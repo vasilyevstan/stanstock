@@ -6,9 +6,20 @@ from typing import Any
 
 from django import forms
 
+from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import Listing, Region, UniverseMembership, UniverseSnapshot
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
+
+#: Currencies the demo universe and the ECB reference series can actually
+#: reconcile. A code outside this set has no eligible conversion path and
+#: would fail at build time, so it is not offered.
+CURRENCY_CHOICES: list[tuple[str, str]] = [
+    ("", "Not applicable"),
+    ("USD", "USD"),
+    ("EUR", "EUR"),
+    ("GBP", "GBP"),
+]
 
 
 class OpportunityFilterForm(forms.Form):
@@ -123,13 +134,41 @@ class SimulationForm(forms.Form):
         required=False,
         label="Benchmark Subject (optional)",
     )
+    benchmark_currency = forms.ChoiceField(
+        required=False,
+        choices=CURRENCY_CHOICES,
+        label="Benchmark Currency",
+        help_text=(
+            "Required when the run converts currencies; a price series carries no "
+            "denomination of its own."
+        ),
+    )
     base_currency = forms.ChoiceField(
         required=False,
-        choices=[("", "Infer when unambiguous"), ("USD", "USD"), ("EUR", "EUR"), ("GBP", "GBP")],
-        label="Native Currency",
+        choices=[("", "Infer when unambiguous"), *CURRENCY_CHOICES[1:]],
+        label="Base Currency",
         help_text=(
-            "Required for mixed-currency universe backtests. Portfolio selections must all "
-            "use this currency."
+            "Every value is reported in this currency. Required when the selection spans "
+            "several native currencies; conversion uses dated rates available by the "
+            "decision boundary."
+        ),
+    )
+    restrict_native_currency = forms.ChoiceField(
+        required=False,
+        choices=[("", "Use every eligible listing"), *CURRENCY_CHOICES[1:]],
+        label="Restrict To Native Currency",
+        help_text="Optionally exclude listings that are not natively in this currency.",
+    )
+    fx_max_carry_days = forms.IntegerField(
+        required=False,
+        min_value=0,
+        max_value=DEFAULT_MAX_CARRY_DAYS,
+        initial=DEFAULT_MAX_CARRY_DAYS,
+        label="FX Carry Limit (days)",
+        help_text=(
+            "Longest gap between an FX observation and the date it is carried forward to "
+            f"(0 to {DEFAULT_MAX_CARRY_DAYS}). A longer gap fails instead of pricing from a "
+            "stale rate."
         ),
     )
 
@@ -142,9 +181,18 @@ class SimulationForm(forms.Form):
         end_date = cleaned_data.get("end_date")
         top_n = cleaned_data.get("top_n")
         selected_listings = cleaned_data.get("selected_listings")
+        base_currency = cleaned_data.get("base_currency")
+        restrict_currency = cleaned_data.get("restrict_native_currency")
 
         if start_date and end_date and start_date > end_date:
             self.add_error("start_date", "Start date cannot be after end date.")
+
+        if cleaned_data.get("benchmark_currency") and not cleaned_data.get("benchmark_subject"):
+            self.add_error(
+                "benchmark_currency",
+                "Choose a benchmark subject before naming its currency; there is nothing to "
+                "denominate otherwise.",
+            )
 
         if mode == SimulationDefinition.Mode.BACKTEST:
             if not top_n or top_n <= 0:
@@ -162,6 +210,28 @@ class SimulationForm(forms.Form):
                         "selected_listings",
                         "Duplicate listing UUIDs detected in selection.",
                     )
+                selected_currencies = sorted(
+                    {listing.currency.upper() for listing in selected_listings}
+                )
+                if len(selected_currencies) > 1 and not base_currency:
+                    self.add_error(
+                        "base_currency",
+                        "Choose the base currency to convert this multi-currency selection "
+                        f"into. Selected listings use: {', '.join(selected_currencies)}.",
+                    )
+                if restrict_currency:
+                    excluded = sorted(
+                        f"{listing.ticker} ({listing.currency.upper()})"
+                        for listing in selected_listings
+                        if listing.currency.upper() != restrict_currency
+                    )
+                    if excluded:
+                        self.add_error(
+                            "restrict_native_currency",
+                            f"This restriction would exclude selected listings: "
+                            f"{', '.join(excluded)}. Drop the restriction or remove them "
+                            "from the selection.",
+                        )
                 snapshot = cleaned_data.get("snapshot")
                 if snapshot:
                     eligible_uuids = set(

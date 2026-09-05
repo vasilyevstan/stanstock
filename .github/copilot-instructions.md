@@ -61,9 +61,13 @@ Every task begins by reading, in order:
   Research reconstructions may be generated later, but fact availability and
   price rows must remain capped at the historical cutoff; observed backtests
   accept only on-time signals.
-- Never combine native-currency prices in one simulation cash balance. Until
-  dated FX conversion exists, require one explicit/inferred native currency
-  per run and reject mixed-currency selections.
+- Never combine native-currency prices in one simulation cash balance. Convert
+  through the dated point-in-time FX path into one explicit base currency, or
+  restrict the run to a single native currency. Resolve every valued date
+  against its own availability cutoff so a later correction cannot reprice an
+  earlier date, refuse a rate published after the valued date in any grade,
+  allow a merely later-retrieved asset only for explicitly research-grade
+  reconstruction, and fail on a missing, over-stale, or ambiguous rate.
 - Resolve the latest eligible fundamental vintage per canonical concept and
   reporting period before calculating growth; an amendment is not a new
   comparison period.

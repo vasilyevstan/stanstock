@@ -132,20 +132,70 @@ Inputs include universe grade, selection rule, rebalance schedule, starting
 cash, costs, slippage, currency convention, benchmark, and missing-price/event
 rules.
 
-The current engine does not perform FX conversion. A simulation must therefore
-contain one native listing currency. Mixed-universe backtests require an
-explicit USD, EUR, or GBP filter, and mixed-currency portfolio selections are
-rejected. The selected currency is persisted in the run configuration and
+The current engine converts native prices into one explicit base currency
+using point-in-time FX. A selection spanning several native currencies must
+name its base currency (`--base-currency USD|EUR|GBP`); a single-currency
+selection infers it. Every value a run reports -- execution prices, cash,
+holdings, trading costs, the benchmark, and all metrics -- is denominated in
+that base currency, while the persisted price input keeps each row's native
+price, native currency, and the exact rate applied.
+
+Conversion rates are dated, and every valued date is resolved against its own
+cutoff -- the end of that date -- so a rate published later can never change
+how an earlier execution was priced. A rate published after the valued date is
+refused in every run; a source asset merely *retrieved* later is permitted
+only for an explicitly research-grade reconstruction, never for observed
+evidence. Because FX series have no weekend, holiday, or (for the synthetic
+demo bundles) non-Friday observations, the most recent eligible observation is
+carried forward and its carry distance is recorded per converted date. The
+reviewed maximum carry is 7 calendar days; a run may tighten it to as little
+as 0 but cannot widen it, and a carry beyond the limit fails rather than
+pricing from a stale rate. Derivation paths are ranked `identity` > `direct` >
+`inverse` > `cross:<pivot>`, and the path used is stored alongside each rate.
+Equally-ranked derivations that disagree, a missing pair, and an over-stale
+observation each fail the whole run instead of producing a
+partially-converted result. `--restrict-native-currency` still selects a
+single-currency slice of a mixed universe when conversion is not wanted at
+all, and is rejected outright when it would silently exclude an explicitly
+selected holding.
+
+A holding whose own market is closed keeps its currency exposure: its last
+native quote is carried and revalued at the current eligible rate -- both when
+the day is valued and when a rebalance sizes its targets -- so a
+foreign-market holiday suspends the stock's price discovery without also
+freezing the portfolio's exchange rate. The closed holding remains untradable
+on that date; only its value is restated. Every simulated date must resolve a
+rate for every non-base currency before any accounting begins, so a date the
+FX series cannot cover fails the run instead of producing a portfolio return.
+
+Because FX vintages carry no intraday knowability, availability is resolved
+only to end-of-day. A converted run therefore executes on closing prices:
+`next_open` and `next_eligible` are rejected, because an opening trade could
+otherwise be settled at a rate published hours after the bell.
+
+A converted run also reports the split between stock return and FX
+contribution. The stock leg revalues the *same* quantity path at each native
+currency's rate on the first simulated date, so the two legs sum exactly to
+the reported cumulative return. When any part of that restatement is not
+established -- for example a cash settlement with no FX basis -- both figures
+are withheld with a stated reason rather than reported as an estimate.
+
+The base currency, the native currencies converted, the longest carry
+applied, and the attribution are persisted in the run configuration and
 metrics. Explicit buy-and-hold selections must all have a usable price on the
 common inception execution date; otherwise the run fails rather than silently
 redistributing the missing listing's allocation.
 
 Research-grade reconstructed history, observed-universe history, and actual
 live prediction outcomes are always labeled separately. Every persisted run
-stores the exact price, signal, and benchmark input frames alongside the result
-curve so it can be reproduced without relying on mutable current state.
+stores the exact price, signal, benchmark, and FX input frames alongside the
+result curve so it can be reproduced without relying on mutable current state.
 Observed-grade backtests reject analyses generated after their target date;
 research-grade reconstructions retain both their historical data cutoff and
 actual later generation timestamp in the persisted signal input. The run input
-hash covers complete normalized frame contents and the explicit calendar, not
-aggregate row counts or sums.
+hash covers complete normalized frame contents -- prices, signals, benchmark,
+and, when a run converts, the dated FX frame together with the canonical
+native-currency assignment and retained conversion inputs -- plus the explicit
+calendar, not aggregate row counts or sums. A run that converts nothing adds
+no FX terms at all, so a single-currency run keeps the exact reproducibility
+identity it had before FX conversion existed.

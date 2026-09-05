@@ -8,6 +8,14 @@ from typing import Any
 
 import polars as pl
 
+from stanstock.simulation.fx import (
+    FxShadowLedger,
+    build_fx_rate_lookup,
+    converted_currencies,
+    max_carry_days,
+    normalize_fx_frame,
+    validate_fx_coverage,
+)
 from stanstock.simulation.hooks import (
     CorporateEventHook,
     default_corporate_event_hook,
@@ -15,6 +23,7 @@ from stanstock.simulation.hooks import (
 from stanstock.simulation.metrics import calculate_simulation_metrics
 from stanstock.simulation.types import (
     ExecutionPriceBasis,
+    FxAttribution,
     HoldingRecord,
     RebalanceFrequency,
     SimulationConfig,
@@ -51,11 +60,23 @@ class AccountingEngine:
         signals: pl.DataFrame | None = None,
         benchmark_prices: pl.DataFrame | None = None,
         calendar: Sequence[date] | None = None,
+        fx_rates: pl.DataFrame | None = None,
     ) -> SimulationResult:
         normalized_prices = self._normalize_prices(prices)
         normalized_signals = self._normalize_signals(signals) if signals is not None else None
         normalized_bench = (
             self._normalize_benchmark(benchmark_prices) if benchmark_prices is not None else None
+        )
+        normalized_fx = (
+            normalize_fx_frame(fx_rates, base_currency=self.config.base_currency)
+            if fx_rates is not None
+            else None
+        )
+        self._validate_currency_coverage(prices, converted=normalized_fx is not None)
+        if normalized_fx is not None:
+            self._validate_convertible_execution_basis(normalized_fx)
+        conversion_inputs = (
+            self._build_conversion_inputs(prices) if normalized_fx is not None else None
         )
 
         input_hash = self._compute_input_hash(
@@ -63,12 +84,25 @@ class AccountingEngine:
             normalized_signals,
             normalized_bench,
             calendar,
+            normalized_fx,
+            conversion_inputs,
         )
 
         # Build trading dates schedule (including gaps for missing price tracking)
         trading_dates = self._build_trading_dates(normalized_prices, normalized_bench, calendar)
         if not trading_dates:
             raise ValueError("Prices DataFrame must contain at least one trading date")
+        if normalized_fx is not None:
+            # An explicit calendar can name dates the FX frame was never
+            # resolved for. Prove coverage before any value is computed, so
+            # such a date fails the run instead of quietly being valued at a
+            # neighbouring day's conversion.
+            validate_fx_coverage(
+                normalized_fx,
+                trading_dates=trading_dates,
+                base_currency=self.config.base_currency or "",
+                required_currencies=self._currency_by_listing(prices).values(),
+            )
 
         # Map dates to fast lookup structures
         price_lookup, open_lookup, symbol_lookup = self._build_price_lookups(normalized_prices)
@@ -91,6 +125,18 @@ class AccountingEngine:
         holdings_qty: dict[str, float] = {}  # listing_id -> quantity
         last_known_price: dict[str, float] = {}  # listing_id -> price
         last_known_date: dict[str, date] = {}  # listing_id -> date
+        # Native quote behind the last observed close, kept only for a
+        # converted run: a foreign holding whose own market is closed must
+        # keep its currency exposure, which means carrying the *quote* and
+        # revaluing it at the current rate, not carrying a frozen conversion.
+        last_known_native: dict[str, float] = {}
+
+        fx_ledger = self._build_fx_ledger(
+            prices=prices,
+            fx_rates=normalized_fx,
+            inception_date=trading_dates[0],
+        )
+        terminal_shadow_market_value = 0.0
 
         all_trades: list[TradeRecord] = []
         all_holdings: list[HoldingRecord] = []
@@ -130,11 +176,24 @@ class AccountingEngine:
                     if exec_p is not None and exec_p > 0:
                         current_exec_prices[lid] = exec_p
 
-                # Current portfolio value at execution prices before trading
+                # Current portfolio value at execution prices before trading.
+                # A holding whose own market is shut has no execution price
+                # today, but it still has a value: its last native quote at
+                # today's rate. Sizing the rebalance off a stale conversion
+                # would allocate capital against an exchange rate that no
+                # longer exists, while leaving the holding itself untradable.
                 current_market_val = 0.0
                 for lid, qty in holdings_qty.items():
                     if qty > 1e-10:
-                        p = current_exec_prices.get(lid, last_known_price.get(lid, 0.0))
+                        p = current_exec_prices.get(lid)
+                        if p is None:
+                            p = _carried_price(
+                                lid,
+                                current_date,
+                                fx_ledger=fx_ledger,
+                                last_known_native=last_known_native,
+                                last_known_price=last_known_price,
+                            )
                         current_market_val += qty * p
 
                 pre_trade_portfolio_val = cash + current_market_val
@@ -175,7 +234,13 @@ class AccountingEngine:
                             symbol=symbol_lookup.get(lid, lid),
                             current_date=current_date,
                             last_known_date=last_known_date.get(lid, current_date),
-                            last_known_price=last_known_price.get(lid, 0.0),
+                            last_known_price=_carried_price(
+                                lid,
+                                current_date,
+                                fx_ledger=fx_ledger,
+                                last_known_native=last_known_native,
+                                last_known_price=last_known_price,
+                            ),
                             quantity_held=curr_qty,
                             event_type="missing_rebalance_price",
                             policy=self.config.missing_price_policy,
@@ -188,6 +253,8 @@ class AccountingEngine:
                         ):
                             cash += curr_qty * resolution.settlement_price
                             holdings_qty[lid] = 0.0
+                            if fx_ledger is not None:
+                                fx_ledger.record_cash_settlement(listing_id=lid, when=current_date)
                         elif resolution.action == "liquidate_zero":
                             holdings_qty[lid] = 0.0
                         continue
@@ -208,6 +275,12 @@ class AccountingEngine:
                         cash += proceeds
                         holdings_qty[lid] = target_qty
                         sym = symbol_lookup.get(lid, lid)
+                        if fx_ledger is not None:
+                            fx_ledger.record_cash_flow(
+                                listing_id=lid,
+                                when=current_date,
+                                base_amount=proceeds,
+                            )
 
                         all_trades.append(
                             TradeRecord(
@@ -261,6 +334,12 @@ class AccountingEngine:
                     cash -= total_outlay
                     holdings_qty[lid] = holdings_qty.get(lid, 0.0) + scaled_buy_qty
                     sym = symbol_lookup.get(lid, lid)
+                    if fx_ledger is not None:
+                        fx_ledger.record_cash_flow(
+                            listing_id=lid,
+                            when=current_date,
+                            base_amount=-total_outlay,
+                        )
 
                     all_trades.append(
                         TradeRecord(
@@ -293,14 +372,36 @@ class AccountingEngine:
                 if close_p is not None and close_p > 0:
                     last_known_price[lid] = close_p
                     last_known_date[lid] = current_date
+                    if fx_ledger is not None:
+                        observed_rate = fx_ledger.dated_rate(lid, current_date)
+                        if observed_rate is None or observed_rate <= 0:
+                            fx_ledger.mark_unavailable(
+                                f"No FX rate is available for listing {lid} on "
+                                f"{current_date.isoformat()}, so its converted price cannot "
+                                "be restated at reference rates."
+                            )
+                        else:
+                            last_known_native[lid] = close_p / observed_rate
+                        fx_ledger.record_price_rate(lid, current_date)
                 else:
-                    # Missing close price on observation date
+                    # Missing close price on observation date. A converted
+                    # holding is carried as its last *native* quote revalued
+                    # at today's rate, so a closed foreign market suspends the
+                    # stock's price discovery without also freezing the
+                    # portfolio's currency exposure.
+                    carried = _carried_price(
+                        lid,
+                        current_date,
+                        fx_ledger=fx_ledger,
+                        last_known_native=last_known_native,
+                        last_known_price=last_known_price,
+                    )
                     resolution = self.corporate_event_hook(
                         listing_id=lid,
                         symbol=sym,
                         current_date=current_date,
                         last_known_date=last_known_date.get(lid, current_date),
-                        last_known_price=last_known_price.get(lid, 0.0),
+                        last_known_price=carried,
                         quantity_held=qty,
                         event_type="missing_price",
                         policy=self.config.missing_price_policy,
@@ -314,12 +415,19 @@ class AccountingEngine:
                     ):
                         cash += qty * resolution.settlement_price
                         holdings_qty[lid] = 0.0
+                        if fx_ledger is not None:
+                            fx_ledger.record_cash_settlement(listing_id=lid, when=current_date)
                         continue
                     elif resolution.action == "liquidate_zero":
                         holdings_qty[lid] = 0.0
                         continue
                     else:  # retain_last_price
-                        close_p = resolution.settlement_price or last_known_price.get(lid, 0.0)
+                        close_p = resolution.settlement_price or carried
+                        if fx_ledger is not None:
+                            # The carried value is now expressed at today's
+                            # rate, so the shadow ledger must undo today's
+                            # rate rather than the stale one.
+                            fx_ledger.record_price_rate(lid, current_date)
 
                 mv = qty * close_p
                 daily_gross_market_val += mv
@@ -336,6 +444,10 @@ class AccountingEngine:
                 )
 
             portfolio_val = cash + daily_gross_market_val
+            if fx_ledger is not None:
+                terminal_shadow_market_value = fx_ledger.shadow_market_value(
+                    (holding.listing_id, holding.market_value) for holding in day_holdings
+                )
 
             # Update holding weights
             for h in day_holdings:
@@ -426,12 +538,24 @@ class AccountingEngine:
         trades_df = self._build_trades_dataframe(all_trades)
         holdings_df = self._build_holdings_dataframe(all_holdings)
 
+        ending_value = float(daily_records[-1]["portfolio_value"])
+        starting_capital = float(self.config.starting_capital)
+        fx_attribution = (
+            fx_ledger.attribution(
+                cumulative_return=(ending_value - starting_capital) / starting_capital,
+                terminal_shadow_market_value=terminal_shadow_market_value,
+            )
+            if fx_ledger is not None
+            else FxAttribution.not_applicable()
+        )
+
         # Metrics calculation
         metrics = calculate_simulation_metrics(
             daily_curves=daily_curves,
             trades=trades_df,
             unresolved_observations=unresolved_observations,
             config=self.config,
+            fx_attribution=fx_attribution,
         )
 
         return SimulationResult(
@@ -877,12 +1001,148 @@ class AccountingEngine:
             schema=schema,
         )
 
+    CONVERSION_INPUT_COLUMNS: tuple[str, ...] = (
+        "date",
+        "listing_id",
+        "currency",
+        "close_native",
+        "open_native",
+        "fx_rate",
+        "fx_observation_date",
+        "fx_carry_days",
+        "fx_path",
+    )
+
+    def _validate_currency_coverage(self, prices: pl.DataFrame, *, converted: bool) -> None:
+        """Refuse to aggregate several native currencies without conversion.
+
+        Without this guard a caller could hand the engine a panel whose rows
+        are denominated in different currencies and no FX frame, and the
+        engine would happily add them into one cash balance.
+        """
+        if "currency" not in prices.columns:
+            return
+        currencies = sorted(
+            {
+                str(value).upper()
+                for value in prices["currency"].to_list()
+                if value is not None and str(value)
+            }
+        )
+        if converted or not currencies:
+            return
+        if len(currencies) > 1:
+            raise ValueError(
+                "Price panel mixes native currencies "
+                f"({', '.join(currencies)}) but no FX rates were supplied; refusing to "
+                "aggregate them into one cash balance."
+            )
+        base = (self.config.base_currency or "").upper()
+        if base and currencies[0] != base:
+            raise ValueError(
+                f"Price panel is denominated in {currencies[0]} but the simulation base "
+                f"currency is {base} and no FX rates were supplied."
+            )
+
+    def _build_conversion_inputs(self, prices: pl.DataFrame) -> pl.DataFrame:
+        """Canonicalize the conversion-bearing columns for the input hash.
+
+        Normalization drops native currency, native price, and per-row rate
+        provenance before the accounting runs, yet those values decide how the
+        run is converted and how its FX attribution is computed. Hashing them
+        separately means swapping two listings' native currencies -- or
+        replaying with a different retained native quote -- cannot produce the
+        same reproducibility identity.
+        """
+        available = [column for column in self.CONVERSION_INPUT_COLUMNS if column in prices.columns]
+        frame = prices.select(available)
+        if "currency" in frame.columns:
+            frame = frame.with_columns(pl.col("currency").cast(pl.Utf8).str.to_uppercase())
+        sort_keys = [column for column in ("date", "listing_id", "currency") if column in available]
+        return frame.sort(sort_keys) if sort_keys else frame
+
+    def _validate_convertible_execution_basis(self, fx_rates: pl.DataFrame) -> None:
+        """Refuse execution bases that may trade at a market open when converting.
+
+        FX availability is modeled only to end-of-day resolution, because the
+        source vintages carry no intraday knowability. Converting an opening
+        trade therefore risks settling it at a rate published hours after the
+        bell -- a look-ahead that is invisible in the result. Rather than
+        pretend to an intraday cutoff the data cannot support, a converted run
+        is restricted to close-based execution.
+        """
+        if not converted_currencies(fx_rates):
+            return
+        if self.config.execution_basis is ExecutionPriceBasis.NEXT_CLOSE:
+            return
+        raise ValueError(
+            f"Execution basis '{self.config.execution_basis.value}' may execute at a market "
+            "open, but FX availability is only resolved to end-of-day, so an opening trade "
+            "could be converted with a rate published after it. Use "
+            f"'{ExecutionPriceBasis.NEXT_CLOSE.value}' for a currency-converted run."
+        )
+
+    def _currency_by_listing(self, prices: pl.DataFrame) -> dict[str, str]:
+        if "currency" not in prices.columns:
+            raise ValueError(
+                "FX rates were supplied but the price panel has no 'currency' column, so "
+                "converted values cannot be traced back to a native currency."
+            )
+        currency_by_listing: dict[str, str] = {}
+        pairs = prices.select(
+            [
+                pl.col("listing_id").cast(pl.Utf8),
+                pl.col("currency").cast(pl.Utf8).str.to_uppercase(),
+            ]
+        ).unique()
+        for row in pairs.iter_rows(named=True):
+            listing_id = row["listing_id"]
+            currency = row["currency"]
+            existing = currency_by_listing.get(listing_id)
+            if existing is not None and existing != currency:
+                raise ValueError(
+                    f"Listing {listing_id} has conflicting native currencies "
+                    f"{existing!r} and {currency!r} in the price panel"
+                )
+            currency_by_listing[listing_id] = currency
+        return currency_by_listing
+
+    def _build_fx_ledger(
+        self,
+        *,
+        prices: pl.DataFrame,
+        fx_rates: pl.DataFrame | None,
+        inception_date: date,
+    ) -> FxShadowLedger | None:
+        """Prepare the reference-rate mirror for a converted run.
+
+        Returns ``None`` for a single-currency run so its accounting path,
+        metrics, and reproducibility identity stay exactly as they were
+        before FX conversion existed.
+        """
+        if fx_rates is None:
+            return None
+        if not self.config.base_currency:
+            raise ValueError("FX rates were supplied but the simulation has no base currency")
+
+        return FxShadowLedger(
+            starting_capital=float(self.config.starting_capital),
+            base_currency=self.config.base_currency,
+            currency_by_listing=self._currency_by_listing(prices),
+            rate_lookup=build_fx_rate_lookup(fx_rates),
+            inception_date=inception_date,
+            converted_currencies=converted_currencies(fx_rates),
+            carry_days_used=max_carry_days(fx_rates),
+        )
+
     def _compute_input_hash(
         self,
         prices: pl.DataFrame,
         signals: pl.DataFrame | None,
         bench: pl.DataFrame | None,
         calendar: Sequence[date] | None,
+        fx_rates: pl.DataFrame | None = None,
+        conversion_inputs: pl.DataFrame | None = None,
     ) -> str:
         hasher = hashlib.sha256()
         hasher.update(
@@ -895,6 +1155,13 @@ class AccountingEngine:
         _update_frame_hash(hasher, "prices", prices)
         _update_frame_hash(hasher, "signals", signals)
         _update_frame_hash(hasher, "benchmark", bench)
+        # FX contributions are appended only for a run that actually converts.
+        # A single-currency run therefore keeps the exact reproducibility
+        # identity it had before FX conversion existed, so an archived hash
+        # stays comparable across this change.
+        if fx_rates is not None:
+            _update_frame_hash(hasher, "fx_rates", fx_rates)
+            _update_frame_hash(hasher, "conversion_inputs", conversion_inputs)
         normalized_calendar = (
             [value.isoformat() for value in sorted(set(calendar))] if calendar is not None else None
         )
@@ -906,6 +1173,39 @@ class AccountingEngine:
             ).encode("utf-8")
         )
         return hasher.hexdigest()
+
+
+def _carried_price(
+    listing_id: str,
+    when: date,
+    *,
+    fx_ledger: FxShadowLedger | None,
+    last_known_native: dict[str, float],
+    last_known_price: dict[str, float],
+) -> float:
+    """Value a holding whose own market produced no quote on ``when``.
+
+    Without conversion this is exactly the previous behavior: the last known
+    price is carried unchanged. With conversion, carrying the last *converted*
+    price would silently pin the holding's exchange rate to the last session
+    its market happened to be open, so a foreign-market holiday would erase a
+    real currency move from the portfolio. The last native quote is carried
+    instead and revalued at ``when``'s eligible rate. If that rate is missing
+    the stale conversion is retained and the FX attribution is marked
+    unavailable, rather than inventing a rate.
+    """
+    previous = last_known_price.get(listing_id, 0.0)
+    if fx_ledger is None:
+        return previous
+    native = last_known_native.get(listing_id)
+    rate = fx_ledger.dated_rate(listing_id, when)
+    if native is None or rate is None or rate <= 0:
+        fx_ledger.mark_unavailable(
+            f"Holding {listing_id} could not be revalued at the {when.isoformat()} FX rate, "
+            "so its carried price still reflects an earlier rate."
+        )
+        return previous
+    return native * rate
 
 
 def _persistable_trade(quantity: float, price: float) -> bool:

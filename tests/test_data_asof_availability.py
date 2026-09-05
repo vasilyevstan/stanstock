@@ -119,6 +119,53 @@ def test_fx_rates_ordered_by_observation_date() -> None:
     assert observation_dates == sorted(observation_dates)
 
 
+def test_unfiltered_fx_rate_read_still_respects_availability() -> None:
+    """A pair-agnostic read must not become an escape hatch around as-of rules.
+
+    Cross-rate derivation cannot name the pivot pair up front, so `fx_rates`
+    accepts no filters at all. That widened read must still exclude every
+    vintage whose own availability -- or whose source asset's availability --
+    is after the decision time.
+    """
+    call_command("seed_demo")
+    first_rate = (
+        FxRate.objects.filter(base_currency="EUR", quote_currency="USD")
+        .order_by("available_at")
+        .first()
+    )
+    assert first_rate is not None
+
+    before = AsOfData(first_rate.available_at - timedelta(seconds=1))
+    assert list(before.fx_rates()) == []
+
+    at_publication = AsOfData(first_rate.available_at)
+    visible = list(at_publication.fx_rates())
+    assert visible
+    assert {rate.quote_currency for rate in visible} == {"USD", "GBP"}
+    assert all(rate.available_at <= first_rate.available_at for rate in visible)
+    assert all(rate.source_asset.available_at <= first_rate.available_at for rate in visible)
+
+
+def test_fx_rates_observation_window_never_widens_availability() -> None:
+    call_command("seed_demo")
+    first_rate = (
+        FxRate.objects.filter(base_currency="EUR", quote_currency="USD")
+        .order_by("available_at")
+        .first()
+    )
+    assert first_rate is not None
+
+    asof = AsOfData(first_rate.available_at)
+    windowed = list(
+        asof.fx_rates(
+            observation_start=first_rate.observation_date,
+            observation_end=first_rate.observation_date,
+        )
+    )
+    assert {rate.observation_date for rate in windowed} == {first_rate.observation_date}
+    assert all(rate.available_at <= first_rate.available_at for rate in windowed)
+
+
 def _register_price_asset(
     tmp_path: Path,
     *,

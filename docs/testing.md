@@ -39,8 +39,13 @@ This command validates settings; it does not prove the database is reachable.
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
   detection, and reconstructed/live evidence separation;
-- shared simulation accounting, native-currency enforcement, full-content
-  input hashing, persistence precision, and no-look-ahead behavior;
+- shared simulation accounting, point-in-time FX derivation (direct, inverse,
+  cross, bounded carry, per-valued-date availability cutoffs, observed-versus-
+  research retrieval, missing/stale/ambiguous failure), accounted-date FX
+  coverage, closed-market currency exposure in valuation and rebalance
+  sizing, close-only converted execution, stock versus FX attribution,
+  full-content input hashing including native-currency assignment,
+  persistence precision, and no-look-ahead behavior;
 - authentication, trusted-proxy login throttling, filters, empty states, and
   evidence/provenance labeling;
 - backup checksums, extraction safety, transactional PostgreSQL restore, and

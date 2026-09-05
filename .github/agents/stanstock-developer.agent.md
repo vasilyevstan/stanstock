@@ -69,10 +69,17 @@ specialist instead of crossing a boundary.
 - Represent missing or insufficient data explicitly (e.g.
   `insufficiency_reason`, `quality_flags`, `confidence_status`); never
   default a missing value to zero or a success-shaped placeholder.
-- Keep return/FX composition consistent: convert through the same
-  `base_currency`/`quote_currency` pair and observation date used elsewhere;
-  never mix currencies silently. Until conversion is implemented, reject
-  mixed-currency selections and persist the one native currency used.
+- Keep return/FX composition consistent: convert through a rate observed on or
+  before the value's own date and admitted by that date's own availability
+  cutoff, using the same derivation path and vintage rules everywhere; never
+  mix currencies silently. Refuse a rate published after the valued date;
+  allow a later-retrieved source asset only for a research-grade
+  reconstruction. Persist the native price, native currency, and applied rate
+  beside every converted value; revalue a carried foreign quote at the current
+  rate in both valuation and pre-trade sizing; prove FX coverage for every
+  accounted date before accounting; restrict converted runs to close-based
+  execution; and fail explicitly on a missing, over-stale, or ambiguous rate
+  path.
 - Handle corporate events (splits, mergers, delistings, symbol changes)
   explicitly in outcome/backtest logic rather than treating a gap as a
   normal return.

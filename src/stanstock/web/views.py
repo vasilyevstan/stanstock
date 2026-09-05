@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
+from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import (
     LatestMarketData,
     Listing,
@@ -342,7 +343,14 @@ def simulations_page(request: HttpRequest) -> HttpResponse:
                     top_n=data.get("top_n"),
                     selected_listing_ids=data.get("parsed_listing_ids"),
                     benchmark_subject=data.get("benchmark_subject") or None,
+                    benchmark_currency=data.get("benchmark_currency") or None,
                     base_currency=data.get("base_currency") or None,
+                    restrict_native_currency=data.get("restrict_native_currency") or None,
+                    fx_max_carry_days=(
+                        DEFAULT_MAX_CARRY_DAYS
+                        if data.get("fx_max_carry_days") is None
+                        else int(data["fx_max_carry_days"])
+                    ),
                 )
                 return redirect("simulation-detail", run_id=run.id)
             except (SimulationWorkflowError, ValueError) as exc:

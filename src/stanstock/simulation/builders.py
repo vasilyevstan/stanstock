@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import cast
 from uuid import UUID
@@ -9,6 +10,12 @@ from django.utils import timezone
 
 from stanstock.data.asof import AsOfData, PriceFrameSchemaError
 from stanstock.data.assets import AssetStore
+from stanstock.data.fx import (
+    DEFAULT_MAX_CARRY_DAYS,
+    FxConversionError,
+    FxConverter,
+    FxEvidenceGrade,
+)
 from stanstock.data.models import DataAsset, UniverseMembership, UniverseSnapshot
 from stanstock.research.models import StockAnalysis
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
@@ -23,6 +30,29 @@ from stanstock.simulation.types import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class PricePanel:
+    """The complete, currency-consistent input set for one simulation.
+
+    ``prices`` and ``benchmark`` are denominated in ``base_currency``. When a
+    conversion was required, they additionally carry each row's native price,
+    native currency, and the exact dated rate applied, and ``fx_rates`` holds
+    the full replayable FX frame. A single-currency panel keeps exactly the
+    columns it had before FX conversion existed and leaves ``fx_rates`` as
+    ``None``, so those runs are byte-for-byte unchanged.
+    """
+
+    prices: pl.DataFrame
+    benchmark: pl.DataFrame | None
+    fx_rates: pl.DataFrame | None
+    base_currency: str
+    native_currencies: tuple[str, ...]
+
+    @property
+    def conversion_applied(self) -> bool:
+        return self.fx_rates is not None
+
+
 def build_price_panel(
     *,
     snapshot: UniverseSnapshot,
@@ -31,11 +61,21 @@ def build_price_panel(
     listing_ids: list[UUID] | None = None,
     provider: str = "synthetic_demo",
     benchmark_subject: str | None = None,
+    benchmark_currency: str | None = None,
     base_currency: str | None = None,
+    restrict_native_currency: str | None = None,
+    fx_max_carry_days: int = DEFAULT_MAX_CARRY_DAYS,
     decision_time: datetime | None = None,
     asset_store: AssetStore | None = None,
-) -> tuple[pl.DataFrame, pl.DataFrame | None]:
-    """Build a normalized price panel from a UniverseSnapshot's eligible listings."""
+) -> PricePanel:
+    """Build a normalized price panel from a UniverseSnapshot's eligible listings.
+
+    A selection spanning several native currencies is converted into one
+    explicit ``base_currency`` using rates dated on or before each simulated
+    date and available by the run's decision boundary. Every conversion that
+    cannot be derived that way fails the whole build rather than producing a
+    partially-converted panel.
+    """
     d_time = decision_time or timezone.now()
     if end_date > d_time.date():
         raise SimulationWorkflowError(
@@ -47,12 +87,26 @@ def build_price_panel(
             f"start_date ({start_date.isoformat()}) cannot be after "
             f"end_date ({end_date.isoformat()})."
         )
+    if not 0 <= fx_max_carry_days <= DEFAULT_MAX_CARRY_DAYS:
+        raise SimulationWorkflowError(
+            f"fx_max_carry_days must be between 0 and {DEFAULT_MAX_CARRY_DAYS}, "
+            f"got {fx_max_carry_days}. The reviewed maximum may be tightened, never widened."
+        )
 
     memberships = UniverseMembership.objects.filter(
         snapshot=snapshot,
         eligible=True,
     ).select_related("listing__security")
-    normalized_currency = base_currency.upper() if base_currency else None
+    requested_base = _normalized_currency(base_currency, label="base_currency")
+    native_filter = _normalized_currency(restrict_native_currency, label="restrict_native_currency")
+    normalized_benchmark_currency = _normalized_currency(
+        benchmark_currency, label="benchmark_currency"
+    )
+    if normalized_benchmark_currency is not None and not benchmark_subject:
+        raise SimulationWorkflowError(
+            "benchmark_currency was given without a benchmark subject; there is nothing to "
+            "denominate. Provide a benchmark subject or drop the benchmark currency."
+        )
 
     if listing_ids is not None:
         if not listing_ids:
@@ -69,24 +123,47 @@ def build_price_panel(
             raise SimulationWorkflowError(
                 f"Listings {missing_str} are not eligible members of snapshot {snapshot.id}."
             )
-    elif normalized_currency is not None:
-        memberships = memberships.filter(listing__currency=normalized_currency)
+        if native_filter is not None:
+            # Silently dropping an explicitly requested holding would turn a
+            # selection error into a confusing "missing inception price"
+            # failure much later, so name the conflict here instead.
+            excluded = sorted(
+                f"{membership.listing.ticker} ({membership.listing.currency.upper()})"
+                for membership in memberships
+                if membership.listing.currency.upper() != native_filter
+            )
+            if excluded:
+                raise SimulationWorkflowError(
+                    f"restrict_native_currency={native_filter} would exclude explicitly "
+                    f"selected listings: {', '.join(excluded)}. Drop the restriction or "
+                    "remove those listings from the selection."
+                )
+    elif native_filter is not None:
+        memberships = memberships.filter(listing__currency=native_filter)
 
     memberships_list = list(memberships)
     if not memberships_list:
         raise SimulationWorkflowError(f"No eligible listings found for snapshot {snapshot.id}.")
-    currencies = sorted({membership.listing.currency.upper() for membership in memberships_list})
-    if len(currencies) > 1:
-        raise SimulationWorkflowError(
-            "Simulation selections must use one native currency until point-in-time FX "
-            f"conversion is implemented. Found: {', '.join(currencies)}."
-        )
-    panel_currency = currencies[0]
-    if normalized_currency is not None and panel_currency != normalized_currency:
-        raise SimulationWorkflowError(
-            f"Selected listings use {panel_currency}, not requested base currency "
-            f"{normalized_currency}."
-        )
+    currencies = tuple(
+        sorted({membership.listing.currency.upper() for membership in memberships_list})
+    )
+    if requested_base is None:
+        if len(currencies) > 1:
+            raise SimulationWorkflowError(
+                "A selection spanning several native currencies needs an explicit base "
+                f"currency to convert into. Found: {', '.join(currencies)}."
+            )
+        panel_currency = currencies[0]
+    else:
+        panel_currency = requested_base
+    conversion_required = any(currency != panel_currency for currency in currencies)
+    if normalized_benchmark_currency is None and benchmark_subject:
+        if conversion_required:
+            raise SimulationWorkflowError(
+                f"Benchmark '{benchmark_subject}' needs an explicit benchmark currency when the "
+                f"simulation converts into {panel_currency}; its denomination cannot be inferred."
+            )
+        normalized_benchmark_currency = panel_currency
 
     store = asset_store or AssetStore()
     asof = AsOfData(d_time, store)
@@ -122,30 +199,12 @@ def build_price_panel(
         if "open" in filtered.columns:
             select_cols.append(pl.col("open").cast(pl.Float64))
         select_cols.append(pl.lit(listing.ticker).cast(pl.Utf8).alias("symbol"))
-        select_cols.append(pl.lit(panel_currency).cast(pl.Utf8).alias("currency"))
+        select_cols.append(
+            pl.lit(listing.currency.upper()).cast(pl.Utf8).alias("currency"),
+        )
         frames.append(filtered.select(select_cols))
 
     price_panel = pl.concat(frames).sort(["date", "listing_id"])
-    if listing_ids is not None:
-        raw_inception_date = price_panel["date"].min()
-        if raw_inception_date is None:
-            raise SimulationWorkflowError("Selected listings have no usable inception date.")
-        inception_date = cast(date, raw_inception_date)
-        inception_listing_ids = set(
-            price_panel.filter((pl.col("date") == inception_date) & (pl.col("close") > 0))[
-                "listing_id"
-            ].to_list()
-        )
-        missing_inception = sorted(
-            str(listing_id)
-            for listing_id in listing_ids
-            if str(listing_id) not in inception_listing_ids
-        )
-        if missing_inception:
-            raise SimulationWorkflowError(
-                "Selected listings lack a usable inception close on "
-                f"{inception_date}: {', '.join(missing_inception)}."
-            )
 
     benchmark_frame: pl.DataFrame | None = None
     if benchmark_subject:
@@ -176,7 +235,161 @@ def build_price_panel(
             ]
         ).sort("date")
 
-    return price_panel, benchmark_frame
+    fx_frame: pl.DataFrame | None = None
+    benchmark_conversion_required = (
+        benchmark_frame is not None
+        and normalized_benchmark_currency is not None
+        and normalized_benchmark_currency != panel_currency
+    )
+    if conversion_required or benchmark_conversion_required:
+        value_dates = sorted(
+            set(price_panel["date"].to_list())
+            | (set(benchmark_frame["date"].to_list()) if benchmark_frame is not None else set())
+        )
+        required_currencies = set(currencies)
+        if normalized_benchmark_currency is not None and benchmark_frame is not None:
+            required_currencies.add(normalized_benchmark_currency)
+        converter = FxConverter(
+            asof,
+            evidence_grade=FxEvidenceGrade(snapshot.grade),
+            max_carry_days=fx_max_carry_days,
+            observation_end=value_dates[-1],
+        )
+        try:
+            fx_frame = converter.conversion_frame(
+                from_currencies=required_currencies,
+                to_currency=panel_currency,
+                value_dates=value_dates,
+            )
+        except FxConversionError as exc:
+            raise SimulationWorkflowError(
+                f"Point-in-time FX conversion into {panel_currency} failed: {exc}"
+            ) from exc
+
+        price_panel = _apply_conversion(price_panel, fx_frame, base_currency=panel_currency)
+        if benchmark_frame is not None and normalized_benchmark_currency is not None:
+            benchmark_frame = _apply_conversion(
+                benchmark_frame.with_columns(
+                    pl.lit(normalized_benchmark_currency).cast(pl.Utf8).alias("currency")
+                ),
+                fx_frame,
+                base_currency=panel_currency,
+            )
+
+    if listing_ids is not None:
+        raw_inception_date = price_panel["date"].min()
+        if raw_inception_date is None:
+            raise SimulationWorkflowError("Selected listings have no usable inception date.")
+        inception_date = cast(date, raw_inception_date)
+        inception_listing_ids = set(
+            price_panel.filter((pl.col("date") == inception_date) & (pl.col("close") > 0))[
+                "listing_id"
+            ].to_list()
+        )
+        missing_inception = sorted(
+            str(listing_id)
+            for listing_id in listing_ids
+            if str(listing_id) not in inception_listing_ids
+        )
+        if missing_inception:
+            raise SimulationWorkflowError(
+                "Selected listings lack a usable inception close on "
+                f"{inception_date}: {', '.join(missing_inception)}."
+            )
+
+    return PricePanel(
+        prices=price_panel,
+        benchmark=benchmark_frame,
+        fx_rates=fx_frame,
+        base_currency=panel_currency,
+        native_currencies=currencies,
+    )
+
+
+def _normalized_currency(value: str | None, *, label: str) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip().upper()
+    if not candidate:
+        return None
+    if len(candidate) != 3 or not candidate.isalpha():
+        raise SimulationWorkflowError(
+            f"{label} must be a three-letter currency code, got {value!r}."
+        )
+    return candidate
+
+
+def _apply_conversion(
+    frame: pl.DataFrame,
+    fx_frame: pl.DataFrame,
+    *,
+    base_currency: str,
+) -> pl.DataFrame:
+    """Convert a dated frame into ``base_currency``, keeping the native values.
+
+    The native price and currency stay in the persisted input beside the
+    converted value and the exact rate that produced it, so a stored run
+    documents what was observed as well as what was reported.
+    """
+    join_keys = fx_frame.select(
+        [
+            pl.col("value_date").alias("date"),
+            pl.col("from_currency").alias("currency"),
+            pl.col("rate").alias("fx_rate"),
+            pl.col("observation_date").alias("fx_observation_date"),
+            pl.col("carry_days").alias("fx_carry_days"),
+            pl.col("path").alias("fx_path"),
+        ]
+    )
+    joined = frame.join(join_keys, on=["date", "currency"], how="left")
+    unmatched = joined.filter(pl.col("fx_rate").is_null())
+    if unmatched.height > 0:
+        gaps = (
+            unmatched.select(["date", "currency"])
+            .unique()
+            .sort(["date", "currency"])
+            .head(5)
+            .to_dicts()
+        )
+        raise SimulationWorkflowError(
+            f"No point-in-time FX rate into {base_currency} was resolved for "
+            f"{unmatched.height} priced observation(s); first gaps: {gaps}."
+        )
+
+    conversions = [
+        pl.col("close").alias("close_native"),
+        (pl.col("close") * pl.col("fx_rate")).alias("close"),
+        pl.lit(base_currency).cast(pl.Utf8).alias("base_currency"),
+    ]
+    if "open" in joined.columns:
+        conversions.extend(
+            [
+                pl.col("open").alias("open_native"),
+                (pl.col("open") * pl.col("fx_rate")).alias("open"),
+            ]
+        )
+    converted = joined.with_columns(conversions)
+    ordered = [
+        column
+        for column in (
+            "date",
+            "listing_id",
+            "close",
+            "open",
+            "symbol",
+            "currency",
+            "base_currency",
+            "close_native",
+            "open_native",
+            "fx_rate",
+            "fx_observation_date",
+            "fx_carry_days",
+            "fx_path",
+        )
+        if column in converted.columns
+    ]
+    sort_keys = ["date", "listing_id"] if "listing_id" in converted.columns else ["date"]
+    return converted.select(ordered).sort(sort_keys)
 
 
 def build_signals_for_backtest(
@@ -305,7 +518,10 @@ def run_simulation_workflow(
     selected_listing_ids: list[UUID] | None = None,
     rebalance_frequency: str | None = None,
     benchmark_subject: str | None = None,
+    benchmark_currency: str | None = None,
     base_currency: str | None = None,
+    restrict_native_currency: str | None = None,
+    fx_max_carry_days: int = DEFAULT_MAX_CARRY_DAYS,
     provider: str = "synthetic_demo",
     asset_store: AssetStore | None = None,
     decision_time: datetime | None = None,
@@ -355,14 +571,17 @@ def run_simulation_workflow(
         cfg_selected_symbols = None
 
     # 1. Build price panel
-    price_panel, bench_frame = build_price_panel(
+    panel = build_price_panel(
         snapshot=snapshot,
         start_date=start_date,
         end_date=end_date,
         listing_ids=selected_listing_ids,
         provider=provider,
         benchmark_subject=benchmark_subject,
+        benchmark_currency=benchmark_currency,
         base_currency=base_currency,
+        restrict_native_currency=restrict_native_currency,
+        fx_max_carry_days=fx_max_carry_days,
         decision_time=d_time,
         asset_store=asset_store,
     )
@@ -373,7 +592,7 @@ def run_simulation_workflow(
             snapshot=snapshot,
             start_date=start_date,
             end_date=end_date,
-            price_panel=price_panel,
+            price_panel=panel.prices,
         )
     else:
         signals = None
@@ -390,7 +609,7 @@ def run_simulation_workflow(
         top_n=cfg_top_n,
         selected_symbols=cfg_selected_symbols,
         benchmark_symbol=benchmark_subject,
-        base_currency=str(price_panel["currency"][0]),
+        base_currency=panel.base_currency,
     )
     config.validate()
 
@@ -405,9 +624,10 @@ def run_simulation_workflow(
     run, result = execute_and_persist_simulation(
         definition=definition,
         universe_snapshot=snapshot,
-        prices=price_panel,
+        prices=panel.prices,
         signals=signals,
-        benchmark_prices=bench_frame,
+        benchmark_prices=panel.benchmark,
+        fx_rates=panel.fx_rates,
         asset_store=asset_store,
         code_revision=code_revision,
     )

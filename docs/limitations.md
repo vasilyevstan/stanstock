@@ -40,10 +40,28 @@ around 14:15 CET. Same-day rates cannot be used before publication.
 The legacy ECB history CSV showed anomalous rows during the spike. StanStock
 prefers the SDMX API or daily XML and must validate every observation.
 
-The simulation engine does not yet convert currencies. It rejects
-mixed-currency portfolio selections and requires mixed-universe backtests to
-select one native currency. This avoids reporting USD, EUR, and GBP values as
-if they shared one cash unit.
+The simulation engine converts native prices into one explicit base currency
+with dated, point-in-time rates. The conversion inherits every weakness of its
+inputs: reference rates are not transaction rates, so a converted portfolio is
+not a claim about executable cross-currency trading, and no FX bid/ask spread,
+conversion commission, or hedging cost is modeled. Rates are carried forward
+across market closures within a bounded window rather than interpolated, so a
+value dated inside a closure is priced at the last observation, not at an
+estimate of that day's true rate. A holding whose own market is closed keeps
+its currency exposure -- its last native quote is revalued at the current
+rate -- but its *stock* price is still stale for as long as the closure
+lasts.
+
+FX availability is resolved only to end-of-day, because the source vintages
+record no intraday publication knowability. A currency-converted run is
+therefore limited to close-based execution; opening-price execution bases are
+rejected rather than modeled with an intraday cutoff the data cannot support.
+
+The stock-versus-FX split is reported only when it is exact -- the same
+quantity path restated at each currency's inception rate. It is a
+decomposition of the reported result, not an attribution of skill, and it is
+withheld entirely when a cash settlement or a missing reference rate makes it
+unmeasurable.
 
 ## Forecast evidence
 

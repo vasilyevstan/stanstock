@@ -103,10 +103,14 @@ uv run python manage.py evaluate --all-pending \
 
 Run a portfolio simulation from the authenticated `/simulations` page or with
 the `simulate` command. CLI portfolio selections use permanent listing UUIDs;
-`python manage.py simulate --help` documents the complete arguments. Until
-point-in-time FX conversion is implemented, each run is restricted to one
-native currency; use `--base-currency USD`, `EUR`, or `GBP` to select a
-single-currency slice of a mixed universe.
+`python manage.py simulate --help` documents the complete arguments. A
+selection spanning several native currencies is converted into one explicit
+reporting currency (`--base-currency USD`, `EUR`, or `GBP`) using rates dated
+on or before each simulated date, resolved against that date's own end-of-day
+cutoff so a later correction cannot rewrite an earlier execution; a missing,
+over-stale, or ambiguous rate path fails the run rather than converting part
+of it. Use `--restrict-native-currency` to run a single-currency slice of a
+mixed universe instead.
 
 ## Authenticated pages
 

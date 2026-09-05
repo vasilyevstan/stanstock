@@ -60,10 +60,11 @@ replacement.
    `FundamentalFact`, and `FxRate`.
 8. Outcomes append after the horizon matures; matured and corporate-event
    states are terminal and do not alter the original prediction.
-9. A simulation stores its one native currency, result curve, and exact price,
-   signal, and benchmark frames as checksummed assets keyed by the run UUID.
-   Its input hash covers complete canonical frame contents and any explicit
-   calendar.
+9. A simulation stores its base currency, result curve, and exact price,
+   signal, benchmark, and FX frames as checksummed assets keyed by the run
+   UUID. Converted price rows keep their native price and currency beside the
+   converted value. Its input hash covers complete canonical frame contents
+   and any explicit calendar.
 
 ## Runtime
 
