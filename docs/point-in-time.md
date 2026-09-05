@@ -55,6 +55,61 @@ parseable `date` column, normalizes it to `Date`, and physically filters it to
 rows in ascending date order. Missing or ambiguous date schemas fail
 explicitly.
 
+## FX vintages
+
+An FX rate is read like any other point-in-time value: only vintages whose
+`available_at` (and whose source asset's `available_at`/`retrieved_at`)
+precede the decision boundary are eligible. Conversion then adds three rules
+a single price read does not need.
+
+**Every valued date carries its own cutoff.** A run-wide decision boundary
+alone would let a correction published in February change how an execution in
+January was priced. Each valued date `D` is therefore resolved against the end
+of `D`: a value dated `D` may only be converted with information that existed
+by then. A February 9 correction of a February 3 observation applies from
+February 9 onward -- including to later dates that carry that observation
+forward -- but can never rewrite February 3 itself.
+
+**Late publication and later retrieval are different.** A rate *published*
+after the valued date describes information nobody held then and is refused
+for every run, regardless of grade. A source asset *retrieved* after the
+valued date is the ordinary research-reconstruction case: an explicitly
+`research`-grade run may read a file StanStock fetched later, exactly as it
+may for filing facts and price frames, while an `observed`-grade run requires
+the vintage and its asset to have been available and retrieved by the end of
+the valued date. `FxEvidenceGrade` has no default; the caller states which
+claim it is making.
+
+**Explicit carry, never silent staleness.** FX series have no weekend,
+holiday, or (for the synthetic demo bundles) non-Friday observations. The
+most recent eligible observation is carried forward and the carry distance is
+stored per converted date. The reviewed maximum is 7 calendar days; a run may
+tighten it to as little as 0, and may not widen it. A carry beyond the limit
+fails instead of pricing from a stale rate, and coverage is proven for every
+accounted date before any value is computed, so a date the series cannot
+reach fails the run rather than borrowing a neighbouring day's conversion.
+
+**End-of-day resolution bounds execution.** The cutoff is a whole day because
+FX vintages record no intraday knowability. A converted run is therefore
+restricted to close-based execution; `next_open` and `next_eligible` are
+rejected rather than converting an opening trade at a rate that may have been
+published after the open.
+
+Providers publish a subset of the pairs a portfolio needs -- ECB quotes are
+EUR-based -- so derivations are ranked `identity` > `direct` > `inverse` >
+`cross:<pivot>` and the chosen path is recorded with each rate. Two
+derivations of the *same* rank that disagree materially are ambiguous and
+fail rather than being resolved silently. Missing pairs and over-stale
+observations fail the whole run; a partially-converted panel is never
+produced.
+
+Converted runs persist the resolved FX frame -- value date, currencies, rate,
+observation date used, carry distance, derivation path, the vintage's
+publication and availability times, the per-row availability cutoff, the
+evidence grade it was admitted under, and source asset IDs -- as its own
+immutable asset, and the price input keeps each row's native price and
+currency beside the converted value.
+
 ## Universe grades
 
 - `observed`: membership was captured at that time.

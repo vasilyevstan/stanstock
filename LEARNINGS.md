@@ -50,6 +50,47 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **A revalued holding must be revalued everywhere.** Restating a closed
+  foreign holding only at end-of-day still lets a rebalance size its targets
+  off the frozen conversion. Valuation and pre-trade sizing use the same
+  carried-native-at-today's-rate figure; the closed holding stays untradable.
+- **Withholding a derived figure is not enough when the primary number is
+  wrong.** A date with no eligible FX rate cannot be rescued by suppressing
+  the attribution -- the reported return is already wrong -- so coverage is
+  proven for every accounted date before any accounting begins.
+- **Model precision bounds what may be executed.** FX vintages record no
+  intraday knowability, so a converted run executes on closes only;
+  opening-price bases are rejected rather than pretending to a cutoff the
+  data cannot support.
+- **A decision boundary is not a per-date cutoff.** Resolving a whole
+  historical panel against one run-wide boundary lets a later correction
+  reprice an earlier execution. Each valued date is resolved against its own
+  end-of-day cutoff; a rate published after that date is refused in every
+  grade, while a merely later-*retrieved* source asset is accepted only for an
+  explicitly research-grade reconstruction.
+- **A carried foreign quote must not carry its exchange rate.** Retaining an
+  already-converted price through a foreign-market holiday silently pins the
+  holding's FX to the last session its market was open. Carry the native quote
+  and revalue it at the current eligible rate, or withhold.
+- **Hash what the accounting reads, not only what it prints.** Native currency
+  assignment and retained native prices are dropped during normalization yet
+  decide conversion and attribution, so they are hashed separately; a run that
+  converts nothing adds no FX terms and keeps its pre-FX identity.
+- **`or` is not a null check for numeric options.** `options.get(x) or
+  DEFAULT` silently restores the default for a deliberate `0`. Bounded
+  safety controls must test for `None` and reject values outside their
+  reviewed range at every entry point.
+- **Point-in-time FX needs three rules, not one.** Availability at the
+  decision boundary is necessary but not sufficient: the observation must
+  also be dated on or before the value's own date, carried forward across
+  closures only within a bounded, recorded window, and derived through a
+  ranked, named path (`identity` > `direct` > `inverse` > `cross:<pivot>`).
+  Missing, over-stale, and same-rank-disagreeing paths fail the run.
+- **A currency split must be exact or withheld.** The stock-versus-FX
+  attribution restates the *same* quantity path at each currency's inception
+  rate, so the two legs sum to the reported return by construction. When a
+  cash settlement or missing reference rate breaks that identity, both figures
+  are withheld with a reason instead of being approximated.
 - **Backtest signal time and information time are separate.** Research-grade
   reconstructions may be generated later, but their fact availability and
   price rows are capped at the historical `AnalysisRun.data_cutoff`; an
@@ -58,9 +99,10 @@ reviews and should not be re-litigated without an explicit new decision.
   proved.** Legacy analyses without an explicit cutoff use `generated_at`;
   assigning their target date would falsely certify historical input
   filtering.
-- **Never aggregate native currencies without conversion.** Until dated FX
-  conversion is implemented, simulation builders must restrict each run to
-  one listing currency and persist that currency with the run.
+- **Never aggregate native currencies without conversion.** Simulation
+  builders convert every native price into one explicit base currency through
+  dated point-in-time rates, persist the native price and applied rate beside
+  each converted value, and record the base currency with the run.
 - **A reproducibility hash must cover content, not summaries.** Simulation
   input hashes include canonical full-frame contents and the explicit
   calendar; shape and aggregate sums can collide for materially different
@@ -103,8 +145,8 @@ reviews and should not be re-litigated without an explicit new decision.
   excludes research-grade or late-generated outcomes from live-performance
   aggregates.
 - **Simulation identity and inputs are durable.** Trades and holdings persist
-  listing UUIDs, and every completed run records immutable price, signal, and
-  benchmark input assets alongside its result curve.
+  listing UUIDs, and every completed run records immutable price, signal,
+  benchmark, and (when converted) FX input assets alongside its result curve.
 - **Local Docker capacity is not repository correctness.** When shared Docker
   Desktop storage is exhausted, validate Compose configuration locally and
   rely on the clean GitHub Actions image build; never prune unrelated shared

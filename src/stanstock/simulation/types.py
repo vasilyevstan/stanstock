@@ -178,6 +178,49 @@ class SimulationConfig:
         return cls.from_dict(parsed)
 
 
+class FxAttributionStatus(StrEnum):
+    """Whether an FX contribution figure may be reported for a run."""
+
+    NOT_APPLICABLE = "not_applicable"
+    EXACT = "exact"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class FxAttribution:
+    """Split of a converted run's return into stock return and FX contribution.
+
+    The split is produced by revaluing the *same* quantity path at each
+    native currency's reference rate (its rate on the run's first simulated
+    date) instead of at the dated rate: every cash movement is mirrored at
+    the reference rate and every open position is revalued at it. Both
+    tracks therefore start from identical capital, which makes
+    ``local_currency_cumulative_return + contribution_return`` equal the
+    reported cumulative return by construction rather than by approximation.
+
+    When any part of that mirror cannot be computed exactly -- a cash
+    settlement whose FX basis is not established, or a reference rate that is
+    missing -- the status becomes ``unavailable`` and both figures stay
+    ``None``. A partially-known split reported as a number would be fake
+    precision, not a measurement.
+    """
+
+    status: FxAttributionStatus
+    detail: str
+    conversion_applied: bool = False
+    native_currencies: tuple[str, ...] = ()
+    max_carry_days_used: int | None = None
+    local_currency_cumulative_return: float | None = None
+    contribution_return: float | None = None
+
+    @classmethod
+    def not_applicable(cls) -> FxAttribution:
+        return cls(
+            status=FxAttributionStatus.NOT_APPLICABLE,
+            detail="No FX conversion was applied; every value is already in the base currency.",
+        )
+
+
 @dataclass
 class UnresolvedObservation:
     listing_id: str
@@ -271,6 +314,13 @@ class SimulationMetrics:
     grade: str
     simulation_kind: str
     base_currency: str | None = None
+    fx_conversion_applied: bool = False
+    fx_native_currencies: list[str] | None = None
+    fx_max_carry_days_used: int | None = None
+    fx_local_currency_cumulative_return: float | None = None
+    fx_contribution_return: float | None = None
+    fx_attribution_status: str | None = None
+    fx_attribution_detail: str | None = None
     benchmark_cumulative_return: float | None = None
     benchmark_cagr: float | None = None
     benchmark_annualized_volatility: float | None = None

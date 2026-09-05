@@ -66,10 +66,32 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 
 - [ ] Return calculations use one consistent price basis; no unit mismatch
       (e.g. price vs. adjusted price) within one calculation.
-- [ ] FX conversions use the matching `base_currency`/`quote_currency` pair
-      and observation date; no implicit or mixed-currency arithmetic.
-- [ ] Until FX conversion is implemented, every simulation rejects
-      mixed-currency selections and records its one native currency.
+- [ ] FX conversions resolve each valued date against that date's own
+      availability cutoff, so a later correction cannot change how an earlier
+      date was priced; no implicit or mixed-currency arithmetic.
+- [ ] A rate published after the valued date is refused for every run; a
+      merely later-*retrieved* source asset is accepted only for an
+      explicitly research-grade reconstruction.
+- [ ] Carry across weekends/holidays is bounded (0 to 7 calendar days,
+      tightenable but never widenable) and recorded per converted date; a
+      missing, over-stale, or ambiguous rate path fails the run instead of
+      converting part of a panel.
+- [ ] A holding whose market is closed keeps its currency exposure: the last
+      native quote is revalued at the current rate rather than carrying a
+      frozen conversion, in end-of-day valuation *and* in pre-trade rebalance
+      sizing.
+- [ ] FX coverage is proven for every accounted date and non-base currency
+      before any value is computed; an uncovered date fails the run instead
+      of reporting a return from a stale conversion.
+- [ ] A converted run executes on closing prices only; opening-price bases
+      are rejected while FX availability is resolved to end-of-day.
+- [ ] Every simulation records its explicit base currency, the native
+      currencies converted, and the exact FX frame used, and keeps native
+      prices beside converted values in its persisted inputs.
+- [ ] The reproducibility hash covers the native-currency assignment and
+      retained conversion inputs, not only the converted prices.
+- [ ] A reported stock-versus-FX split is exact by construction, or withheld
+      with a stated reason; it is never an estimate presented as measured.
 - [ ] A selected portfolio cannot silently omit a holding that lacks an
       inception execution price or redistribute its allocation.
 
@@ -86,8 +108,8 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 
 - [ ] Holdings and trades use permanent listing UUIDs, never ticker text as
       identity.
-- [ ] Every completed run identifies checksummed immutable price, signal, and
-      benchmark inputs as well as its result asset.
+- [ ] Every completed run identifies checksummed immutable price, signal,
+      benchmark, and (when converted) FX inputs as well as its result asset.
 - [ ] The simulation input hash covers complete canonical inputs and the
       explicit calendar; materially different paths cannot collide merely
       because dimensions and sums match.

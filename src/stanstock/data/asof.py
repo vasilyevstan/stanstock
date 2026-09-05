@@ -92,16 +92,35 @@ class AsOfData:
     def fx_rates(
         self,
         *,
-        base_currency: str,
-        quote_currency: str,
+        base_currency: str | None = None,
+        quote_currency: str | None = None,
+        observation_start: date | None = None,
+        observation_end: date | None = None,
     ) -> QuerySet[FxRate]:
-        return FxRate.objects.filter(
-            base_currency=base_currency,
-            quote_currency=quote_currency,
+        """Return FX vintages knowable at the decision time, oldest vintage first.
+
+        Every filter is optional so a caller that must derive a rate path it
+        cannot name up front -- an inverse quote, or a cross through a pivot
+        currency it has not yet chosen -- can still read through this one
+        as-of gate instead of querying `FxRate` directly and losing the
+        `available_at`/`retrieved_at` guarantees. ``observation_start`` and
+        ``observation_end`` bound the *economic* observation window; they
+        never widen availability.
+        """
+        queryset = FxRate.objects.filter(
             available_at__lte=self.decision_time,
             source_asset__available_at__lte=self.decision_time,
             source_asset__retrieved_at__lte=self.decision_time,
-        ).order_by("observation_date", "available_at")
+        )
+        if base_currency is not None:
+            queryset = queryset.filter(base_currency=base_currency)
+        if quote_currency is not None:
+            queryset = queryset.filter(quote_currency=quote_currency)
+        if observation_start is not None:
+            queryset = queryset.filter(observation_date__gte=observation_start)
+        if observation_end is not None:
+            queryset = queryset.filter(observation_date__lte=observation_end)
+        return queryset.select_related("source_asset").order_by("observation_date", "available_at")
 
 
 def _clip_to_through_date(

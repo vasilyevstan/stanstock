@@ -56,6 +56,7 @@ def persist_simulation_run(
     input_prices: pl.DataFrame | None = None,
     input_signals: pl.DataFrame | None = None,
     input_benchmark: pl.DataFrame | None = None,
+    input_fx: pl.DataFrame | None = None,
     code_revision: str | None = None,
     asset_store: AssetStore | None = None,
     register_data_asset: bool = True,
@@ -67,8 +68,13 @@ def persist_simulation_run(
     - SimulationHolding has a non-nullable ForeignKey to Listing. Cash balances
       and benchmark curves are therefore stored in the Parquet result asset
       and in SimulationRun.metrics JSON rather than in SimulationHolding rows.
-    - Exact input frames (prices, signals, benchmark) are persisted as immutable
-      Parquet DataAssets under the run ID to guarantee reproducibility.
+    - Exact input frames (prices, signals, benchmark, FX) are persisted as
+      immutable Parquet DataAssets under the run ID to guarantee
+      reproducibility. The price frame keeps each listing's native price and
+      currency next to its converted value, and the FX frame keeps the dated
+      rate, the observation actually used, its carry distance, and its
+      derivation path, so a converted run can be re-derived without
+      re-reading mutable current state.
     """
     # 1. Validate grade and mode before touching filesystem or database
     if result.config.grade.value != universe_snapshot.grade:
@@ -138,6 +144,12 @@ def persist_simulation_run(
             b_rel_path = f"simulations/{actual_run_id}/inputs/benchmark.parquet"
             stored_bench = store.write_frame(b_rel_path, input_benchmark)
             written_rel_paths.append(b_rel_path)
+
+        stored_fx = None
+        if input_fx is not None:
+            fx_rel_path = f"simulations/{actual_run_id}/inputs/fx.parquet"
+            stored_fx = store.write_frame(fx_rel_path, input_fx)
+            written_rel_paths.append(fx_rel_path)
 
     except Exception:
         for rel in written_rel_paths:
@@ -211,6 +223,31 @@ def persist_simulation_run(
                         "sha256": stored_bench.sha256,
                         "relative_path": stored_bench.relative_path,
                         "row_count": input_benchmark.height,
+                    }
+
+                if stored_fx is not None and input_fx is not None:
+                    fx_asset = register_asset(
+                        provider="simulation",
+                        kind="simulation_input_fx",
+                        subject=str(actual_run_id),
+                        stored=stored_fx,
+                        retrieved_at=now,
+                        available_at=now,
+                        period_start=result.metrics.start_date,
+                        period_end=result.metrics.end_date,
+                        metadata={
+                            "row_count": input_fx.height,
+                            "columns": input_fx.columns,
+                            "base_currency": result.config.base_currency,
+                            "native_currencies": result.metrics.fx_native_currencies,
+                            "max_carry_days_used": result.metrics.fx_max_carry_days_used,
+                        },
+                    )
+                    input_assets_info["fx"] = {
+                        "asset_id": str(fx_asset.id),
+                        "sha256": stored_fx.sha256,
+                        "relative_path": stored_fx.relative_path,
+                        "row_count": input_fx.height,
                     }
 
                 register_asset(
@@ -315,6 +352,7 @@ def execute_and_persist_simulation(
     prices: pl.DataFrame,
     signals: pl.DataFrame | None = None,
     benchmark_prices: pl.DataFrame | None = None,
+    fx_rates: pl.DataFrame | None = None,
     calendar: Sequence[date] | None = None,
     corporate_event_hook: CorporateEventHook | None = None,
     asset_store: AssetStore | None = None,
@@ -348,6 +386,7 @@ def execute_and_persist_simulation(
             signals=signals,
             benchmark_prices=benchmark_prices,
             calendar=calendar,
+            fx_rates=fx_rates,
         )
     except Exception as exc:
         # Create a failed SimulationRun record for observability
@@ -369,6 +408,7 @@ def execute_and_persist_simulation(
         input_prices=prices,
         input_signals=signals,
         input_benchmark=benchmark_prices,
+        input_fx=fx_rates,
         code_revision=code_revision,
         asset_store=asset_store,
     )

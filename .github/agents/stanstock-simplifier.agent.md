@@ -45,9 +45,11 @@ Read:
   data honesty) from complexity with no failure path it protects against.
 - Preserve permanent IDs, immutable prediction/source vintages, `available_at
   <= data_cutoff` filtering, actual generation/retrieval timestamps,
-  research-grade-vs-observed distinctions, one-currency simulation accounting
-  until FX conversion exists, complete-content reproducibility hashes, and
-  required tests. These cannot be simplified away.
+  research-grade-vs-observed distinctions, per-valued-date FX availability
+  cutoffs and conversion into one explicit base currency with explicit
+  failure on missing/stale/ambiguous rate paths, complete-content
+  reproducibility hashes, and required tests. These cannot be simplified
+  away, and neither can row-level FX provenance.
 - Do not redesign accepted behavior or issue a correctness/release approval.
 - Judge the slice independently; do not infer or anticipate another model's
   recommendation.

@@ -9,7 +9,7 @@
       <h1>{{ run.definition.name }}</h1>
       <p class="lede">
         Input hash {{ run.input_hash }} · code revision {{ run.code_revision }}
-        {% if run.metrics.base_currency %} · native currency {{ run.metrics.base_currency }}{% endif %}.
+        {% if run.metrics.base_currency %} · base currency {{ run.metrics.base_currency }}{% endif %}.
       </p>
     </div>
     <span class="badge badge-{{ run.status }}">{{ run.get_status_display }}</span>
@@ -17,6 +17,41 @@
 
   {% if run.error %}
     <div class="error-box" role="alert">{{ run.error }}</div>
+  {% endif %}
+
+  {% if run.metrics.fx_conversion_applied %}
+    <section class="panel" aria-label="Currency conversion">
+      <p class="eyebrow">Point-in-time FX</p>
+      <h2>Converted into {{ run.metrics.base_currency }}</h2>
+      <p class="muted">
+        Native currencies {{ run.metrics.fx_native_currencies|join:", " }} were converted with
+        rates observed on or before each simulated date and available by the run's decision
+        boundary. Longest carry applied: {{ run.metrics.fx_max_carry_days_used }} calendar
+        day{{ run.metrics.fx_max_carry_days_used|pluralize }}.
+      </p>
+      {% if run.metrics.fx_contribution_return is not None %}
+        <div class="compact-list">
+          <article>
+            <div>
+              <strong>Stock return (constant FX)</strong>
+              <small>Same quantity path valued at each currency's inception rate</small>
+            </div>
+            <span>{{ run.metrics.fx_local_currency_cumulative_return|floatformat:4 }}</span>
+          </article>
+          <article>
+            <div>
+              <strong>FX contribution</strong>
+              <small>Remainder of the reported cumulative return</small>
+            </div>
+            <span>{{ run.metrics.fx_contribution_return|floatformat:4 }}</span>
+          </article>
+        </div>
+      {% else %}
+        <p class="empty-state">
+          Stock-versus-FX attribution withheld: {{ run.metrics.fx_attribution_detail }}
+        </p>
+      {% endif %}
+    </section>
   {% endif %}
 
   <section class="metric-grid" aria-label="Simulation metrics">

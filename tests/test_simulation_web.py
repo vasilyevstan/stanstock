@@ -403,7 +403,7 @@ def test_research_backtest_keeps_late_generation_provenance(
 
 
 @pytest.mark.django_db
-def test_price_panel_rejects_mixed_currency_and_supports_explicit_filter(
+def test_price_panel_requires_explicit_base_for_mixed_currency_and_supports_native_filter(
     web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
 ) -> None:
     snapshot, usd_listing, store = web_setup_environment
@@ -435,7 +435,7 @@ def test_price_panel_rejects_mixed_currency_and_supports_explicit_filter(
         available_at=now,
     )
 
-    with pytest.raises(SimulationWorkflowError, match="must use one native currency"):
+    with pytest.raises(SimulationWorkflowError, match="needs an explicit base currency"):
         build_price_panel(
             snapshot=snapshot,
             start_date=date(2026, 1, 1),
@@ -444,16 +444,19 @@ def test_price_panel_rejects_mixed_currency_and_supports_explicit_filter(
             asset_store=store,
         )
 
-    panel, _benchmark = build_price_panel(
+    panel = build_price_panel(
         snapshot=snapshot,
         start_date=date(2026, 1, 1),
         end_date=date(2026, 1, 2),
         provider="synthetic_demo",
-        base_currency="USD",
+        restrict_native_currency="USD",
         asset_store=store,
     )
-    assert set(panel["listing_id"].to_list()) == {str(usd_listing.id)}
-    assert set(panel["currency"].to_list()) == {"USD"}
+    assert set(panel.prices["listing_id"].to_list()) == {str(usd_listing.id)}
+    assert set(panel.prices["currency"].to_list()) == {"USD"}
+    assert panel.base_currency == "USD"
+    assert panel.fx_rates is None
+    assert panel.conversion_applied is False
 
 
 @pytest.mark.django_db

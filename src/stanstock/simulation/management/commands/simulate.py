@@ -6,6 +6,7 @@ from uuid import UUID
 
 from django.core.management.base import BaseCommand, CommandError
 
+from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import UniverseSnapshot
 from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition
@@ -74,10 +75,35 @@ class Command(BaseCommand):
             help="Optional benchmark price history subject (e.g. SPY or ZZBENCH01)",
         )
         parser.add_argument(
+            "--benchmark-currency",
+            help=(
+                "Native currency of the benchmark series. Required when the run converts "
+                "currencies, because a price series carries no denomination of its own."
+            ),
+        )
+        parser.add_argument(
             "--base-currency",
             help=(
-                "Restrict a backtest to one native currency (for example USD or EUR). "
-                "Mixed-currency portfolios are rejected until FX conversion is implemented."
+                "Report every value in this currency (for example USD, EUR, or GBP). "
+                "Required when the selection spans several native currencies; inferred "
+                "from the single native currency otherwise."
+            ),
+        )
+        parser.add_argument(
+            "--restrict-native-currency",
+            help=(
+                "Only include listings whose native currency is this code, instead of "
+                "converting the whole selection."
+            ),
+        )
+        parser.add_argument(
+            "--fx-max-carry-days",
+            type=int,
+            default=DEFAULT_MAX_CARRY_DAYS,
+            help=(
+                "Longest gap in calendar days between an FX observation and the date it is "
+                f"carried forward to (0..{DEFAULT_MAX_CARRY_DAYS}, default "
+                f"{DEFAULT_MAX_CARRY_DAYS}). A longer gap fails."
             ),
         )
         parser.add_argument(
@@ -116,6 +142,20 @@ class Command(BaseCommand):
         top_n_val = int(str(options["top_n"])) if options.get("top_n") is not None else None
         rf_val = str(options["rebalance_frequency"]) if options.get("rebalance_frequency") else None
         bench_val = str(options["benchmark_subject"]) if options.get("benchmark_subject") else None
+        carry_option = options.get("fx_max_carry_days")
+        # `or` would treat a deliberate 0 as "unset" and silently restore the
+        # 7-day maximum, so only an absent value falls back to the default.
+        carry_days = DEFAULT_MAX_CARRY_DAYS if carry_option is None else int(str(carry_option))
+        if not 0 <= carry_days <= DEFAULT_MAX_CARRY_DAYS:
+            raise CommandError(
+                f"--fx-max-carry-days must be between 0 and {DEFAULT_MAX_CARRY_DAYS}."
+            )
+        benchmark_currency = _upper_option(options.get("benchmark_currency"))
+        if benchmark_currency and not bench_val:
+            raise CommandError(
+                "--benchmark-currency requires --benchmark-subject; there is nothing to "
+                "denominate without a benchmark series."
+            )
 
         try:
             definition, run, result = run_simulation_workflow(
@@ -131,19 +171,44 @@ class Command(BaseCommand):
                 selected_listing_ids=listing_uuids,
                 rebalance_frequency=rf_val,
                 benchmark_subject=bench_val,
-                base_currency=str(options["base_currency"]).upper()
-                if options.get("base_currency")
-                else None,
+                benchmark_currency=benchmark_currency,
+                base_currency=_upper_option(options.get("base_currency")),
+                restrict_native_currency=_upper_option(options.get("restrict_native_currency")),
+                fx_max_carry_days=carry_days,
                 provider=str(options["provider"]),
             )
         except ValueError as exc:
             raise CommandError(f"Simulation workflow failed: {exc}") from exc
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Successfully completed simulation run {run.id} for "
-                f"definition {definition.id} ({definition.mode}). "
-                f"Cumulative return: {result.metrics.cumulative_return:.4%}, "
-                f"trades: {result.metrics.total_trades}."
-            )
+        metrics = result.metrics
+        summary = (
+            f"Successfully completed simulation run {run.id} for "
+            f"definition {definition.id} ({definition.mode}). "
+            f"Cumulative return: {metrics.cumulative_return:.4%}, "
+            f"trades: {metrics.total_trades}."
         )
+        if metrics.fx_conversion_applied:
+            native = ", ".join(metrics.fx_native_currencies or ())
+            summary += (
+                f" Converted {native} into {metrics.base_currency} "
+                f"(max carry {metrics.fx_max_carry_days_used} day(s))."
+            )
+            if (
+                metrics.fx_contribution_return is not None
+                and metrics.fx_local_currency_cumulative_return is not None
+            ):
+                summary += (
+                    f" Stock return {metrics.fx_local_currency_cumulative_return:.4%}, "
+                    f"FX contribution {metrics.fx_contribution_return:.4%}."
+                )
+            else:
+                summary += f" FX attribution withheld: {metrics.fx_attribution_detail}"
+
+        self.stdout.write(self.style.SUCCESS(summary))
+
+
+def _upper_option(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text.upper() or None

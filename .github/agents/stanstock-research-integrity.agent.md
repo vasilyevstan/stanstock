@@ -56,8 +56,16 @@ record; the summary below is not a substitute for reading it.
   `confidence_status`) and never coerced to zero, `None`-as-zero, or a
   default score.
 - **Return/FX consistency**: return calculations use one price/currency
-  basis; FX conversions use the matching `base_currency`/`quote_currency`
-  pair and observation date; no mixed-currency arithmetic.
+  basis; every conversion resolves the valued date against its own
+  availability cutoff, through a recorded derivation path, so a later
+  correction cannot reprice an earlier date; a rate published after the
+  valued date is refused in every grade while a later-retrieved asset is
+  research-grade only; carry across market closures is bounded and explicit
+  and a carried foreign quote is revalued at the current rate in valuation and
+  pre-trade sizing alike; FX coverage is proven for every accounted date
+  before accounting and a converted run executes on closes only; a missing,
+  stale, or ambiguous rate path fails rather than converting part of a panel;
+  no mixed-currency arithmetic.
 - **Corporate events**: splits, mergers, delistings, ticker/listing changes,
   and other difficult events are handled explicitly in outcome/backtest
   evaluation (`PredictionOutcome.status`, e.g. `corporate_event`) rather than

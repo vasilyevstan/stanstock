@@ -45,9 +45,9 @@ Read:
   originating agent context rather than spawning a duplicate reviewer.
 - Verify permanent IDs, prediction/source-vintage immutability, `available_at
   <= data_cutoff` filtering, actual generation/retrieval timestamps,
-  research-grade-vs-observed labeling, native-currency simulation boundaries,
-  complete-content input hashes, and missing-data honesty are intact across
-  the diff.
+  research-grade-vs-observed labeling, per-valued-date FX availability cutoffs
+  and conversion into one explicit base currency, complete-content input
+  hashes, and missing-data honesty are intact across the diff.
 - Verify migrations are backward compatible or ship an explicit, tested
   rollback/backfill plan.
 - Verify CI (`.github/workflows/ci.yml`) evidence is real: a stale, skipped,

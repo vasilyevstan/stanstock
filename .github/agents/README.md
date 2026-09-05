@@ -113,10 +113,11 @@ distinct agent in the chain.
 
 Every applicable gate preserves actual generation/retrieval timestamps
 separately from historical `data_cutoff`, rejects late signals from observed
-backtests, refuses mixed-native-currency accounting until dated FX conversion
-exists, and hashes complete canonical simulation inputs rather than aggregate
-summaries. These safeguards are correctness requirements, not optional
-complexity.
+backtests, converts currencies only through point-in-time FX resolved against
+each valued date's own availability cutoff and into one explicit base currency
+(failing on missing, stale, or ambiguous rate paths), and hashes complete
+canonical simulation inputs rather than aggregate summaries. These safeguards
+are correctness requirements, not optional complexity.
 
 ## No secrets, private data, or session paths
 

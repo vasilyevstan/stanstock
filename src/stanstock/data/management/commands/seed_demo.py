@@ -251,6 +251,18 @@ def _weekly_observation_dates(start: date, end: date) -> list[date]:
     return dates
 
 
+def _fx_anchor_date(start: date) -> date:
+    """The last Friday on or before ``start``.
+
+    The weekly series' own first Friday can fall *after* the first priced
+    session, which would leave the opening day of a mixed-currency run with
+    no rate observed on or before it -- and no way to price it without
+    looking ahead. Anchoring one observation on or before the first session
+    closes that gap using information that predates the whole dataset.
+    """
+    return start - timedelta(days=(start.weekday() - 4) % 7)
+
+
 def _synthetic_metadata(**extra: object) -> dict[str, object]:
     """Metadata common to every synthetic `DataAsset` this command writes.
 
@@ -686,13 +698,24 @@ class Command(BaseCommand):
     def _build_fx_rates(self, store: AssetStore) -> list[FxRate]:
         rates: list[FxRate] = []
         fridays = _weekly_observation_dates(START_DATE, END_DATE)
+        anchor = _fx_anchor_date(START_DATE)
         for pair_index, (base, quote) in enumerate(FX_PAIRS):
             rng = np.random.default_rng(SEED + 70_000 + pair_index)
             start_value = 1.05 if quote == "USD" else 0.85
             log_returns = rng.normal(0.0, 0.006, size=len(fridays))
             values = start_value * np.exp(np.cumsum(log_returns))
+            if anchor < fridays[0]:
+                # Prepend the pre-history anchor at the series' own starting
+                # level. It is deliberately *not* drawn from the RNG stream,
+                # so every already-written weekly bundle keeps byte-identical
+                # contents and reruns stay idempotent.
+                pair_dates = [anchor, *fridays]
+                pair_values = np.concatenate(([start_value], values))
+            else:
+                pair_dates = list(fridays)
+                pair_values = values
             by_year: dict[int, list[int]] = {}
-            for position, day in enumerate(fridays):
+            for position, day in enumerate(pair_dates):
                 by_year.setdefault(day.year, []).append(position)
             for year in sorted(by_year):
                 positions = by_year[year]
@@ -701,9 +724,9 @@ class Command(BaseCommand):
                     base=base,
                     quote=quote,
                     year=year,
-                    fridays=fridays,
+                    fridays=pair_dates,
                     positions=positions,
-                    values=values,
+                    values=pair_values,
                 )
                 # As with fundamentals bundles: only build rate rows for a
                 # newly written bundle; a reused bundle's rates were already
@@ -711,13 +734,13 @@ class Command(BaseCommand):
                 if not bundle_created:
                     continue
                 for position in positions:
-                    observation_date = fridays[position]
+                    observation_date = pair_dates[position]
                     rates.append(
                         FxRate(
                             base_currency=base,
                             quote_currency=quote,
                             observation_date=observation_date,
-                            value=_decimal(float(values[position]), 6),
+                            value=_decimal(float(pair_values[position]), 6),
                             published_at=datetime.combine(
                                 observation_date, time(14, 15), tzinfo=UTC
                             ),

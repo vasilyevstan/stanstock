@@ -50,9 +50,22 @@ uv run python manage.py evaluate --all-pending \
 
 Backtests and portfolio simulations run through `python manage.py simulate`
 or the authenticated `/simulations` form. The simulation service persists the
-exact input frames and result curve before reporting a complete run. A mixed
-universe must be restricted with `--base-currency`; portfolios containing
-multiple native currencies fail explicitly until FX conversion exists.
+exact input frames and result curve before reporting a complete run. A
+selection spanning several native currencies must name its reporting currency
+with `--base-currency USD|EUR|GBP`; a single-currency selection infers it.
+Conversion resolves each simulated date against its own end-of-day cutoff, so
+a later correction cannot rewrite an earlier execution, and carries the last
+observation across market closures for at most `--fx-max-carry-days`
+(0 to 7, default 7). Coverage is proven for every simulated date before
+accounting starts, so a date the FX series cannot reach fails the run. A
+missing, over-stale, or ambiguous rate path fails the run explicitly rather
+than converting part of the panel. A converted run executes on closing prices;
+opening-price execution bases are rejected because FX availability is only
+resolved to end-of-day. `--benchmark-currency` is required alongside
+`--benchmark-subject` whenever the run converts, and is rejected when given
+without a subject. `--restrict-native-currency` runs a single-currency slice
+of a mixed universe instead of converting it, and is rejected when it would
+exclude a listing named in `--listings`.
 
 ## Logs
 

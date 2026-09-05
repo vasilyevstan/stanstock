@@ -4,6 +4,7 @@ import numpy as np
 import polars as pl
 
 from stanstock.simulation.types import (
+    FxAttribution,
     SimulationConfig,
     SimulationMetrics,
     UnresolvedObservation,
@@ -16,6 +17,7 @@ def calculate_simulation_metrics(
     trades: pl.DataFrame,
     unresolved_observations: list[UnresolvedObservation],
     config: SimulationConfig,
+    fx_attribution: FxAttribution | None = None,
 ) -> SimulationMetrics:
     if daily_curves.height == 0:
         raise ValueError("Cannot calculate metrics from empty daily curves")
@@ -150,6 +152,8 @@ def calculate_simulation_metrics(
                     beta = float(cov_mat[0, 1] / var_b)
                     alpha = float((np.mean(r_p) - beta * np.mean(r_b)) * 252.0)
 
+    attribution = fx_attribution or FxAttribution.not_applicable()
+
     return SimulationMetrics(
         cumulative_return=cumulative_return,
         cagr=cagr,
@@ -170,6 +174,15 @@ def calculate_simulation_metrics(
         grade=config.grade.value,
         simulation_kind=config.simulation_kind,
         base_currency=config.base_currency,
+        fx_conversion_applied=attribution.conversion_applied,
+        fx_native_currencies=(
+            list(attribution.native_currencies) if attribution.native_currencies else None
+        ),
+        fx_max_carry_days_used=attribution.max_carry_days_used,
+        fx_local_currency_cumulative_return=attribution.local_currency_cumulative_return,
+        fx_contribution_return=attribution.contribution_return,
+        fx_attribution_status=attribution.status.value,
+        fx_attribution_detail=attribution.detail,
         benchmark_cumulative_return=benchmark_cumulative_return,
         benchmark_cagr=benchmark_cagr,
         benchmark_annualized_volatility=benchmark_annualized_volatility,
