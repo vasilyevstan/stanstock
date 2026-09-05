@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}{{ listing.ticker }} · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">{{ listing.region }} · {{ listing.exchange_mic }}</p>
+      <h1>{{ listing.ticker }}</h1>
+      <p class="lede">{{ listing.security.company.name }} · {{ listing.currency }}</p>
+    </div>
+    {% if analysis %}
+      <div class="decision-card">
+        <span class="recommendation recommendation-{{ analysis.recommendation }}">{{ analysis.get_recommendation_display }}</span>
+        <strong>{{ analysis.overall_score }}/100</strong>
+        <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence }}% heuristic confidence</small>
+      </div>
+    {% endif %}
+  </section>
+
+  {% if analysis %}
+    <section class="metric-grid" aria-label="Current analysis">
+      <article><small>Price</small><strong>{{ analysis.current_price }} {{ listing.currency }}</strong><span>{{ analysis.daily_change|percentage }}</span></article>
+      <article>
+        <small>Short scenario</small>
+        <strong>{{ analysis.short_scenario|scenario_range }}</strong>
+        <span>{{ analysis.short_scenario.method|default:"Bear / base / bull" }}</span>
+        {% if analysis.short_scenario.insufficiency_reason %}<span>{{ analysis.short_scenario.insufficiency_reason }}</span>{% endif %}
+      </article>
+      <article>
+        <small>6-12 month scenario</small>
+        <strong>{{ analysis.medium_scenario|scenario_range }}</strong>
+        <span>{{ analysis.medium_scenario.method|default:"Bear / base / bull" }}</span>
+        {% if analysis.medium_scenario.insufficiency_reason %}<span>{{ analysis.medium_scenario.insufficiency_reason }}</span>{% endif %}
+      </article>
+      <article>
+        <small>3+ year scenario</small>
+        <strong>{{ analysis.long_scenario|scenario_range }}</strong>
+        <span>{{ analysis.long_scenario.method|default:"Explicit uncertainty" }}</span>
+        {% if analysis.long_scenario.insufficiency_reason %}<span>{{ analysis.long_scenario.insufficiency_reason }}</span>{% endif %}
+      </article>
+    </section>
+
+    <div class="detail-grid">
+      <section class="panel">
+        <p class="eyebrow">Why this rating</p>
+        <h2>Evidence</h2>
+        <ul class="evidence-list">
+          {% for reason in analysis.reasons %}
+            <li>{{ reason }}</li>
+          {% empty %}
+            <li>No positive factor explanation is available.</li>
+          {% endfor %}
+        </ul>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">What can go wrong</p>
+        <h2>Risks</h2>
+        <ul class="evidence-list">
+          {% for risk in analysis.risks %}
+            <li>{{ risk }}</li>
+          {% empty %}
+            <li>No explicit risk explanation is available.</li>
+          {% endfor %}
+        </ul>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Transparent inputs</p>
+        <h2>Component scores</h2>
+        <dl class="key-values">
+          {% for key, value in analysis.component_scores|mapping_items %}
+            <div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>
+          {% empty %}
+            <div><dt>Coverage</dt><dd>Unavailable</dd></div>
+          {% endfor %}
+        </dl>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Point in time</p>
+        <h2>Provenance</h2>
+        <dl class="key-values">
+          <div><dt>Decision date</dt><dd>{{ analysis.run.target_date }}</dd></div>
+          <div><dt>Generated</dt><dd>{{ analysis.run.generated_at }}</dd></div>
+          <div><dt>Universe grade</dt><dd>{{ analysis.run.universe_snapshot.get_grade_display }}</dd></div>
+          <div><dt>Configuration</dt><dd>{{ analysis.run.config_version }}</dd></div>
+          <div><dt>Code revision</dt><dd>{{ analysis.run.code_revision }}</dd></div>
+        </dl>
+        <h3>Source assets</h3>
+        <div class="compact-list">
+          {% for asset in analysis.data_quality.source_assets %}
+            <article>
+              <div>
+                <strong>{{ asset.provider }} · {{ asset.kind }}</strong>
+                <small>{{ asset.subject }} · available {{ asset.available_at }}</small>
+              </div>
+              <span class="badge">{{ asset.sha256|slice:":12" }}</span>
+            </article>
+          {% empty %}
+            <p class="empty-state">No source-asset provenance is available.</p>
+          {% endfor %}
+        </div>
+      </section>
+    </div>
+  {% else %}
+    <p class="empty-state">No completed point-in-time analysis exists for this listing.</p>
+  {% endif %}
+
+  <section>
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Append-only record</p>
+        <h2>Prediction history</h2>
+      </div>
+    </div>
+    <div class="compact-list">
+      {% for prediction in predictions %}
+        <article>
+          <div>
+            <strong>{{ prediction.get_horizon_display }} · {{ prediction.get_recommendation_display }}</strong>
+            <small>
+              {{ prediction.target_date }} ·
+              {{ prediction.bear_return|percentage }} /
+              {{ prediction.base_return|percentage }} /
+              {{ prediction.bull_return|percentage }}
+            </small>
+          </div>
+          <span class="badge">{{ prediction.model_version }}</span>
+        </article>
+      {% empty %}
+        <p class="empty-state">No immutable predictions have been issued for this listing.</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

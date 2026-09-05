@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Sign in · StanStock{% endblock %}
+
+{% block content %}
+  <section class="login-card" aria-labelledby="login-title">
+    <div>
+      <p class="eyebrow">Private research workspace</p>
+      <h1 id="login-title">Sign in to StanStock</h1>
+      <p class="lede">
+        Market data, prediction history, and portfolio research remain private.
+      </p>
+    </div>
+    <form method="post" class="stack">
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+      <label for="{{ form.username.id_for_label }}">Username</label>
+      {{ form.username }}
+      {% if form.username.errors %}
+        <div class="field-error">{{ form.username.errors }}</div>
+      {% endif %}
+      <label for="{{ form.password.id_for_label }}">Password</label>
+      {{ form.password }}
+      {% if form.password.errors %}
+        <div class="field-error">{{ form.password.errors }}</div>
+      {% endif %}
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="primary-button" type="submit">Sign in</button>
+    </form>
+  </section>
+{% endblock %}

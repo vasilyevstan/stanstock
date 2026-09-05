@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}{{ run.definition.name }} · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">{{ run.definition.get_mode_display }} · {{ run.universe_snapshot.get_grade_display }}</p>
+      <h1>{{ run.definition.name }}</h1>
+      <p class="lede">
+        Input hash {{ run.input_hash }} · code revision {{ run.code_revision }}
+        {% if run.metrics.base_currency %} · native currency {{ run.metrics.base_currency }}{% endif %}.
+      </p>
+    </div>
+    <span class="badge badge-{{ run.status }}">{{ run.get_status_display }}</span>
+  </section>
+
+  {% if run.error %}
+    <div class="error-box" role="alert">{{ run.error }}</div>
+  {% endif %}
+
+  <section class="metric-grid" aria-label="Simulation metrics">
+    {% for name, value in metrics %}
+      <article>
+        <small>{{ name }}</small>
+        <strong>{{ value }}</strong>
+      </article>
+    {% empty %}
+      <p class="empty-state">No metrics were persisted for this run.</p>
+    {% endfor %}
+  </section>
+
+  <div class="detail-grid">
+    <section class="panel">
+      <p class="eyebrow">Audit trail</p>
+      <h2>Recent trades</h2>
+      <div class="compact-list">
+        {% for trade in trades %}
+          <article>
+            <div>
+              <strong>{{ trade.listing.ticker }} · {{ trade.get_side_display }}</strong>
+              <small>{{ trade.trade_date }} · {{ trade.quantity }} at {{ trade.price }}</small>
+            </div>
+            <span>{{ trade.costs }} costs</span>
+          </article>
+        {% empty %}
+          <p class="empty-state">No trades were persisted.</p>
+        {% endfor %}
+      </div>
+    </section>
+    <section class="panel">
+      <p class="eyebrow">Positions</p>
+      <h2>Recent holdings</h2>
+      <div class="compact-list">
+        {% for holding in holdings %}
+          <article>
+            <div>
+              <strong>{{ holding.listing.ticker }}</strong>
+              <small>{{ holding.observation_date }} · {{ holding.quantity }} shares</small>
+            </div>
+            <span>{{ holding.market_value }}</span>
+          </article>
+        {% empty %}
+          <p class="empty-state">No holdings were persisted.</p>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+{% endblock %}

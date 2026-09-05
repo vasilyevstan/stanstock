@@ -1,0 +1,32 @@
+# Example universe configuration (synthetic placeholder).
+#
+# This is a demo/test fixture, not a reproduction of any real, licensed
+# index or constituent list. `seed_demo` reads this file to name and hash
+# the deterministic synthetic universe it creates; a real universe config
+# would follow the same schema but be reviewed against its own sourcing and
+# licensing terms before use.
+schema_version: 1
+config_version: demo-us-europe-synthetic-v1
+slug: demo-us-europe-synthetic
+name: "Demo US & Europe Synthetic Universe"
+description: >
+  Deterministic, entirely synthetic placeholder universe of obviously fake
+  US and European listings used for local development, demos, and tests.
+  Values are illustrative only and must never be presented as investment
+  research or as a reconstruction of any real market index.
+grade: research  # never "observed": this universe was generated, not observed live.
+regions:
+  - code: us
+    count: 40
+    exchanges: [XNAS, XNYS]
+  - code: europe
+    count: 20
+    exchanges: [XLON, XPAR, XETR, XAMS, XMIL]
+ticker_prefixes:
+  us: "ZZUS"
+  europe: "ZZEU"
+notes: >
+  Do not add real company identities, tickers, or ISINs to this file. Any
+  production universe config must document its selection methodology and
+  pass the provider stop/go gate in `docs/source-spike.md` before real
+  price/fundamentals ingestion is enabled for it.

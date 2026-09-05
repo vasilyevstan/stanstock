@@ -1,0 +1,15 @@
+name: "top10_monthly_momentum_backtest"
+mode: "backtest"
+grade: "observed"
+starting_capital: 100000.0
+rebalance_frequency: "monthly"
+execution_basis: "next_close"
+top_n: 10
+transaction_cost_bps: 10.0
+slippage_bps: 5.0
+missing_price_policy: "mark_unresolved"
+risk_free_rate: 0.0
+benchmark_symbol: "SPY"
+cash_buffer_bps: 0.0
+tie_breaker: "symbol_asc"
+description: "Top 10 monthly rebalancing backtest using point-in-time signals with 10 bps transaction costs and 5 bps slippage."

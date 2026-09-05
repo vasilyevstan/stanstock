@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Methodology · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Transparent by design</p>
+      <h1>Methodology and limitations</h1>
+      <p class="lede">
+        StanStock uses deterministic rules, versioned weights, immutable data
+        vintages, and out-of-sample evaluation. It does not use an LLM to alter
+        scores or recommendations.
+      </p>
+    </div>
+  </section>
+  <div class="detail-grid">
+    <section class="panel">
+      <h2>Point in time</h2>
+      <p>Every live result is limited to assets retrieved and available by its decision time. Later restatements and adjusted histories cannot rewrite past inputs.</p>
+    </section>
+    <section class="panel">
+      <h2>Scoring</h2>
+      <p>Quality, growth, valuation, momentum, risk, and market context are combined through versioned horizon weights. Missing data reduces confidence instead of becoming zero.</p>
+    </section>
+    <section class="panel">
+      <h2>Scenarios</h2>
+      <p>Bear, base, and bull values are ranges from explicit empirical or fundamental rules. Probability is withheld when the relevant sample is insufficient.</p>
+    </section>
+    <section class="panel">
+      <h2>Limitations</h2>
+      <p>Free sources can be incomplete, delayed, revised, or unavailable. European filing coverage and total-return data may be less complete than US price history.</p>
+    </section>
+  </div>
+{% endblock %}

@@ -1,0 +1,51 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DJANGO_SETTINGS_MODULE: "stanstock.settings.prod"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS is required}"
+      DJANGO_CSRF_TRUSTED_ORIGINS: "${DJANGO_CSRF_TRUSTED_ORIGINS:-}"
+      DJANGO_TRUST_PROXY_HEADERS: "${DJANGO_TRUST_PROXY_HEADERS:-true}"
+      DJANGO_SECURE_SSL_REDIRECT: "${DJANGO_SECURE_SSL_REDIRECT:-true}"
+      DJANGO_SESSION_COOKIE_SECURE: "${DJANGO_SESSION_COOKIE_SECURE:-true}"
+      DJANGO_CSRF_COOKIE_SECURE: "${DJANGO_CSRF_COOKIE_SECURE:-true}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
+      STANSTOCK_DATA_DIR: "/app/var/data"
+      STANSTOCK_BACKUP_DIR: "/app/var/backups"
+      STANSTOCK_DEMO_MODE: "${STANSTOCK_DEMO_MODE:-false}"
+      STANSTOCK_OWNER_USERNAME: "${STANSTOCK_OWNER_USERNAME:-admin}"
+      STANSTOCK_OWNER_PASSWORD: "${STANSTOCK_OWNER_PASSWORD:-}"
+      STANSTOCK_OWNER_EMAIL: "${STANSTOCK_OWNER_EMAIL:-}"
+      STANSTOCK_CODE_REVISION: "${STANSTOCK_CODE_REVISION:-unknown}"
+      STANSTOCK_LOGIN_TRUSTED_PROXY_IPS: "${STANSTOCK_LOGIN_TRUSTED_PROXY_IPS:-}"
+    ports:
+      - "127.0.0.1:${STANSTOCK_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+    volumes:
+      - stanstock_data:/app/var/data
+      - stanstock_backups:/app/var/backups
+      - stanstock_static:/app/var/static
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+volumes:
+  stanstock_backups:
+  stanstock_data:
+  stanstock_static:

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Market overview · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Persisted observations</p>
+      <h1>Market overview</h1>
+      <p class="lede">
+        Breadth and sector summaries use only the latest stored snapshots. They
+        do not imply live coverage when the provider gate is disabled.
+      </p>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Regional market breadth">
+    {% for region in regions %}
+      <article>
+        <small>{{ region.label }}</small>
+        <strong>{{ region.mean_change|percentage }}</strong>
+        <span>
+          {{ region.listing_count }} listings · {{ region.advancers }} up /
+          {{ region.decliners }} down / {{ region.unchanged }} unchanged
+        </span>
+        {% if region.latest_observation %}<span>Observed {{ region.latest_observation }}</span>{% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <div class="detail-grid">
+    <section class="panel">
+      <p class="eyebrow">Cross-section</p>
+      <h2>Sector movement</h2>
+      <dl class="key-values">
+        {% for sector in sectors %}
+          <div>
+            <dt>{{ sector.name }} <small>({{ sector.listing_count }})</small></dt>
+            <dd>{{ sector.mean_change|percentage }}</dd>
+          </div>
+        {% empty %}
+          <div><dt>Coverage</dt><dd>No market snapshots</dd></div>
+        {% endfor %}
+      </dl>
+    </section>
+    <section class="panel">
+      <p class="eyebrow">Coverage</p>
+      <h2>Latest listings</h2>
+      <dl class="key-values">
+        {% for item in market_rows %}
+          <div>
+            <dt>{{ item.row.listing.ticker }} · {{ item.row.listing.region }}</dt>
+            <dd>
+              {{ item.row.close }} {{ item.row.listing.currency }}
+              <small>{{ item.change|percentage }}</small>
+            </dd>
+          </div>
+        {% empty %}
+          <div><dt>State</dt><dd>Insufficient data</dd></div>
+        {% endfor %}
+      </dl>
+    </section>
+  </div>
+{% endblock %}

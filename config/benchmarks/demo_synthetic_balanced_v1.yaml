@@ -1,0 +1,22 @@
+# Example benchmark configuration (synthetic placeholder).
+#
+# This describes a single deterministic synthetic benchmark price series
+# that `seed_demo` writes as a `DataAsset` (kind=price_history) so research
+# runs can pass it via `--benchmark-subject`. It is an equal-weighted
+# placeholder over the demo universe's own synthetic listings, not a
+# reproduction of any licensed index methodology or constituent list.
+schema_version: 1
+config_version: demo-synthetic-balanced-v1
+slug: demo-synthetic-balanced
+name: "Demo Synthetic Balanced Benchmark"
+description: >
+  Equal-weighted synthetic benchmark composed from the demo universe's own
+  synthetic listings, for local development and test comparisons only.
+benchmark_subject: "ZZBENCH01"
+currency: USD
+weighting: equal_weight
+constituents_source: demo-us-europe-synthetic-v1
+notes: >
+  Values are synthetic placeholders. A production benchmark config must
+  cite its licensed index provider and methodology and must not embed real
+  constituent weights without an approved license.

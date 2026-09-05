@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Simulations · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">One accounting engine</p>
+      <h1>Backtests and portfolios</h1>
+      <p class="lede">
+        Research backtests, observed-universe tests, and portfolio simulations
+        remain visibly distinct and share the same transaction-cost accounting.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <p class="eyebrow">Execute workflow</p>
+    <h2>Run simulation</h2>
+    <form method="post" class="stack">
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+      {% for field in form %}
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}
+          <small class="muted">{{ field.help_text }}</small>
+        {% endif %}
+        {% if field.errors %}
+          <div class="field-error">{{ field.errors }}</div>
+        {% endif %}
+      {% endfor %}
+      <button class="primary-button" type="submit">Run simulation</button>
+    </form>
+  </section>
+
+  <form class="filter-bar compact-filter" method="get">
+    <label>
+      <span>Mode</span>
+      <select name="mode">
+        <option value="">All modes</option>
+        {% for value, label in modes %}
+          <option value="{{ value }}"{% if selected_mode == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="primary-button filter-submit" type="submit">Apply filter</button>
+  </form>
+
+  <p class="muted">{{ result_count }} simulation run{{ result_count|pluralize }}.</p>
+  <div class="compact-list">
+    {% for run in runs %}
+      <article>
+        <div>
+          <a href="{% url 'simulation-detail' run.pk %}"><strong>{{ run.definition.name }}</strong></a>
+          <small>
+            {{ run.definition.get_mode_display }} · {{ run.universe_snapshot.get_grade_display }} ·
+            {{ run.started_at }}
+          </small>
+        </div>
+        <span class="badge badge-{{ run.status }}">{{ run.get_status_display }}</span>
+      </article>
+    {% empty %}
+      <p class="empty-state">
+        No simulation has been persisted. Results will appear here with their
+        universe grade and immutable input hash.
+      </p>
+    {% endfor %}
+  </div>
+{% endblock %}

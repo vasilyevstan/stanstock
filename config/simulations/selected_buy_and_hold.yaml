@@ -1,0 +1,20 @@
+name: "selected_buy_and_hold_tech"
+mode: "portfolio"
+grade: "observed"
+starting_capital: 100000.0
+rebalance_frequency: "never"
+execution_basis: "next_open"
+selected_symbols:
+  - "AAPL"
+  - "MSFT"
+  - "GOOGL"
+  - "AMZN"
+  - "NVDA"
+transaction_cost_bps: 5.0
+slippage_bps: 2.5
+missing_price_policy: "mark_unresolved"
+risk_free_rate: 0.02
+benchmark_symbol: "SPY"
+cash_buffer_bps: 0.0
+tie_breaker: "symbol_asc"
+description: "User-configured 5-stock buy-and-hold portfolio simulation with 2% risk-free hurdle."

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Prediction history · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Append-only evidence</p>
+      <h1>Prediction history</h1>
+      <p class="lede">
+        What the system actually recorded at each decision time. Corrections
+        append a new version; past predictions are never rewritten.
+      </p>
+    </div>
+  </section>
+
+  <form class="filter-bar compact-filter" method="get">
+    <label>
+      <span>Horizon</span>
+      <select name="horizon">
+        <option value="">All horizons</option>
+        {% for value, label in horizons %}
+          <option value="{{ value }}"{% if filters.horizon == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Recommendation</span>
+      <select name="recommendation">
+        <option value="">All</option>
+        {% for value, label in recommendations %}
+          <option value="{{ value }}"{% if filters.recommendation == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="primary-button filter-submit" type="submit">Apply filters</button>
+  </form>
+
+  <p class="muted">{{ result_count }} result{{ result_count|pluralize }}; showing at most 100.</p>
+  <div class="table-scroll" tabindex="0" aria-label="Prediction ledger">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Generated</th>
+          <th scope="col">Stock</th>
+          <th scope="col">Evidence grade</th>
+          <th scope="col">Horizon</th>
+          <th scope="col">Recommendation</th>
+          <th scope="col">Bear / base / bull</th>
+          <th scope="col">Positive probability</th>
+          <th scope="col">Confidence</th>
+          <th scope="col">Outcome</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for prediction in predictions %}
+          <tr>
+            <td>{{ prediction.generated_at }}<small>Target {{ prediction.target_date }}</small></td>
+            <td><a href="{% url 'stock-detail' prediction.listing_id %}"><strong>{{ prediction.listing.ticker }}</strong></a><small>{{ prediction.listing.security.company.name }}</small></td>
+            <td>{{ prediction.analysis.run.universe_snapshot.get_grade_display }}</td>
+            <td>{{ prediction.get_horizon_display }}</td>
+            <td><span class="recommendation recommendation-{{ prediction.recommendation }}">{{ prediction.get_recommendation_display }}</span></td>
+            <td>{{ prediction.bear_return|percentage }} / {{ prediction.base_return|percentage }} / {{ prediction.bull_return|percentage }}</td>
+            <td>
+              {% if prediction.probability_positive is not None %}
+                {{ prediction.probability_positive|percentage }}
+              {% else %}
+                Insufficient evidence
+                {% if prediction.insufficiency_reason %}<small>{{ prediction.insufficiency_reason }}</small>{% endif %}
+              {% endif %}
+            </td>
+            <td>{{ prediction.confidence }}%<small>{{ prediction.confidence_status }}</small></td>
+            <td>
+              {% if prediction.outcome %}
+                {{ prediction.outcome.get_status_display }}
+                <small>{{ prediction.outcome.actual_return|percentage }}</small>
+              {% else %}
+                Not matured
+              {% endif %}
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="9">No predictions have been recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Performance · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Observed, on-time evidence</p>
+      <h1>Method performance</h1>
+      <p class="lede">
+        Only matured predictions from observed universe snapshots that were
+        generated on their target date count here. Reconstructed research
+        results are excluded from live-performance claims.
+      </p>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Performance summary">
+    <article><small>Matured sample</small><strong>{{ summary.sample_count }}</strong><span>{% if summary.sufficient_sample %}Reportable{% else %}Insufficient sample{% endif %}</span></article>
+    <article><small>Mean return</small><strong>{% if summary.sufficient_sample %}{{ summary.mean_return|percentage }}{% else %}Withheld{% endif %}</strong><span>Price/return convention from outcomes</span></article>
+    <article><small>Positive outcomes</small><strong>{% if summary.sufficient_sample %}{{ summary.positive_rate|percentage }}{% else %}Withheld{% endif %}</strong><span>Not risk-adjusted</span></article>
+    <article><small>Directional accuracy</small><strong>{% if summary.sufficient_sample %}{{ summary.directional_accuracy|percentage }}{% else %}Withheld{% endif %}</strong><span>{{ summary.unresolved_count }} unresolved · {{ summary.corporate_event_count }} corporate event</span></article>
+  </section>
+
+  {% if not summary.sufficient_sample %}
+    <div class="notice">
+      <strong>Insufficient sample.</strong>
+      At least 30 matured observations are required before aggregate results are
+      presented as meaningful evidence.
+    </div>
+  {% endif %}
+
+  {% if summary.research_matured_count %}
+    <div class="notice">
+      <strong>Research evidence excluded.</strong>
+      {{ summary.research_matured_count }} matured synthetic or reconstructed
+      outcome{{ summary.research_matured_count|pluralize }} are not included in
+      the observed, on-time metrics above. Use the simulation pages for
+      research-grade results.
+    </div>
+  {% endif %}
+
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Breakdown</p>
+      <h2>Horizon and recommendation</h2>
+    </div>
+  </div>
+  <div class="table-scroll" tabindex="0" aria-label="Performance breakdown">
+    <table class="compact-table">
+      <thead>
+        <tr>
+          <th scope="col">Horizon</th>
+          <th scope="col">Recommendation</th>
+          <th scope="col">Sample</th>
+          <th scope="col">Mean return</th>
+          <th scope="col">Mean benchmark</th>
+          <th scope="col">Evidence state</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for group in groups %}
+          <tr>
+            <td>{{ group.prediction__horizon }}</td>
+            <td>{{ group.prediction__recommendation|upper }}</td>
+            <td>{{ group.sample_count }}</td>
+            <td>{% if group.sample_count >= 30 %}{{ group.mean_return|percentage }}{% else %}Withheld{% endif %}</td>
+            <td>{% if group.sample_count >= 30 %}{{ group.mean_benchmark_return|percentage }}{% else %}Withheld{% endif %}</td>
+            <td>{% if group.sample_count >= 30 %}Reportable{% else %}Insufficient sample{% endif %}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6">No prediction has matured yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

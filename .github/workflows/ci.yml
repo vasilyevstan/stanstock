@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: "0.12.10"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy src
+
+      - name: Run tests
+        run: uv run pytest --cov=stanstock --cov-report=term-missing
+
+      - name: Check migration drift
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: Run Django checks
+        run: uv run python manage.py check --settings=stanstock.settings.test
+
+      - name: Run deployment checks
+        env:
+          DJANGO_SECRET_KEY: "ci-only-long-random-looking-secret-not-used-outside-checks"
+          DJANGO_ALLOWED_HOSTS: "localhost"
+          DATABASE_URL: "postgresql://stanstock:stanstock@localhost:5432/stanstock"
+        run: uv run python manage.py check --deploy --settings=stanstock.settings.prod
+
+  container:
+    name: container
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Build application image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          push: false
+          tags: stanstock:ci

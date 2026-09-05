@@ -1,0 +1,63 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}StanStock{% endblock %}</title>
+    <meta name="description" content="Transparent stock research and prediction tracking.">
+    <link rel="stylesheet" href="{% static 'css/stanstock.css' %}">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="shell header-content">
+        <a class="brand" href="{% url 'index' %}">
+          <span class="brand-mark" aria-hidden="true">S</span>
+          <span>
+            <strong>StanStock</strong>
+            <small>Investment research</small>
+          </span>
+        </a>
+        {% if request.user.is_authenticated %}
+          <nav aria-label="Primary">
+            <a href="{% url 'opportunities' %}"{% if request.resolver_match.url_name == "opportunities" %} aria-current="page"{% endif %}>Opportunities</a>
+            <a href="{% url 'market' %}"{% if request.resolver_match.url_name == "market" %} aria-current="page"{% endif %}>Market</a>
+            <a href="{% url 'predictions' %}"{% if request.resolver_match.url_name == "predictions" %} aria-current="page"{% endif %}>Predictions</a>
+            <a href="{% url 'performance' %}"{% if request.resolver_match.url_name == "performance" %} aria-current="page"{% endif %}>Performance</a>
+            <a href="{% url 'simulations' %}"{% if request.resolver_match.url_name == "simulations" %} aria-current="page"{% endif %}>Simulations</a>
+            <a href="{% url 'status' %}"{% if request.resolver_match.url_name == "status" %} aria-current="page"{% endif %}>Status</a>
+            <form method="post" action="{% url 'logout' %}">
+              {% csrf_token %}
+              <button class="link-button" type="submit">Sign out</button>
+            </form>
+          </nav>
+        {% endif %}
+      </div>
+    </header>
+    {% if request.user.is_authenticated and stanstock_demo_mode or request.user.is_authenticated and stanstock_synthetic_data %}
+      <div class="demo-banner" role="status">
+        <div class="shell">
+          <strong>Synthetic research data.</strong>
+          Values are generated fixtures, not live market data or issued investment calls.
+        </div>
+      </div>
+    {% endif %}
+    <main id="main-content" class="shell page">
+      {% if messages %}
+        <div class="messages" aria-live="polite">
+          {% for message in messages %}
+            <p class="message">{{ message }}</p>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="shell site-footer">
+      <p>
+        Research estimates only. Predictions can be wrong and are not personalized
+        financial advice. <a href="{% url 'methodology' %}">Methodology and limitations</a>.
+      </p>
+    </footer>
+  </body>
+</html>

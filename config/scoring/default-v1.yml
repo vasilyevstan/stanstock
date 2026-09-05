@@ -1,0 +1,73 @@
+version: default-v1
+windows: [1, 5, 10, 20, 63, 126, 252, 756, 1260]
+horizon_weights:
+  short:
+    quality: 0.05
+    growth: 0.05
+    valuation: 0.05
+    momentum_technical: 0.40
+    risk_liquidity: 0.25
+    market_sector: 0.20
+  medium:
+    quality: 0.20
+    growth: 0.20
+    valuation: 0.20
+    momentum_technical: 0.15
+    risk_liquidity: 0.15
+    market_sector: 0.10
+  long:
+    quality: 0.30
+    growth: 0.25
+    valuation: 0.20
+    momentum_technical: 0.05
+    risk_liquidity: 0.15
+    market_sector: 0.05
+component_factor_counts:
+  quality: 10
+  growth: 3
+  valuation: 8
+  momentum_technical: 8
+  risk_liquidity: 6
+  market_sector: 3
+coverage:
+  minimum_component_coverage: 0.25
+  score_penalty_rate: 0.30
+  score_penalty_floor: 0.55
+  confidence_floor: 5
+  confidence_cap: 92
+freshness:
+  fresh_days: 5
+  stale_days: 30
+  stale_score_penalty: 0.35
+  stale_confidence_cap: 45
+risk:
+  low_max: 30
+  medium_max: 60
+  high_max: 80
+recommendation:
+  buy_min_score: 72
+  buy_max_risk: 55
+  buy_min_confidence: 45
+  buy_min_avg_volume_20d: 100000
+  buy_max_bear_downside:
+    short: -0.08
+    medium: -0.30
+    long: -0.50
+  avoid_max_score: 38
+  avoid_min_risk: 82
+  avoid_max_confidence: 15
+scenarios:
+  short_horizon_days: 10
+  medium_horizon_days: 126
+  empirical_min_observations:
+    short: 80
+    medium: 252
+  probability_min_samples:
+    short: 60
+    medium: 60
+    long: 30
+  long_term_years: 3
+  long_bear_growth_haircut: 0.50
+  long_bull_growth_uplift: 1.35
+  long_bear_multiple_compression: -0.10
+  long_bull_multiple_expansion: 0.15

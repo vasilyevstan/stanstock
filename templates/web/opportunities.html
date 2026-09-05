@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Opportunities · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Ranked research</p>
+      <h1>Top opportunities</h1>
+      <p class="lede">
+        Transparent scores from the latest completed point-in-time run. A high
+        score is research evidence, not a guarantee or personalized advice.
+      </p>
+    </div>
+    {% if latest_run %}
+      <div class="run-stamp">
+        <small>Decision date</small>
+        <strong>{{ latest_run.target_date }}</strong>
+        <span>{{ latest_run.config_version }}</span>
+      </div>
+    {% endif %}
+  </section>
+
+  {% if filter_form.errors %}
+    <div class="error-box" role="alert">
+      <strong>Correct the filters below.</strong>
+      {{ filter_form.errors }}
+    </div>
+  {% endif %}
+
+  <form class="filter-bar" method="get">
+    <label>
+      <span>{{ filter_form.q.label }}</span>
+      {{ filter_form.q }}
+    </label>
+    <label>
+      <span>{{ filter_form.region.label }}</span>
+      {{ filter_form.region }}
+    </label>
+    <label>
+      <span>{{ filter_form.recommendation.label }}</span>
+      {{ filter_form.recommendation }}
+    </label>
+    <label>
+      <span>{{ filter_form.risk.label }}</span>
+      {{ filter_form.risk }}
+    </label>
+    <label>
+      <span>{{ filter_form.country.label }}</span>
+      {{ filter_form.country }}
+    </label>
+    <label>
+      <span>{{ filter_form.exchange.label }}</span>
+      {{ filter_form.exchange }}
+    </label>
+    <label>
+      <span>{{ filter_form.sector.label }}</span>
+      {{ filter_form.sector }}
+    </label>
+    <label>
+      <span>{{ filter_form.min_score.label }}</span>
+      {{ filter_form.min_score }}
+    </label>
+    <label>
+      <span>{{ filter_form.min_confidence.label }}</span>
+      {{ filter_form.min_confidence }}
+    </label>
+    <button class="primary-button filter-submit" type="submit">Apply filters</button>
+  </form>
+
+  <div class="section-heading">
+    <p class="muted">{{ result_count }} result{{ result_count|pluralize }}; showing at most 50.</p>
+  </div>
+  <div class="table-scroll" tabindex="0" aria-label="Ranked stock opportunities">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Stock</th>
+          <th scope="col">Price</th>
+          <th scope="col">Score</th>
+          <th scope="col">Recommendation</th>
+          <th scope="col">1-10 days</th>
+          <th scope="col">6-12 months</th>
+          <th scope="col">3+ years</th>
+          <th scope="col">Risk</th>
+          <th scope="col">Confidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for stock in analyses %}
+          <tr>
+            <td>
+              <a href="{% url 'stock-detail' stock.listing_id %}"><strong>{{ stock.listing.ticker }}</strong></a>
+              <small>{{ stock.listing.security.company.name }} · {{ stock.listing.exchange_mic }}</small>
+            </td>
+            <td>{{ stock.current_price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
+            <td><strong>{{ stock.overall_score }}/100</strong></td>
+            <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
+            <td>{{ stock.short_scenario|scenario_range }}</td>
+            <td>{{ stock.medium_scenario|scenario_range }}</td>
+            <td>{{ stock.long_scenario|scenario_range }}</td>
+            <td>{{ stock.get_risk_class_display }}</td>
+            <td>{{ stock.confidence }}% <small>{{ stock.confidence_status }}</small></td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="9">
+              No persisted analysis matches these filters. Run the synthetic seed
+              and analysis commands or adjust the filters.
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
