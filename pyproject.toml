@@ -27,7 +27,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "django-stubs>=5.2,<6",
+    "django-stubs>=5.2,<7",
     "hypothesis>=6.130,<7",
     "mypy>=1.15,<2",
     "playwright>=1.52,<2",
