@@ -47,6 +47,8 @@ class Command(BaseCommand):
             computation=computation,
             generated_at=generated_at,
             data_cutoff=analysis.run.data_cutoff,
+            issued_on_time=False,
+            supported_horizons=_supported_horizons(analysis),
             model_version=str(model_version),
             config_hash_value=analysis.run.config_hash,
             source_assets=computation.source_assets,
@@ -58,6 +60,23 @@ class Command(BaseCommand):
                 + ", ".join(str(prediction.pk) for prediction in predictions)
             )
         )
+
+
+def _supported_horizons(analysis: StockAnalysis) -> tuple[str, ...]:
+    data_quality = analysis.data_quality if isinstance(analysis.data_quality, dict) else {}
+    raw_horizons = data_quality.get("supported_horizons")
+    if raw_horizons is None:
+        return tuple(Prediction.Horizon.values)
+    if not isinstance(raw_horizons, list) or not raw_horizons:
+        raise CommandError("Analysis supported_horizons must be a non-empty list")
+    invalid = [
+        value
+        for value in raw_horizons
+        if not isinstance(value, str) or value not in Prediction.Horizon.values
+    ]
+    if invalid:
+        raise CommandError(f"Analysis contains invalid supported horizons: {invalid}")
+    return tuple(raw_horizons)
 
 
 def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
@@ -145,14 +164,14 @@ def _scenario_from_mapping(raw: object) -> Scenario:
     )
 
 
-def _source_assets_from_analysis(analysis: StockAnalysis) -> list[dict[str, str]]:
+def _source_assets_from_analysis(analysis: StockAnalysis) -> list[dict[str, Any]]:
     data_quality = analysis.data_quality if isinstance(analysis.data_quality, dict) else {}
     if "source_assets" not in data_quality:
         raise CommandError("Analysis provenance is missing source assets")
     raw_assets = data_quality.get("source_assets", [])
     if not isinstance(raw_assets, list):
         raise CommandError("Analysis provenance is not a source asset list")
-    assets: list[dict[str, str]] = []
+    assets: list[dict[str, Any]] = []
     required = (
         "id",
         "provider",
@@ -168,7 +187,12 @@ def _source_assets_from_analysis(analysis: StockAnalysis) -> list[dict[str, str]
             raise CommandError("Analysis provenance contains a non-mapping source asset")
         if not all(isinstance(item.get(key), str) for key in required):
             raise CommandError("Analysis provenance source asset is incomplete")
-        assets.append({key: str(item[key]) for key in required})
+        normalized: dict[str, Any] = {key: str(item[key]) for key in required}
+        if isinstance(item.get("return_definition"), str):
+            normalized["return_definition"] = item["return_definition"]
+        if isinstance(item.get("dividends_included"), bool):
+            normalized["dividends_included"] = item["dividends_included"]
+        assets.append(normalized)
     return assets
 
 

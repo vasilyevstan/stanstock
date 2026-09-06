@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import polars as pl
 
@@ -89,6 +90,34 @@ def test_rule_scenarios_require_real_inputs_and_then_produce_ordered_ranges() ->
         assert scenario.bull is not None
         assert scenario.bear <= scenario.base <= scenario.bull
         assert scenario.probability_positive is None
+
+
+def test_price_only_baseline_withholds_unsupported_horizons() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
+    )
+
+    scenarios = build_scenarios(
+        _frame(90),
+        IndicatorResult(
+            values={
+                "momentum_20d": 0.05,
+                "momentum_63d": 0.08,
+                "annualized_volatility": 0.25,
+            }
+        ),
+        ResearchValues(values={"revenue_growth": 0.08, "free_cash_flow_yield": 0.04}),
+        _aggregate(),
+        config,
+    )
+
+    assert scenarios["short"].bear is not None
+    for horizon in ("medium", "long"):
+        assert scenarios[horizon].bear is None
+        assert scenarios[horizon].base is None
+        assert scenarios[horizon].bull is None
+        assert scenarios[horizon].method == "unsupported_by_model"
+        assert "not supported by 'price_only_baseline'" in scenarios[horizon].insufficiency_reason
 
 
 def test_scenario_total_returns_are_clamped_at_negative_one() -> None:

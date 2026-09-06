@@ -11,7 +11,9 @@ not a claim of free hosted capacity.
 - Durable private volumes mounted at `/app/var/data`, `/app/var/backups`, and
   `/app/var/static`.
 - HTTPS termination at the container or a trusted reverse proxy.
-- Two external scheduled triggers if real price ingestion is ever approved.
+- One external post-close trigger for the optional US Twelve Data workflow;
+  add a separate Europe trigger only after a European price source is
+  independently approved.
 
 Ephemeral container storage is not acceptable for `STANSTOCK_DATA_DIR`.
 
@@ -23,6 +25,7 @@ Ephemeral container storage is not acceptable for `STANSTOCK_DATA_DIR`.
 - `STANSTOCK_DATA_DIR=/app/var/data`
 - `STANSTOCK_BACKUP_DIR=/app/var/backups`
 - `STANSTOCK_CODE_REVISION` set to the immutable deployed revision
+- `TWELVE_DATA_API_KEY` only when the optional US provider is enabled
 
 Configure `DJANGO_CSRF_TRUSTED_ORIGINS` for the HTTPS origin. Keep secure
 redirect and secure cookies enabled. Set `DJANGO_TRUST_PROXY_HEADERS=true`
@@ -35,6 +38,17 @@ login-throttle identities.
 Owner credentials are used only for explicit bootstrap. Remove
 `STANSTOCK_OWNER_PASSWORD` from the runtime environment after the account is
 created so a restart cannot silently rotate it.
+
+The Twelve Data key is also environment-only. Never place it in the image,
+repository, Compose file, command line, URL, log, report, or `ProviderRecord`.
+Provider activation additionally requires a plan or agreement with
+internal-display rights; Basic's current internal non-display label is not
+sufficient for the price-bearing UI.
+
+If those rights terminate or expire, stop all services and follow the full
+installation destruction procedure in `docs/operations.md`. Destroy the
+database, data volume, backup volume, and every external snapshot or replica;
+disabling the provider or deleting only current asset files is not sufficient.
 
 ## Container controls
 
@@ -80,12 +94,22 @@ Then verify:
 
 ## Scheduled jobs
 
-When a lawful price provider is approved, map the Europe-close and US-close
-triggers to the same idempotent management command with explicit region and
-target date. Do not run a resident scheduler in the web container.
+After explicit Twelve Data activation, map a post-publication US trigger to:
+
+```bash
+python manage.py daily --region us
+```
+
+The command resolves the latest completed XNYS session, applies a provider
+publication delay, and is idempotent by target date. Use an explicit
+`--target-date` only for research-grade catch-up. Do not run a resident
+scheduler in the web container. European scheduling remains deferred until a
+separately approved provider exists.
 
 ## Rollback
 
 Application rollback means redeploying a known image revision. Restore data
 only when integrity requires it; never run an older image against an
 incompatible forward-only schema without a reviewed compatibility decision.
+Do not restore any bundle created while Twelve Data was enabled after the
+associated subscription or agreement has ended.

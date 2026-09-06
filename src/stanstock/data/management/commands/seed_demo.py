@@ -88,12 +88,12 @@ from stanstock.data.management.config_loader import (
     default_universe_config_path,
     load_yaml_mapping,
 )
+from stanstock.data.market_state import update_latest_market_data
 from stanstock.data.models import (
     Company,
     DataAsset,
     FundamentalFact,
     FxRate,
-    LatestMarketData,
     Listing,
     Region,
     Security,
@@ -496,24 +496,18 @@ class Command(BaseCommand):
             subject=ticker,
             retrieved_at=observed_at,
             available_at=observed_at,
+            period_start=last_session,
+            period_end=last_session,
             metadata=_synthetic_metadata(),
         )
-        # LatestMarketData is a mutable "current state" row (exactly one per
-        # listing, by `OneToOneField(primary_key=True)`), not an immutable
-        # historical vintage, so it is always safe to keep it in sync here --
-        # unlike `price_asset`/`quote_asset` above, this never risks mutating
-        # a previously written vintage.
-        LatestMarketData.objects.update_or_create(
+        update_latest_market_data(
             listing=listing,
-            defaults={
-                "observed_at": observed_at,
-                "close": _decimal(last_close, 4),
-                "previous_close": _decimal(previous_close, 4)
-                if previous_close is not None
-                else None,
-                "volume": last_volume,
-                "source_asset": quote_asset,
-            },
+            observed_at=observed_at,
+            session_date=last_session,
+            close=_decimal(last_close, 4),
+            previous_close=(_decimal(previous_close, 4) if previous_close is not None else None),
+            volume=last_volume,
+            source_asset=quote_asset,
         )
         del price_asset  # referenced only via its relative_path/on-disk bytes
 

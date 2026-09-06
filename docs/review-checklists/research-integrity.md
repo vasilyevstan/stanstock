@@ -40,6 +40,16 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 - [ ] `generated_at`, `data_cutoff`, and source `retrieved_at` remain
       distinguishable; observed-grade backtests reject late-generated signals,
       while research reconstructions remain explicitly labeled.
+- [ ] On-time status is recorded on each immutable prediction version. The
+      original issuance is bounded by the next market-session open, later
+      reissues remain research evidence, and simulation/reporting do not trust
+      an analysis-level flag alone.
+- [ ] Predictions and persisted horizon scores exist only for the scoring
+      configuration's `supported_horizons`; withheld horizons cannot enter
+      outcomes, unresolved counts, or performance aggregates.
+- [ ] Mutable current-market state advances monotonically by market session
+      (with retrieval time only as a same-session tie-breaker); historical
+      catch-up and ineligible series cannot replace a newer eligible close.
 - [ ] Migration/backfill code does not assign historical cutoffs that the
       legacy calculation path cannot prove; ambiguous legacy runs remain
       conservative or are rejected.
@@ -53,6 +63,9 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       membership.
 - [ ] Consumers (views, exports, reports) are told which grade they are
       reading when it affects interpretation.
+- [ ] Retry recovery finds unique committed work by universe/config/target
+      across retry-time grades before credentials or quota are consumed, and
+      conflicting completed runs fail explicitly.
 
 ## Missing values
 

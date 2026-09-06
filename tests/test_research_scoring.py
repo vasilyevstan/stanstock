@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
-from stanstock.research.config import HORIZONS, load_scoring_config
+import pytest
+import yaml
+
+from stanstock.research.config import HORIZONS, ScoringConfig, load_scoring_config
 from stanstock.research.scoring import (
     aggregate_score,
     assess_risk,
     decide_recommendation,
     score_components,
 )
-from stanstock.research.types import IndicatorResult, ResearchValues, RiskAssessment, Scenario
+from stanstock.research.types import (
+    ComponentScores,
+    IndicatorResult,
+    ResearchValues,
+    RiskAssessment,
+    Scenario,
+)
 
 
 def _rich_indicators() -> IndicatorResult:
@@ -136,6 +146,46 @@ def test_config_horizon_weights_are_versioned_and_sum_to_one() -> None:
         > config.horizon_weights["long"]["momentum_technical"]
     )
     assert config.horizon_weights["long"]["quality"] > config.horizon_weights["short"]["quality"]
+
+
+def test_us_price_baseline_uses_short_price_only_score() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
+    )
+    components = ComponentScores(
+        components={
+            "quality": 100,
+            "growth": 100,
+            "valuation": 100,
+            "momentum_technical": 80,
+            "risk_liquidity": 60,
+            "market_sector": 40,
+        },
+        factor_scores={},
+        missing={},
+        coverage=1.0,
+    )
+
+    aggregate = aggregate_score(components, config)
+
+    assert config.analysis_mode == "price_only_baseline"
+    assert config.overall_horizon == "short"
+    assert config.supported_horizons == ("short",)
+    assert aggregate.horizon_scores["short"] == 66
+    assert aggregate.overall == aggregate.horizon_scores["short"]
+
+
+def test_config_requires_supported_horizon_gates_and_active_factor_counts() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["recommendation"]["buy_max_bear_downside"]["medium"] = -0.30
+    with pytest.raises(ValueError, match="buy_max_bear_downside"):
+        ScoringConfig.from_mapping(raw)
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    del raw["component_factor_counts"]["market_sector"]
+    with pytest.raises(ValueError, match="component_factor_counts"):
+        ScoringConfig.from_mapping(raw)
 
 
 def test_score_bounds_confidence_cap_and_freshness_penalty() -> None:

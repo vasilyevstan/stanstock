@@ -58,7 +58,13 @@
           <tr>
             <td>{{ prediction.generated_at }}<small>Target {{ prediction.target_date }}</small></td>
             <td><a href="{% url 'stock-detail' prediction.listing_id %}"><strong>{{ prediction.listing.ticker }}</strong></a><small>{{ prediction.listing.security.company.name }}</small></td>
-            <td>{{ prediction.analysis.run.universe_snapshot.get_grade_display }}</td>
+            <td>
+              {% if prediction.issued_on_time and prediction.analysis.run.universe_snapshot.grade == "observed" %}
+                Observed · issued on time
+              {% else %}
+                Research-grade reconstruction / late version
+              {% endif %}
+            </td>
             <td>{{ prediction.get_horizon_display }}</td>
             <td><span class="recommendation recommendation-{{ prediction.recommendation }}">{{ prediction.get_recommendation_display }}</span></td>
             <td>{{ prediction.bear_return|percentage }} / {{ prediction.base_return|percentage }} / {{ prediction.bull_return|percentage }}</td>

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
-from django.db.models import Avg, Count, F, Q, QuerySet
+from django.db.models import Avg, Count, Q, QuerySet
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 
@@ -90,12 +90,16 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
     countries: list[str] = []
     exchanges: list[str] = []
     sectors: list[str] = []
+    latest_analysis_mode = ""
     if latest_run is not None:
         base_analyses = (
             StockAnalysis.objects.filter(run=latest_run)
             .select_related("listing__security__company")
             .order_by("-overall_score")
         )
+        latest_analysis = base_analyses.first()
+        if latest_analysis is not None and isinstance(latest_analysis.data_quality, dict):
+            latest_analysis_mode = str(latest_analysis.data_quality.get("analysis_mode", ""))
         countries = list(
             base_analyses.order_by("listing__security__company__country")
             .values_list("listing__security__company__country", flat=True)
@@ -129,6 +133,7 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
         "web/opportunities.html",
         {
             "latest_run": latest_run,
+            "latest_analysis_mode": latest_analysis_mode,
             "analyses": analyses[:50],
             "result_count": analyses.count(),
             "filter_form": filter_form,
@@ -217,7 +222,7 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
                 "decliners": sum(change < 0 for change in changes),
                 "unchanged": sum(change == 0 for change in changes),
                 "latest_observation": max(
-                    (row.observed_at for row in region_rows),
+                    (row.session_date for row in region_rows),
                     default=None,
                 ),
             }
@@ -272,7 +277,8 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     )
     on_time_observed = Q(
         prediction__analysis__run__universe_snapshot__grade=UniverseSnapshot.Grade.OBSERVED,
-        prediction__generated_at__date=F("prediction__target_date"),
+        prediction__analysis__run__issued_on_time=True,
+        prediction__issued_on_time=True,
     )
     reportable_matured = matured.filter(on_time_observed)
     summary = reportable_matured.aggregate(

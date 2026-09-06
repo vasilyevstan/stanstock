@@ -29,8 +29,7 @@ Terminal states are:
 The actual generation timestamp is always preserved. Catch-up work must not
 pretend a missed prediction was issued on its historical target date.
 
-The current free-only boundary has no lawful live-price job. For local product
-testing, the synthetic-only equivalent is:
+The default remains synthetic and requires no provider account:
 
 ```bash
 uv run python manage.py refresh_demo
@@ -39,6 +38,75 @@ uv run python manage.py refresh_demo
 It seeds deterministic data, validates the target against an observed
 synthetic benchmark session, and runs one idempotent analysis/prediction batch.
 It never contacts a live provider.
+
+The optional US-only Twelve Data workflow is disabled by default. Keep its key
+in the environment, run the bounded source probe, then explicitly record a
+plan or agreement with internal-display rights:
+
+```bash
+export TWELVE_DATA_API_KEY=replace-with-your-key
+uv run python manage.py source_spike
+uv run python manage.py configure_twelve_data \
+  --enable \
+  --plan grow \
+  --confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED
+uv run python manage.py daily --region us
+```
+
+The committed 100-stock configuration plus SPY uses approximately 103 credits
+per full run. Local coordination enforces a conservative 8-credit/minute,
+800-credit/day budget through locked `ProviderRecord.metadata`; another
+application using the same account is outside that accounting. Schedule the
+job after the provider has published the completed US daily bars. If the
+benchmark has no target-date close, the run fails rather than creating a
+partial snapshot. Repeating a successful target produces a skipped `JobRun`
+and makes no market-data requests.
+
+An explicit prior `--target-date YYYY-MM-DD` is a research reconstruction,
+not an on-time historical prediction. Disable the provider immediately with:
+
+```bash
+uv run python manage.py configure_twelve_data --disable
+```
+
+Provider termination or expiration also requires deletion of stored Twelve
+Data data under the current terms; disabling alone does not delete immutable
+assets.
+
+### Destroying Twelve Data data after access ends
+
+StanStock does not support selective deletion of one provider from an existing
+research ledger. Twelve Data assets can be referenced by universe snapshots,
+analyses, predictions, outcomes, simulations, and backup manifests; deleting
+only the files or only the `DataAsset` rows would leave incomplete or
+misleading evidence. The supported procedure is therefore a **full
+installation reset**:
+
+1. Stop every web, job, and backup process, revoke or rotate the provider key,
+   and run `configure_twelve_data --disable` if the database is still
+   reachable.
+2. Delete every StanStock backup bundle and every external/off-site copy made
+   while Twelve Data was enabled. Restoring one of those bundles would
+   reintroduce the provider data.
+3. Destroy the complete application database and the complete
+   `STANSTOCK_DATA_DIR`. For the repository's development Compose stack,
+   `docker compose down --volumes` removes PostgreSQL, assets, and the mounted
+   backup volume together. Confirm that the Compose project contains no
+   unrelated volumes before running it.
+4. For direct SQLite development, remove `stanstock.sqlite3`, `var/data`, and
+   `var/backups`. For external PostgreSQL or managed volumes, use the
+   database/storage provider's documented destruction controls and also remove
+   snapshots, replicas, object versions, and retained backups according to
+   their lifecycle policies.
+5. Recreate a clean installation only after `TWELVE_DATA_API_KEY` has been
+   removed from the environment. Run migrations and `refresh_demo` to return
+   to synthetic data, then confirm no `ProviderRecord` or `DataAsset` for
+   `twelve_data` exists.
+
+This procedure intentionally removes all StanStock research history, including
+non-Twelve-Data records. Preserve no mixed backup as a workaround: the
+application's immutability and provenance guarantees take priority over a
+partial purge that cannot prove all derived copies were removed.
 
 Pending outcomes can be evaluated through an explicit cutoff:
 
@@ -121,8 +189,9 @@ account permitted to replace schema objects; the production image includes
 
 ## Provider failures
 
-The source gate currently rejects unattended real OHLCV at the required scope.
-Provider clients must fail explicitly on browser-verification HTML, access
-denial, malformed responses, missing credentials, and disabled
-`ProviderRecord` state. No job may scrape HTML or turn a provider failure into
-a successful empty market update.
+The source gate conditionally permits only the reviewed US Twelve Data scope;
+broad US/European live OHLCV remains unsupported. Provider clients fail
+explicitly on browser-verification HTML, access denial, quota exhaustion,
+malformed responses, missing credentials, missing display-rights
+confirmation, and disabled `ProviderRecord` state. No job may scrape HTML or
+turn a provider failure into a successful empty market update.

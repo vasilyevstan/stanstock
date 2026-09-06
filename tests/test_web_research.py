@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -83,6 +84,7 @@ def persisted_analysis() -> StockAnalysis:
     LatestMarketData.objects.create(
         listing=listing,
         observed_at=now,
+        session_date=timezone.localdate(),
         close=Decimal("101.25"),
         previous_close=Decimal("100.00"),
         volume=1_000_000,
@@ -212,6 +214,33 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
 
 
 @pytest.mark.django_db
+def test_price_only_analysis_discloses_model_and_return_limits(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.run.config_version = "renamed-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+        "return_definition": "split_adjusted_price_return",
+        "dividends_included": False,
+    }
+    persisted_analysis.save(update_fields=["data_quality"])
+
+    opportunities = authenticated_client.get(reverse("opportunities"))
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert opportunities.status_code == 200
+    assert "US price-only baseline." in opportunities.content.decode()
+    assert "Medium- and long-horizon scenarios are withheld" in opportunities.content.decode()
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert "This recommendation does not use company fundamentals." in detail_content
+    assert "Split-adjusted price return; dividends excluded." in detail_content
+
+
+@pytest.mark.django_db
 @override_settings(DEMO_MODE=False)
 def test_synthetic_provenance_banner_does_not_depend_on_demo_setting(
     authenticated_client,
@@ -268,6 +297,108 @@ def test_research_grade_outcomes_are_excluded_from_live_performance(
     assert "Matured sample</small><strong>0</strong>" in content
     assert "Research evidence excluded." in content
     assert "matured synthetic or reconstructed" in content
+
+
+@pytest.mark.django_db
+def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.as_of_date = date(2026, 9, 8)
+    snapshot.save(update_fields=["grade", "as_of_date"])
+    generated_at = datetime(2026, 9, 9, 1, tzinfo=UTC)
+    run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=generated_at,
+        target_date=date(2026, 9, 8),
+        issued_on_time=True,
+        universe_snapshot=snapshot,
+        config_version="us-price-baseline-v1",
+        config_hash="d" * 64,
+        code_revision="test-revision",
+    )
+    analysis = StockAnalysis.objects.create(
+        run=run,
+        listing=persisted_analysis.listing,
+        current_price=Decimal("102"),
+        overall_score=Decimal("70"),
+        recommendation=Recommendation.HOLD,
+        risk_score=Decimal("35"),
+        risk_class=RiskClass.MEDIUM,
+        confidence=Decimal("60"),
+    )
+    prediction = Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=generated_at,
+        target_date=run.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.SHORT,
+        price_at_prediction=Decimal("102"),
+        bear_return=Decimal("-0.03"),
+        base_return=Decimal("0.02"),
+        bull_return=Decimal("0.07"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="heuristic",
+        insufficiency_reason="Insufficient comparable observations",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="overnight-observed-v1",
+        config_hash="d" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    PredictionOutcome.objects.create(
+        prediction=prediction,
+        evaluated_at=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        evaluation_date=date(2026, 10, 1),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.05"),
+        benchmark_return=Decimal("0.02"),
+        success=True,
+        resolution="Observed overnight-issued outcome",
+    )
+    late_prediction = Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=generated_at + timedelta(hours=12),
+        target_date=run.target_date,
+        issued_on_time=False,
+        horizon=Prediction.Horizon.SHORT,
+        price_at_prediction=Decimal("102"),
+        bear_return=Decimal("-0.03"),
+        base_return=Decimal("0.02"),
+        bull_return=Decimal("0.07"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="heuristic",
+        insufficiency_reason="Insufficient comparable observations",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="overnight-reissued-v2",
+        config_hash="d" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    PredictionOutcome.objects.create(
+        prediction=late_prediction,
+        evaluated_at=datetime(2026, 10, 1, 13, tzinfo=UTC),
+        evaluation_date=date(2026, 10, 1),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.05"),
+        benchmark_return=Decimal("0.02"),
+        success=True,
+        resolution="Late reissued outcome",
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert response.context["summary"]["sample_count"] == 1
+    assert response.context["summary"]["research_matured_count"] == 1
 
 
 @pytest.mark.django_db

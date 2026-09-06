@@ -1,9 +1,11 @@
 # Limitations
 
-## Real price ingestion is blocked
+## Live prices are US-only and conditional
 
-The 2026-09-05 provider spike concluded `NO_GO` for the exact free-only,
-unattended, roughly 500-stock US/Europe price requirement.
+The original free-only, unattended, roughly 500-stock US/Europe requirement
+remains `NO_GO`. A reduced 100-stock US starter universe is technically
+supported through Twelve Data's official API, but it is disabled by default
+and conditional on account rights.
 
 - Stooq's public CSV path is protected against automation in the tested
   environment.
@@ -11,13 +13,30 @@ unattended, roughly 500-stock US/Europe price requirement.
   machine-verified.
 - No browser challenge or access control will be bypassed.
 - Alpha Vantage's official free limit is too small for the requested universe.
-- Twelve Data's free tier does not provide the required broad European equity
-  coverage.
+- Twelve Data Basic provides useful US access and sufficient credits, but its
+  current pricing page labels that tier internal non-display. StanStock's
+  price-bearing UI therefore requires Grow/Pro/Ultra or another agreement
+  that explicitly grants internal-display rights.
+- Twelve Data data cannot be redistributed or publicly displayed without
+  appropriate rights, and current terms require its deletion after the
+  subscription or agreement ends. Because provider assets feed immutable
+  provenance and derived records, the supported deletion path is a full
+  installation reset, including databases, assets, backups, replicas, and
+  snapshots; selective provider purging is intentionally unsupported.
+- European live equity coverage is still deferred.
 
-Consequently, the default application is a deterministic synthetic research
-prototype. It cannot honestly claim live rankings or twice-daily live
-predictions until the owner supplies an approved licensed source or changes
-the scope.
+Consequently, the default application remains deterministic synthetic
+research. US live rankings become available only after explicit
+`configure_twelve_data` activation with a non-demo key and display-rights
+confirmation. Historical catch-up runs are research-grade and cannot be
+presented as predictions issued on time.
+
+Twelve Data daily histories are requested with split adjustment only. They
+exclude dividends, so all derived performance is price return, not total
+return. The local quota ledger cannot observe credits consumed by another
+application using the same account, and provider coverage, symbols, plan
+entitlements, timing, and terms can change independently of this code.
+See `docs/operations.md` for the destructive termination procedure.
 
 ## Fundamentals
 

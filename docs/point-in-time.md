@@ -12,6 +12,9 @@ available to the system.
 - `generated_at`: when an analysis or prediction was created.
 - `data_cutoff`: the latest information-availability time permitted for the
   analysis.
+- `issued_on_time`: recorded separately on both the analysis run and each
+  immutable prediction version. A later reissue never inherits the original
+  version's on-time status.
 - `target_date`: the logical market date being processed.
 
 A live decision at time `T` may use a source asset only when both
@@ -47,6 +50,20 @@ StanStock therefore stores each retrieval as its own asset. A historical
 analysis may not substitute a newer asset for the asset actually available at
 its decision time. Reconstructed pre-capture analysis is labeled
 research-grade.
+
+The US Twelve Data workflow stores the exact raw JSON and a separate normalized
+Parquet asset for every retrieval. Current completed-session capture is
+`observed`; an explicitly older target is `research`. A later full-history
+download creates a new vintage and may not rewrite the assets referenced by an
+earlier prediction. Requests use `adjust=splits`, so the evidence supports
+split-adjusted price returns only and never silently becomes a
+dividend-adjusted total-return series.
+
+An observed run completed overnight but before the next XNYS open records its
+actual decision timestamp as `data_cutoff`, even when that UTC timestamp falls
+on the following calendar date. Every source asset in that run must have been
+available and retrieved by that cutoff. Research reconstructions remain capped
+at the historical target-date boundary.
 
 Asset-level eligibility is not enough: an eligible Parquet bundle can still
 contain rows after the requested market date. `AsOfData.price_frame` requires a

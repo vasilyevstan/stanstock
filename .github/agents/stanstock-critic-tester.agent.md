@@ -48,6 +48,10 @@ summary, not a substitute.
   rounding, and stale ORM instances attempting to overwrite terminal states.
 - Regression risk: duplicate/retry/restart behavior for jobs keyed by
   `(job_name, region, target_date, attempt)`.
+- Regression risk: a retry-time evidence grade or missing credential causing
+  already committed target work to be fetched and charged again.
+- Regression risk: analysis-level on-time flags leaking late prediction
+  reissues into performance, or unsupported horizons entering outcomes.
 - Unrelated scope or path-ownership violations.
 
 Defer provider rights, as-of/look-ahead, methodology, and outcome correctness

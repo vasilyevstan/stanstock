@@ -30,6 +30,15 @@ class ProviderBlockedError(ProviderError):
     such a challenge; this exception is the required stop signal instead."""
 
 
+class ProviderQuotaError(ProviderError):
+    """The provider's configured request or credit allowance is exhausted.
+
+    This is distinct from an access-control block: callers may retry after
+    the documented quota window resets, but must never hide the failure as a
+    successful empty response.
+    """
+
+
 class ProviderResponseError(ProviderError):
     """The provider responded with HTTP 200 (or similar) but the payload was
     empty, malformed, or otherwise not usable (for example an unexpected

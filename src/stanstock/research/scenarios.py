@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from stanstock.research.config import ScoringConfig
+from stanstock.research.config import HORIZONS, ScoringConfig
 from stanstock.research.types import AggregateScore, IndicatorResult, ResearchValues, Scenario
 
 
@@ -17,13 +17,21 @@ def build_scenarios(
     sample_support: dict[str, int] | None = None,
 ) -> dict[str, Scenario]:
     support = sample_support or {}
-    return {
+    scenarios = {
         "short": _short_scenario(price_frame, indicators, score, config, support.get("short", 0)),
         "medium": _medium_scenario(
             price_frame, indicators, fundamentals, score, config, support.get("medium", 0)
         ),
         "long": _long_scenario(fundamentals, score, config, support.get("long", 0)),
     }
+    for horizon in HORIZONS:
+        if horizon not in config.supported_horizons:
+            scenarios[horizon] = _missing_scenario(
+                score.confidence,
+                "unsupported_by_model",
+                f"{horizon.capitalize()} horizon is not supported by {config.analysis_mode!r}",
+            )
+    return scenarios
 
 
 def _short_scenario(

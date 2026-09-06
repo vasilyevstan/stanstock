@@ -45,7 +45,18 @@ record; the summary below is not a substitute for reading it.
 - **Reconstruction timing**: compare `generated_at`, `data_cutoff`, source
   `retrieved_at`, and universe grade. Research reconstructions may be late,
   but facts/rows remain capped at their historical cutoff; observed backtests
-  reject late-generated signals.
+  reject late-generated signals. Verify on-time status per immutable
+  prediction version against the next market-session open, and independently
+  recompute that boundary in simulations rather than trusting a stored flag.
+- **Supported evidence**: persist predictions and horizon scores only for
+  configured `supported_horizons`; explicit withheld scenarios must not enter
+  outcome or performance denominators.
+- **Mutable current state**: `LatestMarketData` advances by market
+  `session_date`, using retrieval time only as a same-session tie-breaker;
+  catch-up and ineligible series never replace a newer eligible close.
+- **Retry recovery**: committed work is recovered across retry-time grades
+  before provider enablement, credentials, or quota are consulted, with
+  conflicting completed runs rejected.
 - **Immutability**: predictions, source assets, and fundamental-fact vintages
   are never mutated or deleted in place; corrections append a new row/version.
 - **Research-grade vs observed**: reconstructed (`research`) universe history

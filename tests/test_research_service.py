@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
 from uuid import uuid4
@@ -14,6 +14,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from stanstock.data.assets import AssetStore, register_asset
+from stanstock.data.management.config_loader import default_us_scoring_config_path
 from stanstock.data.models import (
     Company,
     FundamentalFact,
@@ -59,6 +60,7 @@ def test_service_persists_analysis_and_appends_immutable_predictions(tmp_path) -
     assert first_prediction_ids.isdisjoint({prediction.pk for prediction in second.predictions})
     assert all(prediction.probability_positive is None for prediction in first.predictions)
     assert all(prediction.insufficiency_reason for prediction in first.predictions)
+    assert all(prediction.issued_on_time for prediction in first.predictions)
     assert first.analysis.reasons == first.computation.reasons
     assert first.analysis.data_quality["coverage"] > 0
     assert first.analysis.data_quality["source_assets"] == first.computation.source_assets
@@ -322,6 +324,72 @@ def test_predict_command_preserves_source_asset_provenance(tmp_path) -> None:
         prediction.source_assets == persisted.analysis.data_quality["source_assets"]
         for prediction in appended
     )
+    assert all(not prediction.issued_on_time for prediction in appended)
+
+
+@pytest.mark.django_db
+def test_price_only_analysis_ignores_fundamentals_and_persists_only_short_predictions(
+    tmp_path,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now() - timedelta(seconds=2)
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+
+    before = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+    )
+    _create_extreme_facts(listing, price_asset, now + timedelta(milliseconds=100))
+    after = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now + timedelta(seconds=1),
+        provider="synthetic",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+    )
+
+    assert before.computation.fundamentals.values == {}
+    assert after.computation.fundamentals.values == {}
+    assert before.computation.aggregate.overall == after.computation.aggregate.overall
+    assert before.computation.risk_score == after.computation.risk_score
+    assert before.computation.recommendation == after.computation.recommendation
+    assert before.analysis.data_quality["fundamentals_used"] is False
+    assert {prediction.horizon for prediction in after.predictions} == {Prediction.Horizon.SHORT}
+    assert set(after.analysis.component_scores["horizons"]) == {Prediction.Horizon.SHORT}
+    assert all(asset["kind"] == "price_history" for asset in after.computation.source_assets)
+
+    call_command(
+        "predict",
+        analysis=str(after.analysis.pk),
+        model_version="price-only-reissue",
+        stdout=StringIO(),
+    )
+    reissued = Prediction.objects.get(model_version="price-only-reissue")
+    assert reissued.horizon == Prediction.Horizon.SHORT
+    assert reissued.issued_on_time is False
+
+
+@pytest.mark.django_db
+def test_analysis_rejects_an_observed_run_after_the_next_market_open(tmp_path) -> None:
+    target = date(2026, 9, 4)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+
+    with pytest.raises(ValueError, match="after the next market session opened"):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=datetime(2026, 9, 8, 14, tzinfo=UTC),
+            target_date=target,
+            issued_on_time=True,
+            provider="synthetic",
+            store=AssetStore(tmp_path),
+        )
 
 
 @pytest.mark.django_db
@@ -550,3 +618,27 @@ def _create_facts(listing: Listing, source_asset: object, available_at) -> None:
                 available_at=available_at,
                 source_asset=source_asset,
             )
+
+
+def _create_extreme_facts(listing: Listing, source_asset: object, available_at) -> None:
+    for concept, value in (
+        ("total_debt", "1000000000000"),
+        ("shareholders_equity", "1"),
+        ("free_cash_flow", "-1000000000"),
+        ("interest_expense", "-1000000000"),
+    ):
+        FundamentalFact.objects.create(
+            company=listing.security.company,
+            provider="synthetic",
+            concept=concept,
+            source_concept=concept,
+            value=Decimal(value),
+            unit="USD",
+            currency="USD",
+            period_end=date(2025, 12, 31),
+            fiscal_year=2025,
+            fiscal_period="FY",
+            accession=f"extreme-{concept}-{uuid4().hex[:8]}",
+            available_at=available_at,
+            source_asset=source_asset,
+        )

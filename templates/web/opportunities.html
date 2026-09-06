@@ -22,6 +22,15 @@
     {% endif %}
   </section>
 
+  {% if latest_analysis_mode == "price_only_baseline" %}
+    <div class="notice" role="status">
+      <strong>US price-only baseline.</strong>
+      Rankings and recommendations use price, volume, market-relative, and
+      risk evidence only. Medium- and long-horizon scenarios are withheld
+      until point-in-time fundamentals are available.
+    </div>
+  {% endif %}
+
   {% if filter_form.errors %}
     <div class="error-box" role="alert">
       <strong>Correct the filters below.</strong>

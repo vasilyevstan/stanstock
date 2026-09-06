@@ -2,17 +2,20 @@
 
 ## Summary
 
-- **Retrieval date:** 2026-09-05 (all findings below were observed on or
-  around this date, from this project's execution environment).
-- **Decision:** `NO_GO` for unattended real daily-price ingestion at the
-  required ~500-ticker US/Europe breadth via the free, no-key paths
-  evaluated. This is fixed, not merely "conditional": Stooq's public CSV
-  download is automation-blocked and its automation/private-retention
-  terms could not be independently verified, and StanStock will never
-  attempt to bypass its JavaScript verification gate. `source_spike`
-  therefore always reports `NO_GO` for price capability while no approved
-  price-capable provider exists — a technically-successful Stooq probe on
-  a given run does **not** by itself upgrade this to `CONDITIONAL_GO`.
+- **Retrieval date:** 2026-09-06 (findings were observed on or around this
+  date from this project's execution environment).
+- **Decision:** `CONDITIONAL_GO` for a reduced US-only universe through
+  Twelve Data's documented API when a non-demo key and internal-display
+  entitlement are explicitly configured. The original free, unattended,
+  roughly 500-ticker US/Europe requirement remains `NO_GO`.
+- Twelve Data Basic provides the required US symbols and enough technical
+  credits, but its pricing page labels Basic as **internal non-display**.
+  Because StanStock's authenticated pages display prices and charts, live
+  activation requires Grow/Pro/Ultra or another agreement that explicitly
+  grants internal-display rights. Basic alone is not treated as sufficient.
+- Stooq remains fixed `NO_GO`: its public CSV download is
+  automation-blocked and its automation/private-retention terms could not
+  be independently verified. StanStock never bypasses its JavaScript gate.
 - Fundamentals (SEC, filings.xbrl.org) and FX (ECB) are assessed
   separately below and never change the price decision above.
 - This document only records observed technical behavior and completed
@@ -24,9 +27,10 @@
 ## Method
 
 `python manage.py source_spike` sends one small, representative request to
-each provider (Stooq daily CSV, SEC submissions, filings.xbrl.org filings
-index, ECB EXR CSV), writes a private JSON report (0600 permissions, no
-response bodies or secrets) under `<DATA_DIR>/reports/`, and updates
+each provider (Twelve Data and Stooq daily prices, SEC submissions,
+filings.xbrl.org filings index, and ECB EXR CSV), writes a private JSON
+report (0600 permissions, no response bodies or secrets) under
+`<DATA_DIR>/reports/`, and updates
 `ProviderRecord.status` / `.last_error` / `.last_success_at` for each
 provider. It never touches `ProviderRecord.enabled` — enabling a provider
 for real ingestion is a manual decision (see `LEARNINGS.md`), not something
@@ -45,6 +49,7 @@ conflated:
    | `configuration_missing` | Required local configuration (for example `SEC_USER_AGENT`) is absent. Says nothing about the provider. |
    | `environment_blocked` | This execution environment could not complete the request as designed — a network/transport failure, or an access-denial response this project's own testing attributes to network/egress policy rather than the provider rejecting a compliant request. |
    | `provider_incompatible` | The provider itself returned something StanStock cannot use without violating its own rules (an HTML/JavaScript verification challenge, a clear rate/subscription message, or a malformed payload). |
+   | `quota_exhausted` | An approved provider reported that its request or daily credit allowance was exhausted. |
    | `unexpected_error` | Anything else; always investigated before the report is trusted. |
 
 2. A static **capability verdict** — the already-completed research
@@ -56,21 +61,63 @@ conflated:
 
 The overall price-capability decision (`CONDITIONAL_GO`/`NO_GO`) requires
 **both** a price-capability provider's runtime probe to classify `ok`
-**and** its capability verdict to be something other than `NO_GO`. Since
-Stooq — the only configured price-capability provider — has a fixed `NO_GO`
-verdict, the overall decision is `NO_GO` regardless of whether a given run's
-Stooq probe happens to succeed technically.
+**and** its capability verdict to be something other than `NO_GO`. Twelve
+Data can satisfy that technical gate for the reduced US scope. The probe
+never enables the provider: `configure_twelve_data` separately requires an
+explicit display-rights confirmation.
 
 ## Capability verdicts (completed research)
 
 | Provider | Verdict | Basis |
 | --- | --- | --- |
+| Twelve Data (US prices/reference data) | **CONDITIONAL_GO** | Official API and US coverage are usable; activation is conditional on account rights, quotas, private use, and no redistribution. |
 | Stooq (price) | **NO_GO** | Automation-blocked; automation/private-retention terms unverifiable; JS gate will not be bypassed. |
 | SEC EDGAR (fundamentals) | **GO** | Approved source in general per its documented fair-access policy, despite this execution's IP seeing HTTP 403. |
 | filings.xbrl.org (ESEF fundamentals) | **CONDITIONAL_GO** | Usable, but with explicit, documented gaps (Germany and Ireland missing) and repository ingestion lag. |
 | ECB Data Portal EXR (FX) | **GO** | Usable via the SDMX CSV/XML API (what StanStock's client uses); the legacy bulk history CSV showed anomalous rows and is deliberately not used. |
 
 ## Findings by provider
+
+### Twelve Data (US prices) — verdict `CONDITIONAL_GO`
+
+- Official endpoints:
+  `https://api.twelvedata.com/time_series` and
+  `https://api.twelvedata.com/stocks`; API documentation:
+  <https://twelvedata.com/docs>.
+- Authentication is sent in the `Authorization: apikey ...` header. Keys are
+  never added to URLs, reports, asset metadata, logs, or the database.
+- The technical probe verified AAPL daily OHLCV and NASDAQ/NYSE stock
+  reference catalogs. Runtime catalog rows provide symbol, company name,
+  currency, exchange, MIC, instrument type, FIGI when available, and plan
+  access.
+- The committed `us_liquid_starter_v1.yaml` is a curated 100-symbol
+  NASDAQ/NYSE common-stock set with SPY as benchmark. It is not an S&P 500,
+  Nasdaq-100, or other licensed-index reproduction.
+- `/time_series` costs one API credit per symbol. The Basic quota profile is
+  8 credits/minute and 800/day, reset at midnight UTC
+  (<https://support.twelvedata.com/en/articles/5615854-credits>). One full
+  configured run uses about 103 credits. StanStock paces and counts its own
+  calls conservatively, but cannot observe credits used by another
+  application sharing the account.
+- US listed equities and historical end-of-day coverage are documented at
+  <https://support.twelvedata.com/en/articles/9935903-us-equities-market-data>.
+  Broader European coverage is not part of this approved starter scope.
+- Every daily request sets `adjust=splits`. Results are split-adjusted price
+  returns, not dividend-adjusted total returns.
+- Licensing is a separate gate from technical access. Twelve Data's current
+  individual pricing page (<https://twelvedata.com/pricing>) labels Basic as
+  internal non-display and Grow as including internal display. Because
+  StanStock displays provider-derived prices and charts, activation rejects
+  Basic and requires the owner to identify a display-entitled plan or custom
+  agreement and confirm `PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`.
+- The terms (<https://twelvedata.com/terms>) permit access, processing, and
+  storage only within the applicable subscription rights, prohibit
+  unauthorized redistribution/external display, and require deletion of Data
+  after termination or expiration. The owner must disable the provider and
+  remove its stored data when those rights end. Because stored assets are
+  linked into immutable research provenance, StanStock's supported procedure
+  is the full database/data/backup destruction process in
+  `docs/operations.md`, not a partial manifest or file deletion.
 
 ### Stooq (daily prices) — verdict `NO_GO`, runtime `provider_incompatible`
 
@@ -177,24 +224,24 @@ Stooq probe happens to succeed technically.
 
 The overall price-capability decision is `CONDITIONAL_GO` only if a
 price-capability provider's probe classifies `ok` **and** that provider's
-capability verdict is not `NO_GO`. As of 2026-09-05, Stooq — the only
-configured price-capability provider — has a fixed `NO_GO` verdict, so
-`source_spike` reports `NO_GO` for unattended real price ingestion at the
-required breadth. This holds even on a run where Stooq's JS challenge does
-not appear and its probe classifies `ok`: a single successful technical
-request does not establish verified automation/retention rights, so it
-cannot upgrade the decision on its own. StanStock's default application
-therefore uses deterministic synthetic data (see `seed_demo`) rather than
-silently degrading scope or mislabeling reconstructed data as live.
+capability verdict is not `NO_GO`. A successful Twelve Data probe can meet
+that condition for the reduced US-only scope. It does not prove display
+rights and does not change `ProviderRecord.enabled`; activation remains a
+separate explicit command. Stooq cannot meet the condition because its
+capability verdict remains `NO_GO`.
+
+Without a configured Twelve Data key, or when the provider is disabled,
+StanStock continues to use deterministic synthetic data (see `seed_demo`)
+rather than silently degrading scope or mislabeling reconstructed data as
+live.
 
 ## Re-verification
 
 Run `python manage.py source_spike` to refresh the runtime classifications
-above. SEC's `environment_blocked` classification may legitimately change
-on a different network or deployment, since it is attributed to this
-environment rather than to SEC — but its `GO` verdict does not depend on
-that. Stooq's runtime classification may occasionally show `ok` if its
-challenge does not trigger on a given request, but its `NO_GO` verdict is
-fixed pending new research that verifies automation/retention rights;
-`source_spike`'s overall decision will remain `NO_GO` until that constant
-is manually updated, together with this document.
+above. Twelve Data reports `configuration_missing` until
+`TWELVE_DATA_API_KEY` is present and `quota_exhausted` when the provider
+rejects the request for credit limits. SEC's `environment_blocked`
+classification may legitimately change on a different network or
+deployment, since it is attributed to this environment rather than to SEC.
+Stooq's runtime classification may occasionally show `ok`, but its `NO_GO`
+verdict remains fixed pending verified automation/retention rights.

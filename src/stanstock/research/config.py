@@ -72,6 +72,9 @@ class ScenarioConfig:
 @dataclass(frozen=True, slots=True)
 class ScoringConfig:
     version: str
+    analysis_mode: str
+    overall_horizon: str
+    supported_horizons: tuple[str, ...]
     windows: tuple[int, ...]
     horizon_weights: dict[str, dict[str, float]]
     component_factor_counts: dict[str, int]
@@ -84,6 +87,20 @@ class ScoringConfig:
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any]) -> Self:
+        analysis_mode = str(mapping.get("analysis_mode") or "full")
+        overall_horizon = str(mapping.get("overall_horizon") or "medium")
+        if overall_horizon not in HORIZONS:
+            raise ValueError(f"Unsupported overall_horizon {overall_horizon!r}")
+        raw_supported = mapping.get("supported_horizons", list(HORIZONS))
+        if not isinstance(raw_supported, list) or not raw_supported:
+            raise ValueError("supported_horizons must be a non-empty list")
+        supported_horizons = tuple(str(value) for value in raw_supported)
+        if len(supported_horizons) != len(set(supported_horizons)):
+            raise ValueError("supported_horizons contains duplicates")
+        if any(horizon not in HORIZONS for horizon in supported_horizons):
+            raise ValueError(f"supported_horizons must contain only {HORIZONS!r}")
+        if overall_horizon not in supported_horizons:
+            raise ValueError("overall_horizon must be included in supported_horizons")
         weights = cast(dict[str, dict[str, float]], mapping["horizon_weights"])
         for horizon in HORIZONS:
             if horizon not in weights:
@@ -96,17 +113,42 @@ class ScoringConfig:
         risk = cast(dict[str, Any], mapping["risk"])
         recommendation = cast(dict[str, Any], mapping["recommendation"])
         scenarios = cast(dict[str, Any], mapping["scenarios"])
+        component_factor_counts = {
+            str(key): int(value)
+            for key, value in cast(dict[str, int], mapping["component_factor_counts"]).items()
+        }
+        if any(count <= 0 for count in component_factor_counts.values()):
+            raise ValueError("component_factor_counts values must be positive")
+        active_components = {
+            component
+            for horizon in supported_horizons
+            for component, weight in weights[horizon].items()
+            if float(weight) > 0
+        }
+        if set(component_factor_counts) != active_components:
+            raise ValueError(
+                "component_factor_counts must exactly match components with positive "
+                "weights in supported_horizons"
+            )
+        buy_max_bear_downside = {
+            str(key): float(value)
+            for key, value in cast(
+                dict[str, float], recommendation["buy_max_bear_downside"]
+            ).items()
+        }
+        if set(buy_max_bear_downside) != set(supported_horizons):
+            raise ValueError("buy_max_bear_downside must exactly match supported_horizons")
         return cls(
             version=str(mapping["version"]),
+            analysis_mode=analysis_mode,
+            overall_horizon=overall_horizon,
+            supported_horizons=supported_horizons,
             windows=tuple(int(window) for window in cast(list[int], mapping["windows"])),
             horizon_weights={
                 horizon: {component: float(weights[horizon][component]) for component in COMPONENTS}
                 for horizon in HORIZONS
             },
-            component_factor_counts={
-                str(key): int(value)
-                for key, value in cast(dict[str, int], mapping["component_factor_counts"]).items()
-            },
+            component_factor_counts=component_factor_counts,
             coverage=CoverageConfig(
                 minimum_component_coverage=float(coverage["minimum_component_coverage"]),
                 score_penalty_rate=float(coverage["score_penalty_rate"]),
@@ -130,12 +172,7 @@ class ScoringConfig:
                 buy_max_risk=float(recommendation["buy_max_risk"]),
                 buy_min_confidence=float(recommendation["buy_min_confidence"]),
                 buy_min_avg_volume_20d=float(recommendation["buy_min_avg_volume_20d"]),
-                buy_max_bear_downside={
-                    str(key): float(value)
-                    for key, value in cast(
-                        dict[str, float], recommendation["buy_max_bear_downside"]
-                    ).items()
-                },
+                buy_max_bear_downside=buy_max_bear_downside,
                 avoid_max_score=float(recommendation["avoid_max_score"]),
                 avoid_min_risk=float(recommendation["avoid_min_risk"]),
                 avoid_max_confidence=float(recommendation["avoid_max_confidence"]),
