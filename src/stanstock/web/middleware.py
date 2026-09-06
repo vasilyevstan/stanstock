@@ -5,7 +5,12 @@ from collections.abc import Callable
 
 from django.conf import settings
 from django.core.cache import cache
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, HttpResponseForbidden
+from django.shortcuts import resolve_url
+
+from stanstock.data.models import ProviderRecord
+from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
+from stanstock.data.providers import twelve_data
 
 
 class SecurityHeadersMiddleware:
@@ -84,3 +89,34 @@ class LoginRateLimitMiddleware:
         forwarded_for = str(request.META.get("HTTP_X_FORWARDED_FOR", ""))
         client_address = forwarded_for.split(",", maxsplit=1)[0].strip()
         return client_address or remote_address
+
+
+class PersonalProviderAccessMiddleware:
+    """Fail closed when Basic-plan data would be shown to an unlicensed user."""
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return self.get_response(request)
+        if request.path_info in {resolve_url(settings.LOGIN_URL), "/accounts/logout/"}:
+            return self.get_response(request)
+        record = (
+            ProviderRecord.objects.filter(provider=twelve_data.PROVIDER)
+            .only("usage_scope", "metadata")
+            .first()
+        )
+        if record is None or str(record.metadata.get("plan") or "").lower() != "basic":
+            return self.get_response(request)
+        licensed_user_id = str(record.metadata.get("licensed_user_id") or "")
+        if (
+            record.usage_scope != BASIC_USAGE_SCOPE
+            or record.metadata.get("personal_noncommercial_confirmed") is not True
+            or str(user.pk) != licensed_user_id
+        ):
+            return HttpResponseForbidden(
+                "This provider-backed installation is licensed for one personal user only."
+            )
+        return self.get_response(request)

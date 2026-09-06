@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
@@ -13,6 +14,7 @@ from stanstock.core.models import JobRun
 from stanstock.data.live_us import PRIVATE_USAGE_SCOPE, LiveUsRunResult
 from stanstock.data.management.commands import daily
 from stanstock.data.models import ProviderRecord, Universe, UniverseSnapshot
+from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
 from stanstock.data.providers.contracts import PriceBar, PriceSeries
 
 pytestmark = pytest.mark.django_db
@@ -61,14 +63,14 @@ def test_configure_twelve_data_requires_explicit_private_use_confirmation(
     )
 
     with pytest.raises(CommandError, match="PERSONAL_INTERNAL_DISPLAY_AUTHORIZED"):
-        call_command("configure_twelve_data", enable=True)
+        call_command("configure_twelve_data", enable=True, plan="grow")
 
     assert called is False
     assert ProviderRecord.objects.count() == 0
 
 
-def test_configure_twelve_data_rejects_basic_non_display_activation() -> None:
-    with pytest.raises(CommandError, match="internal non-display"):
+def test_configure_twelve_data_basic_requires_single_user_confirmation() -> None:
+    with pytest.raises(CommandError, match="PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED"):
         call_command(
             "configure_twelve_data",
             enable=True,
@@ -77,6 +79,80 @@ def test_configure_twelve_data_rejects_basic_non_display_activation() -> None:
         )
 
     assert ProviderRecord.objects.count() == 0
+
+
+def test_configure_twelve_data_enables_basic_for_one_personal_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = get_user_model().objects.create_user(
+        username="owner",
+        password="correct-password",
+    )
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "private-command-test-key")
+    monkeypatch.setattr(
+        "stanstock.data.management.commands.configure_twelve_data.twelve_data."
+        "fetch_daily_price_series",
+        lambda *args, **kwargs: _validation_series(),
+    )
+    output = StringIO()
+
+    call_command(
+        "configure_twelve_data",
+        enable=True,
+        confirm="PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED",
+        plan="basic",
+        stdout=output,
+    )
+
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    assert record.enabled is True
+    assert record.usage_scope == BASIC_USAGE_SCOPE
+    assert record.metadata["plan"] == "basic"
+    assert record.metadata["licensed_user_id"] == str(user.pk)
+    assert record.metadata["personal_noncommercial_confirmed"] is True
+    assert record.metadata["internal_display_rights_confirmed"] is False
+    assert record.metadata["daily_credit_limit"] == 800
+    assert record.metadata["credits_per_minute"] == 8
+
+
+def test_configure_twelve_data_basic_rejects_multiple_active_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_user_model().objects.create_user(username="owner", password="correct-password")
+    get_user_model().objects.create_user(username="other", password="correct-password")
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "private-command-test-key")
+
+    with pytest.raises(CommandError, match="exactly one active"):
+        call_command(
+            "configure_twelve_data",
+            enable=True,
+            confirm="PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED",
+            plan="basic",
+        )
+
+    assert ProviderRecord.objects.count() == 0
+
+
+def test_store_twelve_data_key_command_never_outputs_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def store() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "stanstock.data.management.commands.store_twelve_data_key.store_twelve_data_api_key",
+        store,
+    )
+    output = StringIO()
+
+    call_command("store_twelve_data_key", stdout=output)
+
+    assert called is True
+    assert "stored in macOS Keychain" in output.getvalue()
+    assert "private-command-test-key" not in output.getvalue()
 
 
 def test_configure_twelve_data_enables_without_persisting_the_api_key(

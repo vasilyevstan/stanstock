@@ -39,11 +39,16 @@ Owner credentials are used only for explicit bootstrap. Remove
 `STANSTOCK_OWNER_PASSWORD` from the runtime environment after the account is
 created so a restart cannot silently rotate it.
 
-The Twelve Data key is also environment-only. Never place it in the image,
-repository, Compose file, command line, URL, log, report, or `ProviderRecord`.
-Provider activation additionally requires a plan or agreement with
-internal-display rights; Basic's current internal non-display label is not
-sufficient for the price-bearing UI.
+The Twelve Data key must never be placed in the image, repository, Compose
+file, command line, URL, log, report, or `ProviderRecord`. Direct macOS
+development may use `store_twelve_data_key`, which stores it in the current
+user's login Keychain. Containers and remote deployments must inject
+`TWELVE_DATA_API_KEY` through the platform's secret manager.
+
+Basic activation is restricted to one authenticated active user under an
+explicit personal, non-commercial, non-redistributed attestation. A
+multi-user or externally accessible deployment must not use this mode; use a
+plan or agreement covering the intended display audience.
 
 If those rights terminate or expire, stop all services and follow the full
 installation destruction procedure in `docs/operations.md`. Destroy the

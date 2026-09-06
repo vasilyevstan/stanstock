@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
@@ -9,15 +10,19 @@ from stanstock.data.live_us import (
     DEFAULT_CREDITS_PER_MINUTE,
     DEFAULT_DAILY_CREDIT_LIMIT,
     DEFAULT_MAX_SYMBOLS,
-    PRIVATE_USAGE_SCOPE,
     ProviderCreditBudget,
 )
 from stanstock.data.models import ProviderRecord
+from stanstock.data.provider_policy import (
+    BASIC_USAGE_SCOPE,
+    DISPLAY_PLANS,
+    PRIVATE_USAGE_SCOPE,
+)
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.exceptions import ProviderError
 
-CONFIRMATION = "PERSONAL_INTERNAL_DISPLAY_AUTHORIZED"
-DISPLAY_PLANS = ("grow", "pro", "ultra", "custom")
+DISPLAY_CONFIRMATION = "PERSONAL_INTERNAL_DISPLAY_AUTHORIZED"
+BASIC_CONFIRMATION = "PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED"
 
 
 class Command(BaseCommand):
@@ -32,15 +37,18 @@ class Command(BaseCommand):
         action.add_argument("--disable", action="store_true")
         parser.add_argument(
             "--confirm",
-            help=f"Required for enable; pass the exact value {CONFIRMATION!r}.",
+            help=(
+                "Required for enable. Basic requires "
+                f"{BASIC_CONFIRMATION!r}; display-entitled plans require "
+                f"{DISPLAY_CONFIRMATION!r}."
+            ),
         )
         parser.add_argument(
             "--plan",
             help=(
-                "Twelve Data plan or agreement (grow, pro, ultra, or custom) "
-                "that grants internal display rights. "
-                "The Basic plan is intentionally excluded because its pricing page "
-                "labels that tier internal non-display."
+                "Twelve Data plan or agreement (basic, grow, pro, ultra, or custom). "
+                "Basic is restricted to one explicitly licensed user and personal, "
+                "non-commercial, non-redistributed use."
             ),
         )
 
@@ -53,14 +61,24 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS("Twelve Data disabled."))
             return
 
-        if options.get("confirm") != CONFIRMATION:
-            raise CommandError(f"Enabling Twelve Data requires --confirm {CONFIRMATION}")
         plan = str(options.get("plan") or "").lower()
-        if plan not in DISPLAY_PLANS:
-            raise CommandError(
-                "Enabling the price-bearing UI requires --plan grow|pro|ultra|custom; "
-                "Twelve Data Basic is labeled internal non-display."
-            )
+        licensed_user_id: str | None = None
+        usage_scope = PRIVATE_USAGE_SCOPE
+        if plan == "basic":
+            if options.get("confirm") != BASIC_CONFIRMATION:
+                raise CommandError(
+                    f"Enabling Twelve Data Basic requires --confirm {BASIC_CONFIRMATION}"
+                )
+            licensed_user_id = _sole_active_user_id()
+            usage_scope = BASIC_USAGE_SCOPE
+        elif plan in DISPLAY_PLANS:
+            if options.get("confirm") != DISPLAY_CONFIRMATION:
+                raise CommandError(
+                    "Enabling a display-entitled Twelve Data plan requires "
+                    f"--confirm {DISPLAY_CONFIRMATION}"
+                )
+        else:
+            raise CommandError("Enabling Twelve Data requires --plan basic|grow|pro|ultra|custom.")
         try:
             api_key = twelve_data.resolve_api_key()
             ProviderRecord.objects.get_or_create(provider=twelve_data.PROVIDER)
@@ -85,7 +103,8 @@ class Command(BaseCommand):
         metadata.update(
             {
                 "plan": plan,
-                "internal_display_rights_confirmed": True,
+                "internal_display_rights_confirmed": plan in DISPLAY_PLANS,
+                "personal_noncommercial_confirmed": plan == "basic",
                 "price_adjustment": "splits",
                 "return_definition": "split_adjusted_price_return",
                 "dividends_included": False,
@@ -93,10 +112,14 @@ class Command(BaseCommand):
                 "validated_latest_date": series.bars[-1].trade_date.isoformat(),
             }
         )
+        if licensed_user_id is not None:
+            metadata["licensed_user_id"] = licensed_user_id
+        else:
+            metadata.pop("licensed_user_id", None)
         record.enabled = True
         record.terms_url = twelve_data.TERMS_URL
         record.terms_checked_at = checked_at
-        record.usage_scope = PRIVATE_USAGE_SCOPE
+        record.usage_scope = usage_scope
         record.status = "ok"
         record.last_success_at = checked_at
         record.last_error = ""
@@ -104,9 +127,25 @@ class Command(BaseCommand):
         record.save()
         self.stdout.write(
             self.style.SUCCESS(
-                "Twelve Data enabled for private personal/internal US use. "
-                "The API key remains environment-only; internal display rights "
-                "were explicitly confirmed, while redistribution and public "
-                "display remain disabled."
+                "Twelve Data enabled for the confirmed private US usage scope. "
+                "The API key remains outside Git and the database; internal "
+                "access is authenticated, while redistribution, public display, "
+                "and commercial use remain disabled."
             )
         )
+
+
+def _sole_active_user_id() -> str:
+    active_user_ids = list(
+        get_user_model()
+        .objects.filter(is_active=True)
+        .order_by("pk")
+        .values_list("pk", flat=True)[:2]
+    )
+    if len(active_user_ids) != 1:
+        raise CommandError(
+            "Twelve Data Basic requires exactly one active StanStock user. "
+            "Each additional user needs a separately licensed private deployment "
+            "or an agreement covering the intended audience."
+        )
+    return str(active_user_ids[0])

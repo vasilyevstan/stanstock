@@ -39,19 +39,42 @@ It seeds deterministic data, validates the target against an observed
 synthetic benchmark session, and runs one idempotent analysis/prediction batch.
 It never contacts a live provider.
 
-The optional US-only Twelve Data workflow is disabled by default. Keep its key
-in the environment, run the bounded source probe, then explicitly record a
-plan or agreement with internal-display rights:
+The optional US-only Twelve Data workflow is disabled by default. On macOS,
+store its key through the interactive login-Keychain command:
 
 ```bash
-export TWELVE_DATA_API_KEY=replace-with-your-key
+uv run python manage.py store_twelve_data_key
+uv run python manage.py store_twelve_data_key --status
+```
+
+The `security` utility prompts for the value without placing it in shell
+history or process arguments. StanStock reads the value into memory only when
+an API call needs it. Use `TWELVE_DATA_API_KEY` from a deployment secret
+manager on non-macOS systems; it takes precedence over Keychain.
+
+Run the bounded source probe, then explicitly record the Basic personal-use
+scope:
+
+```bash
 uv run python manage.py source_spike
 uv run python manage.py configure_twelve_data \
   --enable \
-  --plan grow \
-  --confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED
+  --plan basic \
+  --confirm PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED
 uv run python manage.py daily --region us
 ```
+
+Basic activation requires exactly one active StanStock user and binds access
+to that user's database ID. Any other authenticated user receives HTTP 403,
+and provider jobs fail closed if another active account exists. Grow, Pro,
+Ultra, and reviewed custom agreements use
+`PERSONAL_INTERNAL_DISPLAY_AUTHORIZED` instead.
+
+The sign-in and sign-out routes remain available if a restored database no
+longer matches the stored licensed user ID. Sign out, ensure exactly one active
+StanStock account remains, then rerun the Basic activation command above from
+the local shell to validate the key and bind the provider record to that
+account's current database ID.
 
 The committed 100-stock configuration plus SPY uses approximately 103 credits
 per full run. Local coordination enforces a conservative 8-credit/minute,
@@ -61,6 +84,21 @@ job after the provider has published the completed US daily bars. If the
 benchmark has no target-date close, the run fails rather than creating a
 partial snapshot. Repeating a successful target produces a skipped `JobRun`
 and makes no market-data requests.
+
+After each market refresh, record every active tracked portfolio:
+
+```bash
+uv run python manage.py snapshot_portfolios
+```
+
+The command uses the target-job ledger, creates immutable valuation and
+position rows, deduplicates unchanged inputs across code deployments, and
+records per-portfolio failures in the job details. A batch is failed only when
+every active portfolio fails. Holdings that are unpriced, in another currency,
+or stale relative to the rest of the portfolio are rejected; an entirely
+outdated price feed is shown as a freshness warning on portfolio pages. Run the
+command after `refresh_demo` in synthetic development or after `daily --region
+us` for enabled live data.
 
 An explicit prior `--target-date YYYY-MM-DD` is a research reconstruction,
 not an on-time historical prediction. Disable the provider immediately with:
@@ -99,8 +137,9 @@ installation reset**:
    snapshots, replicas, object versions, and retained backups according to
    their lifecycle policies.
 5. Recreate a clean installation only after `TWELVE_DATA_API_KEY` has been
-   removed from the environment. Run migrations and `refresh_demo` to return
-   to synthetic data, then confirm no `ProviderRecord` or `DataAsset` for
+   removed from the environment and `store_twelve_data_key --delete` has
+   removed any Keychain item. Run migrations and `refresh_demo` to return to
+   synthetic data, then confirm no `ProviderRecord` or `DataAsset` for
    `twelve_data` exists.
 
 This procedure intentionally removes all StanStock research history, including
@@ -193,5 +232,6 @@ The source gate conditionally permits only the reviewed US Twelve Data scope;
 broad US/European live OHLCV remains unsupported. Provider clients fail
 explicitly on browser-verification HTML, access denial, quota exhaustion,
 malformed responses, missing credentials, missing display-rights
-confirmation, and disabled `ProviderRecord` state. No job may scrape HTML or
-turn a provider failure into a successful empty market update.
+or personal-use confirmation, an unlicensed additional user, and disabled
+`ProviderRecord` state. No job may scrape HTML or turn a provider failure into
+a successful empty market update.

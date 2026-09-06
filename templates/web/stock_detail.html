@@ -12,9 +12,15 @@
     </div>
     {% if analysis %}
       <div class="decision-card">
+        {% if opportunity.eligible %}
+          <span class="opportunity-badge">{{ opportunity.label }}</span>
+        {% endif %}
         <span class="recommendation recommendation-{{ analysis.recommendation }}">{{ analysis.get_recommendation_display }}</span>
         <strong>{{ analysis.overall_score }}/100</strong>
         <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence }}% heuristic confidence</small>
+        {% if opportunity.eligible %}
+          <small>{{ opportunity.policy_version }} · {{ opportunity.horizon }} horizon</small>
+        {% endif %}
       </div>
     {% endif %}
   </section>

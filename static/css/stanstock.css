@@ -301,6 +301,21 @@ h3 {
   background: rgb(246 199 91 / 8%);
 }
 
+.opportunity-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 1.8rem;
+  padding: 0.25rem 0.65rem;
+  color: #06140f;
+  background: linear-gradient(135deg, #f6c75b, #68d7ba);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 14%);
+  font-size: 0.75rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
 .badge-success,
 .badge-complete {
   color: var(--accent);
@@ -430,6 +445,10 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.opportunity-row {
+  background: linear-gradient(90deg, rgb(104 215 186 / 10%), transparent 65%);
+}
+
 .recommendation-buy {
   color: var(--accent);
   border-color: rgb(104 215 186 / 45%);
@@ -476,6 +495,43 @@ tbody tr:last-child td {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+}
+
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+}
+
+.portfolio-card {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 1.2rem;
+  background: linear-gradient(145deg, var(--panel-strong), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.portfolio-card h3,
+.portfolio-card p,
+.portfolio-card dl {
+  margin: 0;
+}
+
+.portfolio-card p,
+.portfolio-card small {
+  color: var(--muted);
+}
+
+.opportunity-card {
+  border-color: rgb(104 215 186 / 55%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
+}
+
+.opportunity-spotlight {
+  margin-block: 2rem;
 }
 
 .panel {
@@ -584,7 +640,9 @@ tbody tr:last-child td {
   gap: 0.55rem;
 }
 
-.stack input {
+.stack input,
+.stack select,
+.stack textarea {
   width: 100%;
   padding: 0.8rem 0.9rem;
   color: var(--text);
@@ -612,6 +670,47 @@ tbody tr:last-child td {
 
 .primary-button:hover {
   background: var(--accent-strong);
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  text-decoration: none;
+}
+
+.secondary-button,
+.danger-button {
+  min-height: 2.5rem;
+  padding: 0.55rem 0.8rem;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.danger-button {
+  color: var(--danger);
+  border-color: rgb(255 138 138 / 50%);
+}
+
+.inline-form {
+  display: inline-flex;
+  margin: 0.5rem 0 0;
+}
+
+.danger-zone {
+  margin-top: 2.5rem;
+  padding: 1.2rem;
+  border: 1px solid rgb(255 138 138 / 45%);
+  border-radius: 0.9rem;
+}
+
+.danger-zone p {
+  color: var(--muted);
 }
 
 .error-box,

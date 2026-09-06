@@ -214,6 +214,35 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
 
 
 @pytest.mark.django_db
+def test_great_opportunity_is_highlighted_with_versioned_policy(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.overall_score = Decimal("85")
+    persisted_analysis.confidence = Decimal("70")
+    persisted_analysis.risk_class = RiskClass.LOW
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+        "fundamentals_used": False,
+    }
+    persisted_analysis.save(
+        update_fields=[
+            "overall_score",
+            "confidence",
+            "risk_class",
+            "data_quality",
+        ]
+    )
+
+    opportunities = authenticated_client.get(reverse("opportunities"))
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert "Strong short-term setup" in opportunities.content.decode()
+    assert "great-opportunity-v1" in detail.content.decode()
+
+
+@pytest.mark.django_db
 def test_price_only_analysis_discloses_model_and_return_limits(
     authenticated_client,
     persisted_analysis: StockAnalysis,

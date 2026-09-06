@@ -5,14 +5,18 @@
 - **Retrieval date:** 2026-09-06 (findings were observed on or around this
   date from this project's execution environment).
 - **Decision:** `CONDITIONAL_GO` for a reduced US-only universe through
-  Twelve Data's documented API when a non-demo key and internal-display
-  entitlement are explicitly configured. The original free, unattended,
-  roughly 500-ticker US/Europe requirement remains `NO_GO`.
+  Twelve Data's documented API when a non-demo key and the selected plan's
+  explicit personal-use or display entitlement are configured. The original
+  free, unattended, roughly 500-ticker US/Europe requirement remains `NO_GO`.
 - Twelve Data Basic provides the required US symbols and enough technical
-  credits, but its pricing page labels Basic as **internal non-display**.
-  Because StanStock's authenticated pages display prices and charts, live
-  activation requires Grow/Pro/Ultra or another agreement that explicitly
-  grants internal-display rights. Basic alone is not treated as sufficient.
+  credits. Its pricing page labels Basic as **internal non-display**, while
+  the provider's support article updated 2026-08-04 describes non-commercial
+  internal tools as acceptable for Individual plans.
+- StanStock therefore permits Basic only under an explicit single-user
+  personal/non-commercial attestation, with no redistribution, no public
+  access, one licensed active account, and fail-closed web/job guards.
+  Grow/Pro/Ultra or a custom agreement still require explicit
+  internal-display confirmation.
 - Stooq remains fixed `NO_GO`: its public CSV download is
   automation-blocked and its automation/private-retention terms could not
   be independently verified. StanStock never bypasses its JavaScript gate.
@@ -106,10 +110,15 @@ explicit display-rights confirmation.
   returns, not dividend-adjusted total returns.
 - Licensing is a separate gate from technical access. Twelve Data's current
   individual pricing page (<https://twelvedata.com/pricing>) labels Basic as
-  internal non-display and Grow as including internal display. Because
-  StanStock displays provider-derived prices and charts, activation rejects
-  Basic and requires the owner to identify a display-entitled plan or custom
-  agreement and confirm `PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`.
+  internal non-display and Grow as including internal display. Its support
+  article, [Commercial and personal usage](https://support.twelvedata.com/en/articles/5332349-commercial-and-personal-usage),
+  updated 2026-08-04, says Individual plans are for personal/internal use and
+  permits non-commercial internal tools while prohibiting redistribution and
+  commercial display to third parties. Basic activation therefore requires
+  `PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED`, records the sole licensed
+  user, and stops if a second active user exists. Display-entitled plans use
+  `PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`. The owner remains responsible for
+  confirming that the account's current terms cover the exact use.
 - The terms (<https://twelvedata.com/terms>) permit access, processing, and
   storage only within the applicable subscription rights, prohibit
   unauthorized redistribution/external display, and require deletion of Data

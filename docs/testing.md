@@ -34,9 +34,10 @@ This command validates settings; it does not prove the database is reachable.
 - score, confidence, probability, timestamp, and scenario constraints;
 - provider parsing and explicit failure states using synthetic payloads;
 - Twelve Data activation/kill-switch behavior, header-only credentials,
-  source-spike classifications, US-calendar target resolution, catalog and
-  plan filtering, local quota accounting, immutable raw/Parquet persistence,
-  eligibility exclusions, snapshot rollback, and target-job idempotency;
+  macOS Keychain fallback, Basic single-user enforcement, source-spike
+  classifications, US-calendar target resolution, catalog and plan filtering,
+  local quota accounting, immutable raw/Parquet persistence, eligibility
+  exclusions, snapshot rollback, and target-job idempotency;
 - prediction-level on-time evidence, next-session deadline enforcement,
   credential-free recovery of committed targets across retry-time grades,
   supported-horizon-only prediction persistence, and monotonic current-market
@@ -56,6 +57,9 @@ This command validates settings; it does not prove the database is reachable.
   persistence precision, and no-look-ahead behavior;
 - authentication, trusted-proxy login throttling, filters, empty states, and
   evidence/provenance labeling;
+- owner-scoped tracked portfolios, valuation completeness, stale-price
+  refusal, same-day snapshot deduplication, snapshot database immutability,
+  split warnings, and opportunity-policy highlighting;
 - backup checksums, extraction safety, transactional PostgreSQL restore, and
   database/assets bundling;
 - architecture boundaries around raw provider modules.
