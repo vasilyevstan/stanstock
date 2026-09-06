@@ -10,6 +10,7 @@ from stanstock.data.providers import twelve_data
 from stanstock.data.providers.exceptions import (
     ProviderBlockedError,
     ProviderConfigurationError,
+    ProviderDataError,
     ProviderQuotaError,
     ProviderResponseError,
 )
@@ -119,6 +120,7 @@ def test_parses_split_adjusted_daily_series_and_uses_header_auth(
         "Accept": "application/json",
         "Authorization": "apikey private-test-key",
     }
+    assert captured["params"]["end_date"] == "2026-09-05"
     assert "private-test-key" not in series.source_url
 
 
@@ -208,7 +210,7 @@ def test_rejects_malformed_or_inconsistent_daily_rows(
     }
     monkeypatch.setattr(twelve_data, "fetch", lambda *args, **kwargs: _result(payload))
 
-    with pytest.raises(ProviderResponseError, match="high was below"):
+    with pytest.raises(ProviderDataError, match="high was below"):
         twelve_data.fetch_daily_price_series("AAPL", api_key="test-key")
 
 
@@ -252,6 +254,62 @@ def test_parses_us_stock_reference_catalog(
     assert reference.access_plan == "Basic"
 
 
+def test_catalog_filter_ignores_malformed_unrequested_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        **VALID_CATALOG,
+        "data": [
+            *VALID_CATALOG["data"],
+            {
+                "symbol": "UNUSED",
+                "name": None,
+                "currency": "USD",
+                "exchange": "NASDAQ",
+                "mic_code": "XNGS",
+                "country": "United States",
+                "type": "Common Stock",
+            },
+        ],
+        "count": 2,
+    }
+    monkeypatch.setattr(
+        twelve_data,
+        "fetch",
+        lambda *args, **kwargs: _result(payload, url=twelve_data.STOCKS_URL),
+    )
+
+    catalog = twelve_data.fetch_stock_catalog(
+        exchange="nasdaq",
+        required_symbols={"AAPL"},
+        api_key="test-key",
+    )
+
+    assert [reference.symbol for reference in catalog.references] == ["AAPL"]
+    assert catalog.count == 2
+
+
+def test_catalog_filter_still_rejects_malformed_required_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        **VALID_CATALOG,
+        "data": [{**VALID_CATALOG["data"][0], "name": None}],
+    }
+    monkeypatch.setattr(
+        twelve_data,
+        "fetch",
+        lambda *args, **kwargs: _result(payload, url=twelve_data.STOCKS_URL),
+    )
+
+    with pytest.raises(ProviderResponseError, match="had no usable 'name'"):
+        twelve_data.fetch_stock_catalog(
+            exchange="nasdaq",
+            required_symbols={"AAPL"},
+            api_key="test-key",
+        )
+
+
 def test_http_rate_limit_is_not_misreported_as_empty_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -263,3 +321,18 @@ def test_http_rate_limit_is_not_misreported_as_empty_data(
 
     with pytest.raises(ProviderQuotaError, match="credit limit"):
         twelve_data.fetch_daily_price_series("AAPL", api_key="test-key")
+
+
+def test_http_failure_is_not_downgraded_to_instrument_data_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        twelve_data,
+        "fetch",
+        lambda *args, **kwargs: _result({}, status_code=502),
+    )
+
+    with pytest.raises(ProviderResponseError, match="HTTP 502") as error:
+        twelve_data.fetch_daily_price_series("AAPL", api_key="test-key")
+
+    assert not isinstance(error.value, ProviderDataError)

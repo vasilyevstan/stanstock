@@ -150,14 +150,23 @@ reviews and should not be re-litigated without an explicit new decision.
   delete regression.
 - **Provider access and display rights are separate gates.** Twelve Data can
   technically support the bounded US universe, but its Basic tier is labeled
-  internal non-display; the price-bearing UI remains disabled until the owner
-  confirms a display-entitled plan or agreement. Stooq remains `NO_GO`, Europe
-  remains deferred, and default flows stay visibly `synthetic_demo`.
+  internal non-display. Basic is enabled only after explicit personal,
+  non-commercial authorization and is bound to exactly one active user;
+  broader display requires a display-entitled plan or agreement. Stooq remains
+  `NO_GO`, Europe remains deferred, and default flows stay visibly
+  `synthetic_demo`.
+- **Large provider catalogs can contain irrelevant malformed rows.** Preserve
+  the complete raw response, but normalize only the symbols in the reviewed
+  universe and continue to fail closed when any configured symbol is missing,
+  malformed, ambiguous, or outside the licensed plan.
 - **Live adjusted histories are immutable vintages, not mutable truth.**
   Twelve Data responses are stored as exact raw JSON plus normalized Parquet;
   every later retrieval creates new evidence, requests explicitly use
   split-only adjustment, and derived results are labeled price return rather
   than total return.
+- **Twelve Data's daily `end_date` is exclusive.** Request the following
+  calendar date, but keep validating parsed bars against StanStock's original
+  inclusive cutoff so no future session can enter an analysis.
 - **Synthetic refreshes use observed synthetic sessions.** `refresh_demo`
   defaults to the research snapshot's `as_of_date`, rejects later or
   non-session target dates, and relies on `JobRun` to skip a repeated

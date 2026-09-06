@@ -40,7 +40,12 @@ from stanstock.data.providers.contracts import (
     StockCatalog,
     StockReference,
 )
-from stanstock.data.providers.exceptions import ProviderConfigurationError, ProviderQuotaError
+from stanstock.data.providers.exceptions import (
+    ProviderConfigurationError,
+    ProviderDataError,
+    ProviderQuotaError,
+    ProviderResponseError,
+)
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 
 pytestmark = pytest.mark.django_db
@@ -643,6 +648,95 @@ def test_missing_target_bar_creates_an_explicit_ineligible_membership(
     assert excluded.eligible is False
     assert excluded.exclusion_reason == f"No {TARGET_DATE.isoformat()} daily bar"
     assert not LatestMarketData.objects.filter(listing__ticker="BBB").exists()
+
+
+def test_malformed_listing_series_excludes_only_that_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(minimum_eligible=1)
+    _enable_provider()
+    catalog = _catalog(config)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: catalog,
+    )
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        if symbol == "BBB":
+            raise ProviderDataError("invalid historical OHLC row for 'BBB'")
+        return _series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        )
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+    _patch_analysis(monkeypatch)
+
+    result = run_us_daily(
+        config=config,
+        target_date=TARGET_DATE,
+        snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+        api_key="private-test-key",
+        decision_time=RETRIEVED_AT,
+        store=AssetStore(tmp_path),
+        enforce_rate_limit=False,
+    )
+
+    excluded = UniverseMembership.objects.get(snapshot=result.snapshot, listing__ticker="BBB")
+    assert result.eligible == 1
+    assert result.excluded == 1
+    assert result.credits_used == 4
+    assert excluded.eligible is False
+    assert excluded.exclusion_reason == (
+        "Rejected provider data: invalid historical OHLC row for 'BBB'"
+    )
+    assert not LatestMarketData.objects.filter(listing__ticker="BBB").exists()
+
+
+def test_transient_provider_response_failure_aborts_the_daily_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(minimum_eligible=1)
+    _enable_provider()
+    catalog = _catalog(config)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: catalog,
+    )
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        if symbol == "BBB":
+            raise ProviderResponseError("Twelve Data returned unexpected HTTP 502")
+        return _series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        )
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+
+    with pytest.raises(ProviderResponseError, match="HTTP 502"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+        )
+
+    assert UniverseSnapshot.objects.count() == 0
+    assert AnalysisRun.objects.count() == 0
 
 
 def test_historical_price_vintage_cannot_move_latest_market_state_backward(

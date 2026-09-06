@@ -93,7 +93,10 @@ explicit display-rights confirmation.
 - The technical probe verified AAPL daily OHLCV and NASDAQ/NYSE stock
   reference catalogs. Runtime catalog rows provide symbol, company name,
   currency, exchange, MIC, instrument type, FIGI when available, and plan
-  access.
+  access. A September 2026 live catalog included an unrelated row with a
+  missing company name, so ingestion preserves the complete raw response but
+  strictly normalizes only the configured symbols. A malformed configured
+  symbol still fails the run.
 - The committed `us_liquid_starter_v1.yaml` is a curated 100-symbol
   NASDAQ/NYSE common-stock set with SPY as benchmark. It is not an S&P 500,
   Nasdaq-100, or other licensed-index reproduction.
@@ -107,7 +110,10 @@ explicit display-rights confirmation.
   <https://support.twelvedata.com/en/articles/9935903-us-equities-market-data>.
   Broader European coverage is not part of this approved starter scope.
 - Every daily request sets `adjust=splits`. Results are split-adjusted price
-  returns, not dividend-adjusted total returns.
+  returns, not dividend-adjusted total returns. Live verification showed that
+  a date-only `end_date` is exclusive, so the adapter requests the following
+  calendar date while continuing to validate every returned bar against
+  StanStock's original inclusive cutoff.
 - Licensing is a separate gate from technical access. Twelve Data's current
   individual pricing page (<https://twelvedata.com/pricing>) labels Basic as
   internal non-display and Grow as including internal display. Its support
