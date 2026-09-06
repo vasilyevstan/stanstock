@@ -56,6 +56,78 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 - [ ] Outcome horizons count distinct observed sessions; weekends, holidays,
       and duplicate dates are not treated as extra sessions.
 
+## Forecast identity and decision-policy isolation
+
+- [ ] Score groups (`short`, `medium`, `long`) and persisted forecast
+      identities are separate contracts; adding 6m/12m/3y/5y cannot change a
+      recommendation or opportunity highlight unless a later, explicitly
+      reviewed policy version opts in.
+- [ ] Every prediction states whether it is decision evidence or advisory
+      forecast evidence. Advisory rows are excluded from headline
+      recommendation hit rates even when they were issued on time.
+- [ ] Legacy `medium` and `long` predictions retain their original horizon,
+      maturity, method version, and evidence meaning; migrations do not
+      relabel them as canonical 12m or 3y forecasts.
+- [ ] Scenario returns, stored base error, and actual outcomes share one
+      cumulative split-adjusted price-return basis. Annualized figures are
+      derived display values, and dividends/cash yield are not mixed into
+      price-return columns.
+- [ ] Advisory outcomes are evaluated with explicit direction, interval, and
+      error semantics rather than the short-horizon recommendation copied
+      from their parent analysis.
+
+## Empirical 6m/12m panels
+
+- [ ] The complete training panel is persisted as an immutable derived asset
+      whose hash covers every row, source asset, calendar, and configuration
+      input used by the forecast.
+- [ ] Anchor dates use a fixed configured epoch and non-overlapping
+      horizon-spaced cohorts. Moving the current target date does not
+      arbitrarily shift the historical grid.
+- [ ] Every state feature uses only rows at or before its anchor, and every
+      126/252-session forward label ends on or before the forecast cutoff.
+- [ ] Current-universe/survivorship bias is labeled as reconstructed research
+      evidence and cannot enter an observed live-skill headline.
+- [ ] Shrinkage and positive-return probability use overlap-aware effective
+      support plus distinct-listing, calendar-span, and regime-diversity
+      floors. Raw pooled rows alone cannot unlock probability.
+- [ ] The stored explanation reports raw matches, effective cohorts,
+      diversity, fallback level, shrinkage weight, and comparison with the
+      unconditional and SPY-relative baselines.
+
+## SEC fact normalization and long forecasts
+
+- [ ] Official symbol/exchange/CIK mapping, submissions history (including
+      referenced historical files), and Companyfacts raw bytes are preserved
+      before any normalized fact is written.
+- [ ] SEC availability uses accession `acceptanceDateTime`; naive values are
+      interpreted in `America/New_York`. A date-only fallback is conservative
+      and never treated as midnight UTC on the filed date.
+- [ ] Fundamental-fact identity distinguishes instant and duration facts and
+      includes the full reporting interval, so quarter and YTD observations
+      sharing an end date cannot collide or overwrite one another.
+- [ ] A changed source observation under the same accession appends a later
+      available vintage. Amendments/restatements replace only the affected
+      concept/period after their own availability time and never create a
+      synthetic growth period.
+- [ ] Discrete-quarter derivation uses compatible YTD facts; TTM requires four
+      contiguous comparable quarters, explicit accession lineage, and
+      52/53-week-year tolerance. Instant facts, EPS, and weighted-average
+      shares are never summed or subtracted as additive flows.
+- [ ] Historical per-share growth uses compatible SEC-reported/restated share
+      bases. Historical valuation multiples are withheld when the price and
+      filing share basis cannot be reconciled across splits.
+- [ ] FCF/share and EPS/share are separately declared metric families with
+      fixed eligibility. Negative or unsupported FCF cannot silently switch
+      to a more favorable EPS branch.
+- [ ] Sustainable-growth, peer-normalization, terminal-growth, fade,
+      reversion, and scenario caps are fixed in versioned configuration.
+      Missing required terms withhold the forecast rather than being dropped
+      or reweighted.
+- [ ] 3y/5y positive-return probability remains unavailable until genuinely
+      qualifying point-in-time/live evidence exists; UI wording does not
+      imply that calibration is imminent.
+
 ## Research-grade vs. observed history
 
 - [ ] `UniverseSnapshot.grade` (`research` vs `observed`) is preserved end to
@@ -131,5 +203,8 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 
 - [ ] A scoring/recommendation/risk/scenario methodology change is
       reproducible from `model_version`, `config_hash`, and `code_revision`.
+- [ ] A forecast calculation payload identifies its immutable panel or peer
+      asset, evidence role/grade, price provider, exact support statistics,
+      selected metric branch, fact/accession lineage, and fixed formula inputs.
 - [ ] A methodology change is flagged as material and routed through the
       three-pass simplifier gate (see `.github/agents/README.md`).

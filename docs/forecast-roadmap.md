@@ -12,8 +12,8 @@ Every forecast must:
 - use only information published by its decision time;
 - store its source assets, formula version, inputs, output, and code revision;
 - show bear, base, and bull cases rather than one precise target;
-- explain the numerical contribution from growth, valuation, cash yield,
-  momentum, and risk;
+- explain the numerical contribution from growth, valuation, momentum, and
+  risk, while reporting supported shareholder distributions separately;
 - remain unavailable when required inputs or comparable observations are
   missing;
 - be evaluated through walk-forward tests and later immutable live outcomes;
@@ -95,12 +95,17 @@ future_multiple =
     current_multiple ** (1 - reversion_fraction)
     * target_multiple ** reversion_fraction
 
-base_return =
+base_price_return =
     (1 + growth_base)
     * (future_multiple / current_multiple)
     - 1
-    + supported_cash_yield
 ```
+
+Stored scenario returns remain price returns so they can be compared directly
+with price-only outcomes. Supported dividends or other cash distributions may
+be shown as separate context, but they cannot be added to these fields unless
+a future version introduces an explicit total-return source, storage contract,
+and matching outcome evaluator.
 
 The historical growth estimate will use robust medians of distinct prior
 period growth rates and will be capped to prevent one unusual comparison from
