@@ -62,7 +62,7 @@
       <tbody>
         {% for group in groups %}
           <tr>
-            <td>{{ group.prediction__horizon }}</td>
+            <td>{{ group.prediction__horizon|display_label }}</td>
             <td>{{ group.prediction__recommendation|upper }}</td>
             <td>{{ group.sample_count }}</td>
             <td>{% if group.sample_count >= 30 %}{{ group.mean_return|percentage }}{% else %}Withheld{% endif %}</td>

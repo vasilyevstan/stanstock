@@ -637,7 +637,7 @@ def test_sample_portfolio_web_flow_and_split_warning(client, owner) -> None:
     detail = client.get(response.url)
     content = detail.content.decode()
     assert "Research-reference portfolio; composition is frozen." in content
-    assert "short horizon" in content
+    assert "1-10 trading days" in content
     assert "0.0%" in content
 
     market = LatestMarketData.objects.get(listing=listings[0])

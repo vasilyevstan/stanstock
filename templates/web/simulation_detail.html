@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load stanstock %}
 
 {% block title %}{{ run.definition.name }} · StanStock{% endblock %}
 
@@ -36,14 +37,14 @@
               <strong>Stock return (constant FX)</strong>
               <small>Same quantity path valued at each currency's inception rate</small>
             </div>
-            <span>{{ run.metrics.fx_local_currency_cumulative_return|floatformat:4 }}</span>
+            <span>{{ run.metrics.fx_local_currency_cumulative_return|percentage }}</span>
           </article>
           <article>
             <div>
               <strong>FX contribution</strong>
               <small>Remainder of the reported cumulative return</small>
             </div>
-            <span>{{ run.metrics.fx_contribution_return|floatformat:4 }}</span>
+            <span>{{ run.metrics.fx_contribution_return|percentage }}</span>
           </article>
         </div>
       {% else %}
@@ -74,9 +75,9 @@
           <article>
             <div>
               <strong>{{ trade.listing.ticker }} · {{ trade.get_side_display }}</strong>
-              <small>{{ trade.trade_date }} · {{ trade.quantity }} at {{ trade.price }}</small>
+              <small>{{ trade.trade_date }} · {{ trade.quantity }} at {{ trade.price|price }}</small>
             </div>
-            <span>{{ trade.costs }} costs</span>
+            <span>{{ trade.costs|price }} costs</span>
           </article>
         {% empty %}
           <p class="empty-state">No trades were persisted.</p>
@@ -93,7 +94,7 @@
               <strong>{{ holding.listing.ticker }}</strong>
               <small>{{ holding.observation_date }} · {{ holding.quantity }} shares</small>
             </div>
-            <span>{{ holding.market_value }}</span>
+            <span>{{ holding.market_value|price }}</span>
           </article>
         {% empty %}
           <p class="empty-state">No holdings were persisted.</p>

@@ -34,9 +34,9 @@
     <div class="notice" role="status">
       <strong>Research-reference portfolio; composition is frozen.</strong>
       Built from the provider-backed {{ portfolio.source_analysis_run.target_date }}
-      analysis using {{ portfolio.construction_policy }}.
+      analysis using {{ portfolio.construction_policy|display_label }}.
       The signal was {{ portfolio.construction_metadata.signal_label }}
-      ({{ portfolio.construction_metadata.signal_horizon }} horizon);
+      and covered {{ portfolio.construction_metadata.signal_horizon|display_label }};
       returns beyond that horizon are observational and do not validate the original
       signal. Entry values are immutable analysis reference closes, not executable
       fills. Results are split-adjusted price returns and exclude dividends.
@@ -319,7 +319,7 @@
               <td>{{ snapshot.cost_basis|floatformat:2 }}</td>
               <td>{{ snapshot.return_pct|percentage }}</td>
               <td>
-                {{ snapshot.return_definition }}
+                {{ snapshot.return_definition|display_label }}
                 {% if snapshot.corporate_action_warnings %}
                   <small class="field-error">{{ snapshot.corporate_action_warnings }} possible split warning{{ snapshot.corporate_action_warnings|pluralize }}</small>
                 {% endif %}

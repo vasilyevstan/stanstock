@@ -80,9 +80,9 @@
       {% for provider in providers %}
         <article>
           <div>
-            <strong>{{ provider.provider }}</strong>
+            <strong>{{ provider.provider|display_label }}</strong>
             <small>
-              {{ provider.status }}
+              {{ provider.status|display_label }}
               {% if provider.last_success_at %} · last success {{ provider.last_success_at }}{% endif %}
             </small>
             {% if provider.last_error %}<small>{{ provider.last_error|truncatechars:180 }}</small>{% endif %}
@@ -131,14 +131,14 @@
                 <a href="{% url 'stock-detail' stock.listing_id %}"><strong>{{ stock.listing.ticker }}</strong></a>
                 <small>{{ stock.listing.security.company.name }}</small>
               </td>
-              <td>{{ stock.current_price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
+              <td>{{ stock.current_price|price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
               <td><strong>{{ stock.overall_score }}/100</strong></td>
               <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
               <td>{{ stock.short_scenario|scenario_range }}</td>
               <td>{{ stock.medium_scenario|scenario_range }}</td>
               <td>{{ stock.long_scenario|scenario_range }}</td>
               <td>{{ stock.get_risk_class_display }}</td>
-              <td>{{ stock.confidence }}% <small>{{ stock.confidence_status }}</small></td>
+              <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
             </tr>
           {% empty %}
           {% for stock in demo_opportunities %}
@@ -178,7 +178,7 @@
       {% for job in recent_jobs %}
         <article>
           <div>
-            <strong>{{ job.job_name }} · {{ job.region|default:"all" }}</strong>
+            <strong>{{ job.job_name|display_label }} · {{ job.region|default:"all"|display_label }}</strong>
             <small>Target {{ job.target_date }} · attempt {{ job.attempt }}</small>
           </div>
           <span class="badge badge-{{ job.status }}">{{ job.get_status_display }}</span>

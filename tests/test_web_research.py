@@ -346,7 +346,8 @@ def test_provider_backed_run_suppresses_synthetic_banner(
     assert "Synthetic research data." not in status.content.decode()
     assert market_page.status_code == 200
     assert "Twelve Data provider-backed" in market_page.content.decode()
-    assert "twelve_data" in market_page.content.decode()
+    assert "Twelve Data" in market_page.content.decode()
+    assert "twelve_data" not in market_page.content.decode()
     assert "ZZHIDDEN" not in market_page.content.decode()
 
 
