@@ -94,16 +94,43 @@ thresholds. They are not free-form rationalizations.
 ## Highlighted opportunities
 
 The opportunity highlight is a separate, versioned presentation policy in
-`config/opportunities/great-opportunity-v1.yml`; it does not alter the
+`config/opportunities/great-opportunity-v2.yml`; it does not alter the
 underlying recommendation. A highlighted result must be BUY, clear the
 policy's score and confidence thresholds, remain LOW or MEDIUM risk, and have
-a positive base case for the analysis mode's supported horizon.
+a positive base case for the analysis mode's supported horizon. V2 also
+prevents the Under $10 speculative watchlist from becoming a highlighted
+new-allocation idea. The historical v1 policy remains unchanged.
 
 Full analyses use the label `Great opportunity` and require fundamentals.
 The US price-only baseline instead uses `Strong short-term setup`, checks only
 its supported short horizon, and remains visibly identified as price-only.
 The policy version is shown on stock detail so a later policy revision cannot
 silently masquerade as the original rule.
+
+## Current USD price bands
+
+The opportunities page classifies each latest valid persisted USD close into
+four neutral, non-overlapping affordability bands:
+
+- `0 < price < $10`: `Under $10 - speculative watchlist`;
+- `$10 <= price < $50`;
+- `$50 <= price < $300`;
+- `$300+`.
+
+Each band displays the close's market-session date. Price bands are filters
+and execution context only: they do not enter factor arithmetic, score,
+confidence, valuation, or recommendation. The `$300+` band is not a quality
+penalty.
+
+Under $10 remains research-only with a 0% new-allocation cap. It is excluded
+from current opportunity promotion. Newly constructed sample portfolios apply
+the same boundaries to the immutable decision-run reference close, never a
+later mutable market row, while existing holdings and frozen historical
+portfolios remain visible. Its long-horizon forecast is explicitly unavailable
+until point-in-time SEC, dilution/per-share, solvency/cash-runway,
+Under-$10-specific dollar-liquidity, verified split-event, and compatible
+3-year/5-year formula evidence exists. The configured stock universe is not
+expanded merely to populate a price band.
 
 ## Scenarios
 
@@ -262,4 +289,7 @@ rebalancing, and model return is total current value relative to starting
 capital. A split-sized move withholds that headline return until reviewed.
 The current price-only sample records a short-horizon signal, so later
 buy-and-hold performance is observational rather than evidence that the
-original short thesis remained valid.
+original short thesis remained valid. New sample construction records the
+price-band policy, classifies the analysis reference close at the run's target
+date, and excludes Under $10 names without consulting later market state. An
+older frozen basket is never rewritten when the policy advances.

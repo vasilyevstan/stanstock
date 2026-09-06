@@ -31,6 +31,14 @@
     </div>
   {% endif %}
 
+  <div class="notice" role="status">
+    <strong>Price bands are neutral affordability context.</strong>
+    They use each listing's latest valid {{ price_band_currency }} close and
+    do not change score, confidence, valuation, or recommendation. The
+    Under $10 band is a speculative research watchlist with 0% new allocation.
+    Policy: {{ price_band_policy_version }}.
+  </div>
+
   {% if great_opportunities %}
     <section class="opportunity-spotlight" aria-labelledby="great-opportunities-title">
       <div class="section-heading">
@@ -52,6 +60,9 @@
             <p>{{ card.analysis.listing.security.company.name }}</p>
             <strong>{{ card.analysis.overall_score }}/100</strong>
             <small>{{ card.analysis.get_risk_class_display }} risk · {{ card.analysis.confidence }}% confidence</small>
+            {% if card.price_band %}
+              <small>{{ card.price_band.label }} · {{ card.price_band.price_date }}</small>
+            {% endif %}
           </article>
         {% endfor %}
       </div>
@@ -83,6 +94,10 @@
       {{ filter_form.risk }}
     </label>
     <label>
+      <span>{{ filter_form.price_band.label }}</span>
+      {{ filter_form.price_band }}
+    </label>
+    <label>
       <span>{{ filter_form.country.label }}</span>
       {{ filter_form.country }}
     </label>
@@ -106,53 +121,111 @@
   </form>
 
   <div class="section-heading">
-    <p class="muted">{{ result_count }} result{{ result_count|pluralize }}; showing at most 50.</p>
+    <p class="muted">
+      {{ result_count }} result{{ result_count|pluralize }}; showing at most 50
+      per price band.
+    </p>
   </div>
-  <div class="table-scroll" tabindex="0" aria-label="Ranked stock opportunities">
-    <table>
-      <thead>
-        <tr>
-          <th scope="col">Stock</th>
-          <th scope="col">Price</th>
-          <th scope="col">Score</th>
-          <th scope="col">Recommendation</th>
-          <th scope="col">1-10 days</th>
-          <th scope="col">6-12 months</th>
-          <th scope="col">3+ years</th>
-          <th scope="col">Risk</th>
-          <th scope="col">Confidence</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for card in analysis_cards %}
-          {% with stock=card.analysis %}
-          <tr{% if card.opportunity.eligible %} class="opportunity-row"{% endif %}>
-            <td>
-              <a href="{% url 'stock-detail' stock.listing_id %}"><strong>{{ stock.listing.ticker }}</strong></a>
-              <small>{{ stock.listing.security.company.name }} · {{ stock.listing.exchange_mic }}</small>
-              {% if card.opportunity.eligible %}
-                <span class="opportunity-badge">{{ card.opportunity.label }}</span>
-              {% endif %}
-            </td>
-            <td>{{ stock.current_price|price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
-            <td><strong>{{ stock.overall_score }}/100</strong></td>
-            <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
-            <td>{{ stock.short_scenario|scenario_range }}</td>
-            <td>{{ stock.medium_scenario|scenario_range }}</td>
-            <td>{{ stock.long_scenario|scenario_range }}</td>
-            <td>{{ stock.get_risk_class_display }}</td>
-            <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
-          </tr>
-          {% endwith %}
-        {% empty %}
-          <tr>
-            <td colspan="9">
-              No persisted analysis matches these filters. Run the synthetic seed
-              and analysis commands or adjust the filters.
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="price-band-sections">
+    {% for group in price_band_groups %}
+      <section class="price-band-section{% if not group.new_allocation_eligible %} price-band-section-guarded{% endif %}">
+        <div class="section-heading price-band-heading">
+          <div>
+            <p class="eyebrow">{{ group.eyebrow }}</p>
+            <h2>{{ group.label }}</h2>
+            <p class="muted">{{ group.description }}</p>
+          </div>
+          <div class="price-band-count">
+            <span class="badge">{{ group.count }} match{{ group.count|pluralize:"es" }}</span>
+            {% if group.slug == "under_10" %}
+              <strong>0% new allocation</strong>
+            {% endif %}
+          </div>
+        </div>
+        {% if group.slug == "under_10" %}
+          <div class="notice">
+            <strong>Long-horizon forecast unavailable.</strong>
+            Missing activation gates:
+            {{ under_10_long_horizon_gates|join:", " }}.
+          </div>
+        {% endif %}
+        <div class="price-band-stock-grid">
+          {% for card in group.cards %}
+            {% with stock=card.analysis %}
+              <article class="stock-band-card{% if card.opportunity.eligible %} opportunity-card{% endif %}">
+                <div class="stock-band-card-heading">
+                  <div>
+                    <a href="{% url 'stock-detail' stock.listing_id %}"><h3>{{ stock.listing.ticker }}</h3></a>
+                    <p>{{ stock.listing.security.company.name }} · {{ stock.listing.exchange_mic }}</p>
+                  </div>
+                  <span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span>
+                </div>
+                {% if card.opportunity.eligible %}
+                  <span class="opportunity-badge">{{ card.opportunity.label }}</span>
+                {% endif %}
+                <div class="stock-band-price">
+                  {% if card.price_band %}
+                    <strong>{{ card.price_band.close|price }} {{ card.price_band.currency }}</strong>
+                    <small>Latest close {{ card.price_band.price_date }}</small>
+                  {% elif group.is_unavailable %}
+                    <strong>Price band unavailable</strong>
+                    <small>Decision-run reference: {{ stock.current_price|price }} {{ stock.listing.currency }}</small>
+                  {% else %}
+                    <strong>USD band not applicable</strong>
+                    <small>
+                      Trades in {{ stock.listing.currency }}; decision-run
+                      reference {{ stock.current_price|price }}.
+                    </small>
+                  {% endif %}
+                </div>
+                <dl class="stock-band-metrics">
+                  <div><dt>Score</dt><dd>{{ stock.overall_score }}/100</dd></div>
+                  <div><dt>Risk</dt><dd>{{ stock.get_risk_class_display }}</dd></div>
+                  <div><dt>Confidence</dt><dd>{{ stock.confidence|floatformat:"0" }}%</dd></div>
+                  <div><dt>1-10 days</dt><dd>{{ stock.short_scenario|scenario_range }}</dd></div>
+                  <div><dt>6-12 months</dt><dd>{{ stock.medium_scenario|scenario_range }}</dd></div>
+                  <div>
+                    <dt>3+ years</dt>
+                    <dd>
+                      {% if card.long_horizon_blocked %}
+                        Forecast unavailable
+                      {% else %}
+                        {{ stock.long_scenario|scenario_range }}
+                      {% endif %}
+                    </dd>
+                  </div>
+                </dl>
+                {% if card.long_horizon_blocked %}
+                  <small class="muted">
+                    {{ card.long_horizon_band_reason }}
+                    {% if card.long_horizon_gates %}
+                      Requires {{ card.long_horizon_gates|join:", " }}.
+                    {% endif %}
+                  </small>
+                {% endif %}
+                {% for reason in card.opportunity.blocking_reasons %}
+                  <small class="muted">{{ reason }}</small>
+                {% endfor %}
+              </article>
+            {% endwith %}
+          {% empty %}
+            <p class="empty-state">
+              No persisted analysis in this price band matches the current filters.
+            </p>
+          {% endfor %}
+        </div>
+      </section>
+    {% empty %}
+      {% if latest_run %}
+        <p class="empty-state">
+          No persisted analysis matches these filters. Adjust the filters.
+        </p>
+      {% else %}
+        <p class="empty-state">
+          No completed analysis run exists. Run a completed market analysis
+          before using price-band filters.
+        </p>
+      {% endif %}
+    {% endfor %}
   </div>
 {% endblock %}

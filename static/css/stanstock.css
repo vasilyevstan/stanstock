@@ -534,6 +534,110 @@ tbody tr:last-child td {
   margin-block: 2rem;
 }
 
+.price-band-sections {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.price-band-section {
+  min-width: 0;
+  padding: 1.2rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.price-band-section-guarded {
+  border-color: rgb(246 199 91 / 45%);
+}
+
+.price-band-heading {
+  margin-top: 0;
+}
+
+.price-band-count {
+  display: grid;
+  justify-items: end;
+  gap: 0.45rem;
+  color: var(--warning);
+}
+
+.price-band-stock-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  gap: 1rem;
+}
+
+.stock-band-card {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 1rem;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+}
+
+.stock-band-card-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.stock-band-card h3,
+.stock-band-card p,
+.stock-band-card dl {
+  margin: 0;
+}
+
+.stock-band-card p,
+.stock-band-card small,
+.stock-band-price small {
+  color: var(--muted);
+}
+
+.stock-band-price {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.stock-band-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.stock-band-metrics div {
+  min-width: 0;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border);
+}
+
+.stock-band-metrics dt {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.stock-band-metrics dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 750;
+}
+
+.compact-gate-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.compact-gate-list li + li {
+  margin-top: 0.2rem;
+}
+
 .panel {
   min-width: 0;
   padding: 1.2rem;

@@ -63,6 +63,12 @@ See `docs/operations.md` for the destructive termination procedure.
   claims of an executable same-close fill. Their composition is frozen, they
   do not rebalance, and the current price-only signal is intended for 1-10
   trading days even though the basket can remain visible afterward.
+- Nominal price bands are affordability context, not evidence of
+  undervaluation. Under $10 is a non-investable speculative watchlist for new
+  allocations and sample construction. Existing holdings remain trackable,
+  but no 3-year/5-year forecast is shown until SEC, dilution, solvency,
+  dollar-liquidity, verified split-event, and compatible formula evidence is
+  available.
 - Sample-portfolio return is current total value versus starting capital. It
   is a split-adjusted price return excluding dividends. A possible split
   suppresses the headline return until its quantity basis is reviewed.

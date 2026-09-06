@@ -18,9 +18,18 @@
         <span class="recommendation recommendation-{{ analysis.recommendation }}">{{ analysis.get_recommendation_display }}</span>
         <strong>{{ analysis.overall_score }}/100</strong>
         <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence|floatformat:"0" }}% heuristic confidence</small>
+        {% if current_price_band %}
+          <small>{{ current_price_band.label }} · latest close {{ current_price_band.price_date }}</small>
+        {% endif %}
         {% if opportunity.eligible %}
           <small>{{ opportunity.policy_version }} · {{ opportunity.horizon|display_label }} horizon</small>
         {% endif %}
+      </div>
+    {% endif %}
+    {% if opportunity.blocking_reasons and not current_price_band %}
+      <div class="notice" role="status">
+        <strong>New allocation unavailable.</strong>
+        {{ opportunity.blocking_reasons|join:" " }}
       </div>
     {% endif %}
   </section>
@@ -34,9 +43,22 @@
         intentionally withheld.
       </div>
     {% endif %}
+    {% if current_price_band %}
+      <div class="notice" role="status">
+        <strong>{{ current_price_band.label }}.</strong>
+        Based on the latest valid USD close of
+        {{ current_price_band.close|price }} on {{ current_price_band.price_date }}.
+        This affordability band does not change score, confidence, valuation,
+        or recommendation. Policy: {{ price_band_policy_version }}.
+        {% if not current_price_band.new_allocation_eligible %}
+          New allocation remains 0%; existing holdings remain visible and are
+          not forced to liquidate.
+        {% endif %}
+      </div>
+    {% endif %}
     <section class="metric-grid" aria-label="Current analysis">
       <article>
-        <small>Price</small>
+        <small>Decision-run price</small>
         <strong>{{ analysis.current_price|price }} {{ listing.currency }}</strong>
         <span>{{ analysis.daily_change|percentage }}</span>
         {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
@@ -69,15 +91,28 @@
       </article>
       <article>
         <small>3+ year scenario</small>
-        <strong>{{ analysis.long_scenario|scenario_range }}</strong>
-        <span>
-          {% if analysis.long_scenario.method %}
-            {{ analysis.long_scenario.method|display_label }}
-          {% else %}
-            Explicit uncertainty
+        {% if long_horizon_blocked %}
+          <strong>Forecast unavailable</strong>
+          <span>{{ long_horizon_band_reason }}</span>
+          {% if long_horizon_gates %}
+            <span>Missing activation gates:</span>
+            <ul class="compact-gate-list">
+              {% for gate in long_horizon_gates %}
+                <li>{{ gate }}</li>
+              {% endfor %}
+            </ul>
           {% endif %}
-        </span>
-        {% if analysis.long_scenario.insufficiency_reason %}<span>{{ analysis.long_scenario.insufficiency_reason }}</span>{% endif %}
+        {% else %}
+          <strong>{{ analysis.long_scenario|scenario_range }}</strong>
+          <span>
+            {% if analysis.long_scenario.method %}
+              {{ analysis.long_scenario.method|display_label }}
+            {% else %}
+              Explicit uncertainty
+            {% endif %}
+          </span>
+          {% if analysis.long_scenario.insufficiency_reason %}<span>{{ analysis.long_scenario.insufficiency_reason }}</span>{% endif %}
+        {% endif %}
       </article>
     </section>
 

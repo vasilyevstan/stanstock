@@ -134,6 +134,14 @@ normalized, and liquidity gates use compatible dollar volume rather than raw
 share counts. Split-equivalent price/volume transformations must preserve
 scores and recommendations. Corrections use a new versioned configuration;
 historical hashes, predictions, and performance cohorts remain separate.
+Current USD price bands remain display/filter/execution metadata and show
+their session date. Under $10 is a 0%-new-allocation speculative watchlist,
+not a positive signal; it cannot enter highlights or newly constructed sample
+baskets, and missing long-horizon activation gates are displayed explicitly.
+Sample construction classifies the decision-run reference close rather than
+mutable current market state. Existing holdings and frozen historical baskets
+are never rewritten, and missing current USD price state fails closed for new
+promotion.
 
 ## No secrets, private data, or session paths
 
