@@ -43,4 +43,4 @@ def default_us_universe_config_path() -> Path:
 
 
 def default_us_scoring_config_path() -> Path:
-    return CONFIG_ROOT / "scoring" / "us-price-baseline-v1.yml"
+    return CONFIG_ROOT / "scoring" / "us-price-baseline-v2.yml"

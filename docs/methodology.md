@@ -18,6 +18,18 @@ Supported inputs are grouped into:
 An indicator is unavailable when its minimum history or source inputs are
 missing. Unsupported values are never approximated from unrelated fields.
 
+The prospective US price-only v2 policy removes nominal share-price scale from
+its technical and liquidity gates. It scores the MACD histogram only after
+dividing by the latest positive close, and it measures liquidity as the
+20-session mean of `close * volume`. A split-equivalent transformation of
+price and share volume therefore cannot change either factor. The initial
+dimensionless MACD range (`-0.02` to `+0.02`), dollar-volume factor range
+($1 million to $50 million), and BUY floor ($5 million/day) are explicit,
+versioned policy assumptions; they were not selected by optimizing later
+outcomes. Historical v1 predictions retain their original absolute-MACD and
+share-volume configuration and are never recomputed or pooled with v2
+performance.
+
 ## Horizon weights
 
 The initial hypothesis weights are:

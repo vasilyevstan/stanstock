@@ -38,6 +38,9 @@ def test_indicators_cover_supported_windows_and_benchmark_metrics() -> None:
     assert result.values["ema_12"] > result.values["ema_26"]
     assert result.values["rsi_14"] == pytest.approx(100.0)
     assert result.values["macd"] > 0
+    assert result.values["macd_histogram_pct"] == pytest.approx(
+        result.values["macd_histogram"] / result.values["last_close"]
+    )
     assert result.values["atr_14"] > 0
     assert result.values["annualized_volatility"] >= 0
     downside_volatility = result.values.get("downside_volatility")
@@ -56,6 +59,7 @@ def test_indicators_cover_supported_windows_and_benchmark_metrics() -> None:
     assert 0 <= result.values["52w_position"] <= 1
     assert result.values["volume_trend"] > 0
     assert result.values["abnormal_volume"] > 0
+    assert result.values["avg_dollar_volume_20d"] > 0
     assert result.values["max_drawdown"] <= 0
     assert "beta" in result.values
     assert result.values["relative_return_63d"] > 0
@@ -114,3 +118,43 @@ def test_indicators_ignore_invalid_closes_without_inventing_values() -> None:
     assert result.observation_count == 1
     assert result.values["last_close"] == 12.0
     assert result.missing["return_1d"] == "Need at least 2 closes"
+
+
+def test_normalized_macd_and_dollar_volume_are_split_invariant() -> None:
+    frame = _price_frame(260)
+    split = frame.with_columns(
+        (pl.col(column) / 10).alias(column) for column in ("open", "high", "low", "close")
+    ).with_columns((pl.col("volume") * 10).alias("volume"))
+
+    original = calculate_indicators(frame)
+    transformed = calculate_indicators(split)
+
+    assert transformed.values["macd_histogram"] == pytest.approx(
+        original.values["macd_histogram"] / 10
+    )
+    assert transformed.values["avg_volume_20d"] == pytest.approx(
+        original.values["avg_volume_20d"] * 10
+    )
+    assert transformed.values["macd_histogram_pct"] == pytest.approx(
+        original.values["macd_histogram_pct"]
+    )
+    assert transformed.values["avg_dollar_volume_20d"] == pytest.approx(
+        original.values["avg_dollar_volume_20d"]
+    )
+
+
+def test_invalid_recent_volume_withholds_liquidity_indicators() -> None:
+    frame = _price_frame(40).with_columns(
+        pl.when(pl.int_range(pl.len()) == 39)
+        .then(float("nan"))
+        .otherwise(pl.col("volume"))
+        .alias("volume")
+    )
+
+    result = calculate_indicators(frame)
+
+    assert np.isnan(result.values["avg_volume_20d"])
+    assert result.values["abnormal_volume"] == 0
+    assert "avg_dollar_volume_20d" not in result.values
+    assert "abnormal_volume_strict" not in result.values
+    assert result.missing["avg_dollar_volume_20d"] == ("Recent volume observations must be finite")

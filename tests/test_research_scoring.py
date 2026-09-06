@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from stanstock.research.config import HORIZONS, ScoringConfig, load_scoring_config
+from stanstock.research.config import (
+    HORIZONS,
+    ScoringConfig,
+    config_hash,
+    load_scoring_config,
+)
 from stanstock.research.scoring import (
     aggregate_score,
     assess_risk,
@@ -31,6 +36,7 @@ def _rich_indicators() -> IndicatorResult:
         "close_vs_sma_200": 0.12,
         "rsi_14": 58.0,
         "macd_histogram": 1.0,
+        "macd_histogram_pct": 0.01,
         "52w_position": 0.85,
         "annualized_volatility": 0.22,
         "downside_volatility": 0.16,
@@ -38,6 +44,7 @@ def _rich_indicators() -> IndicatorResult:
         "beta": 1.05,
         "abnormal_volume": 1.1,
         "avg_volume_20d": 1_500_000,
+        "avg_dollar_volume_20d": 150_000_000,
         "relative_return_20d": 0.02,
         "relative_return_63d": 0.07,
         "relative_return_252d": 0.11,
@@ -175,6 +182,80 @@ def test_us_price_baseline_uses_short_price_only_score() -> None:
     assert aggregate.overall == aggregate.horizon_scores["short"]
 
 
+def test_v1_config_hash_and_legacy_factor_policy_remain_unchanged() -> None:
+    path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
+    config = load_scoring_config(path)
+
+    assert config_hash(config) == (
+        "8bd3adebc56bd70cc0b924b8d069c28f971b9d22000ca0811c1eaeb1d9420d83"
+    )
+    assert config.factor_policy.macd_indicator == "macd_histogram"
+    assert config.factor_policy.abnormal_volume_indicator == "abnormal_volume"
+    assert config.factor_policy.liquidity_indicator == "avg_volume_20d"
+    assert config.factor_policy.strict_finite_inputs is False
+    assert config.recommendation.buy_min_liquidity_20d == 100_000
+
+
+def test_v2_config_uses_normalized_macd_and_dollar_liquidity() -> None:
+    path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    config = load_scoring_config(path)
+
+    assert config.version == "us-price-baseline-v2"
+    assert config.factor_policy.macd_indicator == "macd_histogram_pct"
+    assert config.factor_policy.macd_score_low == -0.02
+    assert config.factor_policy.macd_score_high == 0.02
+    assert config.factor_policy.abnormal_volume_indicator == "abnormal_volume_strict"
+    assert config.factor_policy.liquidity_indicator == "avg_dollar_volume_20d"
+    assert config.factor_policy.liquidity_score_low == 1_000_000
+    assert config.factor_policy.liquidity_score_high == 50_000_000
+    assert config.factor_policy.strict_finite_inputs is True
+    assert config.recommendation.buy_min_liquidity_20d == 5_000_000
+
+
+def test_v2_score_and_recommendation_are_split_invariant() -> None:
+    path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    config = load_scoring_config(path)
+    original = _rich_indicators()
+    transformed_values = {
+        **original.values,
+        "last_close": original.values.get("last_close", 100.0) / 10,
+        "macd_histogram": original.values["macd_histogram"] / 10,
+        "avg_volume_20d": original.values["avg_volume_20d"] * 10,
+    }
+    transformed = IndicatorResult(
+        values=transformed_values,
+        observation_count=original.observation_count,
+        last_date=original.last_date,
+    )
+
+    original_components = score_components(original, ResearchValues(values={}), config)
+    transformed_components = score_components(transformed, ResearchValues(values={}), config)
+    original_score = aggregate_score(original_components, config)
+    transformed_score = aggregate_score(transformed_components, config)
+    risk = RiskAssessment(score=20, risk_class="low")
+    original_decision = decide_recommendation(
+        original_score.overall,
+        risk,
+        original_score.confidence,
+        config,
+        scenarios={"short": _evidenced_scenarios()["short"]},
+        indicators=original,
+    )
+    transformed_decision = decide_recommendation(
+        transformed_score.overall,
+        risk,
+        transformed_score.confidence,
+        config,
+        scenarios={"short": _evidenced_scenarios()["short"]},
+        indicators=transformed,
+    )
+
+    assert transformed_components.factor_scores == pytest.approx(original_components.factor_scores)
+    assert transformed_score.overall == pytest.approx(original_score.overall)
+    assert transformed_decision.recommendation == original_decision.recommendation
+    assert transformed_decision.gates == original_decision.gates
+
+
 def test_config_requires_supported_horizon_gates_and_active_factor_counts() -> None:
     config_path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -186,6 +267,90 @@ def test_config_requires_supported_horizon_gates_and_active_factor_counts() -> N
     del raw["component_factor_counts"]["market_sector"]
     with pytest.raises(ValueError, match="component_factor_counts"):
         ScoringConfig.from_mapping(raw)
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["factor_policy"] = {
+        "macd_indicator": "absolute_price",
+        "liquidity_indicator": "avg_volume_20d",
+    }
+    with pytest.raises(ValueError, match="macd_indicator"):
+        ScoringConfig.from_mapping(raw)
+
+
+def test_v2_config_rejects_nonboolean_strict_finite_policy() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["factor_policy"]["strict_finite_inputs"] = "false"
+
+    with pytest.raises(ValueError, match="strict_finite_inputs"):
+        ScoringConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("factor_policy", "macd_score_low", float("nan")),
+        ("factor_policy", "macd_score_high", float("inf")),
+        ("factor_policy", "liquidity_score_low", float("nan")),
+        ("factor_policy", "liquidity_score_high", float("inf")),
+        ("recommendation", "buy_min_liquidity_20d", float("nan")),
+        ("recommendation", "buy_min_liquidity_20d", float("inf")),
+    ],
+)
+def test_v2_config_rejects_nonfinite_policy_values(
+    section: str,
+    key: str,
+    value: float,
+) -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw[section][key] = value
+
+    with pytest.raises(ValueError, match="finite"):
+        ScoringConfig.from_mapping(raw)
+
+
+def test_v1_preserves_legacy_nonfinite_factor_behavior() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v1.yml"
+    )
+    components = score_components(
+        IndicatorResult(
+            values={
+                "macd_histogram": float("nan"),
+                "abnormal_volume": 0.0,
+                "avg_volume_20d": float("nan"),
+            }
+        ),
+        ResearchValues(values={}),
+        config,
+    )
+
+    assert components.factor_scores["momentum.macd"] == 100
+    assert components.factor_scores["risk.abnormal_volume"] == 0
+    assert components.factor_scores["risk.avg_volume"] == 100
+
+
+def test_v2_withholds_nonfinite_price_scale_factors() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    )
+    components = score_components(
+        IndicatorResult(
+            values={
+                "macd_histogram_pct": float("nan"),
+                "abnormal_volume_strict": float("nan"),
+                "avg_dollar_volume_20d": float("nan"),
+            }
+        ),
+        ResearchValues(values={}),
+        config,
+    )
+
+    assert "momentum.macd" not in components.factor_scores
+    assert "risk.abnormal_volume" not in components.factor_scores
+    assert "risk.avg_volume" not in components.factor_scores
+    assert components.missing["momentum.macd"] == "Input must be finite"
 
 
 def test_score_bounds_confidence_cap_and_freshness_penalty() -> None:
@@ -296,6 +461,24 @@ def test_buy_requires_scenario_evidence_and_liquidity() -> None:
     assert thin_liquidity.recommendation == "hold"
     assert thin_liquidity.gates["buy_liquidity_present"] is True
     assert thin_liquidity.gates["buy_liquidity"] is False
+
+
+def test_v2_buy_gate_cannot_be_satisfied_by_share_volume() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    )
+    decision = decide_recommendation(
+        90,
+        RiskAssessment(score=20, risk_class="low"),
+        80,
+        config,
+        scenarios={"short": _evidenced_scenarios()["short"]},
+        indicators=IndicatorResult(values={"avg_volume_20d": 50_000_000}),
+    )
+
+    assert decision.recommendation == "hold"
+    assert decision.gates["buy_liquidity_present"] is False
+    assert decision.gates["buy_liquidity"] is False
 
 
 def test_buy_requires_configured_bear_downside_by_horizon() -> None:

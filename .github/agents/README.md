@@ -128,6 +128,13 @@ cutoff-safe immutable inputs and overlap-aware support; SEC facts must preserve
 full filing/period identity and exact availability; incompatible split/share
 bases and unsupported long-formula inputs are withheld rather than guessed.
 
+Prospective affordability work must also be price-scale invariant: nominal
+share price never raises research conviction, price-difference momentum is
+normalized, and liquidity gates use compatible dollar volume rather than raw
+share counts. Split-equivalent price/volume transformations must preserve
+scores and recommendations. Corrections use a new versioned configuration;
+historical hashes, predictions, and performance cohorts remain separate.
+
 ## No secrets, private data, or session paths
 
 No agent may print or persist: `.env` values, `DJANGO_SECRET_KEY`,

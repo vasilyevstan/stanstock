@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from datetime import date
 
@@ -180,7 +181,18 @@ def score_components(
         _score_higher(-0.15, 0.20),
     )
     _add(factors, missing, "momentum.rsi", indicators, "rsi_14", _score_rsi)
-    _add(factors, missing, "momentum.macd", indicators, "macd_histogram", _score_higher(-2.0, 2.0))
+    _add(
+        factors,
+        missing,
+        "momentum.macd",
+        indicators,
+        config.factor_policy.macd_indicator,
+        _score_higher(
+            config.factor_policy.macd_score_low,
+            config.factor_policy.macd_score_high,
+        ),
+        require_finite=config.factor_policy.strict_finite_inputs,
+    )
     _add(factors, missing, "momentum.52w", indicators, "52w_position", _score_higher(0.15, 0.95))
 
     _add(
@@ -213,16 +225,21 @@ def score_components(
         missing,
         "risk.abnormal_volume",
         indicators,
-        "abnormal_volume",
+        config.factor_policy.abnormal_volume_indicator,
         _score_volume_abnormality,
+        require_finite=config.factor_policy.strict_finite_inputs,
     )
     _add(
         factors,
         missing,
         "risk.avg_volume",
         indicators,
-        "avg_volume_20d",
-        _score_higher(50_000.0, 2_000_000.0),
+        config.factor_policy.liquidity_indicator,
+        _score_higher(
+            config.factor_policy.liquidity_score_low,
+            config.factor_policy.liquidity_score_high,
+        ),
+        require_finite=config.factor_policy.strict_finite_inputs,
     )
 
     _add(
@@ -353,7 +370,7 @@ def decide_recommendation(
         "risk_present": risk.score is not None,
         "risk": risk.score is not None and risk.score <= config.recommendation.buy_max_risk,
         "confidence": confidence >= config.recommendation.buy_min_confidence,
-        "liquidity_present": indicators.get("avg_volume_20d") is not None,
+        "liquidity_present": (indicators.get(config.factor_policy.liquidity_indicator) is not None),
         "liquidity": _passes_liquidity(indicators, config),
     }
     for horizon, max_bear_downside in config.recommendation.buy_max_bear_downside.items():
@@ -386,10 +403,9 @@ def decide_recommendation(
 
 
 def _passes_liquidity(indicators: IndicatorResult, config: ScoringConfig) -> bool:
-    average_volume = indicators.get("avg_volume_20d")
+    average_volume = indicators.get(config.factor_policy.liquidity_indicator)
     return (
-        average_volume is not None
-        and average_volume >= config.recommendation.buy_min_avg_volume_20d
+        average_volume is not None and average_volume >= config.recommendation.buy_min_liquidity_20d
     )
 
 
@@ -443,12 +459,21 @@ def _add(
     source: ResearchValues,
     value_name: str,
     scorer: Callable[[float], float],
+    *,
+    require_finite: bool = False,
 ) -> None:
     value = source.get(value_name)
     if value is None:
         missing[score_name] = source.missing.get(value_name, "Missing input")
         return
-    factors[score_name] = _clamp(float(scorer(value)))
+    if require_finite and not math.isfinite(value):
+        missing[score_name] = "Input must be finite"
+        return
+    scored = float(scorer(value))
+    if require_finite and not math.isfinite(scored):
+        missing[score_name] = "Score must be finite"
+        return
+    factors[score_name] = _clamp(scored)
 
 
 def _score_higher(low: float, high: float) -> Callable[[float], float]:

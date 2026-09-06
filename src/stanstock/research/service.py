@@ -134,6 +134,17 @@ def compute_listing_analysis(
         "analysis_mode": config.analysis_mode,
         "fundamentals_used": config.analysis_mode != "price_only_baseline",
         "supported_horizons": list(config.supported_horizons),
+        "factor_policy": {
+            "macd_indicator": config.factor_policy.macd_indicator,
+            "macd_score_low": config.factor_policy.macd_score_low,
+            "macd_score_high": config.factor_policy.macd_score_high,
+            "abnormal_volume_indicator": config.factor_policy.abnormal_volume_indicator,
+            "liquidity_indicator": config.factor_policy.liquidity_indicator,
+            "liquidity_score_low": config.factor_policy.liquidity_score_low,
+            "liquidity_score_high": config.factor_policy.liquidity_score_high,
+            "strict_finite_inputs": config.factor_policy.strict_finite_inputs,
+            "buy_min_liquidity_20d": config.recommendation.buy_min_liquidity_20d,
+        },
     }
     price_asset_metadata = next(
         (
