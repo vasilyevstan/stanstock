@@ -79,6 +79,20 @@ BUY, HOLD, and AVOID are deterministic gates over:
 Explanations are selected from the actual factors that crossed documented
 thresholds. They are not free-form rationalizations.
 
+## Highlighted opportunities
+
+The opportunity highlight is a separate, versioned presentation policy in
+`config/opportunities/great-opportunity-v1.yml`; it does not alter the
+underlying recommendation. A highlighted result must be BUY, clear the
+policy's score and confidence thresholds, remain LOW or MEDIUM risk, and have
+a positive base case for the analysis mode's supported horizon.
+
+Full analyses use the label `Great opportunity` and require fundamentals.
+The US price-only baseline instead uses `Strong short-term setup`, checks only
+its supported short horizon, and remains visibly identified as price-only.
+The policy version is shown on stock detail so a later policy revision cannot
+silently masquerade as the original rule.
+
 ## Scenarios
 
 - **1-10 trading days:** empirical/rule ranges driven primarily by trend,
@@ -203,3 +217,20 @@ native-currency assignment and retained conversion inputs -- plus the explicit
 calendar, not aggregate row counts or sums. A run that converts nothing adds
 no FX terms at all, so a single-currency run keeps the exact reproducibility
 identity it had before FX conversion existed.
+
+## Tracked portfolio valuations
+
+Tracked portfolios are separate from historical simulations. The owner enters
+current quantity and average cost for each holding. Current value uses the
+latest persisted `LatestMarketData` row, and a snapshot is refused when a
+holding is inactive, unpriced, in another currency, or more than seven
+calendar days behind the newest holding price.
+
+Unrealized gain is securities value minus entered holding cost basis. Cash is
+included in total portfolio value but excluded from gain and return, avoiding
+the false treatment of cash as investment profit. Snapshot history includes
+changes in cash and holdings and is therefore a value series, not a
+time-weighted or money-weighted performance claim. Each snapshot and position
+is immutable and retains its source asset and market-session date. A
+split-sized price move with unchanged quantity is flagged for manual review;
+StanStock does not silently rewrite the owner's quantity or average cost.

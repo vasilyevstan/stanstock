@@ -2,11 +2,11 @@
 
 StanStock uses only documented JSON endpoints and sends the API key in the
 ``Authorization`` header so credentials never appear in asset URLs, logs, or
-exception text. US coverage is technically available from the Basic tier,
-but StanStock's price-bearing private UI is activated only after the owner
-confirms an account or agreement with internal-display rights. Redistribution
-and public display remain out of scope. See ``docs/source-spike.md`` for the
-reviewed terms, coverage, and quota boundary.
+exception text. Basic access is restricted to one explicitly licensed
+personal, non-commercial user; other plans require the owner to confirm an
+account or agreement with internal-display rights. Redistribution and public
+display remain out of scope. See ``docs/source-spike.md`` for the reviewed
+terms, coverage, and quota boundary.
 
 Daily prices are requested with ``adjust=splits`` explicitly. They are
 therefore split-adjusted *price* observations, not dividend-adjusted total
@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from stanstock.data.provider_credentials import read_twelve_data_api_key
 from stanstock.data.providers.contracts import (
     PriceBar,
     PriceSeries,
@@ -56,10 +57,16 @@ def resolve_api_key(
     allow_demo: bool = False,
 ) -> str:
     """Return a configured API key without ever including it in an error."""
-    api_key = explicit if explicit is not None else os.environ.get(API_KEY_ENV, "")
+    if explicit is not None:
+        api_key = explicit
+    else:
+        api_key = os.environ.get(API_KEY_ENV, "") or read_twelve_data_api_key() or ""
     api_key = api_key.strip()
     if not api_key:
-        raise ProviderConfigurationError(f"{API_KEY_ENV} is required for Twelve Data API access.")
+        raise ProviderConfigurationError(
+            f"{API_KEY_ENV} or a local macOS Keychain credential is required "
+            "for Twelve Data API access."
+        )
     if api_key.casefold() == "demo" and not allow_demo:
         raise ProviderConfigurationError(
             "Twelve Data's demo key is limited to trial symbols and cannot "

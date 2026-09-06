@@ -1,0 +1,18 @@
+version: great-opportunity-v1
+modes:
+  full:
+    label: Great opportunity
+    horizon: medium
+    min_score: 80
+    min_confidence: 60
+    allowed_risk_classes: [low, medium]
+    require_positive_base_case: true
+    require_fundamentals: true
+  price_only_baseline:
+    label: Strong short-term setup
+    horizon: short
+    min_score: 80
+    min_confidence: 60
+    allowed_risk_classes: [low, medium]
+    require_positive_base_case: true
+    require_fundamentals: false

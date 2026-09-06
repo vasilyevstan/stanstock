@@ -11,6 +11,7 @@ research integrity, not to imitate a distributed system.
 | `data` | Permanent identities, universe snapshots, providers, immutable assets, filings, FX, and as-of reads |
 | `research` | Indicators, transparent scores, risk, scenarios, analyses, predictions, and outcomes |
 | `simulation` | One accounting model shared by backtests and portfolio simulations |
+| `portfolio` | Owner-scoped live holdings and immutable dated valuation snapshots |
 | `web` | Authenticated server-rendered pages, filters, status, and lightweight JSON where needed |
 
 Raw provider clients belong under `stanstock.data.providers`. An architecture
@@ -26,7 +27,8 @@ SQLite. Relational rows hold:
 - dated universe snapshots and memberships;
 - source and provider status;
 - data-asset manifests and normalized filing/FX facts;
-- analyses, immutable predictions, outcomes, jobs, and simulations.
+- analyses, immutable predictions, outcomes, jobs, simulations, tracked
+  portfolios, and immutable portfolio valuations.
 
 Large or source-native payloads live under `STANSTOCK_DATA_DIR`. `DataAsset`
 stores a relative path, SHA-256 checksum, retrieval time, availability time,
@@ -65,6 +67,11 @@ replacement.
    UUID. Converted price rows keep their native price and currency beside the
    converted value. Its input hash covers complete canonical frame contents
    and any explicit calendar.
+10. A tracked portfolio snapshot stores the exact quantity, average cost,
+    latest persisted price, price session, source asset, code revision, and
+    aggregate value used. Repeated identical inputs are idempotent; changed
+    holdings can create another snapshot on the same market date. Database
+    triggers reject snapshot and snapshot-position updates or deletes.
 
 ## Runtime
 
@@ -73,15 +80,16 @@ The same image runs:
 - Gunicorn for the Django website;
 - deterministic Django management commands for source probes, demo data,
   conditional US Twelve Data ingestion, analysis, predictions, evaluation,
-  simulations, backup, and restore.
+  simulations, tracked-portfolio snapshots, backup, and restore.
 
 Target-date work uses `JobRun` plus a PostgreSQL advisory lock. A unique
 constraint permits only one successful run for a job/region/date. Repeating a
 successful target creates a visible skipped attempt instead of repeating work.
 The US workflow additionally coordinates a conservative provider credit budget
-through a locked `ProviderRecord`, persists raw and normalized vintages before
-analysis, and requires an explicit internal-display entitlement before it may
-run.
+through a locked `ProviderRecord` and persists raw and normalized vintages
+before analysis. Basic mode is bound to exactly one active licensed user with
+an explicit personal/non-commercial attestation; other plans require an
+explicit internal-display entitlement.
 
 No Redis, Celery, resident scheduler, second analytics engine, SPA, or fitted
 ML model is part of v1.
@@ -94,6 +102,12 @@ forms use CSRF protection, production settings default to secure cookies and
 HTTPS, and the production container runs as an unprivileged user with a
 read-only root filesystem. Forwarded client IPs affect login throttling only
 when the immediate proxy address is explicitly trusted.
+
+When Twelve Data Basic is enabled, middleware fails closed for every
+authenticated user except the licensed owner recorded during activation.
+Provider jobs also stop if more than one active user exists. The provider key
+is resolved from the process environment or, for direct macOS use, the current
+OS user's login Keychain; it is never stored in application tables.
 
 The intended deployment is one private instance. A multi-replica deployment
 would require a shared rate-limit store and explicit job coordination review.

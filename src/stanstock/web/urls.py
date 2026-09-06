@@ -13,6 +13,17 @@ urlpatterns = [
     path("market", views.market_overview_page, name="market"),
     path("predictions", views.prediction_history_page, name="predictions"),
     path("performance", views.performance_page, name="performance"),
+    path("portfolios", views.portfolios_page, name="portfolios"),
+    path(
+        "portfolios/<uuid:portfolio_id>",
+        views.portfolio_detail_page,
+        name="portfolio-detail",
+    ),
+    path(
+        "portfolios/<uuid:portfolio_id>/holdings/<int:holding_id>/delete",
+        views.portfolio_holding_delete,
+        name="portfolio-holding-delete",
+    ),
     path("simulations", views.simulations_page, name="simulations"),
     path(
         "simulations/<uuid:run_id>",

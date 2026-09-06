@@ -5,9 +5,11 @@ from decimal import Decimal
 from typing import Any
 
 from django import forms
+from django.contrib.auth.models import User
 
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import Listing, Region, UniverseMembership, UniverseSnapshot
+from stanstock.portfolio.models import Portfolio
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
 
@@ -72,6 +74,92 @@ class OpportunityFilterForm(forms.Form):
                 ("", empty_label),
                 *((value, value) for value in values),
             ]
+
+
+class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]
+    class Meta:
+        model = Portfolio
+        fields = ("name", "description", "base_currency", "cash_balance")
+        widgets = {
+            "description": forms.Textarea(attrs={"rows": 3}),
+        }
+        help_texts = {
+            "cash_balance": "Uninvested cash held in the portfolio base currency.",
+            "base_currency": (
+                "Tracked holdings must currently trade in this currency; portfolio FX "
+                "conversion is intentionally not implicit."
+            ),
+        }
+
+    def __init__(
+        self,
+        *args: Any,
+        owner: User,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.owner = owner
+        self.instance.owner_id = owner.pk
+
+    def clean_name(self) -> str:
+        name = str(self.cleaned_data["name"]).strip()
+        duplicate = Portfolio.objects.filter(owner_id=self.owner.pk, name__iexact=name)
+        if self.instance.pk:
+            duplicate = duplicate.exclude(pk=self.instance.pk)
+        if duplicate.exists():
+            raise forms.ValidationError("You already have a portfolio with this name.")
+        return name
+
+    def clean_base_currency(self) -> str:
+        currency = str(self.cleaned_data["base_currency"])
+        if self.instance.pk and self.instance.holdings.exclude(listing__currency=currency).exists():
+            raise forms.ValidationError(
+                "Remove holdings in other currencies before changing the base currency."
+            )
+        return currency
+
+
+class PortfolioHoldingForm(forms.Form):
+    listing = forms.ModelChoiceField(
+        queryset=Listing.objects.none(),
+        label="Stock",
+    )
+    quantity = forms.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        min_value=Decimal("0.00000001"),
+    )
+    average_cost = forms.DecimalField(
+        max_digits=20,
+        decimal_places=6,
+        min_value=Decimal("0.000001"),
+        label="Average cost per share",
+    )
+    acquired_on = forms.DateField(
+        required=False,
+        widget=forms.DateInput(attrs={"type": "date"}),
+        label="Acquired on",
+    )
+    notes = forms.CharField(
+        required=False,
+        max_length=240,
+        widget=forms.Textarea(attrs={"rows": 2}),
+    )
+
+    def __init__(self, *args: Any, portfolio: Portfolio, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        listing_field = self.fields["listing"]
+        if not isinstance(listing_field, forms.ModelChoiceField):
+            raise TypeError("listing must be a ModelChoiceField")
+        listing_field.queryset = (
+            Listing.objects.filter(
+                is_active=True,
+                currency=portfolio.base_currency,
+                latest_market_data__isnull=False,
+            )
+            .select_related("security__company")
+            .order_by("ticker")
+        )
 
 
 class SimulationForm(forms.Form):

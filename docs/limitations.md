@@ -13,10 +13,14 @@ and conditional on account rights.
   machine-verified.
 - No browser challenge or access control will be bypassed.
 - Alpha Vantage's official free limit is too small for the requested universe.
-- Twelve Data Basic provides useful US access and sufficient credits, but its
-  current pricing page labels that tier internal non-display. StanStock's
-  price-bearing UI therefore requires Grow/Pro/Ultra or another agreement
-  that explicitly grants internal-display rights.
+- Twelve Data's pricing page labels Basic as internal non-display, while its
+  August 2026 support guidance says Individual plans may be used for personal,
+  non-commercial internal tools and prohibits redistribution and commercial
+  display. StanStock supports Basic only under the owner's explicit
+  single-user personal-use attestation, records the licensed user, blocks
+  every other authenticated user, and stops provider jobs if another active
+  account exists. This technical guard is not a substitute for confirming the
+  account's current terms with Twelve Data.
 - Twelve Data data cannot be redistributed or publicly displayed without
   appropriate rights, and current terms require its deletion after the
   subscription or agreement ends. Because provider assets feed immutable
@@ -27,9 +31,9 @@ and conditional on account rights.
 
 Consequently, the default application remains deterministic synthetic
 research. US live rankings become available only after explicit
-`configure_twelve_data` activation with a non-demo key and display-rights
-confirmation. Historical catch-up runs are research-grade and cannot be
-presented as predictions issued on time.
+`configure_twelve_data` activation with a non-demo key and the confirmation
+appropriate to the selected plan. Historical catch-up runs are research-grade
+and cannot be presented as predictions issued on time.
 
 Twelve Data daily histories are requested with split adjustment only. They
 exclude dividends, so all derived performance is price return, not total
@@ -37,6 +41,23 @@ return. The local quota ledger cannot observe credits consumed by another
 application using the same account, and provider coverage, symbols, plan
 entitlements, timing, and terms can change independently of this code.
 See `docs/operations.md` for the destructive termination procedure.
+
+## Tracked portfolios
+
+- Tracked portfolios are current-position trackers, not brokerage ledgers.
+  They do not record tax lots, realized gains, commissions, deposits, or
+  withdrawals as transactions.
+- Historical total value includes any manual holding or cash changes and must
+  not be interpreted as a flow-adjusted return series.
+- Holdings are restricted to the portfolio base currency even though the
+  simulation engine has point-in-time FX support. This is a deliberate first
+  release boundary, not an implicit conversion.
+- A snapshot is withheld if a holding has no current price or is more than
+  seven days behind the newest holding price.
+- Prices may be split-adjusted while user-entered quantities are not. A
+  split-sized move with unchanged quantity is flagged, but the owner must
+  restate quantity and average cost. Dividends are excluded unless the source
+  explicitly states otherwise.
 
 ## Fundamentals
 

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 
 from stanstock.data.assets import AssetStore
@@ -32,6 +33,7 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
 from stanstock.data.providers.contracts import (
     PriceBar,
     PriceSeries,
@@ -417,10 +419,43 @@ def test_credit_budget_rejects_enabled_record_without_display_rights() -> None:
         provider="twelve_data",
         enabled=True,
         status="ok",
-        metadata={"daily_credit_limit": 800, "credits_per_minute": 8},
+        metadata={
+            "daily_credit_limit": 800,
+            "credits_per_minute": 8,
+            "plan": "grow",
+        },
     )
 
     with pytest.raises(ProviderConfigurationError, match="internal-display entitlement"):
+        ProviderCreditBudget(enforce_spacing=False).preflight(1)
+
+
+def test_credit_budget_enforces_basic_single_user_license() -> None:
+    owner = get_user_model().objects.create_user(
+        username="basic-owner",
+        password="correct-password",
+    )
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=True,
+        usage_scope=BASIC_USAGE_SCOPE,
+        status="ok",
+        metadata={
+            "daily_credit_limit": 800,
+            "credits_per_minute": 8,
+            "plan": "basic",
+            "personal_noncommercial_confirmed": True,
+            "licensed_user_id": str(owner.pk),
+        },
+    )
+
+    ProviderCreditBudget(enforce_spacing=False).preflight(1)
+
+    get_user_model().objects.create_user(
+        username="unlicensed-user",
+        password="correct-password",
+    )
+    with pytest.raises(ProviderConfigurationError, match="one licensed active"):
         ProviderCreditBudget(enforce_spacing=False).preflight(1)
 
 

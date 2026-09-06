@@ -31,6 +31,33 @@
     </div>
   {% endif %}
 
+  {% if great_opportunities %}
+    <section class="opportunity-spotlight" aria-labelledby="great-opportunities-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Policy-qualified ideas</p>
+          <h2 id="great-opportunities-title">Highlighted opportunities</h2>
+        </div>
+      </div>
+      <p class="muted">
+        Highlighted stocks pass the versioned score, confidence, risk, and
+        positive base-case gates. A highlight is research evidence, not a
+        guarantee or personalized advice.
+      </p>
+      <div class="portfolio-grid">
+        {% for card in great_opportunities %}
+          <article class="portfolio-card opportunity-card">
+            <span class="opportunity-badge">{{ card.opportunity.label }}</span>
+            <a href="{% url 'stock-detail' card.analysis.listing_id %}"><h3>{{ card.analysis.listing.ticker }}</h3></a>
+            <p>{{ card.analysis.listing.security.company.name }}</p>
+            <strong>{{ card.analysis.overall_score }}/100</strong>
+            <small>{{ card.analysis.get_risk_class_display }} risk · {{ card.analysis.confidence }}% confidence</small>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   {% if filter_form.errors %}
     <div class="error-box" role="alert">
       <strong>Correct the filters below.</strong>
@@ -97,11 +124,15 @@
         </tr>
       </thead>
       <tbody>
-        {% for stock in analyses %}
-          <tr>
+        {% for card in analysis_cards %}
+          {% with stock=card.analysis %}
+          <tr{% if card.opportunity.eligible %} class="opportunity-row"{% endif %}>
             <td>
               <a href="{% url 'stock-detail' stock.listing_id %}"><strong>{{ stock.listing.ticker }}</strong></a>
               <small>{{ stock.listing.security.company.name }} · {{ stock.listing.exchange_mic }}</small>
+              {% if card.opportunity.eligible %}
+                <span class="opportunity-badge">{{ card.opportunity.label }}</span>
+              {% endif %}
             </td>
             <td>{{ stock.current_price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
             <td><strong>{{ stock.overall_score }}/100</strong></td>
@@ -112,6 +143,7 @@
             <td>{{ stock.get_risk_class_display }}</td>
             <td>{{ stock.confidence }}% <small>{{ stock.confidence_status }}</small></td>
           </tr>
+          {% endwith %}
         {% empty %}
           <tr>
             <td colspan="9">

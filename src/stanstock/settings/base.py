@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "stanstock.data",
     "stanstock.research",
     "stanstock.simulation",
+    "stanstock.portfolio",
     "stanstock.web",
 ]
 
@@ -54,6 +55,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "stanstock.web.middleware.PersonalProviderAccessMiddleware",
     "stanstock.web.middleware.LoginRateLimitMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",

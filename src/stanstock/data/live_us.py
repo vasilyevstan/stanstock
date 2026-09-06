@@ -33,6 +33,10 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.data.provider_policy import (
+    PRIVATE_USAGE_SCOPE,
+    validate_provider_usage,
+)
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import PriceSeries, StockCatalog, StockReference
 from stanstock.data.providers.exceptions import (
@@ -50,7 +54,6 @@ DEFAULT_DAILY_CREDIT_LIMIT = 800
 DEFAULT_CREDITS_PER_MINUTE = 8
 DEFAULT_MAX_SYMBOLS = 300
 DEFAULT_CLOSE_DELAY_MINUTES = 30
-PRIVATE_USAGE_SCOPE = "personal_internal_display_authorized"
 _SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,31}$")
 
 
@@ -916,24 +919,8 @@ def _provider_record(*, require_enabled: bool) -> ProviderRecord:
             "Twelve Data is disabled. Run configure_twelve_data --enable after "
             "reviewing the private-use terms."
         )
-    if require_enabled and (
-        record.usage_scope != PRIVATE_USAGE_SCOPE
-        or record.metadata.get("internal_display_rights_confirmed") is not True
-    ):
-        raise ProviderConfigurationError(
-            "Twelve Data activation has no recorded internal-display entitlement. "
-            "Re-run configure_twelve_data --enable with the required plan and "
-            "rights confirmation."
-        )
-    if require_enabled and str(record.metadata.get("plan") or "").lower() not in {
-        "grow",
-        "pro",
-        "ultra",
-        "custom",
-    }:
-        raise ProviderConfigurationError(
-            "Twelve Data ProviderRecord metadata has no supported display-entitled plan"
-        )
+    if require_enabled:
+        validate_provider_usage(record)
     return record
 
 

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Portfolios · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Personal tracking</p>
+      <h1>Your portfolios</h1>
+      <p class="lede">
+        Keep several private portfolios and preserve dated valuation snapshots.
+        Returns are measured against the average costs you enter and exclude
+        dividends unless the source explicitly includes them.
+      </p>
+    </div>
+  </section>
+
+  <div class="detail-grid">
+    <section class="panel">
+      <p class="eyebrow">New portfolio</p>
+      <h2>Create a portfolio</h2>
+      <form method="post" class="stack">
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
+        {% endif %}
+        {% for field in form %}
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
+          {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
+        {% endfor %}
+        <button class="primary-button" type="submit">Create portfolio</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <p class="eyebrow">How tracking works</p>
+      <h2>Evidence, not brokerage accounting</h2>
+      <p>
+        StanStock values current holdings from the latest persisted market rows.
+        The value history includes deposits, withdrawals, and holding edits; it
+        is not a time-weighted return series. Split-adjusted price returns exclude
+        dividends.
+      </p>
+    </section>
+  </div>
+
+  <section>
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Active</p>
+        <h2>Tracked portfolios</h2>
+      </div>
+    </div>
+    <div class="portfolio-grid">
+      {% for card in portfolio_cards %}
+        <article class="portfolio-card">
+          <div>
+            <a href="{% url 'portfolio-detail' card.portfolio.id %}"><h3>{{ card.portfolio.name }}</h3></a>
+            <p>{{ card.portfolio.description|default:"No description." }}</p>
+          </div>
+          <dl class="key-values">
+            <div>
+              <dt>Current value</dt>
+              <dd>
+                {% if card.valuation.total_value is not None %}
+                  {{ card.valuation.total_value|floatformat:2 }} {{ card.portfolio.base_currency }}
+                {% else %}
+                  Unavailable
+                {% endif %}
+              </dd>
+            </div>
+            <div>
+              <dt>Unrealized return</dt>
+              <dd>{{ card.valuation.return_pct|percentage }}</dd>
+            </div>
+            <div><dt>Holdings</dt><dd>{{ card.valuation.positions|length }}</dd></div>
+            <div><dt>Snapshots</dt><dd>{{ card.snapshot_count }}</dd></div>
+          </dl>
+          {% if card.valuation.issues %}
+            <p class="field-error">{{ card.valuation.issues|join:" " }}</p>
+          {% endif %}
+          {% if card.valuation.warnings %}
+            <p class="muted">{{ card.valuation.warnings|join:" " }}</p>
+          {% endif %}
+          <a class="primary-button button-link" href="{% url 'portfolio-detail' card.portfolio.id %}">Open portfolio</a>
+        </article>
+      {% empty %}
+        <p class="empty-state">Create your first portfolio to begin tracking it.</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if archived_portfolios %}
+    <section>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Preserved history</p>
+          <h2>Archived portfolios</h2>
+        </div>
+      </div>
+      <div class="compact-list">
+        {% for portfolio in archived_portfolios %}
+          <article>
+            <div>
+              <a href="{% url 'portfolio-detail' portfolio.id %}"><strong>{{ portfolio.name }}</strong></a>
+              <small>Archived {{ portfolio.archived_at }}</small>
+            </div>
+            <span class="badge">Archived</span>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

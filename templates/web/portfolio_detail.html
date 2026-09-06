@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}{{ portfolio.name }} · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Tracked portfolio</p>
+      <h1>{{ portfolio.name }}</h1>
+      <p class="lede">{{ portfolio.description|default:"Private portfolio tracking." }}</p>
+    </div>
+    <div class="run-stamp">
+      <small>Valuation date</small>
+      <strong>{{ valuation.as_of_date }}</strong>
+      <span>{{ portfolio.base_currency }} · {{ valuation.positions|length }} holding{{ valuation.positions|length|pluralize }}</span>
+    </div>
+  </section>
+
+  {% if portfolio.archived_at %}
+    <div class="notice" role="status">
+      This portfolio is archived. Its immutable snapshots remain available.
+      <form method="post" class="inline-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="restore">
+        <button class="secondary-button" type="submit">Restore portfolio</button>
+      </form>
+    </div>
+  {% endif %}
+
+  {% if valuation.issues %}
+    <div class="error-box notice" role="alert">
+      <strong>Current total withheld.</strong>
+      {{ valuation.issues|join:" " }}
+    </div>
+  {% endif %}
+
+  {% if valuation.warnings %}
+    <div class="notice" role="status">
+      <strong>Price freshness warning.</strong>
+      {{ valuation.warnings|join:" " }}
+    </div>
+  {% endif %}
+
+  <section class="metric-grid" aria-label="Portfolio valuation">
+    <article>
+      <small>Total value</small>
+      <strong>
+        {% if valuation.total_value is not None %}
+          {{ valuation.total_value|floatformat:2 }} {{ portfolio.base_currency }}
+        {% else %}
+          Unavailable
+        {% endif %}
+      </strong>
+      <span>Cash plus valued holdings</span>
+    </article>
+    <article>
+      <small>Securities value</small>
+      <strong>
+        {% if valuation.securities_value is not None %}
+          {{ valuation.securities_value|floatformat:2 }} {{ portfolio.base_currency }}
+        {% else %}
+          Unavailable
+        {% endif %}
+      </strong>
+      <span>Latest persisted closes</span>
+    </article>
+    <article>
+      <small>Unrealized gain</small>
+      <strong>
+        {% if valuation.unrealized_gain is not None %}
+          {{ valuation.unrealized_gain|floatformat:2 }} {{ portfolio.base_currency }}
+        {% else %}
+          Unavailable
+        {% endif %}
+      </strong>
+      <span>Market value minus entered cost basis</span>
+    </article>
+    <article>
+      <small>Unrealized return</small>
+      <strong>{{ valuation.return_pct|percentage }}</strong>
+      <span>Cash excluded; dividends excluded unless stated</span>
+    </article>
+  </section>
+
+  {% if not portfolio.archived_at %}
+    <div class="detail-grid">
+      <section class="panel">
+        <p class="eyebrow">Composition</p>
+        <h2>Add or update a holding</h2>
+        <form method="post" class="stack">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="holding">
+          {% if holding_form.non_field_errors %}
+            <div class="error-box" role="alert">{{ holding_form.non_field_errors }}</div>
+          {% endif %}
+          {% for field in holding_form %}
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
+          {% endfor %}
+          <button class="primary-button" type="submit">Save holding</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <p class="eyebrow">Settings</p>
+        <h2>Portfolio details</h2>
+        <form method="post" class="stack">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="update">
+          {% if portfolio_form.non_field_errors %}
+            <div class="error-box" role="alert">{{ portfolio_form.non_field_errors }}</div>
+          {% endif %}
+          {% for field in portfolio_form %}
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
+            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
+          {% endfor %}
+          <button class="primary-button" type="submit">Update portfolio</button>
+        </form>
+      </section>
+    </div>
+  {% endif %}
+
+  <section>
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Current positions</p>
+        <h2>Holdings</h2>
+      </div>
+      {% if not portfolio.archived_at %}
+        <form method="post" class="inline-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="snapshot">
+          <button class="secondary-button" type="submit">Record snapshot</button>
+        </form>
+      {% endif %}
+    </div>
+    <div class="table-scroll" tabindex="0" aria-label="Portfolio holdings">
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th scope="col">Stock</th>
+            <th scope="col">Quantity</th>
+            <th scope="col">Average cost</th>
+            <th scope="col">Latest price</th>
+            <th scope="col">Market value</th>
+            <th scope="col">Unrealized</th>
+            <th scope="col">Research</th>
+            {% if not portfolio.archived_at %}<th scope="col">Action</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for card in position_cards %}
+            {% with position=card.position %}
+              <tr{% if card.opportunity.eligible %} class="opportunity-row"{% endif %}>
+                <td>
+                  <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                  <small>{{ position.holding.listing.security.company.name }}</small>
+                </td>
+                <td>{{ position.holding.quantity|floatformat:8 }}</td>
+                <td>{{ position.holding.average_cost|floatformat:2 }} {{ portfolio.base_currency }}</td>
+                <td>
+                  {% if position.market_data %}
+                    {{ position.market_data.close|floatformat:2 }}
+                    <small>{{ position.market_data.session_date }}</small>
+                  {% else %}
+                    Unavailable
+                  {% endif %}
+                </td>
+                <td>
+                  {% if position.market_value is not None %}
+                    {{ position.market_value|floatformat:2 }} {{ portfolio.base_currency }}
+                  {% else %}
+                    Unavailable
+                  {% endif %}
+                </td>
+                <td>
+                  {% if position.unrealized_gain is not None %}
+                    {{ position.unrealized_gain|floatformat:2 }} {{ portfolio.base_currency }}
+                  {% else %}
+                    Unavailable
+                  {% endif %}
+                </td>
+                <td>
+                  {% if card.opportunity.eligible %}
+                    <span class="opportunity-badge">{{ card.opportunity.label }}</span>
+                    <small>{{ card.opportunity.policy_version }}</small>
+                  {% elif card.analysis %}
+                    {{ card.analysis.get_recommendation_display }}
+                    <small>{{ card.analysis.overall_score }}/100</small>
+                  {% else %}
+                    No analysis
+                  {% endif %}
+                </td>
+                {% if not portfolio.archived_at %}
+                  <td>
+                    <form method="post" action="{% url 'portfolio-holding-delete' portfolio.id position.holding.id %}">
+                      {% csrf_token %}
+                      <button class="danger-button" type="submit">Remove</button>
+                    </form>
+                  </td>
+                {% endif %}
+              </tr>
+            {% endwith %}
+          {% empty %}
+            <tr>
+              <td colspan="8">No holdings have been added.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Dated evidence</p>
+        <h2>Value history</h2>
+      </div>
+    </div>
+    <div class="notice">
+      Historical values include changes to holdings and cash. They are not
+      time-weighted returns. A split warning means quantity or average cost may
+      need manual restatement.
+    </div>
+    <div class="table-scroll" tabindex="0" aria-label="Portfolio valuation snapshots">
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th scope="col">Valuation date</th>
+            <th scope="col">Total value</th>
+            <th scope="col">Securities</th>
+            <th scope="col">Cash</th>
+            <th scope="col">Cost basis</th>
+            <th scope="col">Unrealized return</th>
+            <th scope="col">Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for snapshot in snapshots %}
+            <tr>
+              <td>
+                {{ snapshot.as_of_date }}
+                <small>Recorded {{ snapshot.recorded_at }}</small>
+              </td>
+              <td>{{ snapshot.total_value|floatformat:2 }} {{ snapshot.base_currency }}</td>
+              <td>{{ snapshot.securities_value|floatformat:2 }}</td>
+              <td>{{ snapshot.cash_balance|floatformat:2 }}</td>
+              <td>{{ snapshot.cost_basis|floatformat:2 }}</td>
+              <td>{{ snapshot.return_pct|percentage }}</td>
+              <td>
+                {{ snapshot.return_definition }}
+                {% if snapshot.corporate_action_warnings %}
+                  <small class="field-error">{{ snapshot.corporate_action_warnings }} possible split warning{{ snapshot.corporate_action_warnings|pluralize }}</small>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="7">No valuation snapshots have been recorded.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% if not portfolio.archived_at %}
+    <section class="danger-zone">
+      <h2>Archive portfolio</h2>
+      <p>Archiving stops edits and scheduled snapshots while preserving all history.</p>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="archive">
+        <button class="danger-button" type="submit">Archive portfolio</button>
+      </form>
+    </section>
+  {% endif %}
+{% endblock %}

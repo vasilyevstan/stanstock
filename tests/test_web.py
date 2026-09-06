@@ -6,6 +6,9 @@ from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
 
+from stanstock.data.models import ProviderRecord
+from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
+
 
 @pytest.mark.django_db
 def test_health_endpoint_reports_components(client) -> None:
@@ -57,6 +60,78 @@ def test_authenticated_status_shows_local_shell(client) -> None:
     assert "StanStock is running locally." in content
     assert "Synthetic demo mode" in content
     assert "DEMO-US" in content
+
+
+@pytest.mark.django_db
+def test_basic_provider_data_is_visible_only_to_licensed_user(client) -> None:
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(username="owner", password="correct-password")
+    other = user_model.objects.create_user(username="other", password="correct-password")
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=True,
+        usage_scope=BASIC_USAGE_SCOPE,
+        status="ok",
+        metadata={
+            "plan": "basic",
+            "personal_noncommercial_confirmed": True,
+            "licensed_user_id": str(owner.pk),
+        },
+    )
+
+    client.force_login(owner)
+    assert client.get(reverse("status")).status_code == 200
+
+    client.force_login(other)
+    response = client.get(reverse("status"))
+    assert response.status_code == 403
+    assert b"licensed for one personal user only" in response.content
+
+
+@pytest.mark.django_db
+def test_disabled_basic_provider_keeps_retained_data_owner_scoped(client) -> None:
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(username="owner", password="correct-password")
+    other = user_model.objects.create_user(username="other", password="correct-password")
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=False,
+        usage_scope=BASIC_USAGE_SCOPE,
+        status="disabled",
+        metadata={
+            "plan": "basic",
+            "personal_noncommercial_confirmed": True,
+            "licensed_user_id": str(owner.pk),
+        },
+    )
+
+    client.force_login(other)
+    assert client.get(reverse("status")).status_code == 403
+
+
+@pytest.mark.django_db
+def test_unlicensed_basic_user_can_log_out(client) -> None:
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(username="owner", password="password")
+    other = user_model.objects.create_user(username="other", password="password")
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=False,
+        usage_scope=BASIC_USAGE_SCOPE,
+        status="disabled",
+        metadata={
+            "plan": "basic",
+            "personal_noncommercial_confirmed": True,
+            "licensed_user_id": str(owner.pk),
+        },
+    )
+
+    client.force_login(other)
+    response = client.post(reverse("logout"))
+
+    assert response.status_code == 302
+    assert response.url == reverse("login")
+    assert client.get(reverse("status")).status_code == 302
 
 
 @pytest.mark.django_db

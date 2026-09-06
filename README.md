@@ -2,7 +2,7 @@
 
 StanStock is a private, local-first stock-research application for transparent
 US and European equity scoring, scenario analysis, immutable prediction
-tracking, backtesting, and portfolio simulation.
+tracking, live personal portfolios, backtesting, and portfolio simulation.
 
 It is a rules-based research system, not an automated trading service. An LLM
 cannot change scores or recommendations, and forecasts are never presented as
@@ -18,10 +18,13 @@ Twelve Data's documented API.
   plus SPY as its benchmark. It is not represented as a licensed index.
 - Twelve Data prices are explicitly split-adjusted price returns; dividends
   are not included and results must not be labeled total returns.
-- Activation requires a non-demo API key and an account or agreement that
-  grants internal-display rights. Twelve Data's current pricing page labels
-  Basic as internal non-display, so Basic alone is not accepted for the
-  price-bearing StanStock UI.
+- Basic activation is limited to one authenticated active user who explicitly
+  confirms personal, non-commercial, non-redistributed use. The provider's
+  pricing page labels Basic as internal non-display, while its August 2026
+  support guidance permits internal tools under Individual plans; use this
+  mode only when your account terms cover your exact personal workflow.
+- Grow, Pro, Ultra, or a reviewed custom agreement can instead be activated
+  with an explicit internal-display confirmation.
 - Stooq's public download route is protected against unattended automation,
   and its automation/private-retention rights could not be verified.
 - SEC EDGAR and ECB data are viable official sources.
@@ -66,18 +69,36 @@ uv run python manage.py refresh_demo
 
 ### Optional US Twelve Data workflow
 
-Keep the key in the environment only. First run the bounded source probe, then
-enable the provider only if the account has internal-display rights:
+On macOS, store the key in the current user's login Keychain through an
+interactive prompt. The key is never passed as a command argument and is not
+written to Git, dotenv files, logs, URLs, metadata, or the database:
 
 ```bash
-export TWELVE_DATA_API_KEY=replace-with-your-key
+uv run python manage.py store_twelve_data_key
+uv run python manage.py store_twelve_data_key --status
+```
+
+Containers and non-macOS hosts should inject `TWELVE_DATA_API_KEY` through
+their secret manager or process environment. Environment variables take
+precedence over Keychain.
+
+For the Basic personal plan, run the bounded source probe and then activate
+the single-user guard:
+
+```bash
 uv run python manage.py source_spike
 uv run python manage.py configure_twelve_data \
   --enable \
-  --plan grow \
-  --confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED
+  --plan basic \
+  --confirm PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED
 uv run python manage.py daily --region us
 ```
+
+Basic mode records the licensed owner and refuses provider jobs if another
+active StanStock user exists. Authenticated provider-backed pages return 403
+for any other user. There is no public signup. For Grow, Pro, Ultra, or a
+reviewed custom agreement, use
+`--confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`.
 
 `daily --region us` validates the configured symbols against Twelve Data's
 NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
@@ -89,9 +110,12 @@ rather than entering the prediction or outcome ledgers. An explicit older
 idempotent; another invocation creates a skipped job and makes no provider
 requests.
 
-The conservative local budget is 8 credits/minute and 800/day. The 100-symbol
+The Basic quota guard is 8 credits/minute and 800/day. The 100-symbol
 configuration uses approximately 103 credits per full run (two catalogs, 100
-stocks, and SPY). This accounting cannot see credits consumed by other
+stocks, and SPY), so two configured daily runs remain below the local daily
+ceiling. Requests are spaced at least 7.5 seconds apart and a run is rejected
+before provider access when its estimated credits would exceed the remaining
+local allowance. This accounting cannot see credits consumed by other
 applications using the same Twelve Data account. Disable access immediately
 with:
 
@@ -162,12 +186,28 @@ over-stale, or ambiguous rate path fails the run rather than converting part
 of it. Use `--restrict-native-currency` to run a single-currency slice of a
 mixed universe instead.
 
+Create several live tracked portfolios from `/portfolios`. Each portfolio is
+private to its owner and stores current holdings plus immutable dated
+valuation snapshots. Holdings are currently restricted to the portfolio's
+base currency and must have a current persisted market row. Snapshot returns
+are unrealized price returns against the average costs entered by the owner;
+cash is excluded from that return, dividends are excluded unless the source
+explicitly includes them, and the value history includes holding/cash changes
+rather than claiming a time-weighted return.
+
+Record all active portfolios after a market-data refresh:
+
+```bash
+uv run python manage.py snapshot_portfolios
+```
+
 ## Authenticated pages
 
 - `/opportunities` - ranked, filterable analyses from the latest completed run.
 - `/stocks/<listing-id>` - scenarios, factor evidence, risks, and provenance.
 - `/predictions` - the append-only prediction ledger.
 - `/performance` - matured outcomes with minimum-sample safeguards.
+- `/portfolios` - owner-scoped holdings and immutable valuation history.
 - `/simulations` - backtest and portfolio runs through one accounting model.
 - `/status` - database, asset-store, provider, job, and prediction status.
 - `/methodology` - point-in-time, scoring, scenario, and limitation summary.

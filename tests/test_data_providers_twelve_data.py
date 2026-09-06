@@ -126,6 +126,7 @@ def test_missing_or_demo_key_is_rejected_for_live_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(twelve_data.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(twelve_data, "read_twelve_data_api_key", lambda: None)
 
     with pytest.raises(ProviderConfigurationError, match="is required"):
         twelve_data.resolve_api_key()
@@ -133,6 +134,28 @@ def test_missing_or_demo_key_is_rejected_for_live_use(
         twelve_data.resolve_api_key("demo")
 
     assert twelve_data.resolve_api_key("demo", allow_demo=True) == "demo"
+
+
+def test_api_key_resolution_uses_environment_before_keychain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(twelve_data.API_KEY_ENV, "environment-key")
+    monkeypatch.setattr(
+        twelve_data,
+        "read_twelve_data_api_key",
+        lambda: pytest.fail("keychain should not be read when the environment is set"),
+    )
+
+    assert twelve_data.resolve_api_key() == "environment-key"
+
+
+def test_api_key_resolution_falls_back_to_macos_keychain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(twelve_data.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(twelve_data, "read_twelve_data_api_key", lambda: "keychain-key")
+
+    assert twelve_data.resolve_api_key() == "keychain-key"
 
 
 @pytest.mark.parametrize(
