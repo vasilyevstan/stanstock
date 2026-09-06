@@ -10,6 +10,11 @@ from django.contrib.auth.models import User
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import Listing, Region, UniverseMembership, UniverseSnapshot
 from stanstock.portfolio.models import Portfolio
+from stanstock.portfolio.service import (
+    SAMPLE_PORTFOLIO_DEFAULT_CAPITAL,
+    SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
+    SAMPLE_PORTFOLIO_MAX_TOP_N,
+)
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
 
@@ -160,6 +165,29 @@ class PortfolioHoldingForm(forms.Form):
             .select_related("security__company")
             .order_by("ticker")
         )
+
+
+class SamplePortfolioForm(forms.Form):
+    starting_capital = forms.DecimalField(
+        max_digits=24,
+        decimal_places=2,
+        min_value=Decimal("100.00"),
+        initial=SAMPLE_PORTFOLIO_DEFAULT_CAPITAL,
+        label="Starting capital",
+        help_text=(
+            "Reference capital for the frozen model basket. This is research tracking, "
+            "not a record of an executed trade."
+        ),
+    )
+    top_n = forms.IntegerField(
+        min_value=1,
+        max_value=SAMPLE_PORTFOLIO_MAX_TOP_N,
+        initial=SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
+        label="Number of opportunities",
+        help_text=(
+            "Select the highest-ranked eligible opportunities and equal-weight the available set."
+        ),
+    )
 
 
 class SimulationForm(forms.Form):

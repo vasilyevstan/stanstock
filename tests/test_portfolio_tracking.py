@@ -26,10 +26,13 @@ from stanstock.data.models import (
 )
 from stanstock.portfolio.models import Portfolio, PortfolioHolding, PortfolioSnapshot
 from stanstock.portfolio.service import (
+    SAMPLE_PORTFOLIO_POLICY,
     PortfolioValuationError,
+    build_sample_portfolio,
     calculate_portfolio_valuation,
     portfolio_snapshot_series,
     record_portfolio_snapshot,
+    restore_portfolio,
     upsert_holding,
 )
 from stanstock.research.models import (
@@ -129,6 +132,98 @@ def _analysis(listing: Listing) -> StockAnalysis:
             "fundamentals_used": False,
         },
     )
+
+
+def _provider_analysis_run(*, count: int = 3) -> tuple[AnalysisRun, list[Listing]]:
+    universe = Universe.objects.create(
+        slug="provider-opportunities",
+        name="Provider opportunities",
+        config_version="provider-test-v1",
+    )
+    target_date = date(2026, 9, 3)
+    snapshot = UniverseSnapshot.objects.create(
+        universe=universe,
+        as_of_date=target_date,
+        grade=UniverseSnapshot.Grade.RESEARCH,
+        config_hash="e" * 64,
+    )
+    now = timezone.now()
+    run = AnalysisRun.objects.create(
+        generated_at=now,
+        data_cutoff=now,
+        target_date=target_date,
+        universe_snapshot=snapshot,
+        config_version="us-price-baseline-v1",
+        config_hash="f" * 64,
+        code_revision="provider-test",
+    )
+    listings: list[Listing] = []
+    for index in range(count):
+        ticker = f"LIVE{index + 1}"
+        company = Company.objects.create(
+            name=f"Live Company {index + 1}",
+            country="US",
+            sector="Technology",
+        )
+        security = Security.objects.create(company=company, name=f"{ticker} Common")
+        listing = Listing.objects.create(
+            security=security,
+            ticker=ticker,
+            provider_symbol=ticker,
+            exchange_mic="XNAS",
+            currency="USD",
+            region=Region.US,
+        )
+        UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
+        price = Decimal(100 + index * 25)
+        asset = DataAsset.objects.create(
+            provider="twelve_data",
+            kind="price_history",
+            subject=ticker,
+            relative_path=f"tests/{ticker.lower()}-live.parquet",
+            sha256=f"{index + 1}" * 64,
+            retrieved_at=now,
+            available_at=now,
+            metadata={
+                "return_definition": "split_adjusted_price_return",
+                "dividends_included": False,
+            },
+        )
+        LatestMarketData.objects.create(
+            listing=listing,
+            observed_at=now,
+            session_date=date(2026, 9, 4),
+            close=price,
+            previous_close=price - Decimal(1),
+            volume=1_000_000,
+            source_asset=asset,
+        )
+        StockAnalysis.objects.create(
+            run=run,
+            listing=listing,
+            current_price=price,
+            daily_change=Decimal("0.01"),
+            overall_score=Decimal(90 - index),
+            recommendation=Recommendation.BUY,
+            risk_score=Decimal("20"),
+            risk_class=RiskClass.LOW,
+            confidence=Decimal("80"),
+            short_scenario={"bear": -0.03, "base": 0.05, "bull": 0.11},
+            data_quality={
+                "analysis_mode": "price_only_baseline",
+                "fundamentals_used": False,
+                "source_assets": [
+                    {
+                        "id": str(asset.pk),
+                        "provider": "twelve_data",
+                        "kind": "price_history",
+                        "subject": ticker,
+                    }
+                ],
+            },
+        )
+        listings.append(listing)
+    return run, listings
 
 
 @pytest.mark.django_db
@@ -388,12 +483,16 @@ def test_split_sized_price_move_is_flagged_without_rewriting_holding(
     market.session_date = date(2026, 9, 5)
     market.save(update_fields=["close", "session_date"])
 
+    valuation = calculate_portfolio_valuation(portfolio)
     second, created = record_portfolio_snapshot(portfolio)
 
     assert created is True
     assert first.corporate_action_warnings == 0
     assert second.corporate_action_warnings == 1
     assert second.positions.get().corporate_action_suspected is True
+    assert valuation.return_pct == Decimal("-0.375")
+    assert "model return is withheld" not in " ".join(valuation.warnings)
+    assert "quantity and average cost may need review" in " ".join(valuation.warnings)
 
 
 @pytest.mark.django_db
@@ -427,6 +526,168 @@ def test_opportunity_policy_is_analysis_mode_aware(priced_listing: Listing) -> N
     assert assessment.horizon == "short"
     analysis.short_scenario = {"bear": -0.03, "base": -0.01, "bull": 0.05}
     assert assess_opportunity(analysis).eligible is False
+
+
+@pytest.mark.django_db
+def test_sample_portfolio_is_deterministic_idempotent_and_frozen(owner) -> None:
+    run, listings = _provider_analysis_run(count=3)
+
+    portfolio, created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+    duplicate, duplicate_created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+
+    assert created is True
+    assert duplicate_created is False
+    assert duplicate.pk == portfolio.pk
+    assert portfolio.source_analysis_run == run
+    assert portfolio.construction_policy == SAMPLE_PORTFOLIO_POLICY
+    assert portfolio.starting_capital == Decimal("100000")
+    assert portfolio.construction_metadata["signal_horizon"] == "short"
+    holdings = list(portfolio.holdings.order_by("notes"))
+    assert [holding.listing_id for holding in holdings] == [listing.id for listing in listings]
+    assert [holding.notes.split(";", 1)[0] for holding in holdings] == [
+        "Rank 1",
+        "Rank 2",
+        "Rank 3",
+    ]
+    baseline = portfolio.snapshots.get()
+    assert baseline.as_of_date == run.target_date
+    assert baseline.total_value == Decimal("100000")
+    assert baseline.return_pct == Decimal(0)
+    assert set(baseline.positions.values_list("source_asset__provider", flat=True)) == {
+        "twelve_data"
+    }
+    invested = sum(
+        (holding.quantity * holding.average_cost for holding in holdings),
+        Decimal(0),
+    )
+    assert (invested + portfolio.cash_balance).quantize(Decimal("0.000001")) == Decimal(
+        "100000.000000"
+    )
+
+    with pytest.raises(PortfolioValuationError, match="frozen"):
+        upsert_holding(
+            portfolio=portfolio,
+            listing=listings[0],
+            quantity=Decimal("2"),
+            average_cost=Decimal("100"),
+        )
+    with pytest.raises(ValidationError, match="frozen"):
+        holdings[0].delete()
+    portfolio.cash_balance += Decimal(1)
+    with pytest.raises(ValidationError, match="frozen"):
+        portfolio.save()
+    portfolio.refresh_from_db()
+    other_owner = get_user_model().objects.create_user(
+        username="replacement-owner",
+        password="replacement-password",
+    )
+    portfolio.owner = other_owner
+    with pytest.raises(ValidationError, match="frozen"):
+        portfolio.save()
+    portfolio.refresh_from_db()
+    portfolio.archived_at = timezone.now()
+    portfolio.save(update_fields=["archived_at", "updated_at"])
+    replacement, replacement_created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+    assert replacement_created is True
+    assert replacement.pk != portfolio.pk
+    with pytest.raises(PortfolioValuationError, match="Another active sample portfolio"):
+        restore_portfolio(portfolio)
+
+
+@pytest.mark.django_db
+def test_sample_portfolio_rejects_non_provider_analysis(owner, priced_listing: Listing) -> None:
+    analysis = _analysis(priced_listing)
+
+    with pytest.raises(PortfolioValuationError, match="provider-backed"):
+        build_sample_portfolio(owner=owner, source_run=analysis.run, top_n=1)
+
+
+@pytest.mark.django_db
+def test_sample_portfolio_web_flow_and_split_warning(client, owner) -> None:
+    _run, listings = _provider_analysis_run(count=2)
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("portfolios"),
+        {
+            "action": "sample",
+            "starting_capital": "100000.00",
+            "top_n": "2",
+        },
+    )
+
+    portfolio = Portfolio.objects.get(owner=owner, source_analysis_run__isnull=False)
+    assert response.status_code == 302
+    assert response.url == reverse("portfolio-detail", args=[portfolio.pk])
+    detail = client.get(response.url)
+    content = detail.content.decode()
+    assert "Research-reference portfolio; composition is frozen." in content
+    assert "short horizon" in content
+    assert "0.0%" in content
+
+    market = LatestMarketData.objects.get(listing=listings[0])
+    market.close = Decimal("50")
+    market.session_date = date(2026, 9, 5)
+    market.save(update_fields=["close", "session_date"])
+    warned = client.get(response.url).content.decode()
+    assert "Model price return" in warned
+    assert "Withheld" in warned
+    assert "split-sized price move" in warned
+    record_portfolio_snapshot(portfolio)
+    persistently_withheld = client.get(response.url).content.decode()
+    assert "Model return withheld." in persistently_withheld
+    assert "historical split warning" in persistently_withheld
+
+    holding = portfolio.holdings.first()
+    assert holding is not None
+    removed = client.post(reverse("portfolio-holding-delete", args=[portfolio.pk, holding.pk]))
+    assert removed.status_code == 302
+    assert portfolio.holdings.count() == 2
+
+
+@pytest.mark.django_db
+def test_build_sample_portfolio_command_is_idempotent(owner) -> None:
+    _provider_analysis_run(count=2)
+    output = StringIO()
+
+    call_command(
+        "build_sample_portfolio",
+        username=owner.username,
+        starting_capital="100000",
+        top_n=2,
+        stdout=output,
+    )
+    call_command(
+        "build_sample_portfolio",
+        username=owner.username,
+        starting_capital="100000",
+        top_n=2,
+        stdout=output,
+    )
+
+    assert (
+        Portfolio.objects.filter(
+            owner=owner,
+            source_analysis_run__isnull=False,
+        ).count()
+        == 1
+    )
+    assert "already exists" in output.getvalue()
 
 
 @pytest.mark.django_db

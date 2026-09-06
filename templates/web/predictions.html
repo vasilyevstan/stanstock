@@ -54,7 +54,8 @@
         </tr>
       </thead>
       <tbody>
-        {% for prediction in predictions %}
+        {% for card in prediction_cards %}
+          {% with prediction=card.prediction %}
           <tr>
             <td>{{ prediction.generated_at }}<small>Target {{ prediction.target_date }}</small></td>
             <td><a href="{% url 'stock-detail' prediction.listing_id %}"><strong>{{ prediction.listing.ticker }}</strong></a><small>{{ prediction.listing.security.company.name }}</small></td>
@@ -64,6 +65,15 @@
               {% else %}
                 Research-grade reconstruction / late version
               {% endif %}
+              <small>
+                {% if card.source_mode == "provider" %}
+                  Provider-backed · {{ card.source_providers|join:", " }}
+                {% elif card.source_mode == "synthetic" %}
+                  Synthetic fixtures
+                {% else %}
+                  Source unavailable
+                {% endif %}
+              </small>
             </td>
             <td>{{ prediction.get_horizon_display }}</td>
             <td><span class="recommendation recommendation-{{ prediction.recommendation }}">{{ prediction.get_recommendation_display }}</span></td>
@@ -86,6 +96,7 @@
               {% endif %}
             </td>
           </tr>
+          {% endwith %}
         {% empty %}
           <tr><td colspan="9">No predictions have been recorded.</td></tr>
         {% endfor %}

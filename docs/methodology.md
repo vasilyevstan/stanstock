@@ -109,6 +109,12 @@ the relevant historical sample satisfies its configured minimum.
 Confidence remains labeled `heuristic` until out-of-sample calibration
 evidence exists.
 
+The planned implementation sequence and exact math-only forecast identities
+are documented in
+[`docs/forecast-roadmap.md`](forecast-roadmap.md). The roadmap explicitly
+excludes LLMs, trained machine-learning models, analyst targets, and automated
+parameter optimization.
+
 ## Predictions and evaluation
 
 A prediction records the actual generation time, target market date,
@@ -234,3 +240,14 @@ time-weighted or money-weighted performance claim. Each snapshot and position
 is immutable and retains its source asset and market-session date. A
 split-sized price move with unchanged quantity is flagged for manual review;
 StanStock does not silently rewrite the owner's quantity or average cost.
+
+A StanStock sample portfolio is a distinct frozen research artifact. It
+equal-weights eligible opportunities from one provider-backed analysis run,
+stores that run and the construction-policy version, and records a baseline at
+the analyses' immutable reference closes. Those closes are not represented as
+executable fills. Later snapshots use the latest persisted market rows without
+rebalancing, and model return is total current value relative to starting
+capital. A split-sized move withholds that headline return until reviewed.
+The current price-only sample records a short-horizon signal, so later
+buy-and-hold performance is observational rather than evidence that the
+original short thesis remained valid.

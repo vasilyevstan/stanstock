@@ -58,6 +58,14 @@ See `docs/operations.md` for the destructive termination procedure.
   split-sized move with unchanged quantity is flagged, but the owner must
   restate quantity and average cost. Dividends are excluded unless the source
   explicitly states otherwise.
+- StanStock sample portfolios use immutable analysis reference closes so their
+  construction can be reproduced. They are research-reference baskets, not
+  claims of an executable same-close fill. Their composition is frozen, they
+  do not rebalance, and the current price-only signal is intended for 1-10
+  trading days even though the basket can remain visible afterward.
+- Sample-portfolio return is current total value versus starting capital. It
+  is a split-adjusted price return excluding dividends. A possible split
+  suppresses the headline return until its quantity basis is reviewed.
 
 ## Fundamentals
 

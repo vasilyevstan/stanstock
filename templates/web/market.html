@@ -13,6 +13,9 @@
         do not imply live coverage when the provider gate is disabled.
       </p>
     </div>
+    <span class="badge {% if data_mode == "provider" %}badge-success{% elif data_mode == "synthetic" %}badge-failed{% endif %}">
+      {{ data_mode_label }}
+    </span>
   </section>
 
   <section class="metric-grid" aria-label="Regional market breadth">
@@ -54,6 +57,7 @@
             <dd>
               {{ item.row.close }} {{ item.row.listing.currency }}
               <small>{{ item.change|percentage }}</small>
+              <small>{{ item.row.source_asset.provider }}</small>
             </dd>
           </div>
         {% empty %}

@@ -283,6 +283,74 @@ def test_synthetic_provenance_banner_does_not_depend_on_demo_setting(
 
 
 @pytest.mark.django_db
+@override_settings(DEMO_MODE=True)
+def test_provider_backed_run_suppresses_synthetic_banner(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    now = timezone.now()
+    provider_asset = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject=persisted_analysis.listing.ticker,
+        relative_path="tests/live-syn-a.parquet",
+        sha256="d" * 64,
+        retrieved_at=now,
+        available_at=now,
+    )
+    persisted_analysis.data_quality = {
+        "source_assets": [
+            {
+                "id": str(provider_asset.pk),
+                "provider": "twelve_data",
+                "kind": "price_history",
+                "subject": persisted_analysis.listing.ticker,
+            }
+        ]
+    }
+    persisted_analysis.save(update_fields=["data_quality"])
+    market = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    market.source_asset = provider_asset
+    market.save(update_fields=["source_asset"])
+    hidden_company = Company.objects.create(name="Synthetic Hidden", country="US")
+    hidden_security = Security.objects.create(company=hidden_company)
+    hidden_listing = Listing.objects.create(
+        security=hidden_security,
+        ticker="ZZHIDDEN",
+        exchange_mic="XNAS",
+        currency="USD",
+        region=Region.US,
+    )
+    synthetic_asset = DataAsset.objects.create(
+        provider="synthetic_demo",
+        kind="price_history",
+        subject=hidden_listing.ticker,
+        relative_path="tests/hidden-synthetic.parquet",
+        sha256="e" * 64,
+        retrieved_at=now,
+        available_at=now,
+    )
+    LatestMarketData.objects.create(
+        listing=hidden_listing,
+        observed_at=now,
+        session_date=timezone.localdate(),
+        close=Decimal("50"),
+        source_asset=synthetic_asset,
+    )
+
+    status = authenticated_client.get(reverse("status"))
+    market_page = authenticated_client.get(reverse("market"))
+
+    assert status.status_code == 200
+    assert "Twelve Data provider-backed" in status.content.decode()
+    assert "Synthetic research data." not in status.content.decode()
+    assert market_page.status_code == 200
+    assert "Twelve Data provider-backed" in market_page.content.decode()
+    assert "twelve_data" in market_page.content.decode()
+    assert "ZZHIDDEN" not in market_page.content.decode()
+
+
+@pytest.mark.django_db
 def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     authenticated_client,
     persisted_analysis: StockAnalysis,

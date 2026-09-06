@@ -36,7 +36,7 @@
         {% endif %}
       </div>
     </header>
-    {% if request.user.is_authenticated and stanstock_demo_mode or request.user.is_authenticated and stanstock_synthetic_data %}
+    {% if request.user.is_authenticated and stanstock_show_synthetic_banner %}
       <div class="demo-banner" role="status">
         <div class="shell">
           <strong>Synthetic research data.</strong>
