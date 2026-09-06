@@ -108,6 +108,22 @@ outdated price feed is shown as a freshness warning on portfolio pages. Run the
 command after `refresh_demo` in synthetic development or after `daily --region
 us` for enabled live data.
 
+Build the owner's frozen sample portfolio from the latest provider-backed
+opportunity run:
+
+```bash
+uv run python manage.py build_sample_portfolio \
+  --username <owner> \
+  --starting-capital 100000 \
+  --top-n 5
+```
+
+The command is idempotent for an active owner/source-run pair and creates its
+baseline snapshot in the same database transaction. It never calls the market
+provider. Archive the sample before intentionally constructing a replacement
+from the same source run; an archived sample cannot be restored while its
+replacement is active.
+
 An explicit prior `--target-date YYYY-MM-DD` is a research reconstruction,
 not an on-time historical prediction. Disable the provider immediately with:
 

@@ -27,10 +27,14 @@ from stanstock.data.models import (
 )
 from stanstock.portfolio.models import Portfolio, PortfolioHolding
 from stanstock.portfolio.service import (
+    PortfolioValuation,
     PortfolioValuationError,
+    build_sample_portfolio,
     calculate_portfolio_valuation,
+    delete_holding,
     portfolio_snapshot_series,
     record_portfolio_snapshot,
+    restore_portfolio,
     upsert_holding,
 )
 from stanstock.research.models import (
@@ -42,6 +46,15 @@ from stanstock.research.models import (
     StockAnalysis,
 )
 from stanstock.research.opportunities import assess_opportunity
+from stanstock.research.provenance import (
+    analysis_run_data_mode,
+    analysis_run_source_providers,
+    data_mode_label,
+    latest_provider_backed_analysis_run,
+    latest_serving_analysis_run,
+    source_data_mode,
+    source_providers,
+)
 from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.types import SimulationWorkflowError
@@ -50,6 +63,7 @@ from stanstock.web.forms import (
     OpportunityFilterForm,
     PortfolioForm,
     PortfolioHoldingForm,
+    SamplePortfolioForm,
     SimulationForm,
 )
 
@@ -73,6 +87,8 @@ def health(request: HttpRequest) -> JsonResponse:
 def status_page(request: HttpRequest) -> HttpResponse:
     components = system_status()
     latest_run = _latest_analysis_run()
+    data_mode = analysis_run_data_mode(latest_run)
+    data_providers = analysis_run_source_providers(latest_run)
     persisted_opportunities = (
         list(
             StockAnalysis.objects.filter(run=latest_run)
@@ -85,7 +101,8 @@ def status_page(request: HttpRequest) -> HttpResponse:
     context = {
         "components": components,
         "system_ok": all(bool(component["ok"]) for component in components),
-        "demo_mode": settings.DEMO_MODE,
+        "data_mode": data_mode,
+        "data_mode_label": data_mode_label(data_mode, data_providers),
         "opportunities": persisted_opportunities,
         "demo_opportunities": (
             DEMO_OPPORTUNITIES if settings.DEMO_MODE and not persisted_opportunities else []
@@ -93,10 +110,14 @@ def status_page(request: HttpRequest) -> HttpResponse:
         "latest_run": latest_run,
         "providers": ProviderRecord.objects.order_by("provider"),
         "recent_jobs": JobRun.objects.order_by("-started_at")[:5],
-        "prediction_count": Prediction.objects.count(),
+        "prediction_count": Prediction.objects.filter(analysis__run=latest_run).count()
+        if latest_run
+        else 0,
         "matured_count": PredictionOutcome.objects.filter(
-            status=PredictionOutcome.Status.MATURED
-        ).count(),
+            prediction__analysis__run=latest_run, status=PredictionOutcome.Status.MATURED
+        ).count()
+        if latest_run
+        else 0,
     }
     return render(request, "web/status.html", context)
 
@@ -216,11 +237,20 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
     if recommendation in Recommendation.values:
         predictions = predictions.filter(recommendation=recommendation)
 
+    displayed_predictions = list(predictions[:100])
+    prediction_cards = [
+        {
+            "prediction": prediction,
+            "source_mode": source_data_mode({"source_assets": prediction.source_assets}),
+            "source_providers": source_providers({"source_assets": prediction.source_assets}),
+        }
+        for prediction in displayed_predictions
+    ]
     return render(
         request,
         "web/predictions.html",
         {
-            "predictions": predictions[:100],
+            "prediction_cards": prediction_cards,
             "result_count": predictions.count(),
             "horizons": Prediction.Horizon.choices,
             "recommendations": Recommendation.choices,
@@ -231,8 +261,17 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def market_overview_page(request: HttpRequest) -> HttpResponse:
+    latest_run = _latest_analysis_run()
+    market_query = LatestMarketData.objects.select_related(
+        "listing__security__company",
+        "source_asset",
+    )
+    if latest_run is not None:
+        market_query = market_query.filter(
+            listing_id__in=StockAnalysis.objects.filter(run=latest_run).values("listing_id")
+        )
     market_rows = list(
-        LatestMarketData.objects.select_related("listing__security__company").order_by(
+        market_query.order_by(
             "listing__region",
             "listing__ticker",
         )
@@ -297,6 +336,11 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
             "market_rows": latest_listings,
             "regions": regions,
             "sectors": sectors,
+            "data_mode": analysis_run_data_mode(latest_run),
+            "data_mode_label": data_mode_label(
+                analysis_run_data_mode(latest_run),
+                analysis_run_source_providers(latest_run),
+            ),
         },
     )
 
@@ -451,39 +495,72 @@ def simulation_detail_page(request: HttpRequest, run_id: UUID) -> HttpResponse:
 @login_required
 def portfolios_page(request: HttpRequest) -> HttpResponse:
     owner = cast(User, request.user)
+    form = PortfolioForm(owner=owner)
+    sample_form = SamplePortfolioForm()
+    invalid_form = False
     if request.method == "POST":
-        form = PortfolioForm(request.POST, owner=owner)
-        if form.is_valid():
-            portfolio = form.save()
-            record_portfolio_snapshot(portfolio)
-            messages.success(request, f"Portfolio “{portfolio.name}” created.")
-            return redirect("portfolio-detail", portfolio_id=portfolio.id)
-    else:
-        form = PortfolioForm(owner=owner)
+        action = request.POST.get("action", "manual")
+        if action == "sample":
+            sample_form = SamplePortfolioForm(request.POST)
+            invalid_form = not sample_form.is_valid()
+            if not invalid_form:
+                try:
+                    portfolio, created = build_sample_portfolio(
+                        owner=owner,
+                        starting_capital=sample_form.cleaned_data["starting_capital"],
+                        top_n=sample_form.cleaned_data["top_n"],
+                    )
+                except PortfolioValuationError as exc:
+                    sample_form.add_error(None, str(exc))
+                    invalid_form = True
+                else:
+                    if created:
+                        messages.success(
+                            request,
+                            "StanStock sample portfolio created from provider-backed "
+                            "opportunities.",
+                        )
+                    else:
+                        messages.info(
+                            request,
+                            "The sample portfolio for the latest source run already exists.",
+                        )
+                    return redirect("portfolio-detail", portfolio_id=portfolio.id)
+        elif action == "manual":
+            form = PortfolioForm(request.POST, owner=owner)
+            invalid_form = not form.is_valid()
+            if not invalid_form:
+                portfolio = form.save()
+                record_portfolio_snapshot(portfolio)
+                messages.success(request, f"Portfolio “{portfolio.name}” created.")
+                return redirect("portfolio-detail", portfolio_id=portfolio.id)
+        else:
+            messages.error(request, "Unknown portfolio action.")
+            return redirect("portfolios")
 
     active = list(Portfolio.objects.filter(owner=owner, archived_at__isnull=True).order_by("name"))
     archived = Portfolio.objects.filter(owner=owner, archived_at__isnull=False).order_by("name")
-    cards = [
-        {
+    cards: list[dict[str, Any]] = []
+    for portfolio in active:
+        valuation = calculate_portfolio_valuation(portfolio)
+        card: dict[str, Any] = {
             "portfolio": portfolio,
-            "valuation": calculate_portfolio_valuation(portfolio),
+            "valuation": valuation,
             "snapshot_count": portfolio.snapshots.count(),
         }
-        for portfolio in active
-    ]
+        card.update(_model_portfolio_metrics(portfolio, valuation))
+        cards.append(card)
     return render(
         request,
         "web/portfolios.html",
         {
             "form": form,
+            "sample_form": sample_form,
+            "sample_source_run": latest_provider_backed_analysis_run(),
             "portfolio_cards": cards,
             "archived_portfolios": archived,
         },
-        status=(
-            HTTPStatus.BAD_REQUEST
-            if request.method == "POST" and not form.is_valid()
-            else HTTPStatus.OK
-        ),
+        status=HTTPStatus.BAD_REQUEST if invalid_form else HTTPStatus.OK,
     )
 
 
@@ -498,6 +575,13 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
         action = request.POST.get("action", "")
         if portfolio.archived_at is not None and action != "restore":
             messages.error(request, "Restore this portfolio before changing it.")
+            return redirect("portfolio-detail", portfolio_id=portfolio.id)
+        if portfolio.is_model_portfolio and action in {"update", "holding"}:
+            messages.error(
+                request,
+                "Model portfolio construction is frozen so its tracked result remains "
+                "attributable to the original selection.",
+            )
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
         if action == "update":
             portfolio_form = PortfolioForm(request.POST, instance=portfolio, owner=owner)
@@ -534,8 +618,11 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
             messages.success(request, "Portfolio archived; its snapshots remain immutable.")
             return redirect("portfolios")
         elif action == "restore":
-            portfolio.archived_at = None
-            portfolio.save(update_fields=["archived_at", "updated_at"])
+            try:
+                portfolio = restore_portfolio(portfolio)
+            except PortfolioValuationError as exc:
+                messages.error(request, str(exc))
+                return redirect("portfolio-detail", portfolio_id=portfolio.id)
             messages.success(request, "Portfolio restored.")
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
         else:
@@ -580,7 +667,11 @@ def portfolio_holding_delete(
         portfolio=portfolio,
     )
     ticker = holding.listing.ticker
-    holding.delete()
+    try:
+        delete_holding(holding)
+    except PortfolioValuationError as exc:
+        messages.error(request, str(exc))
+        return redirect("portfolio-detail", portfolio_id=portfolio.id)
     _snapshot_with_message(request, portfolio)
     messages.success(request, f"{ticker} removed from the portfolio.")
     return redirect("portfolio-detail", portfolio_id=portfolio.id)
@@ -592,12 +683,7 @@ def methodology_page(request: HttpRequest) -> HttpResponse:
 
 
 def _latest_analysis_run() -> AnalysisRun | None:
-    return (
-        AnalysisRun.objects.filter(status="complete")
-        .select_related("universe_snapshot__universe")
-        .order_by("-generated_at")
-        .first()
-    )
+    return latest_serving_analysis_run()
 
 
 def _filter_analyses(
@@ -683,7 +769,7 @@ def _portfolio_detail_context(
             }
         )
     snapshots = portfolio_snapshot_series(portfolio)
-    return {
+    context = {
         "portfolio": portfolio,
         "portfolio_form": portfolio_form,
         "holding_form": holding_form,
@@ -692,6 +778,42 @@ def _portfolio_detail_context(
         "snapshots": list(reversed(snapshots)),
         "first_snapshot": snapshots[0] if snapshots else None,
         "latest_snapshot": snapshots[-1] if snapshots else None,
+    }
+    context.update(_model_portfolio_metrics(portfolio, valuation))
+    return context
+
+
+def _model_portfolio_metrics(
+    portfolio: Portfolio,
+    valuation: PortfolioValuation,
+) -> dict[str, Any]:
+    if not portfolio.is_model_portfolio or portfolio.starting_capital is None:
+        return {
+            "model_return_pct": None,
+            "model_return_withheld": False,
+            "positive_position_count": None,
+        }
+    total_value = valuation.total_value
+    historical_split_warning = portfolio.snapshots.filter(corporate_action_warnings__gt=0).exists()
+    if total_value is None or valuation.corporate_action_warnings > 0 or historical_split_warning:
+        model_return_withheld = True
+        model_return_pct = None
+    else:
+        model_return_withheld = False
+        model_return_pct = (total_value - portfolio.starting_capital) / portfolio.starting_capital
+    positive_position_count = sum(
+        position.market_value is not None and position.market_value > position.cost_basis
+        for position in valuation.positions
+    )
+    return {
+        "model_return_pct": model_return_pct,
+        "model_return_withheld": model_return_withheld,
+        "model_return_withheld_reason": (
+            "A current or historical split warning makes the frozen quantity basis unreliable."
+            if valuation.corporate_action_warnings > 0 or historical_split_warning
+            else ""
+        ),
+        "positive_position_count": positive_position_count,
     }
 
 

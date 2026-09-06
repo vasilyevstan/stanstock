@@ -28,7 +28,9 @@
         <p class="eyebrow">Runtime</p>
         <h2 id="components-title">Component health</h2>
       </div>
-      {% if demo_mode %}<span class="badge">Synthetic demo mode</span>{% endif %}
+      <span class="badge {% if data_mode == "provider" %}badge-success{% elif data_mode == "synthetic" %}badge-failed{% endif %}">
+        {{ data_mode_label }}
+      </span>
     </div>
     <div class="status-grid">
       {% for component in components %}
@@ -107,7 +109,7 @@
         <span class="muted">Illustrative values only</span>
       {% endif %}
     </div>
-    <div class="table-scroll" tabindex="0" aria-label="Synthetic opportunity table">
+    <div class="table-scroll" tabindex="0" aria-label="{{ data_mode_label }} opportunity table">
       <table>
         <thead>
           <tr>

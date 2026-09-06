@@ -4,9 +4,11 @@ StanStock is a private, local-first stock-research application for transparent
 US and European equity scoring, scenario analysis, immutable prediction
 tracking, live personal portfolios, backtesting, and portfolio simulation.
 
-It is a rules-based research system, not an automated trading service. An LLM
-cannot change scores or recommendations, and forecasts are never presented as
-guarantees.
+It is a rules-based research system, not an automated trading service. It does
+not use LLMs or trained machine-learning models to produce forecasts, scores,
+or recommendations, and forecasts are never presented as guarantees. The
+math-only medium- and long-horizon plan is documented in
+[`docs/forecast-roadmap.md`](docs/forecast-roadmap.md).
 
 ## Current data boundary
 
@@ -215,6 +217,23 @@ cash is excluded from that return, dividends are excluded unless the source
 explicitly includes them, and the value history includes holding/cash changes
 rather than claiming a time-weighted return.
 
+The same page can build an idempotent, frozen StanStock sample portfolio from
+the latest provider-backed opportunity run. It equal-weights up to five
+eligible USD listings by default, preserves the source run and reference
+prices, and creates an immutable baseline snapshot. The current price-only
+sample is a research-reference basket rather than an executable-fill claim;
+its short signal horizon, research grade, no-rebalance policy, split-adjusted
+price-return basis, and dividend exclusion remain visible.
+
+The equivalent command is:
+
+```bash
+uv run python manage.py build_sample_portfolio \
+  --username <owner> \
+  --starting-capital 100000 \
+  --top-n 5
+```
+
 Record all active portfolios after a market-data refresh:
 
 ```bash
@@ -234,9 +253,11 @@ uv run python manage.py snapshot_portfolios
 
 When persisted analysis does not exist, the status page clearly labels its
 illustrative synthetic rows. Data-bearing pages require authentication;
-`/healthz` exposes only coarse readiness information. The authenticated
-synthetic-data banner is derived from persisted source provenance, so disabling
-demo mode cannot make synthetic analyses appear live.
+`/healthz` exposes only coarse readiness information. The authenticated data
+label is derived from the latest serving analysis provenance rather than the
+development debug setting, and the market overview is restricted to that
+serving run's listings. Historical prediction rows retain their own
+provider/synthetic labels.
 
 ## Integrity guarantees
 

@@ -58,7 +58,8 @@ def test_authenticated_status_shows_local_shell(client) -> None:
     assert response.headers["Cache-Control"] == "no-store"
     content = response.content.decode()
     assert "StanStock is running locally." in content
-    assert "Synthetic demo mode" in content
+    assert "Synthetic research data." in content
+    assert "No serving analysis" in content
     assert "DEMO-US" in content
 
 

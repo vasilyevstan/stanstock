@@ -26,7 +26,7 @@ services:
       DATABASE_URL: "postgresql://stanstock:stanstock@db:5432/stanstock"
       STANSTOCK_DATA_DIR: "/app/var/data"
       STANSTOCK_BACKUP_DIR: "/app/var/backups"
-      STANSTOCK_DEMO_MODE: "true"
+      STANSTOCK_DEMO_MODE: "${STANSTOCK_DEMO_MODE:-true}"
       STANSTOCK_OWNER_USERNAME: "${STANSTOCK_OWNER_USERNAME:-admin}"
       STANSTOCK_OWNER_PASSWORD: "${STANSTOCK_OWNER_PASSWORD:-stanstock-dev}"
       STANSTOCK_OWNER_EMAIL: "${STANSTOCK_OWNER_EMAIL:-}"

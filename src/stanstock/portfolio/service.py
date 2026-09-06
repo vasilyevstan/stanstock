@@ -4,12 +4,14 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
+from uuid import UUID
 
+from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from stanstock.data.models import LatestMarketData, Listing
+from stanstock.data.models import DataAsset, LatestMarketData, Listing
 from stanstock.portfolio.models import (
     Portfolio,
     PortfolioHolding,
@@ -17,10 +19,26 @@ from stanstock.portfolio.models import (
     PortfolioSnapshotHolding,
 )
 from stanstock.research.config import code_revision
+from stanstock.research.models import AnalysisRun, StockAnalysis
+from stanstock.research.opportunities import OpportunityAssessment, assess_opportunity
+from stanstock.research.provenance import (
+    DATA_MODE_PROVIDER,
+    analysis_run_data_mode,
+    analysis_run_source_providers,
+    latest_provider_backed_analysis_run,
+    source_assets,
+    source_data_mode,
+)
 
 MAX_PORTFOLIO_PRICE_AGE_DAYS = 7
 SPLIT_WARNING_LOW_RATIO = Decimal("0.60")
 SPLIT_WARNING_HIGH_RATIO = Decimal("1.67")
+SAMPLE_PORTFOLIO_POLICY = "equal_weight_opportunities_v1"
+SAMPLE_PORTFOLIO_DEFAULT_CAPITAL = Decimal("100000.000000")
+SAMPLE_PORTFOLIO_DEFAULT_TOP_N = 5
+SAMPLE_PORTFOLIO_MAX_TOP_N = 20
+MONEY_QUANTUM = Decimal("0.000001")
+QUANTITY_QUANTUM = Decimal("0.00000001")
 
 
 class PortfolioValuationError(ValueError):
@@ -54,6 +72,7 @@ class PortfolioValuation:
     warnings: tuple[str, ...]
     return_definition: str
     dividends_included: bool
+    corporate_action_warnings: int
 
     @property
     def complete(self) -> bool:
@@ -67,9 +86,21 @@ class PortfolioSnapshotBatch:
     failures: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SamplePortfolioSelection:
+    analysis: StockAnalysis
+    opportunity: OpportunityAssessment
+    source_asset: DataAsset
+    reference_price: Decimal
+    quantity: Decimal
+    cost_basis: Decimal
+
+
 def validate_holding_listing(*, portfolio: Portfolio, listing: Listing) -> None:
     if portfolio.archived_at is not None:
         raise PortfolioValuationError("Archived portfolios cannot be changed.")
+    if portfolio.is_model_portfolio:
+        raise PortfolioValuationError("Model portfolio holdings are frozen.")
     if not listing.is_active:
         raise PortfolioValuationError(f"{listing.ticker} is not an active listing.")
     if listing.currency.upper() != portfolio.base_currency:
@@ -111,6 +142,180 @@ def upsert_holding(
     return holding
 
 
+def delete_holding(holding: PortfolioHolding) -> None:
+    if holding.portfolio.is_model_portfolio:
+        raise PortfolioValuationError("Model portfolio holdings are frozen.")
+    holding.delete()
+
+
+def build_sample_portfolio(
+    *,
+    owner: User,
+    starting_capital: Decimal = SAMPLE_PORTFOLIO_DEFAULT_CAPITAL,
+    top_n: int = SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
+    source_run: AnalysisRun | None = None,
+) -> tuple[Portfolio, bool]:
+    capital = starting_capital.quantize(MONEY_QUANTUM, rounding=ROUND_DOWN)
+    if capital <= 0:
+        raise PortfolioValuationError("Starting capital must be positive.")
+    if top_n < 1 or top_n > SAMPLE_PORTFOLIO_MAX_TOP_N:
+        raise PortfolioValuationError(f"Top N must be between 1 and {SAMPLE_PORTFOLIO_MAX_TOP_N}.")
+
+    run = source_run or latest_provider_backed_analysis_run()
+    if run is None:
+        raise PortfolioValuationError("No completed analysis run is available.")
+    if run.status != "complete":
+        raise PortfolioValuationError("The source analysis run is not complete.")
+    if analysis_run_data_mode(run) != DATA_MODE_PROVIDER:
+        raise PortfolioValuationError(
+            "A sample portfolio requires a provider-backed analysis run; "
+            "synthetic research cannot seed tracked accuracy."
+        )
+
+    existing = Portfolio.objects.filter(
+        owner=owner,
+        source_analysis_run=run,
+        archived_at__isnull=True,
+    ).first()
+    if existing is not None:
+        return existing, False
+
+    candidates: list[tuple[StockAnalysis, OpportunityAssessment, DataAsset]] = []
+    analyses = run.stocks.select_related("listing__security__company").order_by(
+        "-overall_score",
+        "-confidence",
+        "listing__ticker",
+        "pk",
+    )
+    for analysis in analyses:
+        opportunity = assess_opportunity(analysis)
+        if not opportunity.eligible:
+            continue
+        if analysis.listing.currency.upper() != Portfolio.Currency.USD:
+            continue
+        if not analysis.listing.is_active:
+            continue
+        if source_data_mode(analysis.data_quality) != DATA_MODE_PROVIDER:
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} has incomplete provider provenance."
+            )
+        if not LatestMarketData.objects.filter(listing=analysis.listing).exists():
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} has no current market row for ongoing tracking."
+            )
+        candidates.append((analysis, opportunity, _analysis_price_asset(analysis)))
+        if len(candidates) == top_n:
+            break
+    if not candidates:
+        raise PortfolioValuationError(
+            "The latest provider-backed run has no eligible opportunities."
+        )
+
+    allocation = capital / len(candidates)
+    selections: list[SamplePortfolioSelection] = []
+    invested = Decimal(0)
+    for analysis, opportunity, source_asset in candidates:
+        reference_price = analysis.current_price.quantize(MONEY_QUANTUM)
+        if reference_price <= 0:
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} has an invalid reference price."
+            )
+        quantity = (allocation / reference_price).quantize(
+            QUANTITY_QUANTUM,
+            rounding=ROUND_DOWN,
+        )
+        if quantity <= 0:
+            raise PortfolioValuationError(
+                f"Starting capital is too small to allocate {analysis.listing.ticker}."
+            )
+        cost_basis = (quantity * reference_price).quantize(
+            MONEY_QUANTUM,
+            rounding=ROUND_DOWN,
+        )
+        invested += cost_basis
+        selections.append(
+            SamplePortfolioSelection(
+                analysis=analysis,
+                opportunity=opportunity,
+                source_asset=source_asset,
+                reference_price=reference_price,
+                quantity=quantity,
+                cost_basis=cost_basis,
+            )
+        )
+
+    cash_balance = (capital - invested).quantize(MONEY_QUANTUM, rounding=ROUND_DOWN)
+    if cash_balance < 0:
+        raise PortfolioValuationError("Sample allocation exceeded its starting capital.")
+
+    first_opportunity = selections[0].opportunity
+    metadata = {
+        "entry_basis": "analysis_reference_close",
+        "investability": "research_reference",
+        "opportunity_policy_version": first_opportunity.policy_version,
+        "signal_label": first_opportunity.label,
+        "signal_horizon": first_opportunity.horizon,
+        "requested_top_n": top_n,
+        "selected_count": len(selections),
+        "rebalance_policy": "none",
+        "source_providers": sorted(analysis_run_source_providers(run)),
+        "universe_grade": run.universe_snapshot.grade,
+        "issued_on_time": run.issued_on_time,
+        "return_definition": "split_adjusted_price_return",
+        "dividends_included": False,
+    }
+    base_name = f"StanStock Sample {run.target_date.isoformat()} {str(run.pk)[:8]}"
+    description = (
+        f"Frozen equal-weight research-reference basket of {len(selections)} "
+        f"{first_opportunity.label.lower()} selections from the "
+        f"{run.target_date.isoformat()} provider-backed analysis. Entry values use "
+        "the immutable analysis reference closes, not executable fills."
+    )
+
+    with transaction.atomic():
+        AnalysisRun.objects.select_for_update().get(pk=run.pk)
+        existing = (
+            Portfolio.objects.select_for_update()
+            .filter(
+                owner=owner,
+                source_analysis_run=run,
+                archived_at__isnull=True,
+            )
+            .first()
+        )
+        if existing is not None:
+            return existing, False
+        portfolio = Portfolio.objects.create(
+            owner=owner,
+            name=_available_sample_name(owner, base_name),
+            description=description,
+            base_currency=Portfolio.Currency.USD,
+            cash_balance=cash_balance,
+            source_analysis_run=run,
+            construction_policy=SAMPLE_PORTFOLIO_POLICY,
+            construction_metadata=metadata,
+            starting_capital=capital,
+        )
+        PortfolioHolding.objects.bulk_create(
+            [
+                PortfolioHolding(
+                    portfolio=portfolio,
+                    listing=selection.analysis.listing,
+                    quantity=selection.quantity,
+                    average_cost=selection.reference_price,
+                    acquired_on=run.target_date,
+                    notes=(
+                        f"Rank {rank}; {selection.opportunity.label}; "
+                        f"source analysis {selection.analysis.pk}"
+                    ),
+                )
+                for rank, selection in enumerate(selections, start=1)
+            ]
+        )
+        _record_sample_baseline(portfolio, run, selections)
+    return portfolio, True
+
+
 def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
     holdings = list(
         portfolio.holdings.select_related(
@@ -135,6 +340,7 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
             warnings=(),
             return_definition="price_return",
             dividends_included=False,
+            corporate_action_warnings=0,
         )
 
     market_rows: dict[object, LatestMarketData] = {}
@@ -225,6 +431,18 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
         unrealized_gain = securities_value - cost_basis
         return_pct = unrealized_gain / cost_basis if cost_basis > 0 else None
 
+    corporate_action_warnings = sum(_corporate_action_suspected(position) for position in positions)
+    if corporate_action_warnings:
+        if portfolio.is_model_portfolio:
+            warnings.append(
+                "A split-sized price move was detected; model return is withheld "
+                "until the quantity basis is reviewed."
+            )
+        else:
+            warnings.append(
+                "A split-sized price move was detected; quantity and average cost may need review."
+            )
+
     return PortfolioValuation(
         portfolio=portfolio,
         positions=tuple(positions),
@@ -243,6 +461,7 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
             next(iter(return_definitions)) if len(return_definitions) == 1 else "mixed_price_return"
         ),
         dividends_included=bool(dividends_flags) and all(dividends_flags),
+        corporate_action_warnings=corporate_action_warnings,
     )
 
 
@@ -284,7 +503,7 @@ def record_portfolio_snapshot(
         position.holding.listing_id: _corporate_action_suspected(position)
         for position in valuation.positions
     }
-    warning_count = sum(corporate_action_flags.values())
+    warning_count = valuation.corporate_action_warnings
 
     with transaction.atomic():
         snapshot, created = PortfolioSnapshot.objects.get_or_create(
@@ -365,6 +584,29 @@ def snapshot_all_portfolios() -> PortfolioSnapshotBatch:
     )
 
 
+def restore_portfolio(portfolio: Portfolio) -> Portfolio:
+    with transaction.atomic():
+        locked = Portfolio.objects.select_for_update().get(pk=portfolio.pk)
+        if locked.source_analysis_run_id is not None:
+            AnalysisRun.objects.select_for_update().get(pk=locked.source_analysis_run_id)
+            conflict_exists = (
+                Portfolio.objects.filter(
+                    owner_id=locked.owner_id,
+                    source_analysis_run_id=locked.source_analysis_run_id,
+                    archived_at__isnull=True,
+                )
+                .exclude(pk=locked.pk)
+                .exists()
+            )
+            if conflict_exists:
+                raise PortfolioValuationError(
+                    "Another active sample portfolio already tracks this source run."
+                )
+        locked.archived_at = None
+        locked.save(update_fields=["archived_at", "updated_at"])
+    return locked
+
+
 def _corporate_action_suspected(position: ValuedHolding) -> bool:
     market_data = position.market_data
     if market_data is None:
@@ -381,3 +623,127 @@ def _corporate_action_suspected(position: ValuedHolding) -> bool:
         return False
     ratio = market_data.close / previous.price
     return ratio < SPLIT_WARNING_LOW_RATIO or ratio > SPLIT_WARNING_HIGH_RATIO
+
+
+def _analysis_price_asset(analysis: StockAnalysis) -> DataAsset:
+    expected_subjects = {
+        analysis.listing.ticker,
+        analysis.listing.provider_symbol,
+    }
+    for asset in source_assets(analysis.data_quality):
+        if asset.get("kind") != "price_history":
+            continue
+        if str(asset.get("subject", "")) not in expected_subjects:
+            continue
+        try:
+            asset_id = UUID(str(asset["id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} price provenance has no valid asset id."
+            ) from exc
+        try:
+            source_asset = DataAsset.objects.get(pk=asset_id)
+        except DataAsset.DoesNotExist as exc:
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} source asset is unavailable."
+            ) from exc
+        if source_asset.provider.startswith("synthetic"):
+            raise PortfolioValuationError(f"{analysis.listing.ticker} source asset is synthetic.")
+        return source_asset
+    raise PortfolioValuationError(f"{analysis.listing.ticker} has no matching price source asset.")
+
+
+def _available_sample_name(owner: User, base_name: str) -> str:
+    if not Portfolio.objects.filter(owner=owner, name=base_name).exists():
+        return base_name
+    suffix = 2
+    while Portfolio.objects.filter(owner=owner, name=f"{base_name} ({suffix})").exists():
+        suffix += 1
+    return f"{base_name} ({suffix})"
+
+
+def _record_sample_baseline(
+    portfolio: Portfolio,
+    run: AnalysisRun,
+    selections: list[SamplePortfolioSelection],
+) -> PortfolioSnapshot:
+    payload = {
+        "portfolio_id": str(portfolio.pk),
+        "source_analysis_run_id": str(run.pk),
+        "as_of_date": run.target_date.isoformat(),
+        "base_currency": portfolio.base_currency,
+        "cash_balance": str(portfolio.cash_balance),
+        "positions": [
+            {
+                "listing_id": str(selection.analysis.listing_id),
+                "quantity": str(selection.quantity),
+                "reference_price": str(selection.reference_price),
+                "source_asset_id": str(selection.source_asset.pk),
+            }
+            for selection in selections
+        ],
+    }
+    input_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    securities_value = sum(
+        (selection.cost_basis for selection in selections),
+        Decimal(0),
+    ).quantize(MONEY_QUANTUM)
+    total_value = (portfolio.cash_balance + securities_value).quantize(MONEY_QUANTUM)
+    return_definitions = {
+        str(
+            selection.source_asset.metadata.get("return_definition")
+            or "split_adjusted_price_return"
+        )
+        for selection in selections
+    }
+    dividends_included = all(
+        selection.source_asset.metadata.get("dividends_included") is True
+        for selection in selections
+    )
+    snapshot = PortfolioSnapshot.objects.create(
+        portfolio=portfolio,
+        as_of_date=run.target_date,
+        oldest_price_date=run.target_date,
+        newest_price_date=run.target_date,
+        base_currency=portfolio.base_currency,
+        cash_balance=portfolio.cash_balance,
+        securities_value=securities_value,
+        total_value=total_value,
+        cost_basis=securities_value,
+        unrealized_gain=Decimal(0),
+        return_pct=Decimal(0),
+        input_hash=input_hash,
+        code_revision=code_revision(),
+        return_definition=(
+            next(iter(return_definitions)) if len(return_definitions) == 1 else "mixed_price_return"
+        ),
+        dividends_included=dividends_included,
+        corporate_action_warnings=0,
+    )
+    holding_listing_ids = set(portfolio.holdings.values_list("listing_id", flat=True))
+    expected_listing_ids = {selection.analysis.listing_id for selection in selections}
+    if holding_listing_ids != expected_listing_ids:
+        raise PortfolioValuationError(
+            "Sample portfolio holdings do not match the selected analyses."
+        )
+    PortfolioSnapshotHolding.objects.bulk_create(
+        [
+            PortfolioSnapshotHolding(
+                snapshot=snapshot,
+                listing=selection.analysis.listing,
+                source_asset=selection.source_asset,
+                source_session_date=run.target_date,
+                quantity=selection.quantity,
+                average_cost=selection.reference_price,
+                price=selection.reference_price,
+                cost_basis=selection.cost_basis,
+                market_value=selection.cost_basis,
+                unrealized_gain=Decimal(0),
+                corporate_action_suspected=False,
+            )
+            for selection in selections
+        ]
+    )
+    return snapshot

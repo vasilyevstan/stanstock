@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from stanstock.data.models import DataAsset, ImmutableEvidenceModel, Listing
+from stanstock.research.models import AnalysisRun
 
 
 class Portfolio(models.Model):
@@ -24,6 +27,21 @@ class Portfolio(models.Model):
     description = models.TextField(blank=True)
     base_currency = models.CharField(max_length=3, choices=Currency.choices)
     cash_balance = models.DecimalField(max_digits=24, decimal_places=6, default=0)
+    source_analysis_run = models.ForeignKey(
+        AnalysisRun,
+        on_delete=models.PROTECT,
+        related_name="sample_portfolios",
+        null=True,
+        blank=True,
+    )
+    construction_policy = models.CharField(max_length=80, blank=True)
+    construction_metadata = models.JSONField(default=dict, blank=True)
+    starting_capital = models.DecimalField(
+        max_digits=24,
+        decimal_places=6,
+        null=True,
+        blank=True,
+    )
     archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -39,10 +57,103 @@ class Portfolio(models.Model):
                 condition=models.Q(cash_balance__gte=0),
                 name="portfolio_cash_nonnegative",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(starting_capital__isnull=True) | models.Q(starting_capital__gt=0)
+                ),
+                name="portfolio_starting_capital_positive",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "source_analysis_run"],
+                condition=models.Q(
+                    source_analysis_run__isnull=False,
+                    archived_at__isnull=True,
+                ),
+                name="unique_active_sample_portfolio_run",
+            ),
         ]
 
     def __str__(self) -> str:
         return f"{self.owner_id}:{self.name}"
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        if self.pk:
+            original = (
+                Portfolio.objects.filter(pk=self.pk)
+                .values(
+                    "owner_id",
+                    "source_analysis_run_id",
+                    "name",
+                    "description",
+                    "base_currency",
+                    "cash_balance",
+                    "construction_policy",
+                    "construction_metadata",
+                    "starting_capital",
+                )
+                .first()
+            )
+            if original and original["source_analysis_run_id"] is not None:
+                frozen_values = (
+                    ("owner_id", original["owner_id"], self.owner_id),
+                    (
+                        "source_analysis_run_id",
+                        original["source_analysis_run_id"],
+                        self.source_analysis_run_id,
+                    ),
+                    ("name", original["name"], self.name),
+                    ("description", original["description"], self.description),
+                    ("base_currency", original["base_currency"], self.base_currency),
+                    ("cash_balance", original["cash_balance"], self.cash_balance),
+                    (
+                        "construction_policy",
+                        original["construction_policy"],
+                        self.construction_policy,
+                    ),
+                    (
+                        "construction_metadata",
+                        original["construction_metadata"],
+                        self.construction_metadata,
+                    ),
+                    (
+                        "starting_capital",
+                        original["starting_capital"],
+                        self.starting_capital,
+                    ),
+                )
+                changed = [
+                    field
+                    for field, original_value, current_value in frozen_values
+                    if original_value != current_value
+                ]
+                if changed:
+                    raise ValidationError(
+                        "Model portfolio construction is frozen; only archive status may change."
+                    )
+        super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        if self.is_model_portfolio:
+            if not self.construction_policy:
+                raise ValidationError(
+                    {"construction_policy": "Model portfolios require a construction policy."}
+                )
+            if self.starting_capital is None or self.starting_capital <= 0:
+                raise ValidationError(
+                    {"starting_capital": "Model portfolios require positive starting capital."}
+                )
+        elif (
+            self.construction_policy
+            or self.construction_metadata
+            or self.starting_capital is not None
+        ):
+            raise ValidationError("Manual portfolios cannot contain model-portfolio provenance.")
+
+    @property
+    def is_model_portfolio(self) -> bool:
+        return self.source_analysis_run_id is not None
 
 
 class PortfolioHolding(models.Model):
@@ -78,6 +189,22 @@ class PortfolioHolding(models.Model):
 
     def __str__(self) -> str:
         return f"{self.portfolio_id}:{self.listing_id}"
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if (
+            self.portfolio_id
+            and Portfolio.objects.filter(
+                pk=self.portfolio_id,
+                source_analysis_run__isnull=False,
+            ).exists()
+        ):
+            raise ValidationError("Model portfolio holdings are frozen.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+        if self.portfolio.source_analysis_run_id is not None:
+            raise ValidationError("Model portfolio holdings are frozen.")
+        return super().delete(*args, **kwargs)
 
 
 class PortfolioSnapshot(ImmutableEvidenceModel):
