@@ -53,11 +53,11 @@
       <dl class="key-values">
         {% for item in market_rows %}
           <div>
-            <dt>{{ item.row.listing.ticker }} · {{ item.row.listing.region }}</dt>
+            <dt>{{ item.row.listing.ticker }} · {{ item.row.listing.region|display_label }}</dt>
             <dd>
-              {{ item.row.close }} {{ item.row.listing.currency }}
+              {{ item.row.close|price }} {{ item.row.listing.currency }}
               <small>{{ item.change|percentage }}</small>
-              <small>{{ item.row.source_asset.provider }}</small>
+              <small>{{ item.row.source_asset.provider|display_label }}</small>
             </dd>
           </div>
         {% empty %}

@@ -134,14 +134,14 @@
                 <span class="opportunity-badge">{{ card.opportunity.label }}</span>
               {% endif %}
             </td>
-            <td>{{ stock.current_price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
+            <td>{{ stock.current_price|price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
             <td><strong>{{ stock.overall_score }}/100</strong></td>
             <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
             <td>{{ stock.short_scenario|scenario_range }}</td>
             <td>{{ stock.medium_scenario|scenario_range }}</td>
             <td>{{ stock.long_scenario|scenario_range }}</td>
             <td>{{ stock.get_risk_class_display }}</td>
-            <td>{{ stock.confidence }}% <small>{{ stock.confidence_status }}</small></td>
+            <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
           </tr>
           {% endwith %}
         {% empty %}

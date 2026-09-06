@@ -6,7 +6,7 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">{{ listing.region }} · {{ listing.exchange_mic }}</p>
+      <p class="eyebrow">{{ listing.region|display_label }} · {{ listing.exchange_mic }}</p>
       <h1>{{ listing.ticker }}</h1>
       <p class="lede">{{ listing.security.company.name }} · {{ listing.currency }}</p>
     </div>
@@ -17,9 +17,9 @@
         {% endif %}
         <span class="recommendation recommendation-{{ analysis.recommendation }}">{{ analysis.get_recommendation_display }}</span>
         <strong>{{ analysis.overall_score }}/100</strong>
-        <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence }}% heuristic confidence</small>
+        <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence|floatformat:"0" }}% heuristic confidence</small>
         {% if opportunity.eligible %}
-          <small>{{ opportunity.policy_version }} · {{ opportunity.horizon }} horizon</small>
+          <small>{{ opportunity.policy_version }} · {{ opportunity.horizon|display_label }} horizon</small>
         {% endif %}
       </div>
     {% endif %}
@@ -37,7 +37,7 @@
     <section class="metric-grid" aria-label="Current analysis">
       <article>
         <small>Price</small>
-        <strong>{{ analysis.current_price }} {{ listing.currency }}</strong>
+        <strong>{{ analysis.current_price|price }} {{ listing.currency }}</strong>
         <span>{{ analysis.daily_change|percentage }}</span>
         {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
           <span>Split-adjusted price return; dividends excluded.</span>
@@ -46,19 +46,37 @@
       <article>
         <small>Short scenario</small>
         <strong>{{ analysis.short_scenario|scenario_range }}</strong>
-        <span>{{ analysis.short_scenario.method|default:"Bear / base / bull" }}</span>
+        <span>
+          {% if analysis.short_scenario.method %}
+            {{ analysis.short_scenario.method|display_label }}
+          {% else %}
+            Bear / base / bull
+          {% endif %}
+        </span>
         {% if analysis.short_scenario.insufficiency_reason %}<span>{{ analysis.short_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
       <article>
         <small>6-12 month scenario</small>
         <strong>{{ analysis.medium_scenario|scenario_range }}</strong>
-        <span>{{ analysis.medium_scenario.method|default:"Bear / base / bull" }}</span>
+        <span>
+          {% if analysis.medium_scenario.method %}
+            {{ analysis.medium_scenario.method|display_label }}
+          {% else %}
+            Bear / base / bull
+          {% endif %}
+        </span>
         {% if analysis.medium_scenario.insufficiency_reason %}<span>{{ analysis.medium_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
       <article>
         <small>3+ year scenario</small>
         <strong>{{ analysis.long_scenario|scenario_range }}</strong>
-        <span>{{ analysis.long_scenario.method|default:"Explicit uncertainty" }}</span>
+        <span>
+          {% if analysis.long_scenario.method %}
+            {{ analysis.long_scenario.method|display_label }}
+          {% else %}
+            Explicit uncertainty
+          {% endif %}
+        </span>
         {% if analysis.long_scenario.insufficiency_reason %}<span>{{ analysis.long_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
     </section>
@@ -91,7 +109,7 @@
         <h2>Component scores</h2>
         <dl class="key-values">
           {% for key, value in analysis.component_scores|mapping_items %}
-            <div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>
+            <div><dt>{{ key|display_label }}</dt><dd>{{ value }}</dd></div>
           {% empty %}
             <div><dt>Coverage</dt><dd>Unavailable</dd></div>
           {% endfor %}
@@ -112,7 +130,7 @@
           {% for asset in analysis.data_quality.source_assets %}
             <article>
               <div>
-                <strong>{{ asset.provider }} · {{ asset.kind }}</strong>
+                <strong>{{ asset.provider|display_label }} · {{ asset.kind|display_label }}</strong>
                 <small>{{ asset.subject }} · available {{ asset.available_at }}</small>
               </div>
               <span class="badge">{{ asset.sha256|slice:":12" }}</span>

@@ -67,7 +67,7 @@
               {% endif %}
               <small>
                 {% if card.source_mode == "provider" %}
-                  Provider-backed · {{ card.source_providers|join:", " }}
+                  Provider-backed · {{ card.source_providers|label_list }}
                 {% elif card.source_mode == "synthetic" %}
                   Synthetic fixtures
                 {% else %}
@@ -86,7 +86,7 @@
                 {% if prediction.insufficiency_reason %}<small>{{ prediction.insufficiency_reason }}</small>{% endif %}
               {% endif %}
             </td>
-            <td>{{ prediction.confidence }}%<small>{{ prediction.confidence_status }}</small></td>
+            <td>{{ prediction.confidence|floatformat:"0" }}%<small>{{ prediction.confidence_status|display_label }}</small></td>
             <td>
               {% if prediction.outcome %}
                 {{ prediction.outcome.get_status_display }}
