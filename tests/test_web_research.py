@@ -515,6 +515,88 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
 
 
 @pytest.mark.django_db
+def test_performance_never_pools_distinct_configuration_versions(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    listing = persisted_analysis.listing
+    for method_index, (version, digest) in enumerate(
+        (
+            ("us-price-baseline-v1", "1" * 64),
+            ("us-price-baseline-v2", "2" * 64),
+        )
+    ):
+        generated_at = datetime(2026, 9, 8 + method_index, 1, tzinfo=UTC)
+        run = AnalysisRun.objects.create(
+            generated_at=generated_at,
+            data_cutoff=generated_at,
+            target_date=date(2026, 9, 7 + method_index),
+            issued_on_time=True,
+            universe_snapshot=snapshot,
+            config_version=version,
+            config_hash=digest,
+            code_revision="test-revision",
+        )
+        analysis = StockAnalysis.objects.create(
+            run=run,
+            listing=listing,
+            current_price=Decimal("100"),
+            overall_score=Decimal("70"),
+            recommendation=Recommendation.HOLD,
+            risk_score=Decimal("35"),
+            risk_class=RiskClass.MEDIUM,
+            confidence=Decimal("60"),
+        )
+        for prediction_index in range(15):
+            prediction = Prediction.objects.create(
+                analysis=analysis,
+                listing=listing,
+                generated_at=generated_at,
+                target_date=run.target_date,
+                issued_on_time=True,
+                horizon=Prediction.Horizon.SHORT,
+                price_at_prediction=Decimal("100"),
+                bear_return=Decimal("-0.03"),
+                base_return=Decimal("0.02"),
+                bull_return=Decimal("0.07"),
+                probability_positive=None,
+                confidence=Decimal("60"),
+                confidence_status="heuristic",
+                insufficiency_reason="",
+                recommendation=Recommendation.HOLD,
+                overall_score=Decimal("70"),
+                model_version=f"method-{method_index}-{prediction_index}",
+                config_hash=digest,
+                data_cutoff=generated_at,
+                code_revision="test-revision",
+            )
+            PredictionOutcome.objects.create(
+                prediction=prediction,
+                evaluated_at=datetime(2026, 10, 1, 12, tzinfo=UTC),
+                evaluation_date=date(2026, 10, 1),
+                status=PredictionOutcome.Status.MATURED,
+                actual_return=Decimal("0.05"),
+                benchmark_return=Decimal("0.02"),
+                success=True,
+                resolution="Observed method cohort",
+            )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert response.context["summary"]["config_version"] == "us-price-baseline-v2"
+    assert response.context["summary"]["sample_count"] == 15
+    assert response.context["summary"]["sufficient_sample"] is False
+    groups = list(response.context["groups"])
+    assert len(groups) == 2
+    assert {group["sample_count"] for group in groups} == {15}
+    assert "Method versions remain separate." in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_market_overview_uses_persisted_latest_market_data(
     authenticated_client,
     persisted_analysis: StockAnalysis,

@@ -68,9 +68,12 @@ def calculate_indicators(
         signal = _ema(macd_line[~np.isnan(macd_line)], 9)
         values["macd"] = float(macd_line[-1])
         values["macd_signal"] = float(signal[-1])
-        values["macd_histogram"] = float(macd_line[-1] - signal[-1])
+        histogram = float(macd_line[-1] - signal[-1])
+        values["macd_histogram"] = histogram
+        values["macd_histogram_pct"] = histogram / last_close
     else:
         missing["macd"] = "Need at least 35 closes"
+        missing["macd_histogram_pct"] = missing["macd"]
 
     if highs is not None and lows is not None and len(closes) >= 15:
         values["atr_14"] = _atr(highs, lows, closes, 14)
@@ -112,7 +115,8 @@ def calculate_indicators(
         missing["52w_range"] = "Need at least 252 closes"
 
     if volumes is not None and len(volumes) >= 20:
-        avg_20 = float(np.mean(volumes[-20:]))
+        recent_volumes = volumes[-20:]
+        avg_20 = float(np.mean(recent_volumes))
         values["avg_volume_20d"] = avg_20
         values["abnormal_volume"] = float(volumes[-1] / avg_20) if avg_20 > 0 else 0.0
         if len(volumes) >= 80:
@@ -120,8 +124,21 @@ def calculate_indicators(
             values["volume_trend"] = float(avg_20 / avg_60_prior - 1.0) if avg_60_prior > 0 else 0.0
         else:
             missing["volume_trend"] = "Need at least 80 volume observations"
+        recent_closes = closes[-20:]
+        if (
+            np.isfinite(recent_volumes).all()
+            and (recent_volumes >= 0).all()
+            and np.isfinite(recent_closes).all()
+        ):
+            values["avg_dollar_volume_20d"] = float(np.mean(recent_closes * recent_volumes))
+            values["abnormal_volume_strict"] = float(volumes[-1] / avg_20) if avg_20 > 0 else 0.0
+        else:
+            missing["avg_dollar_volume_20d"] = "Recent volume observations must be finite"
+            missing["abnormal_volume_strict"] = "Recent volume observations must be finite"
     else:
         missing["volume"] = "Need volume and at least 20 observations"
+        missing["avg_dollar_volume_20d"] = missing["volume"]
+        missing["abnormal_volume_strict"] = missing["volume"]
 
     if benchmark is not None:
         values.update(_benchmark_values(clean, benchmark, missing))

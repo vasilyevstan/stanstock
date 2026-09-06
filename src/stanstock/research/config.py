@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,15 +46,32 @@ class RiskConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FactorPolicyConfig:
+    macd_indicator: str
+    macd_score_low: float
+    macd_score_high: float
+    abnormal_volume_indicator: str
+    liquidity_indicator: str
+    liquidity_score_low: float
+    liquidity_score_high: float
+    strict_finite_inputs: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RecommendationConfig:
     buy_min_score: float
     buy_max_risk: float
     buy_min_confidence: float
-    buy_min_avg_volume_20d: float
+    buy_min_liquidity_20d: float
     buy_max_bear_downside: dict[str, float]
     avoid_max_score: float
     avoid_min_risk: float
     avoid_max_confidence: float
+
+    @property
+    def buy_min_avg_volume_20d(self) -> float:
+        """Compatibility alias for historical v1 callers and tests."""
+        return self.buy_min_liquidity_20d
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +96,7 @@ class ScoringConfig:
     windows: tuple[int, ...]
     horizon_weights: dict[str, dict[str, float]]
     component_factor_counts: dict[str, int]
+    factor_policy: FactorPolicyConfig
     coverage: CoverageConfig
     freshness: FreshnessConfig
     risk: RiskConfig
@@ -113,6 +132,57 @@ class ScoringConfig:
         risk = cast(dict[str, Any], mapping["risk"])
         recommendation = cast(dict[str, Any], mapping["recommendation"])
         scenarios = cast(dict[str, Any], mapping["scenarios"])
+        raw_factor_policy = mapping.get("factor_policy", {})
+        if not isinstance(raw_factor_policy, dict):
+            raise ValueError("factor_policy must be a mapping")
+        factor_policy = cast(dict[str, Any], raw_factor_policy)
+        macd_indicator = str(factor_policy.get("macd_indicator") or "macd_histogram")
+        abnormal_volume_indicator = str(
+            factor_policy.get("abnormal_volume_indicator") or "abnormal_volume"
+        )
+        liquidity_indicator = str(factor_policy.get("liquidity_indicator") or "avg_volume_20d")
+        if macd_indicator not in {"macd_histogram", "macd_histogram_pct"}:
+            raise ValueError("factor_policy.macd_indicator is unsupported")
+        if abnormal_volume_indicator not in {
+            "abnormal_volume",
+            "abnormal_volume_strict",
+        }:
+            raise ValueError("factor_policy.abnormal_volume_indicator is unsupported")
+        if liquidity_indicator not in {"avg_volume_20d", "avg_dollar_volume_20d"}:
+            raise ValueError("factor_policy.liquidity_indicator is unsupported")
+        macd_score_low = float(factor_policy.get("macd_score_low", -2.0))
+        macd_score_high = float(factor_policy.get("macd_score_high", 2.0))
+        liquidity_score_low = float(factor_policy.get("liquidity_score_low", 50_000.0))
+        liquidity_score_high = float(factor_policy.get("liquidity_score_high", 2_000_000.0))
+        raw_strict_finite_inputs = factor_policy.get("strict_finite_inputs", False)
+        if not isinstance(raw_strict_finite_inputs, bool):
+            raise ValueError("factor_policy.strict_finite_inputs must be boolean")
+        strict_finite_inputs = raw_strict_finite_inputs
+        if not all(
+            math.isfinite(value)
+            for value in (
+                macd_score_low,
+                macd_score_high,
+                liquidity_score_low,
+                liquidity_score_high,
+            )
+        ):
+            raise ValueError("factor_policy score bounds must be finite")
+        if macd_score_low >= macd_score_high:
+            raise ValueError("factor_policy MACD score bounds must increase")
+        if liquidity_score_low < 0 or liquidity_score_low >= liquidity_score_high:
+            raise ValueError("factor_policy liquidity score bounds must be nonnegative")
+        raw_buy_min_liquidity = recommendation.get(
+            "buy_min_liquidity_20d",
+            recommendation.get("buy_min_avg_volume_20d"),
+        )
+        if raw_buy_min_liquidity is None:
+            raise ValueError(
+                "recommendation requires buy_min_liquidity_20d or buy_min_avg_volume_20d"
+            )
+        buy_min_liquidity = float(raw_buy_min_liquidity)
+        if not math.isfinite(buy_min_liquidity) or buy_min_liquidity < 0:
+            raise ValueError("recommendation liquidity floor must be finite and nonnegative")
         component_factor_counts = {
             str(key): int(value)
             for key, value in cast(dict[str, int], mapping["component_factor_counts"]).items()
@@ -149,6 +219,16 @@ class ScoringConfig:
                 for horizon in HORIZONS
             },
             component_factor_counts=component_factor_counts,
+            factor_policy=FactorPolicyConfig(
+                macd_indicator=macd_indicator,
+                macd_score_low=macd_score_low,
+                macd_score_high=macd_score_high,
+                abnormal_volume_indicator=abnormal_volume_indicator,
+                liquidity_indicator=liquidity_indicator,
+                liquidity_score_low=liquidity_score_low,
+                liquidity_score_high=liquidity_score_high,
+                strict_finite_inputs=strict_finite_inputs,
+            ),
             coverage=CoverageConfig(
                 minimum_component_coverage=float(coverage["minimum_component_coverage"]),
                 score_penalty_rate=float(coverage["score_penalty_rate"]),
@@ -171,7 +251,7 @@ class ScoringConfig:
                 buy_min_score=float(recommendation["buy_min_score"]),
                 buy_max_risk=float(recommendation["buy_max_risk"]),
                 buy_min_confidence=float(recommendation["buy_min_confidence"]),
-                buy_min_avg_volume_20d=float(recommendation["buy_min_avg_volume_20d"]),
+                buy_min_liquidity_20d=buy_min_liquidity,
                 buy_max_bear_downside=buy_max_bear_downside,
                 avoid_max_score=float(recommendation["avoid_max_score"]),
                 avoid_min_risk=float(recommendation["avoid_min_risk"]),

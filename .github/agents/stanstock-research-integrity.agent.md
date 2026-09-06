@@ -97,6 +97,14 @@ record; the summary below is not a substitute for reading it.
   explicit flag/reason (`insufficiency_reason`, `quality_flags`,
   `confidence_status`) and never coerced to zero, `None`-as-zero, or a
   default score.
+- **Price-scale invariance**: nominal share price cannot be alpha or valuation
+  evidence. Verify that split-equivalent price/volume rescaling leaves every
+  prospective normalized factor, score, recommendation, and eligibility gate
+  unchanged; price-difference momentum is normalized and liquidity is
+  dollar-denominated. Raw share volume cannot satisfy a new BUY gate.
+- **Prospective methodology versioning**: price-scale or liquidity corrections
+  use a new immutable configuration and preserve historical hashes,
+  calculation paths, predictions, and version-separated performance.
 - **Return/FX consistency**: return calculations use one price/currency
   basis; every conversion resolves the valued date against its own
   availability cutoff, through a recorded derivation path, so a later
@@ -117,7 +125,8 @@ record; the summary below is not a substitute for reading it.
   methodology change is flagged as material for the simplifier gate. Review
   immutable calculation payloads for the exact cohort support, metric branch,
   fact/accession lineage, peer set, and formula inputs needed to reproduce the
-  result.
+  result. Thresholds must be explicit policy assumptions rather than tuned
+  against the final evaluation period.
 - **Outcomes/simulations**: `PredictionOutcome` and `SimulationRun`/
   `SimulationTrade`/`SimulationHolding` figures are computed only from
   data available as of the relevant date; backtests cannot see future

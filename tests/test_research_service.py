@@ -360,6 +360,18 @@ def test_price_only_analysis_ignores_fundamentals_and_persists_only_short_predic
     assert before.computation.risk_score == after.computation.risk_score
     assert before.computation.recommendation == after.computation.recommendation
     assert before.analysis.data_quality["fundamentals_used"] is False
+    assert before.run.config_version == "us-price-baseline-v2"
+    assert before.analysis.data_quality["factor_policy"] == {
+        "macd_indicator": "macd_histogram_pct",
+        "macd_score_low": -0.02,
+        "macd_score_high": 0.02,
+        "abnormal_volume_indicator": "abnormal_volume_strict",
+        "liquidity_indicator": "avg_dollar_volume_20d",
+        "liquidity_score_low": 1_000_000.0,
+        "liquidity_score_high": 50_000_000.0,
+        "strict_finite_inputs": True,
+        "buy_min_liquidity_20d": 5_000_000.0,
+    }
     assert {prediction.horizon for prediction in after.predictions} == {Prediction.Horizon.SHORT}
     assert set(after.analysis.component_scores["horizons"]) == {Prediction.Horizon.SHORT}
     assert all(asset["kind"] == "price_history" for asset in after.computation.source_assets)

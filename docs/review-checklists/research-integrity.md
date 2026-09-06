@@ -147,6 +147,25 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 - [ ] A low-confidence or insufficient result is visibly distinguishable from
       a high-confidence one downstream (admin, view, export).
 
+## Price-scale and affordability invariance
+
+- [ ] Nominal share price is never a positive signal, valuation shortcut, or
+      reason to raise score/confidence; affordability bands remain outside
+      research arithmetic.
+- [ ] A split-equivalent transformation (`price * k`, `volume / k`) preserves
+      every prospective normalized momentum/liquidity factor, score,
+      recommendation, and eligibility decision.
+- [ ] MACD-like price-difference indicators are normalized by a compatible
+      positive price basis before cross-security scoring.
+- [ ] Liquidity used in scoring or BUY gates is dollar-denominated from
+      compatible price/volume observations; raw share count cannot satisfy a
+      prospective liquidity gate.
+- [ ] Invalid, non-finite, zero-basis, or adjustment-incompatible inputs remain
+      explicitly unavailable rather than becoming zero or a passing gate.
+- [ ] A prospective scoring change uses a new immutable configuration version;
+      historical hashes/calculation paths remain unchanged and performance is
+      not pooled across materially different versions.
+
 ## Return and FX consistency
 
 - [ ] Return calculations use one consistent price basis; no unit mismatch

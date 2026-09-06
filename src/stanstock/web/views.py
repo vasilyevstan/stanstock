@@ -372,17 +372,43 @@ def performance_page(request: HttpRequest) -> HttpResponse:
         prediction__issued_on_time=True,
     )
     reportable_matured = matured.filter(on_time_observed)
-    summary = reportable_matured.aggregate(
+    latest_method_prediction = (
+        Prediction.objects.filter(
+            analysis__run__universe_snapshot__grade=UniverseSnapshot.Grade.OBSERVED,
+            analysis__run__issued_on_time=True,
+            issued_on_time=True,
+        )
+        .select_related("analysis__run")
+        .order_by("-generated_at", "-id")
+        .first()
+    )
+    current_method_matured = reportable_matured.none()
+    current_method_outcomes = outcomes.none()
+    current_config_version = ""
+    current_config_hash = ""
+    if latest_method_prediction is not None:
+        current_config_version = latest_method_prediction.analysis.run.config_version
+        current_config_hash = latest_method_prediction.config_hash
+        method_filter = Q(
+            prediction__analysis__run__config_version=current_config_version,
+            prediction__config_hash=current_config_hash,
+        )
+        current_method_matured = reportable_matured.filter(method_filter)
+        current_method_outcomes = outcomes.filter(method_filter)
+
+    summary = current_method_matured.aggregate(
         sample_count=Count("prediction"),
         mean_return=Avg("actual_return"),
         mean_benchmark_return=Avg("benchmark_return"),
     )
     sample_count = int(summary["sample_count"] or 0)
-    positive_count = reportable_matured.filter(actual_return__gt=0).count()
-    assessed_count = reportable_matured.filter(success__isnull=False).count()
-    successful_count = reportable_matured.filter(success=True).count()
+    positive_count = current_method_matured.filter(actual_return__gt=0).count()
+    assessed_count = current_method_matured.filter(success__isnull=False).count()
+    successful_count = current_method_matured.filter(success=True).count()
     summary.update(
         {
+            "config_version": current_config_version,
+            "config_hash": current_config_hash,
             "positive_rate": (
                 Decimal(positive_count) / Decimal(sample_count) if sample_count else None
             ),
@@ -390,25 +416,41 @@ def performance_page(request: HttpRequest) -> HttpResponse:
                 Decimal(successful_count) / Decimal(assessed_count) if assessed_count else None
             ),
             "sufficient_sample": sample_count >= 30,
-            "unresolved_count": outcomes.filter(
+            "unresolved_count": current_method_outcomes.filter(
                 on_time_observed,
                 status=PredictionOutcome.Status.UNRESOLVED,
             ).count(),
-            "corporate_event_count": outcomes.filter(
+            "corporate_event_count": current_method_outcomes.filter(
                 on_time_observed,
                 status=PredictionOutcome.Status.CORPORATE_EVENT,
             ).count(),
             "research_matured_count": matured.exclude(on_time_observed).count(),
+            "method_count": reportable_matured.values(
+                "prediction__analysis__run__config_version",
+                "prediction__config_hash",
+            )
+            .distinct()
+            .count(),
         }
     )
     groups = (
-        reportable_matured.values("prediction__horizon", "prediction__recommendation")
+        reportable_matured.values(
+            "prediction__analysis__run__config_version",
+            "prediction__config_hash",
+            "prediction__horizon",
+            "prediction__recommendation",
+        )
         .annotate(
             sample_count=Count("prediction"),
             mean_return=Avg("actual_return"),
             mean_benchmark_return=Avg("benchmark_return"),
         )
-        .order_by("prediction__horizon", "prediction__recommendation")
+        .order_by(
+            "prediction__analysis__run__config_version",
+            "prediction__config_hash",
+            "prediction__horizon",
+            "prediction__recommendation",
+        )
     )
     return render(
         request,
