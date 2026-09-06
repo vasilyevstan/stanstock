@@ -20,8 +20,23 @@
   </section>
 
   {% if analysis %}
+    {% if analysis.data_quality.analysis_mode == "price_only_baseline" %}
+      <div class="notice" role="status">
+        <strong>US price-only baseline.</strong>
+        This recommendation does not use company fundamentals. Only the
+        short-horizon scenario is supported; medium and long horizons are
+        intentionally withheld.
+      </div>
+    {% endif %}
     <section class="metric-grid" aria-label="Current analysis">
-      <article><small>Price</small><strong>{{ analysis.current_price }} {{ listing.currency }}</strong><span>{{ analysis.daily_change|percentage }}</span></article>
+      <article>
+        <small>Price</small>
+        <strong>{{ analysis.current_price }} {{ listing.currency }}</strong>
+        <span>{{ analysis.daily_change|percentage }}</span>
+        {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
+          <span>Split-adjusted price return; dividends excluded.</span>
+        {% endif %}
+      </article>
       <article>
         <small>Short scenario</small>
         <strong>{{ analysis.short_scenario|scenario_range }}</strong>

@@ -267,6 +267,7 @@ def test_build_signals_requires_completed_runs_and_rejects_duplicates(
         generated_at=signal_time,
         data_cutoff=signal_time,
         target_date=d0,
+        issued_on_time=True,
         universe_snapshot=snapshot,
         config_version="v1",
         config_hash="h2",
@@ -296,6 +297,7 @@ def test_build_signals_requires_completed_runs_and_rejects_duplicates(
         generated_at=signal_time,
         data_cutoff=signal_time,
         target_date=d0,
+        issued_on_time=True,
         universe_snapshot=snapshot,
         config_version="v1",
         config_hash="h3",
@@ -351,7 +353,90 @@ def test_observed_backtest_rejects_late_generated_signals(
 
     with pytest.raises(
         SimulationWorkflowError,
-        match="Observed backtests require signals generated on their target date",
+        match="Observed backtests require signals issued before the next live session",
+    ):
+        build_signals_for_backtest(
+            snapshot=snapshot,
+            start_date=target,
+            end_date=target,
+        )
+
+
+@pytest.mark.django_db
+def test_observed_backtest_accepts_an_on_time_overnight_signal(
+    web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
+) -> None:
+    snapshot, listing, _store = web_setup_environment
+    target = date(2026, 1, 2)
+    snapshot.as_of_date = target
+    snapshot.save(update_fields=["as_of_date"])
+    generated_at = datetime(2026, 1, 3, 1, tzinfo=timezone.get_current_timezone())
+    run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=generated_at,
+        target_date=target,
+        issued_on_time=True,
+        universe_snapshot=snapshot,
+        config_version="v1",
+        config_hash="overnight",
+        code_revision="test",
+        status="complete",
+    )
+    StockAnalysis.objects.create(
+        run=run,
+        listing=listing,
+        current_price=Decimal("300"),
+        overall_score=Decimal("80"),
+        recommendation=Recommendation.BUY,
+        risk_score=Decimal("20"),
+        risk_class=RiskClass.LOW,
+        confidence=Decimal("80"),
+    )
+
+    signals = build_signals_for_backtest(
+        snapshot=snapshot,
+        start_date=target,
+        end_date=target,
+    )
+
+    assert signals.height == 1
+    assert signals["data_cutoff"].to_list() == [generated_at]
+
+
+@pytest.mark.django_db
+def test_observed_backtest_rejects_a_late_run_even_if_flagged_on_time(
+    web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
+) -> None:
+    snapshot, listing, _store = web_setup_environment
+    target = date(2026, 1, 2)
+    snapshot.as_of_date = target
+    snapshot.save(update_fields=["as_of_date"])
+    generated_at = datetime(2026, 1, 5, 15, tzinfo=timezone.get_current_timezone())
+    run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=datetime(2026, 1, 2, 23, 59, tzinfo=timezone.get_current_timezone()),
+        target_date=target,
+        issued_on_time=True,
+        universe_snapshot=snapshot,
+        config_version="v1",
+        config_hash="invalid-late",
+        code_revision="test",
+        status="complete",
+    )
+    StockAnalysis.objects.create(
+        run=run,
+        listing=listing,
+        current_price=Decimal("300"),
+        overall_score=Decimal("80"),
+        recommendation=Recommendation.BUY,
+        risk_score=Decimal("20"),
+        risk_class=RiskClass.LOW,
+        confidence=Decimal("80"),
+    )
+
+    with pytest.raises(
+        SimulationWorkflowError,
+        match="Observed backtests require signals issued before the next live session",
     ):
         build_signals_for_backtest(
             snapshot=snapshot,

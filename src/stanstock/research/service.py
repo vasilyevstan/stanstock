@@ -25,6 +25,7 @@ from stanstock.research.scoring import (
     decide_recommendation,
     score_components,
 )
+from stanstock.research.timing import is_observed_issuance_on_time
 from stanstock.research.types import AggregateScore, IndicatorResult, ResearchValues, Scenario
 
 
@@ -40,7 +41,7 @@ class AnalysisComputation:
     reasons: list[str]
     risks: list[str]
     data_quality: dict[str, Any]
-    source_assets: list[dict[str, str]]
+    source_assets: list[dict[str, Any]]
     current_price: float
     daily_change: float | None
 
@@ -49,7 +50,7 @@ class AnalysisComputation:
 class PersistedAnalysis:
     run: AnalysisRun
     analysis: StockAnalysis
-    predictions: tuple[Prediction, Prediction, Prediction]
+    predictions: tuple[Prediction, ...]
     computation: AnalysisComputation
 
 
@@ -70,7 +71,11 @@ def compute_listing_analysis(
     price = indicators.values.get("last_close")
     if price is None:
         raise ValueError(f"No usable price history for {listing}")
-    fundamental_inputs = inputs_from_facts(facts)
+    fundamental_inputs = (
+        inputs_from_facts(())
+        if config.analysis_mode == "price_only_baseline"
+        else inputs_from_facts(facts)
+    )
     fundamentals = calculate_fundamentals(fundamental_inputs, price=price)
     component_scores = score_components(indicators, fundamentals, config)
     aggregate = aggregate_score(
@@ -98,8 +103,9 @@ def compute_listing_analysis(
     )
     daily_change = indicators.values.get("return_1d")
     assets = _dedupe_assets(source_assets or [])
-    asset_payload = [
-        {
+    asset_payload: list[dict[str, Any]] = []
+    for asset in assets:
+        payload: dict[str, Any] = {
             "id": str(asset.id),
             "provider": asset.provider,
             "kind": asset.kind,
@@ -109,8 +115,11 @@ def compute_listing_analysis(
             "retrieved_at": asset.retrieved_at.isoformat(),
             "available_at": asset.available_at.isoformat(),
         }
-        for asset in assets
-    ]
+        if isinstance(asset.metadata.get("return_definition"), str):
+            payload["return_definition"] = asset.metadata["return_definition"]
+        if isinstance(asset.metadata.get("dividends_included"), bool):
+            payload["dividends_included"] = asset.metadata["dividends_included"]
+        asset_payload.append(payload)
     data_quality = {
         "indicator_missing": indicators.missing,
         "fundamental_missing": fundamentals.missing,
@@ -122,7 +131,24 @@ def compute_listing_analysis(
         "source_assets": asset_payload,
         "recommendation_gates": decision.gates,
         "risk_insufficiency_reason": risk.insufficiency_reason,
+        "analysis_mode": config.analysis_mode,
+        "fundamentals_used": config.analysis_mode != "price_only_baseline",
+        "supported_horizons": list(config.supported_horizons),
     }
+    price_asset_metadata = next(
+        (
+            asset
+            for asset in asset_payload
+            if asset["kind"] == "price_history"
+            and asset["subject"] == (listing.provider_symbol or listing.ticker)
+        ),
+        None,
+    )
+    if price_asset_metadata is not None:
+        if "return_definition" in price_asset_metadata:
+            data_quality["return_definition"] = price_asset_metadata["return_definition"]
+        if "dividends_included" in price_asset_metadata:
+            data_quality["dividends_included"] = price_asset_metadata["dividends_included"]
     reasons = generate_reasons(indicators, fundamentals, aggregate)
     risks = generate_risks(indicators, fundamentals, risk, aggregate)
     return AnalysisComputation(
@@ -175,13 +201,15 @@ def _compute_listing_from_asof(
             through_date=target_date,
         )
         source_assets.append(benchmark_asset)
-    facts = list(
-        asof.fundamental_facts(
-            company_id=listing.security.company_id,
-            available_through=decision_time,
-        ).select_related("source_asset")
-    )
-    source_assets.extend(fact.source_asset for fact in facts)
+    facts: list[Any] = []
+    if config.analysis_mode != "price_only_baseline":
+        facts = list(
+            asof.fundamental_facts(
+                company_id=listing.security.company_id,
+                available_through=decision_time,
+            ).select_related("source_asset")
+        )
+        source_assets.extend(fact.source_asset for fact in facts)
     return compute_listing_analysis(
         listing=listing,
         price_frame=price_frame,
@@ -199,6 +227,7 @@ def _create_analysis_run(
     generated_at: datetime,
     data_cutoff: datetime,
     target_date: date,
+    issued_on_time: bool,
     universe_snapshot: UniverseSnapshot,
     config: ScoringConfig,
     config_hash_value: str,
@@ -208,6 +237,7 @@ def _create_analysis_run(
         generated_at=generated_at,
         data_cutoff=data_cutoff,
         target_date=target_date,
+        issued_on_time=issued_on_time,
         universe_snapshot=universe_snapshot,
         config_version=config.version,
         config_hash=config_hash_value,
@@ -226,12 +256,16 @@ def _persist_listing_analysis(
     config_hash_value: str,
     code_revision_value: str,
 ) -> PersistedAnalysis:
+    if run.issued_on_time:
+        _validate_on_time_source_assets(computation.source_assets, data_cutoff=data_cutoff)
     analysis = _create_stock_analysis(run, listing, computation)
     predictions = append_predictions(
         analysis=analysis,
         computation=computation,
         generated_at=generated_at,
         data_cutoff=data_cutoff,
+        issued_on_time=run.issued_on_time,
+        supported_horizons=tuple(computation.data_quality["supported_horizons"]),
         model_version=model_version,
         config_hash_value=config_hash_value,
         source_assets=computation.source_assets,
@@ -242,6 +276,20 @@ def _persist_listing_analysis(
     )
 
 
+def _validate_on_time_source_assets(
+    source_assets: list[dict[str, Any]],
+    *,
+    data_cutoff: datetime,
+) -> None:
+    for asset in source_assets:
+        for field in ("available_at", "retrieved_at"):
+            timestamp = datetime.fromisoformat(str(asset[field]))
+            if timestamp > data_cutoff:
+                raise ValueError(
+                    f"On-time analysis source asset {asset['id']} has {field} after data cutoff"
+                )
+
+
 @transaction.atomic
 def analyze_listing(
     *,
@@ -249,6 +297,7 @@ def analyze_listing(
     universe_snapshot: UniverseSnapshot,
     decision_time: datetime | None = None,
     target_date: date | None = None,
+    issued_on_time: bool | None = None,
     provider: str = "synthetic_demo",
     subject: str | None = None,
     benchmark_subject: str | None = None,
@@ -258,8 +307,18 @@ def analyze_listing(
 ) -> PersistedAnalysis:
     generated_at = decision_time or timezone.now()
     logical_target_date = target_date or generated_at.date()
-    data_cutoff = _analysis_data_cutoff(generated_at, logical_target_date)
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
+    run_issued_on_time = _issued_on_time(
+        universe_snapshot,
+        generated_at=generated_at,
+        target_date=logical_target_date,
+        explicit=issued_on_time,
+    )
+    data_cutoff = _analysis_data_cutoff(
+        generated_at,
+        logical_target_date,
+        issued_on_time=run_issued_on_time,
+    )
     if not UniverseMembership.objects.filter(
         snapshot=universe_snapshot,
         listing=listing,
@@ -276,6 +335,7 @@ def analyze_listing(
         generated_at=generated_at,
         data_cutoff=data_cutoff,
         target_date=logical_target_date,
+        issued_on_time=run_issued_on_time,
         universe_snapshot=universe_snapshot,
         config=config,
         config_hash_value=digest,
@@ -310,6 +370,7 @@ def analyze_snapshot(
     universe_snapshot: UniverseSnapshot,
     decision_time: datetime | None = None,
     target_date: date | None = None,
+    issued_on_time: bool | None = None,
     provider: str = "synthetic_demo",
     benchmark_subject: str | None = None,
     store: AssetStore | None = None,
@@ -318,8 +379,18 @@ def analyze_snapshot(
 ) -> list[PersistedAnalysis]:
     generated_at = decision_time or timezone.now()
     logical_target_date = target_date or generated_at.date()
-    data_cutoff = _analysis_data_cutoff(generated_at, logical_target_date)
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
+    run_issued_on_time = _issued_on_time(
+        universe_snapshot,
+        generated_at=generated_at,
+        target_date=logical_target_date,
+        explicit=issued_on_time,
+    )
+    data_cutoff = _analysis_data_cutoff(
+        generated_at,
+        logical_target_date,
+        issued_on_time=run_issued_on_time,
+    )
     config = load_scoring_config(config_path)
     digest = config_hash(config)
     revision = code_revision()
@@ -328,6 +399,7 @@ def analyze_snapshot(
         generated_at=generated_at,
         data_cutoff=data_cutoff,
         target_date=logical_target_date,
+        issued_on_time=run_issued_on_time,
         universe_snapshot=universe_snapshot,
         config=config,
         config_hash_value=digest,
@@ -370,30 +442,37 @@ def append_predictions(
     computation: AnalysisComputation,
     generated_at: datetime,
     data_cutoff: datetime,
+    issued_on_time: bool,
+    supported_horizons: tuple[str, ...],
     model_version: str,
     config_hash_value: str,
-    source_assets: list[dict[str, str]],
+    source_assets: list[dict[str, Any]],
     code_revision_value: str,
-) -> tuple[Prediction, Prediction, Prediction]:
-    predictions = tuple(
+) -> tuple[Prediction, ...]:
+    if issued_on_time and (
+        not analysis.run.issued_on_time or generated_at != analysis.run.generated_at
+    ):
+        raise ValueError(
+            "Only predictions created with the original on-time analysis may be marked on time"
+        )
+    horizons = tuple(Prediction.Horizon(value) for value in supported_horizons)
+    if not horizons:
+        raise ValueError("At least one supported prediction horizon is required")
+    return tuple(
         _create_prediction(
             analysis=analysis,
             horizon=horizon,
             scenario=computation.scenarios[horizon],
             generated_at=generated_at,
             data_cutoff=data_cutoff,
+            issued_on_time=issued_on_time,
             model_version=model_version,
             config_hash_value=config_hash_value,
             source_assets=source_assets,
             code_revision_value=code_revision_value,
         )
-        for horizon in (
-            Prediction.Horizon.SHORT,
-            Prediction.Horizon.MEDIUM,
-            Prediction.Horizon.LONG,
-        )
+        for horizon in horizons
     )
-    return (predictions[0], predictions[1], predictions[2])
 
 
 def _create_stock_analysis(
@@ -401,6 +480,7 @@ def _create_stock_analysis(
     listing: Listing,
     computation: AnalysisComputation,
 ) -> StockAnalysis:
+    supported_horizons = {str(value) for value in computation.data_quality["supported_horizons"]}
     return StockAnalysis.objects.create(
         run=run,
         listing=listing,
@@ -414,7 +494,11 @@ def _create_stock_analysis(
         confidence_status=computation.aggregate.confidence_status,
         component_scores={
             "components": computation.aggregate.component_scores.components,
-            "horizons": computation.aggregate.horizon_scores,
+            "horizons": {
+                horizon: score
+                for horizon, score in computation.aggregate.horizon_scores.items()
+                if horizon in supported_horizons
+            },
             "factors": computation.aggregate.component_scores.factor_scores,
         },
         short_scenario=computation.scenarios["short"].as_dict(),
@@ -433,9 +517,10 @@ def _create_prediction(
     scenario: Scenario,
     generated_at: datetime,
     data_cutoff: datetime,
+    issued_on_time: bool,
     model_version: str,
     config_hash_value: str,
-    source_assets: list[dict[str, str]],
+    source_assets: list[dict[str, Any]],
     code_revision_value: str,
 ) -> Prediction:
     return Prediction.objects.create(
@@ -443,6 +528,7 @@ def _create_prediction(
         listing=analysis.listing,
         generated_at=generated_at,
         target_date=analysis.run.target_date,
+        issued_on_time=issued_on_time,
         horizon=horizon,
         price_at_prediction=analysis.current_price,
         bear_return=_optional_decimal(scenario.bear, places=4),
@@ -490,15 +576,40 @@ def _optional_decimal(value: float | None, *, places: int) -> Decimal | None:
     return _decimal(value, places=places)
 
 
-def _analysis_data_cutoff(generated_at: datetime, target_date: date) -> datetime:
+def _analysis_data_cutoff(
+    generated_at: datetime,
+    target_date: date,
+    *,
+    issued_on_time: bool,
+) -> datetime:
     if target_date > generated_at.date():
         raise ValueError(
             f"target_date ({target_date.isoformat()}) cannot be after generation date "
             f"({generated_at.date().isoformat()})"
         )
-    if target_date == generated_at.date():
+    if issued_on_time or target_date == generated_at.date():
         return generated_at
     return datetime.combine(target_date, time.max, tzinfo=generated_at.tzinfo)
+
+
+def _issued_on_time(
+    snapshot: UniverseSnapshot,
+    *,
+    generated_at: datetime,
+    target_date: date,
+    explicit: bool | None,
+) -> bool:
+    if explicit is not None:
+        if explicit and snapshot.grade != UniverseSnapshot.Grade.OBSERVED:
+            raise ValueError("Only an observed universe snapshot can be issued on time")
+        if explicit and not is_observed_issuance_on_time(
+            snapshot,
+            target_date=target_date,
+            generated_at=generated_at,
+        ):
+            raise ValueError("Observed analysis was generated after the next market session opened")
+        return explicit
+    return snapshot.grade == UniverseSnapshot.Grade.OBSERVED and generated_at.date() == target_date
 
 
 def _validate_snapshot_for_target(snapshot: UniverseSnapshot, target_date: date) -> None:

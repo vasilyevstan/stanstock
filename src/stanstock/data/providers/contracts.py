@@ -37,6 +37,39 @@ class PriceSeries:
     retrieved_at: datetime
     source_url: str
     raw_bytes: bytes
+    exchange: str | None = None
+    mic_code: str | None = None
+    instrument_type: str | None = None
+    exchange_timezone: str | None = None
+    adjustment: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StockReference:
+    """One stock-listing identity returned by a provider reference catalog."""
+
+    symbol: str
+    name: str
+    currency: str
+    exchange: str
+    mic_code: str
+    country: str
+    instrument_type: str
+    figi_code: str | None = None
+    access_plan: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StockCatalog:
+    """A provider stock-catalog response plus its immutable raw bytes."""
+
+    provider: str
+    exchange: str
+    references: tuple[StockReference, ...]
+    count: int
+    retrieved_at: datetime
+    source_url: str
+    raw_bytes: bytes
 
 
 @dataclass(frozen=True, slots=True)

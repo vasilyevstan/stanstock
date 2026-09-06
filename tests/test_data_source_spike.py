@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from datetime import UTC, datetime
 
 import pytest
 from django.core.management import call_command
@@ -15,16 +16,17 @@ from stanstock.data.providers.exceptions import (
     ProviderBlockedError,
     ProviderConfigurationError,
     ProviderNetworkError,
+    ProviderQuotaError,
 )
 from stanstock.data.providers.filings_xbrl import FilingsPage
 
 pytestmark = pytest.mark.django_db
 
 
-def _fake_price_series() -> PriceSeries:
+def _fake_price_series(*, provider: str = "stooq", symbol: str = "aapl.us") -> PriceSeries:
     return PriceSeries(
-        provider="stooq",
-        symbol="aapl.us",
+        provider=provider,
+        symbol=symbol,
         currency=None,
         bars=(
             PriceBar(
@@ -63,6 +65,16 @@ class _FakeEcbResult:
 
 def _patch_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
+        source_spike.twelve_data,
+        "resolve_api_key",
+        lambda: "private-test-key",
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "fetch_daily_price_series",
+        lambda *a, **k: _fake_price_series(provider="twelve_data", symbol="AAPL"),
+    )
+    monkeypatch.setattr(
         source_spike.stooq, "fetch_daily_price_series", lambda *a, **k: _fake_price_series()
     )
     monkeypatch.setattr(source_spike.sec, "fetch_submissions", lambda *a, **k: _fake_sec_payload())
@@ -86,7 +98,7 @@ def test_stooq_html_challenge_classified_provider_incompatible_and_no_go(
     monkeypatch.setattr(source_spike.ecb, "fetch_exr_csv", lambda *a, **k: _FakeEcbResult())
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     record = ProviderRecord.objects.get(provider="stooq")
     assert record.status == source_spike.CLASSIFICATION_PROVIDER_INCOMPATIBLE
@@ -116,7 +128,7 @@ def test_sec_403_classified_environment_blocked_not_provider_incompatible(
     monkeypatch.setattr(source_spike.ecb, "fetch_exr_csv", lambda *a, **k: _FakeEcbResult())
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     record = ProviderRecord.objects.get(provider="sec")
     assert record.status == source_spike.CLASSIFICATION_ENV_BLOCKED
@@ -132,7 +144,7 @@ def test_stooq_success_does_not_grant_conditional_go_due_to_unverified_terms(
     _patch_all_ok(monkeypatch)
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     reports = list((tmp_path / "reports").glob("source_spike_*.json"))
     report = json.loads(reports[0].read_text())
@@ -141,6 +153,117 @@ def test_stooq_success_does_not_grant_conditional_go_due_to_unverified_terms(
     stooq_probe = next(probe for probe in report["probes"] if probe["provider"] == "stooq")
     assert stooq_probe["classification"] == source_spike.CLASSIFICATION_OK
     assert stooq_probe["capability_verdict"] == source_spike.CAPABILITY_VERDICT_NO_GO
+
+
+def test_twelve_data_success_grants_us_conditional_go_and_preserves_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        metadata={
+            "daily_credits_used": 17,
+            "daily_credit_limit": 100,
+            "credits_per_minute": 4,
+        },
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "resolve_api_key",
+        lambda: "private-test-key",
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "fetch_daily_price_series",
+        lambda *a, **k: _fake_price_series(provider="twelve_data", symbol="AAPL"),
+    )
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "source_spike",
+            skip="stooq,sec,filings_xbrl_org,ecb",
+        )
+
+    report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
+    report = json.loads(report_path.read_text())
+    assert report["decision"] == "CONDITIONAL_GO"
+    assert report["price_capability"] is True
+
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    assert record.status == source_spike.CLASSIFICATION_OK
+    assert record.metadata["daily_credits_used"] == 17
+    assert record.metadata["daily_credit_limit"] == 100
+    assert record.metadata["credits_per_minute"] == 4
+    assert record.metadata["credits_used_local"] == 1
+    assert record.metadata["capability_verdict"] == "CONDITIONAL_GO"
+    assert record.terms_url == source_spike.twelve_data.TERMS_URL
+    assert record.usage_scope == source_spike.TWELVE_DATA_USAGE_SCOPE
+
+
+def test_twelve_data_quota_error_is_classified_without_granting_price_capability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    def raise_quota(*args: object, **kwargs: object) -> PriceSeries:
+        raise ProviderQuotaError("Twelve Data API quota is exhausted")
+
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "resolve_api_key",
+        lambda: "private-test-key",
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "fetch_daily_price_series",
+        raise_quota,
+    )
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "source_spike",
+            skip="stooq,sec,filings_xbrl_org,ecb",
+        )
+
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    assert record.status == source_spike.CLASSIFICATION_QUOTA_EXHAUSTED
+    report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
+    report = json.loads(report_path.read_text())
+    assert report["decision"] == "NO_GO"
+    assert report["price_capability"] is False
+
+
+def test_source_spike_does_not_downgrade_confirmed_twelve_data_usage_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    checked_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=True,
+        terms_checked_at=checked_at,
+        usage_scope="personal_internal_display_authorized",
+        metadata={"internal_display_rights_confirmed": True},
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "resolve_api_key",
+        lambda: "private-test-key",
+    )
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "fetch_daily_price_series",
+        lambda *a, **k: _fake_price_series(provider="twelve_data", symbol="AAPL"),
+    )
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "source_spike",
+            skip="stooq,sec,filings_xbrl_org,ecb",
+        )
+
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    assert record.enabled is True
+    assert record.usage_scope == "personal_internal_display_authorized"
+    assert record.terms_checked_at == checked_at
+    assert record.metadata["internal_display_rights_confirmed"] is True
 
 
 def test_capability_verdicts_reflect_completed_provider_research(
@@ -155,6 +278,7 @@ def test_capability_verdicts_reflect_completed_provider_research(
     report = json.loads(report_path.read_text())
     verdicts = {probe["provider"]: probe["capability_verdict"] for probe in report["probes"]}
     assert verdicts == {
+        "twelve_data": "CONDITIONAL_GO",
         "stooq": "NO_GO",
         "sec": "GO",
         "filings_xbrl_org": "CONDITIONAL_GO",
@@ -176,7 +300,7 @@ def test_decision_would_be_conditional_go_if_a_price_provider_had_an_approved_ve
     )
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
     report = json.loads(report_path.read_text())
@@ -201,7 +325,7 @@ def test_missing_sec_user_agent_classified_configuration_missing(
     monkeypatch.setattr(source_spike.ecb, "fetch_exr_csv", lambda *a, **k: _FakeEcbResult())
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     record = ProviderRecord.objects.get(provider="sec")
     assert record.status == source_spike.CLASSIFICATION_CONFIG_MISSING
@@ -254,7 +378,7 @@ def test_skip_option_excludes_provider(monkeypatch: pytest.MonkeyPatch, tmp_path
     report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
     report = json.loads(report_path.read_text())
     providers = {probe["provider"] for probe in report["probes"]}
-    assert providers == {"stooq", "filings_xbrl_org"}
+    assert providers == {"twelve_data", "stooq", "filings_xbrl_org"}
 
 
 def test_never_touches_enabled_field(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

@@ -1,7 +1,8 @@
 """Safely probe configured representative provider endpoints.
 
-Calls one small, representative request per configured provider (Stooq
-daily CSV, SEC submissions, filings.xbrl.org filings index, ECB EXR CSV),
+Calls one small, representative request per configured provider (Twelve
+Data and Stooq daily prices, SEC submissions, filings.xbrl.org filings
+index, ECB EXR CSV),
 classifies each outcome, updates `ProviderRecord` status (never `enabled` -
 the provider stop/go gate is a manual decision, see `LEARNINGS.md`), and
 writes a private JSON report under `STANSTOCK_DATA_DIR`. It never retries
@@ -41,12 +42,18 @@ the evidence behind each provider's mapping):
   StanStock cannot use for its documented, non-bypassing access path (an
   HTML/JavaScript verification challenge, a malformed payload, or a clear
   rate/subscription message).
+- ``quota_exhausted``: an approved provider reported that the configured
+  request or daily credit allowance is exhausted.
 - ``unexpected_error``: any other exception; always investigated before the
   report is trusted.
 
-Completed provider research (2026-09-05, see `docs/source-spike.md`) fixes
+Completed provider research (updated 2026-09-06, see
+`docs/source-spike.md`) fixes
 each provider's capability verdict as:
 
+- ``twelve_data`` -> ``CONDITIONAL_GO``: its official API permits the
+  reduced private US-only scope, subject to the configured plan's market,
+  quota, storage, and non-redistribution limits.
 - ``stooq`` -> ``NO_GO``: its public CSV download is automation-blocked
   (StanStock will never attempt to bypass the JS verification gate) and its
   automation/private-retention terms could not be independently verified.
@@ -61,14 +68,11 @@ each provider's capability verdict as:
   rows in research and is deliberately not used.
 
 The overall CONDITIONAL_GO/NO_GO decision is driven only by whether a
-price-capability provider (currently just Stooq) both (a) has a capability
-verdict other than ``NO_GO`` and (b) probed ``ok`` in this run. Because
-Stooq's verdict is fixed ``NO_GO``, this command reports an overall
-``NO_GO`` for unattended real price ingestion even on a run where Stooq's
-probe happens to succeed technically - a technical success does not, by
-itself, establish verified automation/retention rights. Fundamentals/FX
-classifications are reported but never change this decision, since v1's
-price gate is the documented blocker (see `docs/limitations.md`).
+price-capability provider both (a) has a capability verdict other than
+``NO_GO`` and (b) probed ``ok`` in this run. Twelve Data can satisfy that
+gate for the reduced US-only scope when a non-demo personal API key is
+configured. Stooq remains fixed ``NO_GO`` regardless of a one-off technical
+success. Fundamentals/FX classifications are reported separately.
 """
 
 from __future__ import annotations
@@ -84,13 +88,15 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.utils import timezone as dj_timezone
 
+from stanstock.data.live_us import ProviderCreditBudget
 from stanstock.data.models import ProviderRecord
-from stanstock.data.providers import ecb, filings_xbrl, sec, stooq
+from stanstock.data.providers import ecb, filings_xbrl, sec, stooq, twelve_data
 from stanstock.data.providers.exceptions import (
     ProviderBlockedError,
     ProviderConfigurationError,
     ProviderError,
     ProviderNetworkError,
+    ProviderQuotaError,
     ProviderResponseError,
 )
 
@@ -98,12 +104,15 @@ from stanstock.data.providers.exceptions import (
 #: endpoint shape; StanStock does not claim any relationship with the filer.
 PROBE_SEC_CIK = "0000320193"
 PROBE_STOOQ_SYMBOL = "aapl.us"
+PROBE_TWELVE_DATA_SYMBOL = "AAPL"
 PROBE_ECB_QUOTE_CURRENCY = "USD"
+TWELVE_DATA_USAGE_SCOPE = "personal_internal_display_requires_entitlement"
 
 CLASSIFICATION_OK = "ok"
 CLASSIFICATION_CONFIG_MISSING = "configuration_missing"
 CLASSIFICATION_ENV_BLOCKED = "environment_blocked"
 CLASSIFICATION_PROVIDER_INCOMPATIBLE = "provider_incompatible"
+CLASSIFICATION_QUOTA_EXHAUSTED = "quota_exhausted"
 CLASSIFICATION_UNEXPECTED = "unexpected_error"
 
 DECISION_CONDITIONAL_GO = "CONDITIONAL_GO"
@@ -123,6 +132,7 @@ CAPABILITY_VERDICT_CONDITIONAL_GO = "CONDITIONAL_GO"
 CAPABILITY_VERDICT_NO_GO = "NO_GO"
 
 PROVIDER_CAPABILITY_VERDICTS: dict[str, str] = {
+    "twelve_data": CAPABILITY_VERDICT_CONDITIONAL_GO,
     "stooq": CAPABILITY_VERDICT_NO_GO,
     "sec": CAPABILITY_VERDICT_GO,
     "filings_xbrl_org": CAPABILITY_VERDICT_CONDITIONAL_GO,
@@ -139,6 +149,83 @@ class ProbeOutcome:
     elapsed_ms: int
     is_price_capability: bool = False
     capability_verdict: str = CAPABILITY_VERDICT_NO_GO
+
+
+def _probe_twelve_data() -> ProbeOutcome:
+    started = dj_timezone.now()
+    try:
+        api_key = twelve_data.resolve_api_key()
+        ProviderRecord.objects.get_or_create(provider=twelve_data.PROVIDER)
+        budget = ProviderCreditBudget(require_enabled=False)
+        budget.preflight(1)
+        budget.consume()
+        series = twelve_data.fetch_daily_price_series(
+            PROBE_TWELVE_DATA_SYMBOL,
+            outputsize=2,
+            api_key=api_key,
+        )
+    except ProviderConfigurationError as exc:
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_CONFIG_MISSING,
+            exc,
+            started,
+            price=True,
+        )
+    except ProviderQuotaError as exc:
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_QUOTA_EXHAUSTED,
+            exc,
+            started,
+            price=True,
+        )
+    except ProviderBlockedError as exc:
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_PROVIDER_INCOMPATIBLE,
+            exc,
+            started,
+            price=True,
+        )
+    except ProviderNetworkError as exc:
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_ENV_BLOCKED,
+            exc,
+            started,
+            price=True,
+        )
+    except ProviderResponseError as exc:
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_PROVIDER_INCOMPATIBLE,
+            exc,
+            started,
+            price=True,
+        )
+    except ProviderError as exc:  # pragma: no cover - defensive catch-all
+        return _outcome(
+            "twelve_data",
+            twelve_data.TIME_SERIES_URL,
+            CLASSIFICATION_UNEXPECTED,
+            exc,
+            started,
+            price=True,
+        )
+    return _outcome(
+        "twelve_data",
+        twelve_data.TIME_SERIES_URL,
+        CLASSIFICATION_OK,
+        f"Received {len(series.bars)} daily bars for {PROBE_TWELVE_DATA_SYMBOL!r}",
+        started,
+        price=True,
+    )
 
 
 def _probe_stooq() -> ProbeOutcome:
@@ -282,7 +369,13 @@ def _outcome(
     )
 
 
-PROBES = (_probe_stooq, _probe_sec, _probe_filings_xbrl, _probe_ecb)
+PROBES = (
+    _probe_twelve_data,
+    _probe_stooq,
+    _probe_sec,
+    _probe_filings_xbrl,
+    _probe_ecb,
+)
 
 
 class Command(BaseCommand):
@@ -292,7 +385,10 @@ class Command(BaseCommand):
         parser.add_argument(
             "--skip",
             default="",
-            help="Comma-separated provider names to skip (stooq,sec,filings_xbrl_org,ecb)",
+            help=(
+                "Comma-separated provider names to skip "
+                "(twelve_data,stooq,sec,filings_xbrl_org,ecb)"
+            ),
         )
 
     def handle(self, *args: object, **options: object) -> None:
@@ -308,10 +404,9 @@ class Command(BaseCommand):
         # An "approved" price capability requires BOTH a successful probe on
         # this run AND a capability verdict other than NO_GO. A technical
         # success alone (classification == ok) never grants CONDITIONAL_GO
-        # by itself: Stooq's verdict is fixed NO_GO because its
-        # automation/private-retention terms could not be verified, so this
-        # command reports NO_GO for unattended real price ingestion even if
-        # a given Stooq probe happens to succeed.
+        # by itself: Stooq's verdict remains fixed NO_GO, while Twelve Data
+        # must both have a reviewed CONDITIONAL_GO verdict and succeed with
+        # the configured non-demo account.
         price_capability = any(
             outcome.classification == CLASSIFICATION_OK
             and outcome.capability_verdict != CAPABILITY_VERDICT_NO_GO
@@ -350,10 +445,13 @@ class Command(BaseCommand):
 
     def _update_provider_records(self, outcomes: list[ProbeOutcome], run_at: datetime) -> None:
         for outcome in outcomes:
+            record, _created = ProviderRecord.objects.get_or_create(provider=outcome.provider)
             metadata = {
+                **record.metadata,
                 "last_probe_endpoint": outcome.endpoint,
                 "last_probe_elapsed_ms": outcome.elapsed_ms,
                 "last_probe_detail": outcome.detail,
+                "last_probe_at": run_at.isoformat(),
                 "capability_verdict": outcome.capability_verdict,
             }
             last_error = (
@@ -361,10 +459,22 @@ class Command(BaseCommand):
                 if outcome.classification == CLASSIFICATION_OK
                 else f"{outcome.classification}: {outcome.detail}"
             )
-            record, _created = ProviderRecord.objects.get_or_create(provider=outcome.provider)
             record.status = outcome.classification
             record.metadata = metadata
             record.last_error = last_error
+            if outcome.provider == twelve_data.PROVIDER:
+                record.terms_url = twelve_data.TERMS_URL
+                if not record.usage_scope:
+                    record.usage_scope = TWELVE_DATA_USAGE_SCOPE
             if outcome.classification == CLASSIFICATION_OK:
                 record.last_success_at = run_at
-            record.save(update_fields=["status", "metadata", "last_error", "last_success_at"])
+            record.save(
+                update_fields=[
+                    "status",
+                    "metadata",
+                    "last_error",
+                    "last_success_at",
+                    "terms_url",
+                    "usage_scope",
+                ]
+            )

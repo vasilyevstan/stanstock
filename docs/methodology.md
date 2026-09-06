@@ -104,7 +104,9 @@ revision.
 
 Predictions are append-only. A correction uses a new model/configuration
 version. Missed runs can be reconstructed for research but cannot be presented
-as calls issued on time.
+as calls issued on time. On-time status belongs to each immutable prediction,
+not only its parent analysis, so a later reissued version is excluded from live
+performance evidence.
 
 Performance reports only matured outcomes and retains unresolved corporate
 events in coverage counts. Aggregate return, hit-rate, or calibration metrics
@@ -115,9 +117,11 @@ return, AVOID on a non-positive return, and HOLD only when the realized return
 falls inside its stored bear/bull range.
 
 The performance page aggregates only outcomes from observed universe snapshots
-whose predictions were generated on their target date. Matured synthetic or
-later-reconstructed outcomes remain visibly excluded from live,
-out-of-sample claims.
+whose individual predictions were issued before the next market session.
+Matured synthetic, unsupported, or later-reissued outcomes remain visibly
+excluded from live, out-of-sample claims. A price-only baseline persists only
+the short horizon it supports; withheld medium and long scenarios are not
+prediction records and therefore cannot enter evaluation denominators.
 
 The evaluator also compares the target-date close in the evaluation vintage
 with the immutable prediction source price. A material mismatch is classified

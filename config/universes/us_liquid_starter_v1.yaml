@@ -1,0 +1,138 @@
+# Curated US-only starter universe for Twelve Data US equity coverage.
+#
+# This is not an index reproduction. It is a manually reviewed set of 100
+# large, actively traded common-stock symbols chosen to provide diversified
+# research coverage while keeping two daily full-history refreshes comfortably
+# below the conservative 800-credit local daily ceiling. Provider activation
+# still requires an account or agreement with internal-display rights. The live catalog response is
+# still authoritative for name, currency, instrument type, exchange, MIC, and
+# plan access on every run.
+schema_version: 1
+config_version: us-liquid-starter-v1
+slug: us-liquid-starter
+name: "US Liquid Starter Universe"
+description: >
+  Private, personal, US-only research universe. Membership is observed when
+  the scheduled job runs and validated against Twelve Data's official stock
+  catalog. This configuration is not an S&P, Nasdaq, or other licensed index.
+provider: twelve_data
+country: United States
+instrument_type: Common Stock
+currency: USD
+exchanges:
+  - NASDAQ
+  - NYSE
+benchmark_symbol: SPY
+benchmark_currency: USD
+benchmark_type: ETF
+history_years: 7
+minimum_history_sessions: 1260
+price_adjustment: splits
+minimum_eligible: 75
+maximum_symbols: 300
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - AVGO
+  - TSLA
+  - JPM
+  - WMT
+  - V
+  - LLY
+  - ORCL
+  - XOM
+  - MA
+  - COST
+  - NFLX
+  - JNJ
+  - HD
+  - PG
+  - BAC
+  - ABBV
+  - KO
+  - CRM
+  - AMD
+  - PLTR
+  - GE
+  - CSCO
+  - IBM
+  - CVX
+  - MRK
+  - CAT
+  - UNH
+  - PM
+  - WFC
+  - MCD
+  - ABT
+  - TMO
+  - DIS
+  - INTU
+  - QCOM
+  - AMGN
+  - GS
+  - TXN
+  - RTX
+  - ISRG
+  - NOW
+  - BKNG
+  - AMAT
+  - SPGI
+  - PEP
+  - DHR
+  - BLK
+  - LOW
+  - C
+  - ADP
+  - GILD
+  - SYK
+  - PGR
+  - MDLZ
+  - PANW
+  - LRCX
+  - CB
+  - MU
+  - KLAC
+  - CME
+  - ADI
+  - SO
+  - DUK
+  - NEE
+  - COP
+  - SCHW
+  - TJX
+  - UPS
+  - BA
+  - DE
+  - ELV
+  - MO
+  - ICE
+  - BMY
+  - FISV
+  - MRSH
+  - APH
+  - SHW
+  - WM
+  - USB
+  - MCO
+  - CVS
+  - EOG
+  - AON
+  - CI
+  - CL
+  - HCA
+  - SLB
+  - MAR
+  - ORLY
+  - CTAS
+  - GD
+  - HON
+  - LIN
+notes: >
+  Daily OHLCV is explicitly split-adjusted and excludes dividends, so every
+  reported return is a price return rather than a total return. Twelve Data
+  data must remain private to the authenticated owner and must be deleted if
+  the subscription terminates, in accordance with the provider terms.

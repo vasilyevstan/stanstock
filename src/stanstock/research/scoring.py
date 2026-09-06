@@ -272,7 +272,7 @@ def aggregate_score(
         horizon: _weighted_score(component_scores.components, config.horizon_weights[horizon])
         for horizon in HORIZONS
     }
-    raw = horizon_scores["medium"]
+    raw = horizon_scores[config.overall_horizon]
     missingness_penalty = max(
         config.coverage.score_penalty_floor,
         1.0 - config.coverage.score_penalty_rate * (1.0 - component_scores.coverage),

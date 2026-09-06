@@ -72,11 +72,16 @@ The same image runs:
 
 - Gunicorn for the Django website;
 - deterministic Django management commands for source probes, demo data,
-  analysis, predictions, evaluation, simulations, backup, and restore.
+  conditional US Twelve Data ingestion, analysis, predictions, evaluation,
+  simulations, backup, and restore.
 
 Target-date work uses `JobRun` plus a PostgreSQL advisory lock. A unique
 constraint permits only one successful run for a job/region/date. Repeating a
 successful target creates a visible skipped attempt instead of repeating work.
+The US workflow additionally coordinates a conservative provider credit budget
+through a locked `ProviderRecord`, persists raw and normalized vintages before
+analysis, and requires an explicit internal-display entitlement before it may
+run.
 
 No Redis, Celery, resident scheduler, second analytics engine, SPA, or fitted
 ML model is part of v1.

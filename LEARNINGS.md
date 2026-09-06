@@ -50,6 +50,22 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **On-time evidence belongs to each immutable prediction version.** The
+  original prediction may inherit a calendar-proven on-time analysis, but a
+  later reissue is research evidence; observed simulations independently
+  recompute the next-session deadline instead of trusting a stored flag.
+- **Unsupported horizons must not enter the evidence ledger.** A price-only
+  model can display explicit withheld scenarios, but it persists predictions
+  and horizon scores only for configured supported horizons so outcomes and
+  performance denominators cannot absorb unsupported calls.
+- **Current market state is ordered by market session, not retrieval time.**
+  `LatestMarketData.session_date` is the primary freshness key and retrieval
+  time only breaks same-session ties; historical catch-up and ineligible
+  series cannot replace a newer eligible close.
+- **Committed-work recovery precedes credentials and retry-time labels.** A
+  retry searches completed universe/target/scoring evidence across snapshot
+  grades before provider enablement, API-key resolution, or quota use, and
+  fails explicitly if completed runs conflict.
 - **A revalued holding must be revalued everywhere.** Restating a closed
   foreign holding only at end-of-day still lets a rebalance size its targets
   off the frozen conversion. Valuation and pre-trade sizing use the same
@@ -132,10 +148,16 @@ reviews and should not be re-litigated without an explicit new decision.
   immutability-trigger migration must be checked for table recreation and, if
   needed, followed by a trigger-reinstallation migration plus a bulk-update/
   delete regression.
-- **The free unattended price path is currently `NO_GO`.** Stooq's browser
-  gate is not bypassed, and the reviewed free API tiers do not cover the
-  requested US/European breadth. Default product flows use visibly labeled
-  `synthetic_demo` data.
+- **Provider access and display rights are separate gates.** Twelve Data can
+  technically support the bounded US universe, but its Basic tier is labeled
+  internal non-display; the price-bearing UI remains disabled until the owner
+  confirms a display-entitled plan or agreement. Stooq remains `NO_GO`, Europe
+  remains deferred, and default flows stay visibly `synthetic_demo`.
+- **Live adjusted histories are immutable vintages, not mutable truth.**
+  Twelve Data responses are stored as exact raw JSON plus normalized Parquet;
+  every later retrieval creates new evidence, requests explicitly use
+  split-only adjustment, and derived results are labeled price return rather
+  than total return.
 - **Synthetic refreshes use observed synthetic sessions.** `refresh_demo`
   defaults to the research snapshot's `as_of_date`, rejects later or
   non-session target dates, and relies on `JobRun` to skip a repeated

@@ -33,6 +33,14 @@ This command validates settings; it does not prove the database is reachable.
   the Django and database layers;
 - score, confidence, probability, timestamp, and scenario constraints;
 - provider parsing and explicit failure states using synthetic payloads;
+- Twelve Data activation/kill-switch behavior, header-only credentials,
+  source-spike classifications, US-calendar target resolution, catalog and
+  plan filtering, local quota accounting, immutable raw/Parquet persistence,
+  eligibility exclusions, snapshot rollback, and target-job idempotency;
+- prediction-level on-time evidence, next-session deadline enforcement,
+  credential-free recovery of committed targets across retry-time grades,
+  supported-horizon-only prediction persistence, and monotonic current-market
+  session updates;
 - technical/fundamental math, canonical concept/restatement selection, and
   missing-value behavior;
 - recommendation, risk, scenario, and explanation determinism;

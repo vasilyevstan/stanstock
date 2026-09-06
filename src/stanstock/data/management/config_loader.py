@@ -36,3 +36,11 @@ def default_universe_config_path() -> Path:
 
 def default_benchmark_config_path() -> Path:
     return CONFIG_ROOT / "benchmarks" / "demo_synthetic_balanced_v1.yaml"
+
+
+def default_us_universe_config_path() -> Path:
+    return CONFIG_ROOT / "universes" / "us_liquid_starter_v1.yaml"
+
+
+def default_us_scoring_config_path() -> Path:
+    return CONFIG_ROOT / "scoring" / "us-price-baseline-v1.yml"

@@ -35,8 +35,11 @@ Every task begins by reading, in order:
   within the existing stack.
 - Never use live provider data, real provider credentials, or a real network
   fetch in tests or CI. Use synthetic fixtures only.
-- Treat unattended free US/European OHLCV as `NO_GO` until new primary-source
-  evidence approves a provider. The built-in demo provider is named
+- Treat broad unattended US/European OHLCV as `NO_GO`. The only approved live
+  price path is the conditional US Twelve Data workflow: it stays disabled
+  without a non-demo key and explicit internal-display entitlement, uses the
+  curated bounded universe, preserves split-adjusted price-return labeling,
+  and never redistributes provider data. The built-in demo provider is named
   `synthetic_demo` and must remain visibly synthetic.
 - Never expose secrets (`.env` values, `DJANGO_SECRET_KEY`, `DATABASE_URL`,
   provider API keys), private financial/portfolio data, or local
@@ -60,7 +63,19 @@ Every task begins by reading, in order:
 - Preserve both `AnalysisRun.generated_at` and `AnalysisRun.data_cutoff`.
   Research reconstructions may be generated later, but fact availability and
   price rows must remain capped at the historical cutoff; observed backtests
-  accept only on-time signals.
+  accept only calendar-proven on-time signals. Preserve
+  `Prediction.issued_on_time` separately: a later immutable reissue never
+  inherits the original version's live-evidence status.
+- Persist predictions and reported horizon scores only for a scoring
+  configuration's `supported_horizons`; an explicitly withheld scenario must
+  not enter outcome or performance denominators.
+- Update `LatestMarketData` only through the shared monotonic market-state
+  writer. Compare market `session_date` first and retrieval time only within
+  the same session; historical or ineligible series must not move current
+  state backward.
+- Recover already committed target work across retry-time snapshot grades
+  before checking provider enablement, resolving credentials, or spending
+  quota; conflicting completed runs are an explicit integrity error.
 - Never combine native-currency prices in one simulation cash balance. Convert
   through the dated point-in-time FX path into one explicit base currency, or
   restrict the run to a single native currency. Resolve every valued date

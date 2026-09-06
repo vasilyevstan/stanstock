@@ -315,6 +315,7 @@ class LatestMarketData(models.Model):
         related_name="latest_market_data",
     )
     observed_at = models.DateTimeField()
+    session_date = models.DateField()
     close = models.DecimalField(max_digits=20, decimal_places=6)
     previous_close = models.DecimalField(max_digits=20, decimal_places=6, null=True)
     volume = models.BigIntegerField(null=True)
@@ -337,4 +338,4 @@ class LatestMarketData(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"{self.listing_id}:{self.observed_at.isoformat()}:{self.close}"
+        return f"{self.listing_id}:{self.session_date.isoformat()}:{self.close}"

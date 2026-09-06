@@ -18,6 +18,7 @@ from stanstock.data.fx import (
 )
 from stanstock.data.models import DataAsset, UniverseMembership, UniverseSnapshot
 from stanstock.research.models import StockAnalysis
+from stanstock.research.timing import is_observed_issuance_on_time
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.service import execute_and_persist_simulation
 from stanstock.simulation.types import (
@@ -434,7 +435,8 @@ def build_signals_for_backtest(
     invalid_cutoffs = [
         analysis
         for analysis in analyses
-        if analysis.run.data_cutoff.date() > analysis.run.target_date
+        if snapshot.grade != UniverseSnapshot.Grade.OBSERVED
+        and analysis.run.data_cutoff.date() > analysis.run.target_date
     ]
     if invalid_cutoffs:
         raise SimulationWorkflowError(
@@ -442,14 +444,26 @@ def build_signals_for_backtest(
         )
 
     if snapshot.grade == UniverseSnapshot.Grade.OBSERVED:
-        late_signals = [
-            analysis
-            for analysis in analyses
-            if analysis.run.generated_at.date() != analysis.run.target_date
-        ]
+        late_signals = []
+        for analysis in analyses:
+            valid_issuance = False
+            if (
+                analysis.run.issued_on_time
+                and analysis.run.data_cutoff == analysis.run.generated_at
+            ):
+                try:
+                    valid_issuance = is_observed_issuance_on_time(
+                        snapshot,
+                        target_date=analysis.run.target_date,
+                        generated_at=analysis.run.generated_at,
+                    )
+                except ValueError:
+                    valid_issuance = False
+            if not valid_issuance:
+                late_signals.append(analysis)
         if late_signals:
             raise SimulationWorkflowError(
-                "Observed backtests require signals generated on their target date; "
+                "Observed backtests require signals issued before the next live session; "
                 "late-generated analyses are research reconstructions."
             )
 

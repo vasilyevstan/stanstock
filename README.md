@@ -10,21 +10,29 @@ guarantees.
 
 ## Current data boundary
 
-The required free-provider capability gate is **NO_GO for unattended real
-price ingestion at the requested breadth**.
+The original free-provider gate remains **NO_GO for broad US/European
+coverage**, but StanStock now has a **conditional US-only path** through
+Twelve Data's documented API.
 
+- The curated starter universe contains 100 NASDAQ/NYSE common-stock symbols
+  plus SPY as its benchmark. It is not represented as a licensed index.
+- Twelve Data prices are explicitly split-adjusted price returns; dividends
+  are not included and results must not be labeled total returns.
+- Activation requires a non-demo API key and an account or agreement that
+  grants internal-display rights. Twelve Data's current pricing page labels
+  Basic as internal non-display, so Basic alone is not accepted for the
+  price-bearing StanStock UI.
 - Stooq's public download route is protected against unattended automation,
   and its automation/private-retention rights could not be verified.
 - SEC EDGAR and ECB data are viable official sources.
 - filings.xbrl.org is usable for European filings but documents incomplete
   coverage, including Germany and Ireland.
-- The official free API alternatives reviewed do not support roughly 500 US
-  and European equities with twice-daily automated OHLCV updates.
+- European live equity prices remain deferred.
 
-StanStock therefore defaults to deterministic synthetic data. It does not
-scrape around access controls, silently shrink the universe, or label
-reconstructed data as live predictions. See `docs/source-spike.md` for the
-evidence and exact limitations.
+StanStock still defaults to deterministic synthetic data and requires an
+explicit provider enable step. It does not scrape around access controls,
+silently broaden licensed use, or label historical catch-up as an on-time
+prediction. See `docs/source-spike.md` for the evidence and exact limitations.
 
 ### Synthetic demo data
 
@@ -55,6 +63,48 @@ history (no fabricated weekends/holidays):
 ```bash
 uv run python manage.py refresh_demo
 ```
+
+### Optional US Twelve Data workflow
+
+Keep the key in the environment only. First run the bounded source probe, then
+enable the provider only if the account has internal-display rights:
+
+```bash
+export TWELVE_DATA_API_KEY=replace-with-your-key
+uv run python manage.py source_spike
+uv run python manage.py configure_twelve_data \
+  --enable \
+  --plan grow \
+  --confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED
+uv run python manage.py daily --region us
+```
+
+`daily --region us` validates the configured symbols against Twelve Data's
+NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
+vintages, captures an observed universe snapshot for the latest eligible
+session, analyzes eligible listings, and appends the supported short-horizon
+price-only predictions. Medium and long scenarios remain explicitly withheld
+rather than entering the prediction or outcome ledgers. An explicit older
+`--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
+idempotent; another invocation creates a skipped job and makes no provider
+requests.
+
+The conservative local budget is 8 credits/minute and 800/day. The 100-symbol
+configuration uses approximately 103 credits per full run (two catalogs, 100
+stocks, and SPY). This accounting cannot see credits consumed by other
+applications using the same Twelve Data account. Disable access immediately
+with:
+
+```bash
+uv run python manage.py configure_twelve_data --disable
+```
+
+Twelve Data data must remain private, may not be redistributed without
+appropriate rights, and must be deleted after the subscription or agreement
+ends as required by the provider's current terms. The supported termination
+procedure is a full installation reset covering the database, data directory,
+backups, snapshots, and replicas; see
+[Operations and recovery](docs/operations.md#destroying-twelve-data-data-after-access-ends).
 
 ## Start locally
 
