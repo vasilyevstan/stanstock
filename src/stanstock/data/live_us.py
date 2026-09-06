@@ -41,6 +41,7 @@ from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import PriceSeries, StockCatalog, StockReference
 from stanstock.data.providers.exceptions import (
     ProviderConfigurationError,
+    ProviderDataError,
     ProviderError,
     ProviderQuotaError,
 )
@@ -341,16 +342,19 @@ def run_us_daily(
     expected_credits = len(config.exchanges) + len(config.symbols) + 1
     budget = ProviderCreditBudget(enforce_spacing=enforce_rate_limit)
     budget.preflight(expected_credits)
+    credits_used = 0
 
     try:
         catalogs: list[StockCatalog] = []
         for exchange in config.exchanges:
             budget.consume()
+            credits_used += 1
             catalogs.append(
                 twelve_data.fetch_stock_catalog(
                     exchange=exchange,
                     country=config.country,
                     instrument_type=config.instrument_type,
+                    required_symbols=config.symbols,
                     api_key=key,
                 )
             )
@@ -365,17 +369,23 @@ def run_us_daily(
             if symbol in exclusion_reasons:
                 continue
             budget.consume()
-            series = twelve_data.fetch_daily_price_series(
-                symbol,
-                start_date=history_start,
-                end_date=target_date,
-                adjustment=config.price_adjustment,
-                api_key=key,
-            )
-            _validate_listing_series(series, references[symbol], config)
+            credits_used += 1
+            try:
+                series = twelve_data.fetch_daily_price_series(
+                    symbol,
+                    start_date=history_start,
+                    end_date=target_date,
+                    adjustment=config.price_adjustment,
+                    api_key=key,
+                )
+                _validate_listing_series(series, references[symbol], config)
+            except (ProviderDataError, ValueError) as exc:
+                exclusion_reasons[symbol] = f"Rejected provider data: {exc}"[:160]
+                continue
             series_by_symbol[symbol] = series
 
         budget.consume()
+        credits_used += 1
         benchmark_series = twelve_data.fetch_daily_price_series(
             config.benchmark_symbol,
             start_date=history_start,
@@ -462,7 +472,7 @@ def run_us_daily(
         excluded=len(config.symbols) - len(eligible_symbols),
         price_assets=len(price_assets) + 1,
         raw_assets=len(price_assets) + 1 + len(catalog_assets),
-        credits_used=len(catalogs) + len(series_by_symbol) + 1,
+        credits_used=credits_used,
         benchmark_symbol=config.benchmark_symbol,
     )
 

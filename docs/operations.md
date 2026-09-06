@@ -52,6 +52,14 @@ history or process arguments. StanStock reads the value into memory only when
 an API call needs it. Use `TWELVE_DATA_API_KEY` from a deployment secret
 manager on non-macOS systems; it takes precedence over Keychain.
 
+For a private local checkout, Docker Compose can read
+`TWELVE_DATA_API_KEY` from the ignored `.env` file. Copy `.env.example`, set
+the key locally, and restrict the file to the current OS user with
+`chmod 600 .env`. Both `.gitignore` and `.dockerignore` exclude the file.
+Direct `manage.py` commands do not load dotenv files automatically; run
+`set -a; . ./.env; set +a` in the shell first. Never commit, copy into an
+image, print, or attach the populated file.
+
 Run the bounded source probe, then explicitly record the Basic personal-use
 scope:
 

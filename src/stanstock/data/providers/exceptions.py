@@ -43,3 +43,13 @@ class ProviderResponseError(ProviderError):
     """The provider responded with HTTP 200 (or similar) but the payload was
     empty, malformed, or otherwise not usable (for example an unexpected
     content type, missing required fields, or a checksum mismatch)."""
+
+
+class ProviderDataError(ProviderResponseError):
+    """A valid provider response contained unusable data for one instrument.
+
+    Callers may exclude that instrument when their methodology explicitly
+    permits partial coverage. HTTP failures, non-JSON gateway responses, and
+    malformed response envelopes remain plain :class:`ProviderResponseError`
+    failures and must not be downgraded to a data-quality exclusion.
+    """

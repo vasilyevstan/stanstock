@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, date, datetime
+from collections.abc import Collection
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -33,6 +34,7 @@ from stanstock.data.providers.contracts import (
 from stanstock.data.providers.exceptions import (
     ProviderBlockedError,
     ProviderConfigurationError,
+    ProviderDataError,
     ProviderQuotaError,
     ProviderResponseError,
 )
@@ -109,7 +111,8 @@ def fetch_daily_price_series(
     if start_date is not None:
         params["start_date"] = start_date.isoformat()
     if end_date is not None:
-        params["end_date"] = end_date.isoformat()
+        # Twelve Data treats a date-only end boundary as exclusive for daily data.
+        params["end_date"] = (end_date + timedelta(days=1)).isoformat()
     if outputsize is not None:
         params["outputsize"] = outputsize
 
@@ -121,30 +124,33 @@ def fetch_daily_price_series(
         timeout=DEFAULT_TIMEOUT,
     )
     payload = _load_response(result, context=f"daily prices for {normalized_symbol}")
-    meta = _required_mapping(payload, "meta", context=normalized_symbol)
-    returned_symbol = _required_text(meta, "symbol", context=normalized_symbol).upper()
-    if returned_symbol != normalized_symbol:
-        raise ProviderResponseError(
-            f"Twelve Data returned symbol {returned_symbol!r} for "
-            f"requested symbol {normalized_symbol!r}"
-        )
-    interval = _required_text(meta, "interval", context=normalized_symbol)
-    if interval != "1day":
-        raise ProviderResponseError(
-            f"Twelve Data returned interval {interval!r} for daily symbol {normalized_symbol!r}"
-        )
+    try:
+        meta = _required_mapping(payload, "meta", context=normalized_symbol)
+        returned_symbol = _required_text(meta, "symbol", context=normalized_symbol).upper()
+        if returned_symbol != normalized_symbol:
+            raise ProviderResponseError(
+                f"Twelve Data returned symbol {returned_symbol!r} for "
+                f"requested symbol {normalized_symbol!r}"
+            )
+        interval = _required_text(meta, "interval", context=normalized_symbol)
+        if interval != "1day":
+            raise ProviderResponseError(
+                f"Twelve Data returned interval {interval!r} for daily symbol {normalized_symbol!r}"
+            )
 
-    raw_values = payload.get("values")
-    if not isinstance(raw_values, list) or not raw_values:
-        raise ProviderResponseError(
-            f"Twelve Data returned no daily values for symbol {normalized_symbol!r}"
+        raw_values = payload.get("values")
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ProviderResponseError(
+                f"Twelve Data returned no daily values for symbol {normalized_symbol!r}"
+            )
+        bars = _parse_bars(
+            raw_values,
+            symbol=normalized_symbol,
+            start_date=start_date,
+            end_date=end_date,
         )
-    bars = _parse_bars(
-        raw_values,
-        symbol=normalized_symbol,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    except ProviderResponseError as exc:
+        raise ProviderDataError(str(exc)) from exc
     return PriceSeries(
         provider=PROVIDER,
         symbol=normalized_symbol,
@@ -167,11 +173,16 @@ def fetch_stock_catalog(
     country: str = "United States",
     instrument_type: str = "Common Stock",
     outputsize: int = MAX_OUTPUT_SIZE,
+    required_symbols: Collection[str] | None = None,
     api_key: str | None = None,
     allow_demo: bool = False,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> StockCatalog:
-    """Fetch one official stock-reference catalog slice."""
+    """Fetch one official stock-reference catalog slice.
+
+    When ``required_symbols`` is provided, only those rows are normalized.
+    The complete provider response remains available in ``raw_bytes``.
+    """
     normalized_exchange = exchange.strip().upper()
     if not normalized_exchange:
         raise ValueError("exchange is required")
@@ -201,20 +212,31 @@ def fetch_stock_catalog(
         raise ProviderResponseError(
             f"Twelve Data {normalized_exchange} stock catalog had no data array"
         )
-    references = tuple(
-        _parse_stock_reference(row, exchange=normalized_exchange, index=index)
-        for index, row in enumerate(raw_data)
+    symbol_filter = (
+        frozenset(_normalize_symbol(symbol) for symbol in required_symbols)
+        if required_symbols is not None
+        else None
     )
+    references: list[StockReference] = []
+    for index, row in enumerate(raw_data):
+        if symbol_filter is not None:
+            if not isinstance(row, dict):
+                continue
+            row_symbol = _optional_text(row.get("symbol"))
+            if row_symbol is None or row_symbol.upper() not in symbol_filter:
+                continue
+        references.append(_parse_stock_reference(row, exchange=normalized_exchange, index=index))
+    parsed_references = tuple(references)
     raw_count = payload.get("count", len(references))
-    if not isinstance(raw_count, int) or raw_count < len(references):
+    if not isinstance(raw_count, int) or raw_count < len(parsed_references):
         raise ProviderResponseError(
             f"Twelve Data {normalized_exchange} stock catalog had invalid count "
-            f"{raw_count!r} for {len(references)} rows"
+            f"{raw_count!r} for {len(parsed_references)} rows"
         )
     return StockCatalog(
         provider=PROVIDER,
         exchange=normalized_exchange,
-        references=references,
+        references=parsed_references,
         count=raw_count,
         retrieved_at=datetime.now(tz=UTC),
         source_url=result.url,

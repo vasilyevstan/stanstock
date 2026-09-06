@@ -82,6 +82,26 @@ Containers and non-macOS hosts should inject `TWELVE_DATA_API_KEY` through
 their secret manager or process environment. Environment variables take
 precedence over Keychain.
 
+For a private local checkout, `.env` is also supported by Docker Compose and
+is excluded from both Git and the image build context. Keep it owner-readable
+only:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# Edit TWELVE_DATA_API_KEY in .env without committing the file.
+```
+
+Direct `manage.py` commands do not parse dotenv files themselves. Export the
+local file into that command's process when not using Compose:
+
+```bash
+set -a
+. ./.env
+set +a
+uv run python manage.py source_spike
+```
+
 For the Basic personal plan, run the bounded source probe and then activate
 the single-user guard:
 
