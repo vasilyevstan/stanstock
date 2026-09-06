@@ -13,6 +13,25 @@ Reviewer: `stanstock-critic-tester`.
 - [ ] A failed job leaves no partially written `DataAsset`, `Prediction`, or
       simulation row that a retry would treat as already complete.
 
+## Local scheduling
+
+- [ ] The LaunchAgent records and rechecks the machine IANA timezone, and its
+      chosen wall-clock time is validated after regular/early XNYS closes,
+      across DST changes, and before the next session opening.
+- [ ] Sleep/wake recovery, holidays, duplicate targets, dirty worktrees, and
+      missing or locked credential sources have explicit fail/skip behavior;
+      no late run is marked as observed or on time.
+- [ ] The plist, process arguments, and logs contain no populated `.env`
+      values; unattended execution either reads an owner-only credential
+      source promptly or fails.
+- [ ] Aggregate orchestration preserves independently retryable market,
+      evaluation, and portfolio-snapshot child jobs and recovers successful
+      children before another provider call.
+- [ ] Scheduled portfolio snapshots use the resolved exchange-session date,
+      not the local wall-clock date.
+- [ ] Local SQLite enables WAL plus a bounded busy timeout; concurrent web/job
+      behavior has focused tests.
+
 ## Backups
 
 - [ ] Backup/restore procedures cover both the PostgreSQL database and the

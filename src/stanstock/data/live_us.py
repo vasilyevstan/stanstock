@@ -328,6 +328,7 @@ def run_us_daily(
     decision_time: datetime | None = None,
     store: AssetStore | None = None,
     enforce_rate_limit: bool = True,
+    require_on_time: bool = False,
 ) -> LiveUsRunResult:
     """Fetch, persist, and analyze one complete US target-date snapshot."""
     existing_result = _existing_completed_result(
@@ -434,6 +435,12 @@ def run_us_daily(
         *(series.retrieved_at for series in series_by_symbol.values()),
     )
     with transaction.atomic():
+        if require_on_time:
+            analysis_time = max(analysis_time, timezone.now())
+            _require_automatic_on_time(
+                target_date=target_date,
+                generated_at=analysis_time,
+            )
         snapshot = _ensure_snapshot(
             config=config,
             target_date=target_date,
@@ -458,6 +465,11 @@ def run_us_daily(
             store=store,
             config_path=default_us_scoring_config_path(),
         )
+        if require_on_time:
+            _require_automatic_on_time(
+                target_date=target_date,
+                generated_at=max(analysis_time, timezone.now()),
+            )
     _record_provider_success(
         at=analysis_time,
         target_date=target_date,
@@ -474,6 +486,19 @@ def run_us_daily(
         raw_assets=len(price_assets) + 1 + len(catalog_assets),
         credits_used=credits_used,
         benchmark_symbol=config.benchmark_symbol,
+    )
+
+
+def _require_automatic_on_time(*, target_date: date, generated_at: datetime) -> None:
+    if is_us_prediction_on_time(
+        target_date=target_date,
+        generated_at=generated_at,
+    ):
+        return
+    raise ValueError(
+        f"Automatic issuance deadline passed before completing "
+        f"{target_date.isoformat()} analysis; no late analysis or prediction "
+        "was created."
     )
 
 

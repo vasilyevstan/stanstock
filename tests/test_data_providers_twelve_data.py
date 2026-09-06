@@ -160,6 +160,21 @@ def test_api_key_resolution_falls_back_to_macos_keychain(
     assert twelve_data.resolve_api_key() == "keychain-key"
 
 
+def test_noninteractive_api_key_resolution_never_reads_keychain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(twelve_data.API_KEY_ENV, raising=False)
+    monkeypatch.setenv(twelve_data.DISABLE_KEYCHAIN_ENV, "1")
+    monkeypatch.setattr(
+        twelve_data,
+        "read_twelve_data_api_key",
+        lambda: pytest.fail("disabled keychain must not be read"),
+    )
+
+    with pytest.raises(ProviderConfigurationError, match="is required"):
+        twelve_data.resolve_api_key()
+
+
 @pytest.mark.parametrize(
     ("payload", "error"),
     [

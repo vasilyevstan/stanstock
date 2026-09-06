@@ -7,6 +7,7 @@ from stanstock.data.providers.exceptions import ProviderConfigurationError
 
 TWELVE_DATA_KEYCHAIN_SERVICE = "com.stanstock.twelve-data"
 TWELVE_DATA_KEYCHAIN_ACCOUNT = "api-key"
+KEYCHAIN_TIMEOUT_SECONDS = 5
 
 
 def read_twelve_data_api_key() -> str | None:
@@ -27,8 +28,9 @@ def read_twelve_data_api_key() -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ProviderConfigurationError(
             "The macOS Keychain could not be accessed for the Twelve Data credential."
         ) from exc

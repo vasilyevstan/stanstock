@@ -316,7 +316,11 @@ def build_sample_portfolio(
     return portfolio, True
 
 
-def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
+def calculate_portfolio_valuation(
+    portfolio: Portfolio,
+    *,
+    expected_as_of_date: date | None = None,
+) -> PortfolioValuation:
     holdings = list(
         portfolio.holdings.select_related(
             "listing__security__company",
@@ -327,7 +331,7 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
         return PortfolioValuation(
             portfolio=portfolio,
             positions=(),
-            as_of_date=timezone.localdate(),
+            as_of_date=expected_as_of_date or timezone.localdate(),
             oldest_price_date=None,
             newest_price_date=None,
             cash_balance=portfolio.cash_balance,
@@ -443,6 +447,12 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
                 "A split-sized price move was detected; quantity and average cost may need review."
             )
 
+    if expected_as_of_date is not None and as_of_date != expected_as_of_date:
+        issues.append(
+            f"Portfolio prices resolve to {as_of_date.isoformat()}, not the required "
+            f"XNYS session {expected_as_of_date.isoformat()}."
+        )
+
     return PortfolioValuation(
         portfolio=portfolio,
         positions=tuple(positions),
@@ -467,8 +477,13 @@ def calculate_portfolio_valuation(portfolio: Portfolio) -> PortfolioValuation:
 
 def record_portfolio_snapshot(
     portfolio: Portfolio,
+    *,
+    expected_as_of_date: date | None = None,
 ) -> tuple[PortfolioSnapshot, bool]:
-    valuation = calculate_portfolio_valuation(portfolio)
+    valuation = calculate_portfolio_valuation(
+        portfolio,
+        expected_as_of_date=expected_as_of_date,
+    )
     if not valuation.complete:
         raise PortfolioValuationError(
             "Portfolio snapshot was not recorded: " + " ".join(valuation.issues)
@@ -562,14 +577,20 @@ def portfolio_snapshot_series(portfolio: Portfolio) -> list[PortfolioSnapshot]:
     return list(portfolio.snapshots.order_by("recorded_at", "id"))
 
 
-def snapshot_all_portfolios() -> PortfolioSnapshotBatch:
+def snapshot_all_portfolios(
+    *,
+    expected_as_of_date: date | None = None,
+) -> PortfolioSnapshotBatch:
     created = 0
     unchanged = 0
     failures: list[str] = []
     portfolios = Portfolio.objects.filter(archived_at__isnull=True).order_by("owner_id", "name")
     for portfolio in portfolios:
         try:
-            _snapshot, was_created = record_portfolio_snapshot(portfolio)
+            _snapshot, was_created = record_portfolio_snapshot(
+                portfolio,
+                expected_as_of_date=expected_as_of_date,
+            )
         except PortfolioValuationError as exc:
             failures.append(f"{portfolio.name}: {exc}")
             continue

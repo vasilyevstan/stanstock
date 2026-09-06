@@ -93,6 +93,63 @@ benchmark has no target-date close, the run fails rather than creating a
 partial snapshot. Repeating a successful target produces a skipped `JobRun`
 and makes no market-data requests.
 
+### Daily macOS LaunchAgent
+
+The supported unattended local workflow is one user LaunchAgent at 02:00
+local time Tuesday-Saturday:
+
+```bash
+.venv/bin/python manage.py launchd_refresh install
+.venv/bin/python manage.py launchd_refresh status
+```
+
+Installation validates the detected IANA timezone over more than a year of
+scheduled invocations, including regular and early XNYS closes plus local and
+New York DST changes. Every checked invocation must satisfy:
+
+```text
+XNYS close + provider publication delay <= 02:00 local < next XNYS open
+```
+
+An unsafe timezone blocks installation; the installer never silently changes
+the chosen hour. The timezone is recorded in the plist, and runtime refuses to
+continue after a machine-timezone change until the LaunchAgent is reinstalled.
+
+The plist contains only paths and non-secret runtime flags. The committed
+`scripts/run-scheduled-refresh.sh` runner requires the ignored local `.env`,
+rejects group/other-readable permissions, exports it inside the child process,
+disables unattended Keychain fallback, and then executes the absolute
+`.venv/bin/python`. A missing key therefore fails promptly instead of opening
+or waiting on a Keychain prompt. Logs are written below the current user's
+private `~/Library/Logs/StanStock` directory.
+
+`scheduled_refresh` resolves the latest completed XNYS target and maintains an
+aggregate parent `JobRun` with independently recoverable children:
+
+1. `daily` market retrieval, universe snapshot, analysis, and prediction;
+2. provider- and maturity-filtered prediction outcome evaluation;
+3. immutable portfolio snapshots bound to the resolved XNYS session date.
+
+The automated market child requires a clean Git worktree and records the exact
+40-character HEAD revision. A retry recovers any successful child before
+provider credentials or quota are used again. Evaluation and portfolio
+snapshots are attempted independently after market success, so one downstream
+failure does not hide the other's result. Holidays and already completed
+targets become explicit skips. If macOS wakes the job after the next XNYS
+session has opened, a missing market child fails rather than creating a late
+prediction marked as observed; use an explicit manual `daily --target-date`
+research reconstruction when historical catch-up is intentional.
+
+Uninstall without deleting historical logs or job evidence:
+
+```bash
+.venv/bin/python manage.py launchd_refresh uninstall
+```
+
+Local SQLite uses WAL mode, an immediate transaction mode, and a 20-second busy
+timeout so the nightly writer and local web process coordinate predictably.
+PostgreSQL continues to use target-key advisory locks.
+
 After each market refresh, record every active tracked portfolio:
 
 ```bash

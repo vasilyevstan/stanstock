@@ -11,8 +11,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from stanstock.core.models import JobRun
+from stanstock.data import jobs as data_jobs
 from stanstock.data.live_us import PRIVATE_USAGE_SCOPE, LiveUsRunResult
-from stanstock.data.management.commands import daily
 from stanstock.data.models import ProviderRecord, Universe, UniverseSnapshot
 from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
 from stanstock.data.providers.contracts import PriceBar, PriceSeries
@@ -257,9 +257,9 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
     config = object()
     run_calls: list[object] = []
 
-    monkeypatch.setattr(daily, "load_us_universe_config", lambda path: config)
+    monkeypatch.setattr(data_jobs, "load_us_universe_config", lambda path: config)
     monkeypatch.setattr(
-        daily,
+        data_jobs,
         "resolve_us_target_date",
         lambda **kwargs: (target, UniverseSnapshot.Grade.OBSERVED),
     )
@@ -278,7 +278,7 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
             benchmark_symbol="SPY",
         )
 
-    monkeypatch.setattr(daily, "run_us_daily", run_us_daily)
+    monkeypatch.setattr(data_jobs, "run_us_daily", run_us_daily)
     command_args = {
         "region": "us",
         "target_date": target.isoformat(),

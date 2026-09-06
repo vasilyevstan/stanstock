@@ -15,6 +15,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from stanstock.core.launchd import launch_agent_status
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
@@ -110,6 +111,7 @@ def status_page(request: HttpRequest) -> HttpResponse:
         "latest_run": latest_run,
         "providers": ProviderRecord.objects.order_by("provider"),
         "recent_jobs": JobRun.objects.order_by("-started_at")[:5],
+        "scheduler": _scheduler_status(),
         "prediction_count": Prediction.objects.filter(analysis__run=latest_run).count()
         if latest_run
         else 0,
@@ -120,6 +122,18 @@ def status_page(request: HttpRequest) -> HttpResponse:
         else 0,
     }
     return render(request, "web/status.html", context)
+
+
+def _scheduler_status() -> dict[str, object]:
+    try:
+        return launch_agent_status()
+    except (OSError, ValueError) as exc:
+        return {
+            "installed": False,
+            "loaded": False,
+            "timezone_matches": False,
+            "error": str(exc),
+        }
 
 
 @login_required

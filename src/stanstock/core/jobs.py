@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
+import os
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from django.db import connection, transaction
@@ -167,4 +170,40 @@ def _target_lock(target_key: str) -> Iterator[None]:
     with _LOCAL_LOCKS_GUARD:
         lock = _LOCAL_LOCKS.setdefault(target_key, threading.Lock())
     with lock:
+        if connection.vendor == "sqlite":
+            with _sqlite_process_lock(target_key):
+                yield
+            return
         yield
+
+
+@contextmanager
+def _sqlite_process_lock(target_key: str) -> Iterator[None]:
+    database_name = connection.settings_dict.get("NAME")
+    if not isinstance(database_name, (str, Path)):
+        yield
+        return
+    raw_name = str(database_name)
+    if raw_name == ":memory:" or raw_name.startswith("file:"):
+        yield
+        return
+    with _sqlite_file_lock(target_key, Path(raw_name)):
+        yield
+
+
+@contextmanager
+def _sqlite_file_lock(target_key: str, database_path: Path) -> Iterator[None]:
+    lock_directory = database_path.resolve().parent / ".stanstock-job-locks"
+    lock_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(lock_directory, 0o700)
+    filename = hashlib.sha256(target_key.encode()).hexdigest() + ".lock"
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_directory / filename, flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)

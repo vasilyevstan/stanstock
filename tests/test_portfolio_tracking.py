@@ -24,6 +24,7 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.portfolio.jobs import execute_portfolio_snapshot_job
 from stanstock.portfolio.models import Portfolio, PortfolioHolding, PortfolioSnapshot
 from stanstock.portfolio.service import (
     SAMPLE_PORTFOLIO_POLICY,
@@ -775,6 +776,26 @@ def test_snapshot_portfolios_command_is_observable_and_idempotent(
 
 
 @pytest.mark.django_db
+def test_scheduled_snapshot_requires_the_resolved_xnys_session(
+    owner,
+    priced_listing: Listing,
+) -> None:
+    portfolio = Portfolio.objects.create(owner=owner, name="Session-bound", base_currency="USD")
+    upsert_holding(
+        portfolio=portfolio,
+        listing=priced_listing,
+        quantity=Decimal("1"),
+        average_cost=Decimal("90"),
+    )
+
+    with pytest.raises(PortfolioValuationError, match="required XNYS session 2026-09-05"):
+        record_portfolio_snapshot(
+            portfolio,
+            expected_as_of_date=date(2026, 9, 5),
+        )
+
+
+@pytest.mark.django_db
 def test_snapshot_portfolios_records_partial_failures_without_losing_success(
     owner,
     priced_listing: Listing,
@@ -817,3 +838,15 @@ def test_snapshot_portfolios_records_partial_failures_without_losing_success(
     assert run.details["failures"] == [
         "Broken: Portfolio snapshot was not recorded: INACTIVE is no longer an active listing."
     ]
+
+    with pytest.raises(ValueError, match="Broken"):
+        execute_portfolio_snapshot_job(
+            target_date=date(2026, 9, 7),
+            require_all=True,
+        )
+
+    strict_run = JobRun.objects.get(
+        job_name="scheduled_portfolio_snapshots",
+        target_date=date(2026, 9, 7),
+    )
+    assert strict_run.status == JobRun.Status.FAILED
