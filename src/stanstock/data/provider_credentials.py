@@ -11,7 +11,7 @@ TWELVE_DATA_KEYCHAIN_ACCOUNT = "api-key"
 
 def read_twelve_data_api_key() -> str | None:
     """Read the Twelve Data key from the current macOS user's login keychain."""
-    if sys.platform != "darwin":
+    if not _is_macos():
         return None
     try:
         result = subprocess.run(
@@ -102,8 +102,12 @@ def delete_twelve_data_api_key() -> bool:
 
 
 def _require_macos_keychain() -> None:
-    if sys.platform != "darwin":
+    if not _is_macos():
         raise ProviderConfigurationError(
             "Local credential storage currently uses macOS Keychain. "
             "Use TWELVE_DATA_API_KEY in non-macOS environments."
         )
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
