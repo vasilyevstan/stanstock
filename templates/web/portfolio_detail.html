@@ -215,6 +215,9 @@
                 <td>
                   <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
                   <small>{{ position.holding.listing.security.company.name }}</small>
+                  {% if card.price_band %}
+                    <small>{{ card.price_band.label }} · {{ card.price_band.price_date }}</small>
+                  {% endif %}
                 </td>
                 <td>{{ position.holding.quantity|floatformat:8 }}</td>
                 <td>{{ position.holding.average_cost|floatformat:2 }} {{ portfolio.base_currency }}</td>
@@ -249,6 +252,10 @@
                     <small>{{ card.analysis.overall_score }}/100</small>
                   {% else %}
                     No analysis
+                  {% endif %}
+                  {% if card.price_band and not card.price_band.new_allocation_eligible %}
+                    <span class="badge">Speculative watchlist</span>
+                    <small>Existing holding remains tracked; new allocation is 0%.</small>
                   {% endif %}
                 </td>
                 {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}

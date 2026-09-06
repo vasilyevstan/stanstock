@@ -18,6 +18,13 @@ from stanstock.portfolio.models import (
     PortfolioSnapshot,
     PortfolioSnapshotHolding,
 )
+from stanstock.research.affordability import (
+    DECISION_TARGET_DATE_BASIS,
+    PRICE_BAND_POLICY_VERSION,
+    UNDER_10_BAND,
+    PriceBandAssessment,
+    classify_price_band,
+)
 from stanstock.research.config import code_revision
 from stanstock.research.models import AnalysisRun, StockAnalysis
 from stanstock.research.opportunities import OpportunityAssessment, assess_opportunity
@@ -33,7 +40,7 @@ from stanstock.research.provenance import (
 MAX_PORTFOLIO_PRICE_AGE_DAYS = 7
 SPLIT_WARNING_LOW_RATIO = Decimal("0.60")
 SPLIT_WARNING_HIGH_RATIO = Decimal("1.67")
-SAMPLE_PORTFOLIO_POLICY = "equal_weight_opportunities_v1"
+SAMPLE_PORTFOLIO_POLICY = "equal_weight_opportunities_v2"
 SAMPLE_PORTFOLIO_DEFAULT_CAPITAL = Decimal("100000.000000")
 SAMPLE_PORTFOLIO_DEFAULT_TOP_N = 5
 SAMPLE_PORTFOLIO_MAX_TOP_N = 20
@@ -90,6 +97,7 @@ class PortfolioSnapshotBatch:
 class SamplePortfolioSelection:
     analysis: StockAnalysis
     opportunity: OpportunityAssessment
+    price_band: PriceBandAssessment
     source_asset: DataAsset
     reference_price: Decimal
     quantity: Decimal
@@ -180,21 +188,34 @@ def build_sample_portfolio(
     if existing is not None:
         return existing, False
 
-    candidates: list[tuple[StockAnalysis, OpportunityAssessment, DataAsset]] = []
-    analyses = run.stocks.select_related("listing__security__company").order_by(
-        "-overall_score",
-        "-confidence",
-        "listing__ticker",
-        "pk",
-    )
+    candidates: list[
+        tuple[StockAnalysis, OpportunityAssessment, PriceBandAssessment, DataAsset]
+    ] = []
+    analyses = run.stocks.select_related(
+        "listing__security__company",
+        "listing__latest_market_data",
+    ).order_by("-overall_score", "-confidence", "listing__ticker", "pk")
     for analysis in analyses:
-        opportunity = assess_opportunity(analysis)
-        if not opportunity.eligible:
-            continue
         if analysis.listing.currency.upper() != Portfolio.Currency.USD:
             continue
         if not analysis.listing.is_active:
             continue
+        construction_price_band = classify_price_band(
+            close=analysis.current_price,
+            price_date=run.target_date,
+            date_basis=DECISION_TARGET_DATE_BASIS,
+            currency=analysis.listing.currency,
+        )
+        opportunity = assess_opportunity(
+            analysis,
+            price_band=construction_price_band,
+        )
+        if not opportunity.eligible:
+            continue
+        if construction_price_band is None:
+            raise PortfolioValuationError(
+                f"{analysis.listing.ticker} has no valid decision-run USD price band."
+            )
         if source_data_mode(analysis.data_quality) != DATA_MODE_PROVIDER:
             raise PortfolioValuationError(
                 f"{analysis.listing.ticker} has incomplete provider provenance."
@@ -203,7 +224,14 @@ def build_sample_portfolio(
             raise PortfolioValuationError(
                 f"{analysis.listing.ticker} has no current market row for ongoing tracking."
             )
-        candidates.append((analysis, opportunity, _analysis_price_asset(analysis)))
+        candidates.append(
+            (
+                analysis,
+                opportunity,
+                construction_price_band,
+                _analysis_price_asset(analysis),
+            )
+        )
         if len(candidates) == top_n:
             break
     if not candidates:
@@ -214,7 +242,7 @@ def build_sample_portfolio(
     allocation = capital / len(candidates)
     selections: list[SamplePortfolioSelection] = []
     invested = Decimal(0)
-    for analysis, opportunity, source_asset in candidates:
+    for analysis, opportunity, price_band, source_asset in candidates:
         reference_price = analysis.current_price.quantize(MONEY_QUANTUM)
         if reference_price <= 0:
             raise PortfolioValuationError(
@@ -237,6 +265,7 @@ def build_sample_portfolio(
             SamplePortfolioSelection(
                 analysis=analysis,
                 opportunity=opportunity,
+                price_band=price_band,
                 source_asset=source_asset,
                 reference_price=reference_price,
                 quantity=quantity,
@@ -253,6 +282,8 @@ def build_sample_portfolio(
         "entry_basis": "analysis_reference_close",
         "investability": "research_reference",
         "opportunity_policy_version": first_opportunity.policy_version,
+        "price_band_policy_version": PRICE_BAND_POLICY_VERSION,
+        "excluded_new_allocation_price_bands": [UNDER_10_BAND],
         "signal_label": first_opportunity.label,
         "signal_horizon": first_opportunity.horizon,
         "requested_top_n": top_n,
@@ -263,6 +294,16 @@ def build_sample_portfolio(
         "issued_on_time": run.issued_on_time,
         "return_definition": "split_adjusted_price_return",
         "dividends_included": False,
+        "selection_price_bands": [
+            {
+                "ticker": selection.analysis.listing.ticker,
+                "band": selection.price_band.slug,
+                "close": str(selection.price_band.close),
+                "price_date": selection.price_band.price_date.isoformat(),
+                "date_basis": selection.price_band.date_basis,
+            }
+            for selection in selections
+        ],
     }
     base_name = f"StanStock Sample {run.target_date.isoformat()} {str(run.pk)[:8]}"
     description = (
@@ -306,6 +347,7 @@ def build_sample_portfolio(
                     acquired_on=run.target_date,
                     notes=(
                         f"Rank {rank}; {selection.opportunity.label}; "
+                        f"{selection.price_band.label}; "
                         f"source analysis {selection.analysis.pk}"
                     ),
                 )

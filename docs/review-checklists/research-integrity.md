@@ -165,6 +165,21 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 - [ ] A prospective scoring change uses a new immutable configuration version;
       historical hashes/calculation paths remain unchanged and performance is
       not pooled across materially different versions.
+- [ ] Current USD price bands use the latest valid persisted close, display
+      its session date, and never enter score, confidence, valuation, or
+      recommendation arithmetic.
+- [ ] Under $10 is labeled as a speculative watchlist with a 0%
+      new-allocation cap; it is excluded from new opportunity highlights and
+      sample construction without removing existing holdings or rewriting
+      frozen historical baskets.
+- [ ] Current opportunity display/filtering uses `LatestMarketData`, but a
+      run-dated sample basket classifies the immutable analysis reference
+      close at the run target. Later mutable closes cannot change archive and
+      rebuild composition, and missing current USD state fails closed for
+      promotion.
+- [ ] Under-$10 long-horizon output says `Forecast unavailable` and names the
+      missing SEC, dilution/per-share, solvency/cash-runway, dollar-liquidity,
+      split-event, and compatible 3y/5y evidence gates.
 
 ## Return and FX consistency
 

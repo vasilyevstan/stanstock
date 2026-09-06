@@ -102,6 +102,15 @@ record; the summary below is not a substitute for reading it.
   prospective normalized factor, score, recommendation, and eligibility gate
   unchanged; price-difference momentum is normalized and liquidity is
   dollar-denominated. Raw share volume cannot satisfy a new BUY gate.
+- **Neutral affordability bands**: current USD bands use the latest valid
+  persisted close and show its session date, but never enter score,
+  confidence, valuation, or recommendation arithmetic. Under $10 remains a
+  0%-new-allocation speculative watchlist, is excluded from new highlights
+  and sample construction, shows explicit missing 3y/5y gates, and does not
+  erase existing holdings or frozen historical baskets. Current UI bands use
+  `LatestMarketData`; run-dated sample construction must instead classify the
+  immutable analysis reference close, and missing current USD state fails
+  closed for promotion.
 - **Prospective methodology versioning**: price-scale or liquidity corrections
   use a new immutable configuration and preserve historical hashes,
   calculation paths, predictions, and version-separated performance.

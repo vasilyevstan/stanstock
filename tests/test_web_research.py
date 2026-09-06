@@ -182,6 +182,19 @@ def test_research_pages_require_authentication(client, name: str) -> None:
 
 
 @pytest.mark.django_db
+def test_opportunities_explain_when_no_completed_analysis_exists(
+    authenticated_client,
+) -> None:
+    response = authenticated_client.get(reverse("opportunities"))
+
+    assert response.status_code == 200
+    assert response.context["price_band_groups"] == []
+    content = response.content.decode()
+    assert "No completed analysis run exists." in content
+    assert "No persisted analysis in this price band" not in content
+
+
+@pytest.mark.django_db
 def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     authenticated_client,
     persisted_analysis: StockAnalysis,
@@ -191,6 +204,7 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
         {
             "region": "us",
             "recommendation": "buy",
+            "price_band": "50_to_300",
             "country": "US",
             "exchange": "XNAS",
             "sector": "Technology",
@@ -205,6 +219,8 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     assert "Synthetic research data." in opportunity_content
     assert "SYN-A" in opportunity_content
     assert "78.50/100" in opportunity_content
+    assert "$50-$300" in opportunity_content
+    assert "Latest close" in opportunity_content
 
     excluded = authenticated_client.get(
         reverse("opportunities"),
@@ -224,6 +240,29 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     content = detail.content.decode()
     assert "Quality is above the configured threshold." in content
     assert "Prediction history" in content
+
+
+@pytest.mark.django_db
+def test_opportunities_display_every_price_band_including_empty_bands(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    response = authenticated_client.get(reverse("opportunities"))
+
+    assert response.status_code == 200
+    groups = response.context["price_band_groups"]
+    assert [(group["slug"], group["count"]) for group in groups] == [
+        ("under_10", 0),
+        ("10_to_50", 0),
+        ("50_to_300", 1),
+        ("300_plus", 0),
+    ]
+    content = response.content.decode()
+    assert "Under $10 - speculative watchlist" in content
+    assert "$10-$50" in content
+    assert "$50-$300" in content
+    assert "$300+" in content
+    assert content.count("No persisted analysis in this price band") == 3
 
 
 @pytest.mark.django_db
@@ -252,7 +291,152 @@ def test_great_opportunity_is_highlighted_with_versioned_policy(
     detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
 
     assert "Strong short-term setup" in opportunities.content.decode()
-    assert "great-opportunity-v1" in detail.content.decode()
+    assert "great-opportunity-v2" in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.overall_score = Decimal("85")
+    persisted_analysis.confidence = Decimal("70")
+    persisted_analysis.risk_class = RiskClass.LOW
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+        "fundamentals_used": False,
+    }
+    persisted_analysis.save(
+        update_fields=[
+            "overall_score",
+            "confidence",
+            "risk_class",
+            "data_quality",
+        ]
+    )
+    market_data = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    market_data.close = Decimal("9.99")
+    market_data.session_date = date(2026, 9, 5)
+    market_data.save(update_fields=["close", "session_date"])
+
+    opportunities = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "under_10"},
+    )
+    excluded_band = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "10_to_50"},
+    )
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    opportunity_content = opportunities.content.decode()
+    assert opportunities.status_code == 200
+    assert "Under $10 - speculative watchlist" in opportunity_content
+    assert "0% new allocation" in opportunity_content
+    assert "9.99 USD" in opportunity_content
+    price_band_groups = opportunities.context["price_band_groups"]
+    assert price_band_groups[0]["cards"][0]["price_band"].price_date == date(
+        2026,
+        9,
+        5,
+    )
+    assert "Strong short-term setup" not in opportunity_content
+    assert persisted_analysis.listing.ticker not in excluded_band.content.decode()
+
+    detail_content = detail.content.decode()
+    assert detail.status_code == 200
+    assert "Forecast unavailable" in detail_content
+    assert "Point-in-time SEC facts with adverse-versus-missing states" in detail_content
+    assert "Verified split and reverse-split events" in detail_content
+    persisted_analysis.refresh_from_db()
+    assert persisted_analysis.overall_score == Decimal("85")
+    assert persisted_analysis.recommendation == Recommendation.BUY
+
+
+@pytest.mark.django_db
+def test_missing_current_usd_price_band_fails_closed(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.overall_score = Decimal("85")
+    persisted_analysis.confidence = Decimal("70")
+    persisted_analysis.risk_class = RiskClass.LOW
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+        "fundamentals_used": False,
+    }
+    persisted_analysis.save(
+        update_fields=[
+            "overall_score",
+            "confidence",
+            "risk_class",
+            "data_quality",
+        ]
+    )
+    LatestMarketData.objects.filter(listing=persisted_analysis.listing).delete()
+
+    opportunities = authenticated_client.get(reverse("opportunities"))
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert opportunities.status_code == 200
+    groups = opportunities.context["price_band_groups"]
+    unavailable_group = next(group for group in groups if group["slug"] == "unavailable")
+    assert unavailable_group["count"] == 1
+    assert unavailable_group["new_allocation_eligible"] is False
+    card = unavailable_group["cards"][0]
+    assert card["opportunity"].eligible is False
+    assert card["long_horizon_blocked"] is True
+    content = opportunities.content.decode()
+    assert "Strong short-term setup" not in content
+    assert "Forecast unavailable" in content
+    assert "No valid latest persisted USD close is available" in content
+
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert "Forecast unavailable" in detail_content
+    assert "No valid latest persisted USD close is available" in detail_content
+
+
+@pytest.mark.django_db
+def test_non_usd_listing_marks_usd_band_not_applicable(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.overall_score = Decimal("85")
+    persisted_analysis.confidence = Decimal("70")
+    persisted_analysis.risk_class = RiskClass.LOW
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+        "fundamentals_used": False,
+    }
+    persisted_analysis.save(
+        update_fields=[
+            "overall_score",
+            "confidence",
+            "risk_class",
+            "data_quality",
+        ]
+    )
+    listing = persisted_analysis.listing
+    listing.currency = "EUR"
+    listing.save(update_fields=["currency"])
+
+    response = authenticated_client.get(reverse("opportunities"))
+
+    assert response.status_code == 200
+    groups = response.context["price_band_groups"]
+    not_applicable = next(group for group in groups if group["slug"] == "not_applicable")
+    assert not_applicable["count"] == 1
+    assert not_applicable["new_allocation_eligible"] is True
+    assert not_applicable["cards"][0]["opportunity"].eligible is True
+    content = response.content.decode()
+    assert "USD band not applicable" in content
+    assert "Trades in EUR" in content
+    assert "Price band unavailable" not in content
+    assert "Strong short-term setup" in content
 
 
 @pytest.mark.django_db

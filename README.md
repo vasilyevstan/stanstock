@@ -240,7 +240,11 @@ eligible USD listings by default, preserves the source run and reference
 prices, and creates an immutable baseline snapshot. The current price-only
 sample is a research-reference basket rather than an executable-fill claim;
 its short signal horizon, research grade, no-rebalance policy, split-adjusted
-price-return basis, and dividend exclusion remain visible.
+price-return basis, and dividend exclusion remain visible. Newly constructed
+samples exclude the `Under $10 - speculative watchlist` band and record the
+price-band policy used. Construction classifies the immutable analysis
+reference close at the run's target date rather than a later mutable close;
+existing holdings and older frozen samples are not rewritten.
 
 The equivalent command is:
 
@@ -259,7 +263,8 @@ uv run python manage.py snapshot_portfolios
 
 ## Authenticated pages
 
-- `/opportunities` - ranked, filterable analyses from the latest completed run.
+- `/opportunities` - ranked analyses grouped and filterable by neutral current
+  USD price bands, with the close date displayed.
 - `/stocks/<listing-id>` - scenarios, factor evidence, risks, and provenance.
 - `/predictions` - the append-only prediction ledger.
 - `/performance` - matured outcomes with minimum-sample safeguards.

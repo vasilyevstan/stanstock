@@ -525,6 +525,9 @@ def test_opportunity_policy_is_analysis_mode_aware(priced_listing: Listing) -> N
     assert assessment.eligible is True
     assert assessment.label == "Strong short-term setup"
     assert assessment.horizon == "short"
+    assert assessment.policy_version == "great-opportunity-v2"
+    assert assessment.price_band is not None
+    assert assessment.price_band.slug == "50_to_300"
     analysis.short_scenario = {"bear": -0.03, "base": -0.01, "bull": 0.05}
     assert assess_opportunity(analysis).eligible is False
 
@@ -616,6 +619,106 @@ def test_sample_portfolio_rejects_non_provider_analysis(owner, priced_listing: L
 
     with pytest.raises(PortfolioValuationError, match="provider-backed"):
         build_sample_portfolio(owner=owner, source_run=analysis.run, top_n=1)
+
+
+@pytest.mark.django_db
+def test_under_10_is_excluded_from_new_sample_but_existing_holdings_remain_trackable(
+    owner,
+) -> None:
+    run, listings = _provider_analysis_run(count=3)
+    decision_analysis = StockAnalysis.objects.get(run=run, listing=listings[0])
+    decision_analysis.current_price = Decimal("9.99")
+    decision_analysis.save(update_fields=["current_price"])
+    market_data = LatestMarketData.objects.get(listing=listings[0])
+    market_data.close = Decimal("125")
+    market_data.save(update_fields=["close"])
+
+    sample, created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+
+    assert created is True
+    assert list(
+        sample.holdings.order_by("listing__ticker").values_list("listing_id", flat=True)
+    ) == [
+        listings[1].id,
+        listings[2].id,
+    ]
+    assert sample.construction_metadata["price_band_policy_version"] == "us-price-bands-v1"
+    assert sample.construction_metadata["excluded_new_allocation_price_bands"] == ["under_10"]
+    assert {item["band"] for item in sample.construction_metadata["selection_price_bands"]} == {
+        "50_to_300"
+    }
+    assert {
+        item["price_date"] for item in sample.construction_metadata["selection_price_bands"]
+    } == {run.target_date.isoformat()}
+    assert {
+        item["date_basis"] for item in sample.construction_metadata["selection_price_bands"]
+    } == {"decision_target"}
+
+    sample.archived_at = timezone.now()
+    sample.save(update_fields=["archived_at", "updated_at"])
+    market_data.close = Decimal("400")
+    market_data.save(update_fields=["close"])
+    rebuilt, rebuilt_created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+    assert rebuilt_created is True
+    assert list(
+        rebuilt.holdings.order_by("listing__ticker").values_list("listing_id", flat=True)
+    ) == [
+        listings[1].id,
+        listings[2].id,
+    ]
+
+    tracked = Portfolio.objects.create(
+        owner=owner,
+        name="Existing speculative holding",
+        base_currency="USD",
+    )
+    market_data.close = Decimal("9.99")
+    market_data.save(update_fields=["close"])
+    holding = upsert_holding(
+        portfolio=tracked,
+        listing=listings[0],
+        quantity=Decimal("10"),
+        average_cost=Decimal("12"),
+    )
+    valuation = calculate_portfolio_valuation(tracked)
+
+    assert holding.listing_id == listings[0].id
+    assert valuation.positions[0].market_data is not None
+    assert valuation.positions[0].market_data.close == Decimal("9.99")
+
+
+@pytest.mark.django_db
+def test_invalid_ineligible_analysis_does_not_abort_sample_construction(owner) -> None:
+    run, listings = _provider_analysis_run(count=3)
+    ineligible = StockAnalysis.objects.get(run=run, listing=listings[0])
+    ineligible.recommendation = Recommendation.HOLD
+    ineligible.current_price = Decimal("0")
+    ineligible.save(update_fields=["recommendation", "current_price"])
+
+    portfolio, created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=2,
+    )
+
+    assert created is True
+    assert list(
+        portfolio.holdings.order_by("listing__ticker").values_list("listing_id", flat=True)
+    ) == [
+        listings[1].id,
+        listings[2].id,
+    ]
 
 
 @pytest.mark.django_db

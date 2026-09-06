@@ -38,6 +38,16 @@ from stanstock.portfolio.service import (
     restore_portfolio,
     upsert_holding,
 )
+from stanstock.research.affordability import (
+    PRICE_BAND_CURRENCY,
+    PRICE_BAND_POLICY_VERSION,
+    PRICE_BANDS,
+    PRICE_BANDS_BY_SLUG,
+    UNDER_10_LONG_HORIZON_GATES,
+    PriceBandAssessment,
+    PriceBandDefinition,
+    latest_price_band,
+)
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -147,7 +157,10 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
     if latest_run is not None:
         base_analyses = (
             StockAnalysis.objects.filter(run=latest_run)
-            .select_related("listing__security__company")
+            .select_related(
+                "listing__security__company",
+                "listing__latest_market_data",
+            )
             .order_by("-overall_score")
         )
         latest_analysis = base_analyses.first()
@@ -176,34 +189,96 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
         exchanges=exchanges,
         sectors=sectors,
     )
-    if latest_run is not None and filter_form.is_valid():
+    filters_valid = filter_form.is_valid()
+    if latest_run is not None and filters_valid:
         analyses = _filter_analyses(analyses, filter_form.cleaned_data)
     elif request.GET:
         analyses = analyses.none()
 
-    displayed_analyses = list(analyses[:50])
+    selected_price_band = (
+        str(filter_form.cleaned_data.get("price_band") or "") if filters_valid else ""
+    )
     analysis_cards: list[dict[str, Any]] = []
     great_opportunities: list[dict[str, Any]] = []
-    for displayed_analysis in displayed_analyses:
-        assessment = assess_opportunity(displayed_analysis)
-        card = {
-            "analysis": displayed_analysis,
-            "opportunity": assessment,
-        }
-        analysis_cards.append(card)
-        if assessment.eligible and len(great_opportunities) < 6:
+    for displayed_analysis in analyses[:50]:
+        card = _opportunity_card(displayed_analysis)
+        if card["opportunity"].eligible and len(great_opportunities) < 6:
             great_opportunities.append(card)
+    price_band_groups: list[dict[str, Any]] = []
+    if latest_run is None:
+        visible_definitions: tuple[PriceBandDefinition, ...] = ()
+    elif selected_price_band in PRICE_BANDS_BY_SLUG:
+        visible_definitions = (PRICE_BANDS_BY_SLUG[selected_price_band],)
+    else:
+        visible_definitions = PRICE_BANDS
+    for definition in visible_definitions:
+        group_analyses = _analyses_in_price_band(analyses, definition)
+        cards = [_opportunity_card(analysis) for analysis in group_analyses[:50]]
+        analysis_cards.extend(cards)
+        price_band_groups.append(
+            {
+                "slug": definition.slug,
+                "eyebrow": "Latest persisted USD close",
+                "label": definition.label,
+                "description": definition.description,
+                "new_allocation_eligible": definition.new_allocation_eligible,
+                "count": group_analyses.count(),
+                "cards": cards,
+                "is_unavailable": False,
+            }
+        )
+    if not selected_price_band:
+        unavailable_analyses = _analyses_without_usd_price_band(analyses)
+        unavailable_count = unavailable_analyses.count()
+        if unavailable_count:
+            unavailable_cards = [
+                _opportunity_card(analysis) for analysis in unavailable_analyses[:50]
+            ]
+            analysis_cards.extend(unavailable_cards)
+            price_band_groups.append(
+                {
+                    "slug": "unavailable",
+                    "eyebrow": "Price-band guard",
+                    "label": "USD price band unavailable",
+                    "description": "No valid latest persisted USD close is available.",
+                    "new_allocation_eligible": False,
+                    "count": unavailable_count,
+                    "cards": unavailable_cards,
+                    "is_unavailable": True,
+                }
+            )
+        non_usd_analyses = _analyses_outside_usd_price_band_policy(analyses)
+        non_usd_count = non_usd_analyses.count()
+        if non_usd_count:
+            non_usd_cards = [_opportunity_card(analysis) for analysis in non_usd_analyses[:50]]
+            analysis_cards.extend(non_usd_cards)
+            price_band_groups.append(
+                {
+                    "slug": "not_applicable",
+                    "eyebrow": "Outside current USD scope",
+                    "label": "USD price band not applicable",
+                    "description": "This listing does not trade in USD.",
+                    "new_allocation_eligible": True,
+                    "count": non_usd_count,
+                    "cards": non_usd_cards,
+                    "is_unavailable": False,
+                }
+            )
     return render(
         request,
         "web/opportunities.html",
         {
             "latest_run": latest_run,
             "latest_analysis_mode": latest_analysis_mode,
-            "analyses": displayed_analyses,
+            "analyses": [card["analysis"] for card in analysis_cards],
             "analysis_cards": analysis_cards,
             "great_opportunities": great_opportunities,
+            "price_band_groups": price_band_groups,
             "result_count": analyses.count(),
             "filter_form": filter_form,
+            "price_band_currency": PRICE_BAND_CURRENCY,
+            "price_band_policy_version": PRICE_BAND_POLICY_VERSION,
+            "under_10_long_horizon_gates": UNDER_10_LONG_HORIZON_GATES,
         },
     )
 
@@ -211,12 +286,15 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
 @login_required
 def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
     listing = get_object_or_404(
-        Listing.objects.select_related("security__company"),
+        Listing.objects.select_related(
+            "security__company",
+            "latest_market_data",
+        ),
         pk=listing_id,
     )
     analysis = (
         StockAnalysis.objects.filter(listing=listing, run__status="complete")
-        .select_related("run")
+        .select_related("run", "listing__latest_market_data")
         .order_by("-run__generated_at")
         .first()
     )
@@ -225,13 +303,34 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
         .select_related("analysis")
         .order_by("-generated_at", "horizon")[:30]
     )
+    current_price_band = latest_price_band(listing)
+    (
+        long_horizon_blocked,
+        long_horizon_band_reason,
+        long_horizon_gates,
+    ) = _long_horizon_band_state(
+        listing=listing,
+        current_price_band=current_price_band,
+    )
     return render(
         request,
         "web/stock_detail.html",
         {
             "listing": listing,
             "analysis": analysis,
-            "opportunity": assess_opportunity(analysis) if analysis is not None else None,
+            "opportunity": (
+                assess_opportunity(
+                    analysis,
+                    price_band=current_price_band,
+                )
+                if analysis is not None
+                else None
+            ),
+            "current_price_band": current_price_band,
+            "price_band_policy_version": PRICE_BAND_POLICY_VERSION,
+            "long_horizon_blocked": long_horizon_blocked,
+            "long_horizon_band_reason": long_horizon_band_reason,
+            "long_horizon_gates": long_horizon_gates,
             "predictions": predictions,
         },
     )
@@ -742,6 +841,80 @@ def _latest_analysis_run() -> AnalysisRun | None:
     return latest_serving_analysis_run()
 
 
+def _opportunity_card(analysis: StockAnalysis) -> dict[str, Any]:
+    current_price_band = latest_price_band(analysis.listing)
+    assessment = assess_opportunity(
+        analysis,
+        price_band=current_price_band,
+    )
+    (
+        long_horizon_blocked,
+        long_horizon_band_reason,
+        long_horizon_gates,
+    ) = _long_horizon_band_state(
+        listing=analysis.listing,
+        current_price_band=current_price_band,
+    )
+    return {
+        "analysis": analysis,
+        "opportunity": assessment,
+        "price_band": current_price_band,
+        "long_horizon_blocked": long_horizon_blocked,
+        "long_horizon_band_reason": long_horizon_band_reason,
+        "long_horizon_gates": long_horizon_gates,
+    }
+
+
+def _long_horizon_band_state(
+    *,
+    listing: Listing,
+    current_price_band: PriceBandAssessment | None,
+) -> tuple[bool, str, tuple[str, ...]]:
+    if current_price_band is not None and current_price_band.blocks_long_horizon:
+        return (
+            True,
+            "Under-$10 long-horizon activation gates are not yet available.",
+            UNDER_10_LONG_HORIZON_GATES,
+        )
+    if listing.currency.upper() == PRICE_BAND_CURRENCY and current_price_band is None:
+        return (
+            True,
+            "No valid latest persisted USD close is available to apply the "
+            "guarded price-band policy.",
+            (),
+        )
+    return False, "", ()
+
+
+def _analyses_in_price_band(
+    analyses: QuerySet[StockAnalysis],
+    definition: PriceBandDefinition,
+) -> QuerySet[StockAnalysis]:
+    lookups: dict[str, Any] = {
+        "listing__currency__iexact": PRICE_BAND_CURRENCY,
+    }
+    minimum_lookup = "gte" if definition.minimum_inclusive else "gt"
+    lookups[f"listing__latest_market_data__close__{minimum_lookup}"] = definition.minimum
+    if definition.maximum is not None:
+        lookups["listing__latest_market_data__close__lt"] = definition.maximum
+    return analyses.filter(**lookups)
+
+
+def _analyses_without_usd_price_band(
+    analyses: QuerySet[StockAnalysis],
+) -> QuerySet[StockAnalysis]:
+    return analyses.filter(
+        listing__currency__iexact=PRICE_BAND_CURRENCY,
+        listing__latest_market_data__isnull=True,
+    )
+
+
+def _analyses_outside_usd_price_band_policy(
+    analyses: QuerySet[StockAnalysis],
+) -> QuerySet[StockAnalysis]:
+    return analyses.exclude(listing__currency__iexact=PRICE_BAND_CURRENCY)
+
+
 def _filter_analyses(
     analyses: QuerySet[StockAnalysis],
     filters: dict[str, Any],
@@ -750,6 +923,7 @@ def _filter_analyses(
     region = filters["region"]
     recommendation = filters["recommendation"]
     risk = filters["risk"]
+    price_band = filters["price_band"]
     country = filters["country"]
     exchange = filters["exchange"]
     sector = filters["sector"]
@@ -765,6 +939,11 @@ def _filter_analyses(
         analyses = analyses.filter(recommendation=recommendation)
     if risk in RiskClass.values:
         analyses = analyses.filter(risk_class=risk)
+    if price_band in PRICE_BANDS_BY_SLUG:
+        analyses = _analyses_in_price_band(
+            analyses,
+            PRICE_BANDS_BY_SLUG[price_band],
+        )
     if country:
         analyses = analyses.filter(listing__security__company__country=country)
     if exchange:
@@ -806,21 +985,32 @@ def _portfolio_detail_context(
     latest_by_listing: dict[UUID, StockAnalysis] = {}
     latest_run = _latest_analysis_run()
     if latest_run is not None:
-        analyses = StockAnalysis.objects.filter(
-            listing_id__in=listing_ids,
-            run=latest_run,
-        ).order_by("-pk")
+        analyses = (
+            StockAnalysis.objects.filter(
+                listing_id__in=listing_ids,
+                run=latest_run,
+            )
+            .select_related("listing__latest_market_data")
+            .order_by("-pk")
+        )
         for persisted_analysis in analyses:
             latest_by_listing[persisted_analysis.listing_id] = persisted_analysis
     position_cards = []
     for position in valuation.positions:
         latest_analysis = latest_by_listing.get(position.holding.listing_id)
+        current_price_band = latest_price_band(position.holding.listing)
         position_cards.append(
             {
                 "position": position,
                 "analysis": latest_analysis,
+                "price_band": current_price_band,
                 "opportunity": (
-                    assess_opportunity(latest_analysis) if latest_analysis is not None else None
+                    assess_opportunity(
+                        latest_analysis,
+                        price_band=current_price_band,
+                    )
+                    if latest_analysis is not None
+                    else None
                 ),
             }
         )

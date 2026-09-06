@@ -15,6 +15,7 @@ from stanstock.portfolio.service import (
     SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
     SAMPLE_PORTFOLIO_MAX_TOP_N,
 )
+from stanstock.research.affordability import price_band_choices
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
 
@@ -42,6 +43,11 @@ class OpportunityFilterForm(forms.Form):
     risk = forms.ChoiceField(
         required=False,
         choices=[("", "All"), *RiskClass.choices],
+    )
+    price_band = forms.ChoiceField(
+        required=False,
+        choices=[("", "All price bands"), *price_band_choices()],
+        label="Price band",
     )
     country = forms.ChoiceField(required=False)
     exchange = forms.ChoiceField(required=False)

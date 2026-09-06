@@ -59,7 +59,9 @@ This command validates settings; it does not prove the database is reachable.
   evidence/provenance labeling;
 - owner-scoped tracked portfolios, valuation completeness, stale-price
   refusal, same-day snapshot deduplication, snapshot database immutability,
-  split warnings, and opportunity-policy highlighting;
+  split warnings, opportunity-policy highlighting, exact price-band
+  boundaries, neutral band filtering, Under $10 promotion/sample exclusion,
+  and preservation of existing holdings;
 - backup checksums, extraction safety, transactional PostgreSQL restore, and
   database/assets bundling;
 - architecture boundaries around raw provider modules.

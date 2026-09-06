@@ -8,10 +8,18 @@ from typing import Any, cast
 
 import yaml
 
+from stanstock.research.affordability import (
+    PRICE_BAND_CURRENCY,
+    PRICE_BAND_UNAVAILABLE_ALLOCATION_REASON,
+    PRICE_BANDS_BY_SLUG,
+    UNDER_10_ALLOCATION_REASON,
+    PriceBandAssessment,
+    latest_price_band,
+)
 from stanstock.research.models import Recommendation, StockAnalysis
 
 POLICY_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "opportunities" / "great-opportunity-v1.yml"
+    Path(__file__).resolve().parents[3] / "config" / "opportunities" / "great-opportunity-v2.yml"
 )
 
 
@@ -30,6 +38,7 @@ class OpportunityModePolicy:
 class OpportunityPolicy:
     version: str
     modes: dict[str, OpportunityModePolicy]
+    excluded_new_allocation_price_bands: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +48,16 @@ class OpportunityAssessment:
     policy_version: str
     horizon: str
     criteria: dict[str, bool]
+    price_band: PriceBandAssessment | None
+    blocking_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolveLatestPriceBand:
+    pass
+
+
+_RESOLVE_LATEST_PRICE_BAND = _ResolveLatestPriceBand()
 
 
 @lru_cache(maxsize=1)
@@ -68,10 +87,30 @@ def load_opportunity_policy() -> OpportunityPolicy:
             require_positive_base_case=bool(value["require_positive_base_case"]),
             require_fundamentals=bool(value["require_fundamentals"]),
         )
-    return OpportunityPolicy(version=str(raw["version"]), modes=modes)
+    allocation_raw = raw.get("new_allocation", {})
+    if not isinstance(allocation_raw, dict):
+        raise ValueError("Opportunity policy requires a new_allocation mapping")
+    excluded_price_bands = frozenset(
+        str(item) for item in cast(list[object], allocation_raw.get("excluded_price_bands", []))
+    )
+    unsupported_price_bands = excluded_price_bands - PRICE_BANDS_BY_SLUG.keys()
+    if unsupported_price_bands:
+        raise ValueError(
+            "Opportunity policy contains unsupported excluded price bands: "
+            f"{sorted(unsupported_price_bands)}"
+        )
+    return OpportunityPolicy(
+        version=str(raw["version"]),
+        modes=modes,
+        excluded_new_allocation_price_bands=excluded_price_bands,
+    )
 
 
-def assess_opportunity(analysis: StockAnalysis) -> OpportunityAssessment:
+def assess_opportunity(
+    analysis: StockAnalysis,
+    *,
+    price_band: PriceBandAssessment | None | _ResolveLatestPriceBand = (_RESOLVE_LATEST_PRICE_BAND),
+) -> OpportunityAssessment:
     policy = load_opportunity_policy()
     data_quality = analysis.data_quality if isinstance(analysis.data_quality, dict) else {}
     analysis_mode = str(data_quality.get("analysis_mode") or "full")
@@ -80,6 +119,16 @@ def assess_opportunity(analysis: StockAnalysis) -> OpportunityAssessment:
         raise ValueError("Opportunity policy has no full-mode fallback")
     scenario = _scenario_for_horizon(analysis, mode_policy.horizon)
     base_case = _decimal_or_none(scenario.get("base")) if isinstance(scenario, dict) else None
+    resolved_price_band = (
+        latest_price_band(analysis.listing)
+        if isinstance(price_band, _ResolveLatestPriceBand)
+        else price_band
+    )
+    uses_usd_price_band_policy = analysis.listing.currency.upper() == PRICE_BAND_CURRENCY
+    allocation_band_eligible = not uses_usd_price_band_policy or (
+        resolved_price_band is not None
+        and resolved_price_band.slug not in policy.excluded_new_allocation_price_bands
+    )
     criteria = {
         "buy_recommendation": analysis.recommendation == Recommendation.BUY,
         "score": analysis.overall_score >= mode_policy.min_score,
@@ -95,13 +144,22 @@ def assess_opportunity(analysis: StockAnalysis) -> OpportunityAssessment:
             if mode_policy.require_fundamentals
             else True
         ),
+        "new_allocation_price_band": allocation_band_eligible,
     }
+    if allocation_band_eligible:
+        blocking_reasons: tuple[str, ...] = ()
+    elif resolved_price_band is None:
+        blocking_reasons = (PRICE_BAND_UNAVAILABLE_ALLOCATION_REASON,)
+    else:
+        blocking_reasons = (UNDER_10_ALLOCATION_REASON,)
     return OpportunityAssessment(
         eligible=all(criteria.values()),
         label=mode_policy.label,
         policy_version=policy.version,
         horizon=mode_policy.horizon,
         criteria=criteria,
+        price_band=resolved_price_band,
+        blocking_reasons=blocking_reasons,
     )
 
 
