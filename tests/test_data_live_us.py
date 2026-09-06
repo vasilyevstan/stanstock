@@ -517,6 +517,102 @@ def test_run_us_daily_persists_vintages_snapshot_and_predictions(
     )
 
 
+def test_automatic_run_withholds_analysis_if_fetch_crosses_next_session_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    _enable_provider()
+    late_retrieval = datetime(2026, 9, 8, 13, 31, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: replace(_catalog(config), retrieved_at=late_retrieval),
+    )
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        series = (
+            _series(symbol, instrument_type="ETF")
+            if symbol == config.benchmark_symbol
+            else _series(symbol)
+        )
+        return replace(series, retrieved_at=late_retrieval)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.analyze_snapshot",
+        lambda **kwargs: pytest.fail("late automatic data must not create analysis"),
+    )
+
+    with pytest.raises(ValueError, match="deadline passed before completing"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+            require_on_time=True,
+        )
+
+    assert UniverseSnapshot.objects.count() == 0
+    assert AnalysisRun.objects.count() == 0
+    assert Prediction.objects.count() == 0
+
+
+def test_automatic_run_uses_current_clock_for_issuance_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    _enable_provider()
+    retrieval_before_open = datetime(2026, 9, 8, 13, 29, tzinfo=UTC)
+    resumed_after_open = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: replace(_catalog(config), retrieved_at=retrieval_before_open),
+    )
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        series = (
+            _series(symbol, instrument_type="ETF")
+            if symbol == config.benchmark_symbol
+            else _series(symbol)
+        )
+        return replace(series, retrieved_at=retrieval_before_open)
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+    monkeypatch.setattr("stanstock.data.live_us.timezone.now", lambda: resumed_after_open)
+    monkeypatch.setattr(
+        "stanstock.data.live_us.analyze_snapshot",
+        lambda **kwargs: pytest.fail("resumed late run must not create analysis"),
+    )
+
+    with pytest.raises(ValueError, match="deadline passed before completing"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=datetime(2026, 9, 8, 13, 20, tzinfo=UTC),
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+            require_on_time=True,
+        )
+
+    assert UniverseSnapshot.objects.count() == 0
+    assert AnalysisRun.objects.count() == 0
+    assert Prediction.objects.count() == 0
+
+
 def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

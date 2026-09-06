@@ -132,6 +132,23 @@ rather than entering the prediction or outcome ledgers. An explicit older
 idempotent; another invocation creates a skipped job and makes no provider
 requests.
 
+On a private macOS checkout, install the validated local scheduler after the
+manual provider workflow succeeds:
+
+```bash
+.venv/bin/python manage.py launchd_refresh install
+.venv/bin/python manage.py launchd_refresh status
+```
+
+The LaunchAgent invokes one recoverable refresh at 02:00 local time
+Tuesday-Saturday. Installation is refused unless that wall-clock schedule is
+after Twelve Data's publication delay and before the next XNYS opening across
+regular closes, early closes, and DST transitions. The ignored `.env` must be
+owner-only (`chmod 600 .env`); its values are sourced by a private runner and
+never copied into the plist. A late sleep/wake invocation refuses automatic
+research-grade backdating. Remove the job with
+`.venv/bin/python manage.py launchd_refresh uninstall`.
+
 The Basic quota guard is 8 credits/minute and 800/day. The 100-symbol
 configuration uses approximately 103 credits per full run (two catalogs, 100
 stocks, and SPY), so two configured daily runs remain below the local daily

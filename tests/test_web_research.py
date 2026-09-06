@@ -44,6 +44,19 @@ def authenticated_client(client):
     return client
 
 
+@pytest.fixture(autouse=True)
+def scheduler_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: {
+            "installed": True,
+            "loaded": True,
+            "timezone_matches": True,
+            "expected_timezone": "America/New_York",
+        },
+    )
+
+
 @pytest.fixture
 def persisted_analysis() -> StockAnalysis:
     company = Company.objects.create(
@@ -344,6 +357,8 @@ def test_provider_backed_run_suppresses_synthetic_banner(
     assert status.status_code == 200
     assert "Twelve Data provider-backed" in status.content.decode()
     assert "Synthetic research data." not in status.content.decode()
+    assert "Daily automation" in status.content.decode()
+    assert "Scheduled" in status.content.decode()
     assert market_page.status_code == 200
     assert "Twelve Data provider-backed" in market_page.content.decode()
     assert "Twelve Data" in market_page.content.decode()

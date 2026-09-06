@@ -46,6 +46,7 @@ STOCKS_URL = "https://api.twelvedata.com/stocks"
 TERMS_URL = "https://twelvedata.com/terms"
 PRICING_URL = "https://twelvedata.com/pricing"
 API_KEY_ENV = "TWELVE_DATA_API_KEY"
+DISABLE_KEYCHAIN_ENV = "STANSTOCK_DISABLE_KEYCHAIN"
 DEFAULT_USER_AGENT = (
     "StanStockResearch/0.1 (+https://github.com/vasilyevstan/stanstock; private personal research)"
 )
@@ -59,12 +60,19 @@ def resolve_api_key(
     allow_demo: bool = False,
 ) -> str:
     """Return a configured API key without ever including it in an error."""
+    keychain_disabled = _environment_flag(DISABLE_KEYCHAIN_ENV)
     if explicit is not None:
         api_key = explicit
     else:
-        api_key = os.environ.get(API_KEY_ENV, "") or read_twelve_data_api_key() or ""
+        api_key = os.environ.get(API_KEY_ENV, "")
+        if not api_key and not keychain_disabled:
+            api_key = read_twelve_data_api_key() or ""
     api_key = api_key.strip()
     if not api_key:
+        if explicit is None and keychain_disabled:
+            raise ProviderConfigurationError(
+                f"{API_KEY_ENV} is required for unattended Twelve Data API access."
+            )
         raise ProviderConfigurationError(
             f"{API_KEY_ENV} or a local macOS Keychain credential is required "
             "for Twelve Data API access."
@@ -75,6 +83,10 @@ def resolve_api_key(
             "enable StanStock's live US universe. Configure a personal API key."
         )
     return api_key
+
+
+def _environment_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def fetch_daily_price_series(

@@ -89,6 +89,13 @@ def database_config() -> dict[str, object]:
         return {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "stanstock.sqlite3",
+            "OPTIONS": {
+                "timeout": 20,
+                "transaction_mode": "IMMEDIATE",
+                "init_command": (
+                    "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA busy_timeout=20000"
+                ),
+            },
         }
 
     parsed = urlparse(database_url)

@@ -6,12 +6,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from stanstock.core.jobs import JobExecutionResult, execute_target_job
-from stanstock.core.models import JobRun
-from stanstock.portfolio.models import Portfolio
-from stanstock.portfolio.service import snapshot_all_portfolios
-
-JOB_NAME = "snapshot_portfolios"
+from stanstock.portfolio.jobs import execute_portfolio_snapshot_job
 
 
 class Command(BaseCommand):
@@ -32,28 +27,9 @@ class Command(BaseCommand):
     def handle(self, *args: object, **options: object) -> None:
         target_date = _parse_target_date(options.get("target_date")) or timezone.localdate()
 
-        def _task(run: JobRun) -> JobExecutionResult:
-            report = snapshot_all_portfolios()
-            portfolio_count = Portfolio.objects.filter(archived_at__isnull=True).count()
-            completed_count = report.created + report.unchanged
-            if report.failures and completed_count == 0:
-                raise ValueError("; ".join(report.failures))
-            return JobExecutionResult(
-                status=(JobRun.Status.NO_DATA if portfolio_count == 0 else JobRun.Status.SUCCESS),
-                details={
-                    "portfolios": portfolio_count,
-                    "snapshots_created": report.created,
-                    "snapshots_unchanged": report.unchanged,
-                    "failures": list(report.failures),
-                },
-            )
-
         try:
-            run = execute_target_job(
-                job_name=JOB_NAME,
-                region="",
+            run = execute_portfolio_snapshot_job(
                 target_date=target_date,
-                task=_task,
             )
         except ValueError as exc:
             raise CommandError(f"Portfolio snapshot job failed: {exc}") from exc

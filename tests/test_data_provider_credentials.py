@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -49,3 +50,18 @@ def test_keychain_is_not_used_on_non_macos(
     assert provider_credentials.read_twelve_data_api_key() is None
     with pytest.raises(ProviderConfigurationError, match="macOS Keychain"):
         provider_credentials.store_twelve_data_api_key()
+
+
+def test_keychain_read_times_out_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider_credentials.sys, "platform", "darwin")
+
+    def run(*args: object, **kwargs: object) -> SimpleNamespace:
+        assert kwargs["timeout"] == provider_credentials.KEYCHAIN_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd="security", timeout=5)
+
+    monkeypatch.setattr(provider_credentials.subprocess, "run", run)
+
+    with pytest.raises(ProviderConfigurationError, match="could not be accessed"):
+        provider_credentials.read_twelve_data_api_key()

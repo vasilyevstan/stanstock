@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import Company, Listing, Region, Security, Universe, UniverseSnapshot
+from stanstock.research.jobs import eligible_pending_predictions
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -619,6 +620,62 @@ def test_prediction_scenario_constraint_keeps_all_null_or_ordered_all_present_in
         )
 
 
+@pytest.mark.django_db
+def test_pending_job_selection_is_provider_and_session_maturity_aware() -> None:
+    _, analysis = _analysis()
+    live_short = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        version="live-short",
+        source_assets=[{"provider": "twelve_data"}],
+    )
+    _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        version="synthetic-short",
+        source_assets=[{"provider": "synthetic_demo"}],
+    )
+    _prediction(
+        analysis,
+        horizon=Prediction.Horizon.MEDIUM,
+        version="live-medium",
+        source_assets=[{"provider": "twelve_data"}],
+    )
+
+    selected = eligible_pending_predictions(
+        provider="twelve_data",
+        evaluation_date=date(2026, 1, 16),
+    )
+
+    assert selected == [live_short]
+
+
+@pytest.mark.django_db
+def test_pending_job_selection_excludes_terminal_corporate_events() -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        version="terminal-short",
+        source_assets=[{"provider": "twelve_data"}],
+    )
+    PredictionOutcome.objects.create(
+        prediction=prediction,
+        evaluated_at=_evaluation_time(),
+        evaluation_date=date(2026, 1, 16),
+        status=PredictionOutcome.Status.CORPORATE_EVENT,
+        resolution="Split basis requires review",
+    )
+
+    assert (
+        eligible_pending_predictions(
+            provider="twelve_data",
+            evaluation_date=date(2026, 1, 16),
+        )
+        == []
+    )
+
+
 def _analysis() -> tuple[Listing, StockAnalysis]:
     company = Company.objects.create(name=f"Outcome Co {uuid4().hex[:6]}", country="US")
     security = Security.objects.create(company=company)
@@ -673,6 +730,7 @@ def _prediction(
     bull: Decimal | None = Decimal("0.10"),
     price_at_prediction: Decimal = Decimal("100"),
     data_cutoff: datetime | None = None,
+    source_assets: list[dict[str, str]] | None = None,
 ) -> Prediction:
     return Prediction.objects.create(
         analysis=analysis,
@@ -694,7 +752,7 @@ def _prediction(
         model_version=version or f"outcome-{horizon.value}",
         config_hash="b" * 64,
         data_cutoff=data_cutoff or analysis.run.generated_at,
-        source_assets=[],
+        source_assets=source_assets or [],
         code_revision="test",
     )
 
