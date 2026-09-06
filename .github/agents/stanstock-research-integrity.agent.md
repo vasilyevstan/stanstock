@@ -1,6 +1,6 @@
 ---
 name: stanstock-research-integrity
-description: Read-only StanStock reviewer for provider rights/provenance, as-of/look-ahead correctness, quantitative methodology, outcomes, and simulations.
+description: Read-only StanStock reviewer for provider provenance, as-of correctness, empirical forecast panels, SEC fact semantics, methodology, outcomes, and simulations.
 target: github-copilot
 tools: [read, search, execute, web]
 user-invocable: true
@@ -23,6 +23,10 @@ Read:
   `src/stanstock/data/assets.py`;
 - `src/stanstock/research/models.py` (scoring, `Prediction`,
   `PredictionOutcome`);
+- affected forecast configuration and any immutable derived training or peer
+  panel assets;
+- SEC submissions/Companyfacts parsing, fact normalization, and filing-time
+  resolution when the change touches fundamentals;
 - `src/stanstock/simulation/models.py`;
 - `ProviderRecord` usage and any provider terms/licensing references;
 - affected tests and fixtures.
@@ -51,6 +55,33 @@ record; the summary below is not a substitute for reading it.
 - **Supported evidence**: persist predictions and horizon scores only for
   configured `supported_horizons`; explicit withheld scenarios must not enter
   outcome or performance denominators.
+- **Forecast-policy isolation**: score groups and forecast identities remain
+  separate. Advisory 6m/12m/3y/5y outputs cannot alter BUY/HOLD/AVOID,
+  opportunity highlights, or headline decision hit rates; on-time issuance
+  does not upgrade research-grade training evidence.
+- **Forecast units and outcomes**: stored scenario and actual values use the
+  same cumulative price-return basis. Annualized values are derived for
+  display only, cash yield is not mixed into price-return forecasts, and
+  advisory outcomes use forecast-error/direction/interval semantics rather
+  than an inherited short-horizon recommendation.
+- **Empirical panel integrity**: forecast panels are immutable complete-content
+  assets with fixed-epoch, non-overlapping cohorts; every feature is trailing
+  at its anchor and every forward label has fully matured by the forecast
+  cutoff. Shrinkage and probability gates use overlap-aware effective support,
+  calendar/regime diversity, and fixed versioned thresholds rather than raw
+  stock-row counts.
+- **SEC filing semantics**: raw identity mapping, submissions history, and
+  Companyfacts are preserved before normalization. Facts use exact accession
+  acceptance times (or a documented conservative fallback), full
+  instant/duration period identity, append-only source revisions, and
+  point-in-time classifications. Quarterly, YTD, annual, and TTM values cannot
+  be interchanged or collapsed by a shared period end.
+- **Long-formula compatibility**: a forecast cannot combine current-vintage
+  split-adjusted prices with incompatible filing-vintage shares or per-share
+  values. Metric-family selection, peer floors, formula weights, caps, fade,
+  and reversion are fixed in versioned configuration; unsupported inputs
+  remain insufficient instead of being silently dropped, reweighted, or
+  switched to a more favorable metric.
 - **Mutable current state**: `LatestMarketData` advances by market
   `session_date`, using retrieval time only as a same-session tie-breaker;
   catch-up and ineligible series never replace a newer eligible close.
@@ -83,7 +114,10 @@ record; the summary below is not a substitute for reading it.
   silently producing an implausible return.
 - **Methodology**: scoring/recommendation/risk/scenario logic is
   reproducible from `model_version`, `config_hash`, and `code_revision`; a
-  methodology change is flagged as material for the simplifier gate.
+  methodology change is flagged as material for the simplifier gate. Review
+  immutable calculation payloads for the exact cohort support, metric branch,
+  fact/accession lineage, peer set, and formula inputs needed to reproduce the
+  result.
 - **Outcomes/simulations**: `PredictionOutcome` and `SimulationRun`/
   `SimulationTrade`/`SimulationHolding` figures are computed only from
   data available as of the relevant date; backtests cannot see future

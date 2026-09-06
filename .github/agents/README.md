@@ -11,7 +11,7 @@ or merge authority.
 | `stanstock-architect` | Read-only. Turns an accepted request into a bounded, dependency-ordered implementation contract. |
 | `stanstock-simplifier` | Read-only. One pass for ordinary changes; three sealed distinct-model passes plus synthesis for material changes. |
 | `stanstock-developer` | Bounded full-stack editor (`src/`, `templates/`, `static/`, `tests/`). No git or deploy authority. |
-| `stanstock-research-integrity` | Read-only. Reviews provider rights/provenance, as-of/look-ahead correctness, methodology, outcomes, and simulations. |
+| `stanstock-research-integrity` | Read-only. Reviews provider rights/provenance, as-of/look-ahead correctness, empirical forecast panels, SEC fact semantics, methodology, outcomes, and simulations. |
 | `stanstock-critic-tester` | Read-only. Adversarial diff review plus test execution, using the security/UX/contracts/operations checklists. |
 | `stanstock-final-validator` | Read-only. Milestone/release acceptance across the full chain. |
 
@@ -118,6 +118,15 @@ each valued date's own availability cutoff and into one explicit base currency
 (failing on missing, stale, or ambiguous rate paths), and hashes complete
 canonical simulation inputs rather than aggregate summaries. These safeguards
 are correctness requirements, not optional complexity.
+
+Forecast work additionally keeps score groups separate from persisted
+forecast identities, labels advisory evidence independently from decision
+evidence, uses cumulative price-return units consistently, and prevents
+advisory 6m/12m/3y/5y results from changing recommendations, opportunity
+highlights, or headline decision hit rates. Empirical panels must use
+cutoff-safe immutable inputs and overlap-aware support; SEC facts must preserve
+full filing/period identity and exact availability; incompatible split/share
+bases and unsupported long-formula inputs are withheld rather than guessed.
 
 ## No secrets, private data, or session paths
 
