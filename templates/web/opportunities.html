@@ -27,8 +27,9 @@
       <strong>US price-only baseline.</strong>
       Rankings and recommendations use price, volume, market-relative, and
       risk evidence only. The 6- and 12-month ranges are advisory and cannot
-      change the ranking. Three- and five-year forecasts remain withheld
-      until point-in-time fundamentals are available.
+      change the ranking. Three- and five-year ranges are separately
+      SEC-backed when point-in-time evidence qualifies and also cannot change
+      the ranking.
     </div>
   {% endif %}
 
@@ -192,11 +193,11 @@
                     <div><dt>12 months</dt><dd>Not issued</dd></div>
                   {% endif %}
                   <div>
-                    <dt>{% if stock.has_explicit_advisory_forecasts %}3 years{% else %}Legacy 3+ years{% endif %}</dt>
+                    <dt>{% if stock.has_explicit_long_forecasts %}3 years{% else %}Legacy 3+ years{% endif %}</dt>
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
-                      {% elif stock.has_explicit_advisory_forecasts %}
+                      {% elif stock.has_explicit_long_forecasts %}
                         {{ stock.three_year_forecast_scenario|scenario_range }}
                       {% else %}
                         {{ stock.legacy_long_forecast_scenario|scenario_range }}
@@ -208,7 +209,7 @@
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
-                      {% elif stock.has_explicit_advisory_forecasts %}
+                      {% elif stock.has_explicit_long_forecasts %}
                         {{ stock.five_year_forecast_scenario|scenario_range }}
                       {% else %}
                         Not issued

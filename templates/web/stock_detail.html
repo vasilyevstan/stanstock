@@ -47,6 +47,10 @@
           Explicit 6- and 12-month advisory forecasts were not issued for this
           legacy analysis.
         {% endif %}
+        {% if analysis.has_explicit_long_forecasts %}
+          The 3- and 5-year ranges use separate point-in-time SEC evidence and
+          also cannot change BUY/HOLD/AVOID or opportunity status.
+        {% endif %}
       </div>
       {% if analysis.has_explicit_medium_forecasts %}
         <div class="notice" role="status">
@@ -179,8 +183,9 @@
           {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
         </article>
       {% endif %}
-      {% if analysis.has_explicit_advisory_forecasts %}
+      {% if analysis.has_explicit_long_forecasts %}
         <article>
+          {% with scenario=analysis.three_year_forecast_scenario %}
           <small>3-year advisory forecast</small>
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
@@ -194,11 +199,51 @@
               </ul>
             {% endif %}
           {% else %}
-            <strong>{{ analysis.three_year_forecast_scenario|scenario_range }}</strong>
-            <span>Requires point-in-time SEC evidence.</span>
+            <strong>{{ scenario|scenario_range }}</strong>
+            {% if scenario.annualized_return %}
+              <span>
+                Annualized bear/base/bull:
+                {{ scenario.annualized_return.bear|percentage }} /
+                {{ scenario.annualized_return.base|percentage }} /
+                {{ scenario.annualized_return.bull|percentage }}
+              </span>
+            {% endif %}
+            <span>
+              {% if scenario.method_version %}{{ scenario.method_version }}{% else %}Not yet issued{% endif %}
+              {% if scenario.metric_family %} · {{ scenario.metric_family|display_label }}{% endif %}
+            </span>
+            {% if scenario.support %}
+              <span>
+                {{ scenario.support.peer_count }} SEC peer{{ scenario.support.peer_count|pluralize }}
+                · SIC-{{ scenario.support.sic_fallback_level }}
+                · {{ scenario.evidence_grade|display_label }} evidence
+              </span>
+            {% endif %}
+            {% if scenario.formula_inputs %}
+              <span>
+                Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
+                {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped %}
+                  (bounded reversion anchor {{ scenario.formula_inputs.current_multiple_capped|floatformat:"1" }}x)
+                {% endif %}
+                · historical growth {{ scenario.formula_inputs.historical_growth_capped|percentage }}
+                · sustainable growth {{ scenario.formula_inputs.sustainable_growth|percentage }}
+                · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
+              </span>
+            {% endif %}
+            {% if scenario.split_basis %}
+              <span>
+                Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
+                the following {{ scenario.split_basis.post_period_exposure_days }}-day interval
+                has no independent split-event verification.
+              </span>
+            {% endif %}
+            {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
+            {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
           {% endif %}
+          {% endwith %}
         </article>
         <article>
+          {% with scenario=analysis.five_year_forecast_scenario %}
           <small>5-year advisory forecast</small>
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
@@ -212,9 +257,48 @@
               </ul>
             {% endif %}
           {% else %}
-            <strong>{{ analysis.five_year_forecast_scenario|scenario_range }}</strong>
-            <span>Requires point-in-time SEC evidence.</span>
+            <strong>{{ scenario|scenario_range }}</strong>
+            {% if scenario.annualized_return %}
+              <span>
+                Annualized bear/base/bull:
+                {{ scenario.annualized_return.bear|percentage }} /
+                {{ scenario.annualized_return.base|percentage }} /
+                {{ scenario.annualized_return.bull|percentage }}
+              </span>
+            {% endif %}
+            <span>
+              {% if scenario.method_version %}{{ scenario.method_version }}{% else %}Not yet issued{% endif %}
+              {% if scenario.metric_family %} · {{ scenario.metric_family|display_label }}{% endif %}
+            </span>
+            {% if scenario.support %}
+              <span>
+                {{ scenario.support.peer_count }} SEC peer{{ scenario.support.peer_count|pluralize }}
+                · SIC-{{ scenario.support.sic_fallback_level }}
+                · {{ scenario.evidence_grade|display_label }} evidence
+              </span>
+            {% endif %}
+            {% if scenario.formula_inputs %}
+              <span>
+                Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
+                {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped %}
+                  (bounded reversion anchor {{ scenario.formula_inputs.current_multiple_capped|floatformat:"1" }}x)
+                {% endif %}
+                · historical growth {{ scenario.formula_inputs.historical_growth_capped|percentage }}
+                · sustainable growth {{ scenario.formula_inputs.sustainable_growth|percentage }}
+                · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
+              </span>
+            {% endif %}
+            {% if scenario.split_basis %}
+              <span>
+                Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
+                the following {{ scenario.split_basis.post_period_exposure_days }}-day interval
+                has no independent split-event verification.
+              </span>
+            {% endif %}
+            {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
+            {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
           {% endif %}
+          {% endwith %}
         </article>
       {% else %}
         <article>

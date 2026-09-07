@@ -66,6 +66,18 @@ This command validates settings; it does not prove the database is reachable.
   historical-anchor leakage exclusion, equal cohort weighting, shrinkage,
   support/diversity/calibration withholding, immutable panel provenance, and
   advisory isolation from recommendations and opportunities;
+- deterministic 3y/5y FCF/share and separately eligible EPS/share branches,
+  negative/partial-FCF fallback refusal, selected-period and near-zero-EPS
+  share-basis checks, bidirectional TTM-to-annual diluted-share continuity,
+  bounded post-period split exposure, current SIC peer floors and fallback
+  levels, unsupported-financial and low-multiple withholding, compatible
+  invested-capital canonical/source bases and tax inputs, bounded
+  insufficiency messages, ordered scenario math, actual-current-multiple
+  return identity, cumulative/annualized parity, dividend exclusion, complete
+  target provenance, compact immutable peer references and payload budgets,
+  future-fact/classification exclusion, bounded SQLite evidence loading,
+  observed/research-grade prediction issuance, and
+  recommendation/opportunity isolation;
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
   detection, explicit 6m/12m/3y/5y maturity counts, provider-conflict

@@ -107,10 +107,11 @@ See `docs/operations.md` for the destructive termination procedure.
 
 ## Fundamentals
 
-- SEC submissions and companyfacts are suitable for US filing vintages, but
-  SEC access returned HTTP 403 from this execution environment. Deployment
-  must verify access using a compliant identifying User-Agent and fair-access
-  limits.
+- SEC submissions and Companyfacts are suitable for US filing vintages, but
+  every environment must pass a bounded preflight with a compliant identifying
+  User-Agent and fair-access limits before the provider is enabled. Network or
+  provider failures remain explicit rather than being interpreted as missing
+  company fundamentals.
 - filings.xbrl.org states that its repository is incomplete and explicitly
   identifies Germany and Ireland as missing. Repository-added time can lag the
   authority filing time.
@@ -166,11 +167,35 @@ unmeasurable.
   missing, debt components are not promoted to a total unless they are
   compatible and non-overlapping, and banks/financials/REIT-like accounting
   may remain unsupported by long v1.
-- The explicit `3y` and `5y` identities and advisory evaluation fields exist,
-  but their deterministic SEC-backed forecast engine is not yet released.
-  Existing `medium`
-  and `long` rows remain legacy identities rather than being relabeled as exact
-  horizons.
+- The deterministic SEC-backed `3y` and `5y` engine is intentionally narrow.
+  It requires compatible positive FCF/share or a separately eligible EPS/share
+  branch, reported diluted-EPS share-basis evidence, sustainable-growth
+  inputs, and a same-family SIC peer floor. Missing tax, invested capital,
+  peers, annual history, classification, or compatible price provenance
+  produces `Insufficient evidence`; negative or inconsistent FCF cannot
+  silently switch to EPS. Existing `medium` and `long` rows remain legacy
+  identities rather than being relabeled as exact horizons.
+- Advisory `6m`/`12m` and `3y`/`5y` forecasts require a complete eligible
+  universe snapshot so their cohort and peer context is immutable. The
+  single-listing analysis service intentionally issues only the decision
+  prediction path; use the snapshot or daily workflow for advisory horizons.
+- Long scenarios are deterministic advisory cases, not statistically
+  calibrated target-price probabilities. Their positive-return probability is
+  unavailable at launch, dividends are excluded, current SIC is not historical
+  industry membership, and historical company valuation normalization remains
+  out of scope until a compatible split-factor or unadjusted-price source
+  exists.
+- Long-v1 verifies the SEC diluted-share basis through the latest metric
+  period, including every selected annual EPS/share period and TTM-to-annual
+  continuity. It cannot verify a split between that period and the forecast
+  target from split-adjusted prices alone. Each prediction exposes the bounded
+  number of unverified post-period days; this is residual risk, not evidence
+  that a split occurred or did not occur.
+- Long-v1 withholds raw current FCF/share or EPS/share multiples below the
+  configured family floor because raising a cheap multiple to that floor
+  before reversion would overstate return. High raw multiples retain the
+  actual price denominator and use the configured cap only as a conservative
+  reversion anchor.
 - Legacy scenario columns remain in storage for rollback compatibility. New
   application reads use the schema-versioned `forecast_scenarios` document;
   the old columns can be retired only after all supported deployments have

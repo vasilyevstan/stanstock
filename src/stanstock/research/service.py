@@ -12,7 +12,13 @@ from django.utils import timezone
 
 from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore
-from stanstock.data.models import DataAsset, Listing, UniverseMembership, UniverseSnapshot
+from stanstock.data.models import (
+    DataAsset,
+    Listing,
+    ProviderRecord,
+    UniverseMembership,
+    UniverseSnapshot,
+)
 from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
 from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.explanations import generate_reasons, generate_risks
@@ -27,6 +33,12 @@ from stanstock.research.forecasting import (
 )
 from stanstock.research.fundamentals import calculate_fundamentals, inputs_from_facts
 from stanstock.research.indicators import calculate_indicators
+from stanstock.research.long_forecast_config import (
+    LongForecastConfig,
+    load_long_forecast_config,
+    long_forecast_config_hash,
+)
+from stanstock.research.long_forecasts import LongForecast, build_long_forecasts
 from stanstock.research.medium_forecasts import (
     MediumForecast,
     MediumPanel,
@@ -61,6 +73,7 @@ class AnalysisComputation:
     source_assets: list[dict[str, Any]]
     current_price: float
     daily_change: float | None
+    price_asset: DataAsset | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +91,14 @@ class AdvisoryForecastContext:
     config_hash: str
     model_version: str
     forecasts: dict[str, dict[str, MediumForecast]]
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastContext:
+    config: LongForecastConfig
+    config_hash: str
+    model_version: str
+    forecasts: dict[str, dict[str, LongForecast]]
 
 
 def compute_listing_analysis(
@@ -192,6 +213,7 @@ def compute_listing_analysis(
         source_assets=asset_payload,
         current_price=price,
         daily_change=daily_change,
+        price_asset=price_asset,
     )
 
 
@@ -284,17 +306,22 @@ def _persist_listing_analysis(
     config_hash_value: str,
     code_revision_value: str,
     advisory_context: AdvisoryForecastContext | None = None,
+    long_context: LongForecastContext | None = None,
 ) -> PersistedAnalysis:
     if run.issued_on_time:
         _validate_on_time_source_assets(computation.source_assets, data_cutoff=data_cutoff)
     advisory_forecasts = (
         advisory_context.forecasts.get(str(listing.pk), {}) if advisory_context is not None else {}
     )
+    long_forecasts = (
+        long_context.forecasts.get(str(listing.pk), {}) if long_context is not None else {}
+    )
     analysis = _create_stock_analysis(
         run,
         listing,
         computation,
         advisory_forecasts=advisory_forecasts,
+        long_forecasts=long_forecasts,
     )
     decision_predictions = append_predictions(
         analysis=analysis,
@@ -322,10 +349,22 @@ def _persist_listing_analysis(
             source_assets=computation.source_assets,
             code_revision_value=code_revision_value,
         )
+    long_predictions: tuple[Prediction, ...] = ()
+    if long_context is not None:
+        long_predictions = append_long_advisory_predictions(
+            analysis=analysis,
+            forecasts=long_forecasts,
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            issued_on_time=run.issued_on_time,
+            model_version=long_context.model_version,
+            config_hash_value=long_context.config_hash,
+            code_revision_value=code_revision_value,
+        )
     return PersistedAnalysis(
         run=run,
         analysis=analysis,
-        predictions=(*decision_predictions, *advisory_predictions),
+        predictions=(*decision_predictions, *advisory_predictions, *long_predictions),
         computation=computation,
     )
 
@@ -431,6 +470,7 @@ def analyze_snapshot(
     store: AssetStore | None = None,
     config_path: Path | None = None,
     medium_forecast_config_path: Path | None = None,
+    long_forecast_config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> list[PersistedAnalysis]:
     generated_at = decision_time or timezone.now()
@@ -475,6 +515,7 @@ def analyze_snapshot(
             operation="Snapshot stock analysis",
         )
     advisory_context: AdvisoryForecastContext | None = None
+    long_context: LongForecastContext | None = None
     panel_relative_path: str | None = None
     try:
         medium_config = load_medium_forecast_config(medium_forecast_config_path)
@@ -510,6 +551,7 @@ def analyze_snapshot(
                 model_version=_model_version(medium_config.version, run.id.hex),
                 forecasts=build_medium_forecasts(panel.frame, medium_config),
             )
+        computations: dict[str, AnalysisComputation] = {}
         for membership in memberships:
             computation = _compute_listing_from_asof(
                 listing=membership.listing,
@@ -521,6 +563,46 @@ def analyze_snapshot(
                 sample_support=sample_support,
                 target_date=logical_target_date,
             )
+            computations[str(membership.listing.pk)] = computation
+        long_config = load_long_forecast_config(long_forecast_config_path)
+        if (
+            provider == long_config.price_provider == "twelve_data"
+            and long_config.fundamentals_provider == "sec"
+            and config.version in long_config.enabled_scoring_versions
+            and ProviderRecord.objects.filter(
+                provider=long_config.fundamentals_provider,
+                enabled=True,
+            ).exists()
+            and memberships
+        ):
+            current_prices: dict[str, float] = {}
+            current_price_assets: dict[str, DataAsset] = {}
+            for membership in memberships:
+                listing_id = str(membership.listing.pk)
+                computation = computations[listing_id]
+                if computation.price_asset is None:
+                    raise ValueError(
+                        f"Long forecast price asset is missing for {membership.listing}"
+                    )
+                current_prices[listing_id] = computation.current_price
+                current_price_assets[listing_id] = computation.price_asset
+            long_digest = long_forecast_config_hash(long_config)
+            long_context = LongForecastContext(
+                config=long_config,
+                config_hash=long_digest,
+                model_version=_model_version(long_config.version, run.id.hex),
+                forecasts=build_long_forecasts(
+                    listings=[membership.listing for membership in memberships],
+                    asof=asof,
+                    data_cutoff=data_cutoff,
+                    target_date=logical_target_date,
+                    config=long_config,
+                    current_prices=current_prices,
+                    price_assets=current_price_assets,
+                ),
+            )
+        for membership in memberships:
+            computation = computations[str(membership.listing.pk)]
             results.append(
                 _persist_listing_analysis(
                     run=run,
@@ -532,6 +614,7 @@ def analyze_snapshot(
                     config_hash_value=digest,
                     code_revision_value=revision,
                     advisory_context=advisory_context,
+                    long_context=long_context,
                 )
             )
     except Exception:
@@ -651,12 +734,59 @@ def append_advisory_predictions(
     )
 
 
+def append_long_advisory_predictions(
+    *,
+    analysis: StockAnalysis,
+    forecasts: dict[str, LongForecast],
+    generated_at: datetime,
+    data_cutoff: datetime,
+    issued_on_time: bool,
+    model_version: str,
+    config_hash_value: str,
+    code_revision_value: str,
+) -> tuple[Prediction, ...]:
+    require_stock_research_listing(
+        analysis.listing,
+        operation="Long advisory forecast issuance",
+    )
+    if issued_on_time and (
+        not analysis.run.issued_on_time or generated_at != analysis.run.generated_at
+    ):
+        raise ValueError(
+            "Only forecasts created with the original on-time analysis may be marked on time"
+        )
+    expected_horizons = {
+        Prediction.Horizon.THREE_YEAR.value,
+        Prediction.Horizon.FIVE_YEAR.value,
+    }
+    if set(forecasts) != expected_horizons:
+        raise ValueError("Long advisory forecast issuance requires exactly 3y and 5y")
+    return tuple(
+        _create_long_advisory_prediction(
+            analysis=analysis,
+            horizon=Prediction.Horizon(horizon),
+            forecast=forecasts[horizon],
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            issued_on_time=issued_on_time,
+            model_version=model_version,
+            config_hash_value=config_hash_value,
+            code_revision_value=code_revision_value,
+        )
+        for horizon in (
+            Prediction.Horizon.THREE_YEAR.value,
+            Prediction.Horizon.FIVE_YEAR.value,
+        )
+    )
+
+
 def _create_stock_analysis(
     run: AnalysisRun,
     listing: Listing,
     computation: AnalysisComputation,
     *,
     advisory_forecasts: dict[str, MediumForecast] | None = None,
+    long_forecasts: dict[str, LongForecast] | None = None,
 ) -> StockAnalysis:
     supported_horizons = {str(value) for value in computation.data_quality["supported_horizons"]}
     scenario_payloads = {
@@ -666,6 +796,15 @@ def _create_stock_analysis(
         {
             horizon: forecast.scenario_payload()
             for horizon, forecast in (advisory_forecasts or {}).items()
+        }
+    )
+    scenario_payloads.update(
+        {
+            horizon: {
+                **forecast.scenario_payload(),
+                "evidence_grade": _long_forecast_evidence_grade(run),
+            }
+            for horizon, forecast in (long_forecasts or {}).items()
         }
     )
     return StockAnalysis.objects.create(
@@ -834,6 +973,74 @@ def _create_advisory_prediction(
         calculation=calculation,
         code_revision=code_revision_value,
     )
+
+
+def _create_long_advisory_prediction(
+    *,
+    analysis: StockAnalysis,
+    horizon: Prediction.Horizon,
+    forecast: LongForecast,
+    generated_at: datetime,
+    data_cutoff: datetime,
+    issued_on_time: bool,
+    model_version: str,
+    config_hash_value: str,
+    code_revision_value: str,
+) -> Prediction:
+    source_assets = [_asset_payload(asset) for asset in forecast.source_assets]
+    if issued_on_time:
+        _validate_on_time_source_assets(source_assets, data_cutoff=data_cutoff)
+    price_provider, price_subject = _prediction_price_source(analysis, source_assets)
+    calculation = dict(forecast.calculation)
+    calculation.update(
+        {
+            "config_hash": config_hash_value,
+            "prediction_version": model_version,
+            "price_subject": price_subject,
+        }
+    )
+    scenario = forecast.scenario
+    evidence_grade = _long_forecast_evidence_grade(analysis.run)
+    return Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=generated_at,
+        target_date=analysis.run.target_date,
+        issued_on_time=issued_on_time,
+        horizon=horizon,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=evidence_grade,
+        source_mode=source_data_mode({"source_assets": source_assets}),
+        price_provider=price_provider,
+        price_subject=price_subject,
+        price_at_prediction=analysis.current_price,
+        bear_return=_optional_decimal(scenario.bear, places=4),
+        base_return=_optional_decimal(scenario.base, places=4),
+        bull_return=_optional_decimal(scenario.bull, places=4),
+        probability_positive=None,
+        confidence=_decimal(scenario.confidence, places=2),
+        confidence_status=scenario.confidence_status,
+        insufficiency_reason=scenario.insufficiency_reason,
+        recommendation=analysis.recommendation,
+        overall_score=analysis.overall_score,
+        component_scores=analysis.component_scores,
+        model_version=model_version,
+        method_version=str(calculation["method_version"]),
+        config_hash=config_hash_value,
+        data_cutoff=data_cutoff,
+        source_assets=source_assets,
+        calculation={
+            **calculation,
+            "evidence_grade": evidence_grade,
+        },
+        code_revision=code_revision_value,
+    )
+
+
+def _long_forecast_evidence_grade(run: AnalysisRun) -> str:
+    if run.issued_on_time and run.universe_snapshot.grade == UniverseSnapshot.Grade.OBSERVED:
+        return UniverseSnapshot.Grade.OBSERVED
+    return UniverseSnapshot.Grade.RESEARCH
 
 
 def _prediction_price_source(

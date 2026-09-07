@@ -164,9 +164,12 @@ forecast.
   SPY trend/volatility regimes. Each cohort receives equal aggregate weight
   before p20/p50/p80 estimation, and sparse conditional ranges shrink toward
   the unconditional horizon distribution.
-- **3 years and 5 years:** reserved for explicit fundamental cases using
-  point-in-time SEC evidence; these remain unavailable until that engine is
-  released.
+- **3 years and 5 years:** separate deterministic advisory cases using
+  point-in-time SEC facts, current point-in-time SIC peers, and the exact
+  split-adjusted Twelve Data price asset. Positive compatible FCF/share takes
+  priority. EPS/share is permitted only when FCF evidence is genuinely
+  unavailable; negative, inconsistent, or incomplete FCF cannot trigger a
+  more favorable fallback.
 
 Bear, base, and bull are ordered ranges, not precise target prices.
 Medium-horizon probability of positive return is omitted with an insufficiency
@@ -187,8 +190,56 @@ matching dimensions. All panel inputs are capped at their historical anchor,
 and a forward label is present only when its complete outcome ends on or
 before the current forecast target.
 
-The planned implementation sequence and exact math-only forecast identities
-are documented in
+The long engine requires at least three contiguous annual per-share periods,
+compatible TTM metric and diluted-share periods, reported diluted-EPS
+share-basis checks for every selected annual period, TTM diluted shares within
+15% of the latest overlapping annual share basis, a bounded cash tax rate,
+beginning and ending invested capital using identical canonical and source
+concept definitions, and a same-family SIC peer set meeting frozen floors. Its
+base input is:
+
+```text
+g0 = cap(
+    0.45 * historical_per_share_growth
+  + 0.30 * (ROIC * reinvestment_rate)
+  + 0.25 * peer_per_share_growth
+)
+
+growth[t] = fade[t] * g0 + (1 - fade[t]) * terminal_growth
+
+bounded_current_multiple = cap(actual_current_multiple)
+
+terminal_multiple = capped_geometric_interpolation(
+    bounded_current_multiple,
+    bounded_peer_multiple,
+    reversion
+)
+
+cumulative_price_return =
+    product(1 + growth[t])
+    * terminal_multiple / actual_current_multiple
+    - 1
+```
+
+NOPAT uses TTM operating income and a bounded tax expense/pretax-income rate.
+Invested capital is compatible debt plus equity minus cash, averaged between
+the TTM boundaries; reinvestment is its change divided by NOPAT. Both
+snapshots must use identical canonical and source concepts for equity, cash,
+and every debt component. A raw current multiple below its configured family
+floor is outside long-v1 and is withheld; high multiples retain the actual
+price denominator while using the bounded value only as a conservative
+reversion anchor. Bear, base, and bull vary only the frozen growth delta,
+reinvestment multiplier, and peer multiple multiplier. Annualized 3y/5y
+values are derived for display from the stored cumulative return. Dividends
+and cash yield are excluded, and positive-return probability remains
+unavailable until genuinely qualifying prospective outcomes exist. SEC
+continuity checks verify the share basis only through the latest metric
+period. The remaining days through the forecast target are stored as
+machine-readable `unverified_post_period_split` exposure and shown beside the
+forecast; StanStock does not claim that an adjusted-price series proves no
+later split occurred.
+
+The released sequence and exact math-only forecast identities are documented in
 [`docs/forecast-roadmap.md`](forecast-roadmap.md). The roadmap explicitly
 excludes LLMs, trained machine-learning models, analyst targets, and automated
 parameter optimization.

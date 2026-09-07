@@ -55,6 +55,7 @@ class SecFundamentalSeries:
     annual: dict[str, tuple[FundamentalValue, ...]]
     quarters: dict[str, tuple[FundamentalValue, ...]]
     ttm: dict[str, FundamentalValue]
+    instants: dict[str, tuple[FundamentalFact, ...]]
     latest_instants: dict[str, FundamentalFact]
     missing: dict[str, str]
 
@@ -70,7 +71,8 @@ def build_sec_fundamental_series(
     _add_free_cash_flow_series(annual)
     _add_free_cash_flow_series(quarters)
     ttm = _ttm_series(quarters)
-    latest_instants = _latest_instant_facts(selected)
+    instants = _instant_series(selected)
+    latest_instants = {concept: values[-1] for concept, values in instants.items() if values}
     missing: dict[str, str] = {}
     for required in (
         "revenue",
@@ -90,6 +92,7 @@ def build_sec_fundamental_series(
         annual={key: tuple(values) for key, values in annual.items()},
         quarters={key: tuple(values) for key, values in quarters.items()},
         ttm=ttm,
+        instants={key: tuple(values) for key, values in instants.items()},
         latest_instants=latest_instants,
         missing=missing,
     )
@@ -381,19 +384,16 @@ def _free_cash_flow(
     )
 
 
-def _latest_instant_facts(
+def _instant_series(
     selected: tuple[FundamentalFact, ...],
-) -> dict[str, FundamentalFact]:
-    result: dict[str, FundamentalFact] = {}
+) -> dict[str, list[FundamentalFact]]:
+    result: dict[str, list[FundamentalFact]] = {}
     for fact in selected:
         if fact.period_type != FundamentalFact.PeriodType.INSTANT:
             continue
-        existing = result.get(fact.concept)
-        if existing is None or (fact.period_end, fact.available_at) > (
-            existing.period_end,
-            existing.available_at,
-        ):
-            result[fact.concept] = fact
+        result.setdefault(fact.concept, []).append(fact)
+    for facts in result.values():
+        facts.sort(key=lambda fact: (fact.period_end, fact.available_at))
     return result
 
 

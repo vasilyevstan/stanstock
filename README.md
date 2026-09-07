@@ -156,22 +156,39 @@ NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
 vintages, captures an observed universe snapshot for the latest eligible
 session, analyzes eligible listings, appends the supported short-horizon
 decision prediction, and issues separate 6- and 12-month price-only advisory
-forecasts. The medium engine writes one private immutable Parquet panel per
-analysis run, uses fixed-epoch non-overlapping cohorts, weights each market
-cohort equally, and shrinks conditional p20/p50/p80 returns toward the
-unconditional distribution. Probability stays hidden until effective support,
-listing diversity, calendar span, matched market-regime breadth, and
-walk-forward calibration all pass.
+forecasts. When SEC is enabled, the same immutable run also issues separate
+3- and 5-year advisory forecasts or an explicit insufficiency reason. The
+medium engine writes one private immutable Parquet panel per analysis run,
+uses fixed-epoch non-overlapping cohorts, weights each market cohort equally,
+and shrinks conditional p20/p50/p80 returns toward the unconditional
+distribution. Probability stays hidden until effective support, listing
+diversity, calendar span, matched market-regime breadth, and walk-forward
+calibration all pass.
 
 The single SPY benchmark response supplies both regime evidence for those
 forecasts and the investable ETF market row; it is not fetched twice.
 Current-universe historical panels are explicitly labeled survivorship-biased
 research evidence and are not presented as live skill. Existing `medium` and
-`long` records retain their legacy identities. Exact `3y` and `5y` advisory forecasts consume this SEC evidence through a
-separate deterministic engine. An explicit older
-`--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
-idempotent; another invocation creates a skipped job and makes no provider
-requests.
+`long` records retain their legacy identities. Exact `3y` and `5y` forecasts
+use a separate deterministic SEC engine: positive compatible FCF/share takes
+priority, EPS/share is eligible only when FCF evidence is genuinely
+unavailable, current SIC peers must meet frozen sample floors, and growth
+fades toward a fixed terminal rate while valuation partially reverts toward a
+bounded peer median. Every selected annual period must reconcile
+net-income-derived EPS with reported diluted EPS, TTM diluted shares must stay
+within 15% of the latest overlapping annual basis, and beginning/end invested
+capital must use the same canonical and source concept definitions. Scenario
+returns divide by the actual current multiple while using a bounded current
+multiple only as the reversion anchor; a raw multiple below the supported
+family floor is withheld rather than being raised mechanically. Missing,
+negative, incompatible, stale, or unsupported inputs stay `Insufficient
+evidence`; probability remains unavailable. Because there is no verified
+split-event feed, each prediction also records and discloses the bounded
+period after its latest SEC share evidence as residual post-period split risk.
+These advisory rows cannot change BUY/HOLD/AVOID, opportunity ranking, or
+decision hit rates. An explicit older `--target-date YYYY-MM-DD` is labeled
+research-grade. A successful target is idempotent; another invocation creates
+a skipped job and makes no provider requests.
 
 After upgrading an existing database that already contains immutable SPY
 benchmark assets, create its ETF listing locally without consuming provider

@@ -401,6 +401,15 @@ def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates
             "data_quality",
         ]
     )
+    persisted_analysis.forecast_scenarios = {
+        **persisted_analysis.forecast_scenarios,
+        "horizons": {
+            **persisted_analysis.forecast_scenarios.get("horizons", {}),
+            "3y": {"bear": -0.12, "base": 0.45, "bull": 0.92},
+            "5y": {"bear": -0.20, "base": 0.80, "bull": 1.60},
+        },
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
     market_data = LatestMarketData.objects.get(listing=persisted_analysis.listing)
     market_data.close = Decimal("9.99")
     market_data.session_date = date(2026, 9, 5)
@@ -415,6 +424,7 @@ def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates
         {"price_band": "10_to_50"},
     )
     detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+    status = authenticated_client.get(reverse("status"))
 
     opportunity_content = opportunities.content.decode()
     assert opportunities.status_code == 200
@@ -435,6 +445,11 @@ def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates
     assert "Forecast unavailable" in detail_content
     assert "Point-in-time SEC facts with adverse-versus-missing states" in detail_content
     assert "Verified split and reverse-split events" in detail_content
+    status_content = status.content.decode()
+    assert status.status_code == 200
+    assert "Forecast unavailable" in status_content
+    assert "-12.0% / +45.0% / +92.0%" not in status_content
+    assert "-20.0% / +80.0% / +160.0%" not in status_content
     persisted_analysis.refresh_from_db()
     assert persisted_analysis.overall_score == Decimal("85")
     assert persisted_analysis.recommendation == Recommendation.BUY
@@ -605,7 +620,7 @@ def test_price_only_analysis_discloses_model_and_return_limits(
     opportunity_content = opportunities.content.decode()
     assert "US price-only baseline." in opportunity_content
     assert "The 6- and 12-month ranges are advisory" in opportunity_content
-    assert "Three- and five-year forecasts remain withheld" in opportunity_content
+    assert "Three- and five-year ranges are separately" in opportunity_content
     assert detail.status_code == 200
     detail_content = detail.content.decode()
     assert "The recommendation remains short-horizon" in detail_content
@@ -613,13 +628,103 @@ def test_price_only_analysis_discloses_model_and_return_limits(
     assert "Reconstructed training evidence." in detail_content
     assert "6-month advisory forecast" in detail_content
     assert "12-month advisory forecast" in detail_content
-    assert "3-year advisory forecast" in detail_content
-    assert "5-year advisory forecast" in detail_content
+    assert "Legacy 3+ year scenario" in detail_content
+    assert "3-year advisory forecast" not in detail_content
     assert "-10.0% / +8.0% / +24.0%" in detail_content
     assert "-18.0% / +14.0% / +38.0%" in detail_content
     assert "4 non-overlapping cohorts" in detail_content
     assert "Relative momentum +7.0%" in detail_content
     assert "Split-adjusted price return · dividends excluded" in detail_content
+
+
+@pytest.mark.django_db
+def test_explicit_long_forecasts_render_method_support_and_annualized_values(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    horizons = {
+        **persisted_analysis.forecast_scenarios.get("horizons", {}),
+        "short": persisted_analysis.short_scenario,
+        "medium": persisted_analysis.medium_scenario,
+        "long": persisted_analysis.long_scenario,
+    }
+    for horizon, years, values in (
+        ("3y", 3, (-0.12, 0.45, 0.92)),
+        ("5y", 5, (-0.20, 0.80, 1.60)),
+    ):
+        horizons[horizon] = {
+            "bear": values[0],
+            "base": values[1],
+            "bull": values[2],
+            "probability_positive": None,
+            "confidence": 64,
+            "confidence_status": "deterministic_point_in_time",
+            "insufficiency_reason": (
+                "Positive-return probability is unavailable for deterministic long-v1"
+            ),
+            "method": "sec_per_share_growth_multiple_reversion",
+            "method_version": "us-sec-long-v1",
+            "metric_family": "fcf_per_share",
+            "support": {
+                "peer_count": 3,
+                "sic_fallback_level": 4,
+                "sic_prefix": "3571",
+            },
+            "annualized_return": {
+                "bear": (1 + values[0]) ** (1 / years) - 1,
+                "base": (1 + values[1]) ** (1 / years) - 1,
+                "bull": (1 + values[2]) ** (1 / years) - 1,
+            },
+            "return_basis": "split_adjusted_price_return",
+            "evidence_grade": "observed",
+            "formula_inputs": {
+                "current_multiple_raw": 18.2,
+                "current_multiple_capped": 18.2,
+                "historical_growth_capped": 0.09,
+                "sustainable_growth": 0.07,
+                "peer_growth": 0.08,
+            },
+            "split_basis": {
+                "basis": "as_filed_diluted_shares_vs_split_adjusted_price",
+                "verified_through": "2026-06-30",
+                "post_period_exposure_days": 66,
+                "maximum_exposure_days": 200,
+                "continuity_tolerance": 0.15,
+                "continuity_checks": [],
+                "residual_risk": "unverified_post_period_split",
+            },
+        }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": horizons,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    opportunities = authenticated_client.get(reverse("opportunities"))
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert opportunities.status_code == 200
+    opportunity_content = opportunities.content.decode()
+    assert "Legacy 3+ years" not in opportunity_content
+    assert "-12.0% / +45.0% / +92.0%" in opportunity_content
+
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert "3-year advisory forecast" in detail_content
+    assert "5-year advisory forecast" in detail_content
+    assert "us-sec-long-v1" in detail_content
+    assert "Fcf Per Share" in detail_content
+    assert "3 SEC peers" in detail_content
+    assert "SIC-4" in detail_content
+    assert "Observed evidence" in detail_content
+    assert "Annualized bear/base/bull" in detail_content
+    assert "Current multiple 18.2x" in detail_content
+    assert "historical growth +9.0%" in detail_content
+    assert "Diluted-share basis verified through 2026-06-30" in detail_content
+    assert "the following 66-day interval" in detail_content
+    assert "has no independent split-event verification" in detail_content
+    assert "Split-adjusted price return · dividends excluded" in detail_content
+    assert "Positive-return probability is unavailable" in detail_content
 
 
 @pytest.mark.django_db
