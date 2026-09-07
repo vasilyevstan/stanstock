@@ -137,9 +137,133 @@
         <span>Current reference-price gain above zero</span>
       </article>
     {% endif %}
+    {% if contribution_performance.active %}
+      <article>
+        <small>External contributions</small>
+        <strong>{{ contribution_performance.total_contributions|floatformat:2 }} {{ portfolio.base_currency }}</strong>
+        <span>
+          {{ contribution_performance.contribution_count }} immutable deposit{{ contribution_performance.contribution_count|pluralize }};
+          {{ contribution_performance.tracked_contributions|floatformat:2 }} applied after the current performance boundary
+        </span>
+      </article>
+      <article>
+        <small>Investment profit / loss</small>
+        <strong>
+          {% if contribution_performance.investment_profit_loss is not None %}
+            {{ contribution_performance.investment_profit_loss|floatformat:2 }} {{ portfolio.base_currency }}
+          {% else %}
+            Withheld
+          {% endif %}
+        </strong>
+        <span>Current NAV minus the tracking boundary and later external contributions</span>
+      </article>
+      <article>
+        <small>Contribution-adjusted return</small>
+        <strong>
+          {% if contribution_performance.return_pct is not None %}
+            {{ contribution_performance.return_pct|percentage }}
+          {% else %}
+            Withheld
+          {% endif %}
+        </strong>
+        <span>
+          {% if contribution_performance.withheld_reason %}
+            {{ contribution_performance.withheld_reason }}
+          {% else %}
+            Simple return since {{ contribution_performance.tracking_boundary_reason|lower }};
+            not time-weighted
+          {% endif %}
+        </span>
+      </article>
+    {% endif %}
   </section>
 
   {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}
+    <div class="detail-grid">
+      <section class="panel">
+        <p class="eyebrow">External cash flow</p>
+        <h2>Record a deposit</h2>
+        <p>
+          The default is your {{ portfolio.monthly_contribution|floatformat:2 }}
+          {{ portfolio.base_currency }} monthly preference. Deposits are
+          append-only and separate from investment profit or loss.
+        </p>
+        <form method="post" class="stack">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="deposit">
+          {% if deposit_form.non_field_errors %}
+            <div class="error-box" role="alert">{{ deposit_form.non_field_errors }}</div>
+          {% endif %}
+          {% for hidden in deposit_form.hidden_fields %}{{ hidden }}{% endfor %}
+          {% for field in deposit_form.visible_fields %}
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
+          {% endfor %}
+          <button class="primary-button" type="submit">Record deposit</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <p class="eyebrow">Side-effect-free preview</p>
+        <h2>Monthly allocation plan</h2>
+        {% if contribution_plan.issues %}
+          <div class="error-box" role="alert">
+            {{ contribution_plan.issues|join:" " }}
+          </div>
+        {% else %}
+          <dl class="key-values">
+            <div><dt>Total NAV</dt><dd>{{ contribution_plan.nav|floatformat:2 }} {{ portfolio.base_currency }}</dd></div>
+            <div><dt>Cash available</dt><dd>{{ contribution_plan.cash_available|floatformat:2 }}</dd></div>
+            <div><dt>SPY target budget</dt><dd>{{ contribution_plan.spy_budget|floatformat:2 }}</dd></div>
+            <div><dt>Satellite target budget</dt><dd>{{ contribution_plan.satellite_budget|floatformat:2 }}</dd></div>
+            <div><dt>Residual cash</dt><dd>{{ contribution_plan.residual_cash|floatformat:2 }}</dd></div>
+            <div><dt>Execution mode</dt><dd>{% if contribution_plan.fractional_shares %}Fractional shares{% else %}Whole shares{% endif %}</dd></div>
+          </dl>
+          <div class="compact-list">
+            {% for purchase in contribution_plan.purchases %}
+              <article>
+                <div>
+                  <strong>{{ purchase.listing.ticker }} · {% if purchase.role == "core" %}Core ETF{% else %}Stock satellite{% endif %}</strong>
+                  <small>
+                    {{ purchase.quantity|floatformat:8 }} ×
+                    {{ purchase.price|floatformat:2 }} =
+                    {{ purchase.amount|floatformat:2 }} {{ portfolio.base_currency }}
+                  </small>
+                  <small>Persisted close from {{ purchase.source_session_date }}</small>
+                  <small>{{ purchase.rationale }}</small>
+                </div>
+              </article>
+            {% empty %}
+              <p class="empty-state">No purchase is required; all cash remains available.</p>
+            {% endfor %}
+          </div>
+          {% if contribution_plan.satellite_reason %}
+            <p class="muted">{{ contribution_plan.satellite_reason }}</p>
+          {% endif %}
+          <p class="muted">
+            Policy {{ contribution_plan.policy_version }} · 70% SPY NAV target ·
+            at most one qualified short-horizon stock satellite · no selling ·
+            unused cash carries forward.
+          </p>
+          {% if contribution_plan.executable %}
+            <form method="post" class="stack">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="execute_plan">
+              {% if plan_confirmation_error %}
+                <div class="error-box" role="alert">{{ plan_confirmation_error }}</div>
+              {% elif plan_confirmation_form.non_field_errors %}
+                <div class="error-box" role="alert">{{ plan_confirmation_form.non_field_errors }}</div>
+              {% endif %}
+              {% for hidden in plan_confirmation_form.hidden_fields %}{{ hidden }}{% endfor %}
+              <button class="primary-button" type="submit">Confirm recorded purchases</button>
+              <small>No brokerage or provider order is sent.</small>
+            </form>
+          {% endif %}
+        {% endif %}
+      </section>
+    </div>
+
     <div class="detail-grid">
       <section class="panel">
         <p class="eyebrow">Composition</p>
@@ -198,7 +322,7 @@
       <table class="compact-table">
         <thead>
           <tr>
-            <th scope="col">Stock</th>
+            <th scope="col">Security</th>
             <th scope="col">Quantity</th>
             <th scope="col">Average cost</th>
             <th scope="col">Latest price</th>
@@ -284,6 +408,80 @@
       </table>
     </div>
   </section>
+
+  {% if contribution_performance.active %}
+    <div class="detail-grid">
+      <section class="panel">
+        <p class="eyebrow">Immutable cash flows</p>
+        <h2>Recent deposits</h2>
+        <div class="compact-list">
+          {% for deposit in deposits %}
+            <article>
+              <div>
+                <strong>{{ deposit.amount|floatformat:2 }} {{ deposit.currency }}</strong>
+                <small>{{ deposit.occurred_at }} · cash after {{ deposit.cash_balance_after|floatformat:2 }}</small>
+                {% if deposit.note %}<small>{{ deposit.note }}</small>{% endif %}
+                {% if deposit.boundary_issue %}<small class="field-error">{{ deposit.boundary_issue }}</small>{% endif %}
+              </div>
+            </article>
+          {% empty %}
+            <p class="empty-state">No external deposits recorded.</p>
+          {% endfor %}
+        </div>
+        {% if performance_baselines %}
+          <h3>Performance restarts</h3>
+          <div class="compact-list">
+            {% for baseline in performance_baselines %}
+              <article>
+                <div>
+                  <strong>{{ baseline.get_reason_display }}</strong>
+                  <small>
+                    {{ baseline.recorded_at }} ·
+                    {% if baseline.snapshot %}
+                      value {{ baseline.snapshot.total_value|floatformat:2 }}
+                      {{ baseline.snapshot.base_currency }}
+                    {% else %}
+                      valuation boundary unavailable
+                    {% endif %}
+                  </small>
+                  {% if baseline.note %}<small>{{ baseline.note }}</small>{% endif %}
+                  {% if baseline.boundary_issue %}<small class="field-error">{{ baseline.boundary_issue }}</small>{% endif %}
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Confirmed records</p>
+        <h2>Planner purchases</h2>
+        <div class="compact-list">
+          {% for execution in plan_executions %}
+            <article>
+              <div>
+                <strong>{{ execution.executed_at }} · {{ execution.policy_version }}</strong>
+                <small>
+                  Cash {{ execution.starting_cash|floatformat:2 }} →
+                  {{ execution.ending_cash|floatformat:2 }}
+                </small>
+                {% for purchase in execution.purchases.all %}
+                  <small>
+                    {{ purchase.listing.ticker }} ·
+                    {{ purchase.quantity|floatformat:8 }} @
+                    {{ purchase.price|floatformat:2 }} =
+                    {{ purchase.amount|floatformat:2 }} ·
+                    source session {{ purchase.source_session_date }}
+                  </small>
+                {% endfor %}
+              </div>
+            </article>
+          {% empty %}
+            <p class="empty-state">No planner purchases have been confirmed.</p>
+          {% endfor %}
+        </div>
+      </section>
+    </div>
+  {% endif %}
 
   <section>
     <div class="section-heading">

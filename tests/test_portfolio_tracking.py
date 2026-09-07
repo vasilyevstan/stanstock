@@ -912,10 +912,13 @@ def test_portfolio_pages_create_track_highlight_and_isolate_owner(
     created = client.post(
         reverse("portfolios"),
         {
+            "action": "manual",
             "name": "Growth",
             "description": "Tracked ideas",
             "base_currency": "USD",
             "cash_balance": "500",
+            "monthly_contribution": "600",
+            "allow_fractional_shares": "on",
         },
     )
     portfolio = Portfolio.objects.get(owner=owner, name="Growth")
@@ -941,7 +944,8 @@ def test_portfolio_pages_create_track_highlight_and_isolate_owner(
     assert detail.status_code == 200
     assert "PORT" in content
     assert "Strong short-term setup" in content
-    assert PortfolioSnapshot.objects.filter(portfolio=portfolio).count() == 2
+    assert PortfolioSnapshot.objects.filter(portfolio=portfolio).count() == 3
+    assert portfolio.deposits.count() == 1
 
     other = get_user_model().objects.create_user(
         username="other",

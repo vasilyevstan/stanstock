@@ -148,6 +148,18 @@ reviews and should not be re-litigated without an explicit new decision.
   immutability-trigger migration must be checked for table recreation and, if
   needed, followed by a trigger-reinstallation migration plus a bulk-update/
   delete regression.
+- **`select_for_update()` can lock ordering joins.** A model's default ordering
+  can add joined tables to a locking query even when the caller only intends to
+  lock local rows. Use `of=("self",)` with an explicit stable row order before
+  acquiring shared analysis or market locks. Use `no_key=True` for shared
+  reference rows that must remain compatible with foreign-key `KEY SHARE`
+  checks, and exercise the complete sequence with independent PostgreSQL
+  connections.
+- **Escape PostgreSQL `%` placeholders in migration SQL.** PL/pgSQL format
+  markers passed through Django's psycopg schema editor must be written as
+  `%%`; otherwise a fresh PostgreSQL migration fails before the trigger
+  function is created. Cover the generated SQL and a real forward/reverse
+  migration cycle.
 - **Provider access and display rights are separate gates.** Twelve Data can
   technically support the bounded US universe, but its Basic tier is labeled
   internal non-display. Basic is enabled only after explicit personal,
@@ -190,6 +202,26 @@ reviews and should not be re-litigated without an explicit new decision.
 - **Simulation identity and inputs are durable.** Trades and holdings persist
   listing UUIDs, and every completed run records immutable price, signal,
   benchmark, and (when converted) FX input assets alongside its result curve.
+- **Cash flows and allocation decisions need their own immutable evidence.**
+  Keep deposits, confirmed purchases, and manual performance baselines
+  separate from mutable portfolio state. A preview is not an event, and a
+  recorded purchase is local bookkeeping at a persisted close, not a broker
+  fill.
+- **A confirmation hash must bind qualification, not only execution price.**
+  Include the exact analysis/run/configuration/code revision, eligibility
+  criteria, source asset UUID/checksum, price session, holdings, settings, and
+  cash. Recompute under one portfolio-first lock order and reject any changed
+  state.
+- **Unexplained quantity changes are boundaries, not returns.** A supported
+  manual quantity change appends an immutable post-change baseline. If the
+  whole portfolio cannot be valued, preserve an explicit unavailable-boundary
+  record so the edit remains recoverable while performance stays withheld.
+  Repeated snapshots must carry unresolved split warnings until quantity is
+  explicitly corrected.
+- **Django admin saves are concurrency-sensitive writes.** Read-only form
+  fields do not stop `Model.save()` from writing stale values. Ledger-managed
+  models require portfolio-first locking and explicit field allow-lists in
+  web and admin paths, plus regressions that interleave deposits or purchases.
 - **Local Docker capacity is not repository correctness.** When shared Docker
   Desktop storage is exhausted, validate Compose configuration locally and
   rely on the clean GitHub Actions image build; never prune unrelated shared

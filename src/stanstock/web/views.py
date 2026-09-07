@@ -3,12 +3,13 @@ from __future__ import annotations
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models import Avg, Count, Q, QuerySet
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -33,6 +34,13 @@ from stanstock.data.models import (
     UniverseSnapshot,
 )
 from stanstock.portfolio.models import Portfolio, PortfolioHolding
+from stanstock.portfolio.planner import (
+    PortfolioPlanningError,
+    calculate_contribution_performance,
+    confirm_monthly_contribution_plan,
+    preview_monthly_contribution_plan,
+    record_external_deposit,
+)
 from stanstock.portfolio.service import (
     PortfolioValuation,
     PortfolioValuationError,
@@ -78,8 +86,10 @@ from stanstock.simulation.types import SimulationWorkflowError
 from stanstock.web.demo import DEMO_OPPORTUNITIES
 from stanstock.web.forms import (
     OpportunityFilterForm,
+    PortfolioDepositForm,
     PortfolioForm,
     PortfolioHoldingForm,
+    PortfolioPlanConfirmationForm,
     SamplePortfolioForm,
     SimulationForm,
 )
@@ -757,8 +767,20 @@ def portfolios_page(request: HttpRequest) -> HttpResponse:
             form = PortfolioForm(request.POST, owner=owner)
             invalid_form = not form.is_valid()
             if not invalid_form:
-                portfolio = form.save()
-                record_portfolio_snapshot(portfolio)
+                with transaction.atomic():
+                    portfolio = form.save(commit=False)
+                    starting_cash = portfolio.cash_balance
+                    portfolio.cash_balance = Decimal(0)
+                    portfolio.save()
+                    if starting_cash > 0:
+                        record_external_deposit(
+                            portfolio=portfolio,
+                            amount=starting_cash,
+                            idempotency_key=uuid4(),
+                            note="Initial portfolio cash",
+                        )
+                        portfolio.refresh_from_db()
+                    record_portfolio_snapshot(portfolio)
                 messages.success(request, f"Portfolio “{portfolio.name}” created.")
                 return redirect("portfolio-detail", portfolio_id=portfolio.id)
         else:
@@ -797,13 +819,22 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
     portfolio = get_object_or_404(Portfolio, pk=portfolio_id, owner=owner)
     portfolio_form = PortfolioForm(instance=portfolio, owner=owner)
     holding_form = PortfolioHoldingForm(portfolio=portfolio)
+    deposit_form = PortfolioDepositForm(portfolio=portfolio)
+    plan_confirmation_form = PortfolioPlanConfirmationForm()
+    plan_confirmation_error = ""
+    invalid_form = False
 
     if request.method == "POST":
         action = request.POST.get("action", "")
         if portfolio.archived_at is not None and action != "restore":
             messages.error(request, "Restore this portfolio before changing it.")
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
-        if portfolio.is_model_portfolio and action in {"update", "holding"}:
+        if portfolio.is_model_portfolio and action in {
+            "update",
+            "holding",
+            "deposit",
+            "execute_plan",
+        }:
             messages.error(
                 request,
                 "Model portfolio construction is frozen so its tracked result remains "
@@ -811,12 +842,36 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
             )
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
         if action == "update":
-            portfolio_form = PortfolioForm(request.POST, instance=portfolio, owner=owner)
-            if portfolio_form.is_valid():
-                portfolio_form.save()
+            updated_portfolio: Portfolio | None = None
+            with transaction.atomic():
+                locked_portfolio = Portfolio.objects.select_for_update().get(
+                    pk=portfolio.pk,
+                    owner=owner,
+                )
+                portfolio_form = PortfolioForm(
+                    request.POST,
+                    instance=locked_portfolio,
+                    owner=owner,
+                )
+                if portfolio_form.is_valid():
+                    updated_portfolio = portfolio_form.save(commit=False)
+                    updated_portfolio.save(
+                        update_fields=[
+                            "name",
+                            "description",
+                            "base_currency",
+                            "monthly_contribution",
+                            "allow_fractional_shares",
+                            "updated_at",
+                        ]
+                    )
+                    updated_portfolio.refresh_from_db()
+            if updated_portfolio is not None:
+                portfolio = updated_portfolio
                 _snapshot_with_message(request, portfolio)
                 messages.success(request, "Portfolio settings updated.")
                 return redirect("portfolio-detail", portfolio_id=portfolio.id)
+            invalid_form = True
         elif action == "holding":
             holding_form = PortfolioHoldingForm(request.POST, portfolio=portfolio)
             if holding_form.is_valid():
@@ -836,6 +891,65 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
                     _snapshot_with_message(request, portfolio)
                     messages.success(request, "Holding saved.")
                     return redirect("portfolio-detail", portfolio_id=portfolio.id)
+            invalid_form = True
+        elif action == "deposit":
+            deposit_form = PortfolioDepositForm(request.POST, portfolio=portfolio)
+            if deposit_form.is_valid():
+                try:
+                    _deposit, created = record_external_deposit(
+                        portfolio=portfolio,
+                        amount=deposit_form.cleaned_data["amount"],
+                        idempotency_key=deposit_form.cleaned_data["idempotency_key"],
+                        note=deposit_form.cleaned_data.get("note") or "",
+                    )
+                except PortfolioPlanningError as exc:
+                    deposit_form.add_error(None, str(exc))
+                else:
+                    portfolio.refresh_from_db()
+                    if created:
+                        _snapshot_with_message(request, portfolio)
+                        messages.success(
+                            request,
+                            "External deposit recorded; allocation preview updated.",
+                        )
+                    else:
+                        messages.info(request, "That deposit was already recorded.")
+                    return redirect("portfolio-detail", portfolio_id=portfolio.id)
+            invalid_form = True
+        elif action == "execute_plan":
+            plan_confirmation_form = PortfolioPlanConfirmationForm(request.POST)
+            if plan_confirmation_form.is_valid():
+                try:
+                    execution, created = confirm_monthly_contribution_plan(
+                        portfolio=portfolio,
+                        expected_plan_hash=plan_confirmation_form.cleaned_data["plan_hash"],
+                        idempotency_key=plan_confirmation_form.cleaned_data["idempotency_key"],
+                    )
+                except PortfolioPlanningError as exc:
+                    plan_confirmation_error = str(exc)
+                    portfolio.refresh_from_db()
+                    portfolio_form = PortfolioForm(instance=portfolio, owner=owner)
+                    holding_form = PortfolioHoldingForm(portfolio=portfolio)
+                    deposit_form = PortfolioDepositForm(portfolio=portfolio)
+                    plan_confirmation_form = PortfolioPlanConfirmationForm()
+                else:
+                    portfolio.refresh_from_db()
+                    if created:
+                        _snapshot_with_message(request, portfolio)
+                        messages.success(
+                            request,
+                            f"Recorded {execution.purchases.count()} planner "
+                            "purchase(s); no brokerage order was sent.",
+                        )
+                    else:
+                        messages.info(request, "That allocation plan was already recorded.")
+                    return redirect("portfolio-detail", portfolio_id=portfolio.id)
+            else:
+                plan_confirmation_error = (
+                    "Plan confirmation request was invalid; review the current plan."
+                )
+                plan_confirmation_form = PortfolioPlanConfirmationForm()
+            invalid_form = True
         elif action == "snapshot":
             _snapshot_with_message(request, portfolio, success_message=True)
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
@@ -856,12 +970,6 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
             messages.error(request, "Unknown portfolio action.")
             return redirect("portfolio-detail", portfolio_id=portfolio.id)
 
-    status_code = (
-        HTTPStatus.BAD_REQUEST
-        if request.method == "POST"
-        and (not portfolio_form.is_valid() or not holding_form.is_valid())
-        else HTTPStatus.OK
-    )
     return render(
         request,
         "web/portfolio_detail.html",
@@ -869,8 +977,11 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
             portfolio=portfolio,
             portfolio_form=portfolio_form,
             holding_form=holding_form,
+            deposit_form=deposit_form,
+            plan_confirmation_form=plan_confirmation_form,
+            plan_confirmation_error=plan_confirmation_error,
         ),
-        status=status_code,
+        status=HTTPStatus.BAD_REQUEST if invalid_form else HTTPStatus.OK,
     )
 
 
@@ -1051,6 +1162,9 @@ def _portfolio_detail_context(
     portfolio: Portfolio,
     portfolio_form: PortfolioForm,
     holding_form: PortfolioHoldingForm,
+    deposit_form: PortfolioDepositForm,
+    plan_confirmation_form: PortfolioPlanConfirmationForm,
+    plan_confirmation_error: str,
 ) -> dict[str, Any]:
     valuation = calculate_portfolio_valuation(portfolio)
     listing_ids = [position.holding.listing_id for position in valuation.positions]
@@ -1093,15 +1207,44 @@ def _portfolio_detail_context(
             }
         )
     snapshots = portfolio_snapshot_series(portfolio)
+    contribution_plan = (
+        preview_monthly_contribution_plan(portfolio)
+        if portfolio.archived_at is None and not portfolio.is_model_portfolio
+        else None
+    )
+    if contribution_plan is not None and (
+        not plan_confirmation_form.is_bound or plan_confirmation_error
+    ):
+        plan_confirmation_form = PortfolioPlanConfirmationForm(
+            plan_hash=contribution_plan.plan_hash,
+        )
     context = {
         "portfolio": portfolio,
         "portfolio_form": portfolio_form,
         "holding_form": holding_form,
+        "deposit_form": deposit_form,
+        "plan_confirmation_form": plan_confirmation_form,
+        "plan_confirmation_error": plan_confirmation_error,
         "valuation": valuation,
         "position_cards": position_cards,
         "snapshots": list(reversed(snapshots)),
         "first_snapshot": snapshots[0] if snapshots else None,
         "latest_snapshot": snapshots[-1] if snapshots else None,
+        "contribution_plan": contribution_plan,
+        "contribution_performance": calculate_contribution_performance(
+            portfolio,
+            valuation=valuation,
+        ),
+        "deposits": portfolio.deposits.select_related("boundary_snapshot").order_by(
+            "-occurred_at",
+            "-recorded_at",
+        )[:12],
+        "performance_baselines": portfolio.performance_baselines.select_related(
+            "snapshot"
+        ).order_by("-recorded_at", "-id")[:12],
+        "plan_executions": portfolio.plan_executions.prefetch_related(
+            "purchases__listing",
+        ).order_by("-executed_at", "-recorded_at")[:12],
     }
     context.update(_model_portfolio_metrics(portfolio, valuation))
     return context

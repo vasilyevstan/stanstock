@@ -31,6 +31,11 @@ Reviewer: `stanstock-critic-tester`.
       not the local wall-clock date.
 - [ ] Local SQLite enables WAL plus a bounded busy timeout; concurrent web/job
       behavior has focused tests.
+- [ ] Concurrent deposits, plan confirmations, settings saves, admin saves,
+      and holding removals cannot lose cash, duplicate spending, restore stale
+      quantities, or produce a 500 on a retry/double submission.
+- [ ] A rejected confirmation refreshes portfolio state and renders a new
+      plan hash/idempotency key matching the preview currently shown.
 
 ## Backups
 

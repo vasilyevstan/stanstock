@@ -191,6 +191,39 @@ outdated price feed is shown as a freshness warning on portfolio pages. Run the
 command after `refresh_demo` in synthetic development or after `daily --region
 us` for enabled live data.
 
+### Monthly contribution ledger
+
+Apply the portfolio migration before using deposits or monthly plans:
+
+```bash
+uv run python manage.py migrate
+```
+
+On `/portfolios`, create or open a manual portfolio, record an external
+deposit, review the side-effect-free allocation preview, and explicitly
+confirm only if the displayed local records match the intended bookkeeping.
+Confirmation records purchases in StanStock; it does not send a brokerage
+order. The default monthly preference is $600 and can be edited without
+changing cash. Cash itself is managed only by immutable deposits and confirmed
+planner purchases.
+
+The planner recomputes its SHA-256 plan identity while holding the portfolio,
+holdings, relevant market rows, and qualifying analysis rows. A concurrent
+deposit, settings change, price advance, or analysis replacement rejects the
+old preview and renders a fresh confirmation identity. Cash writes also use a
+compare-and-swap condition. PostgreSQL row locks and local SQLite's immediate
+transactions/WAL/busy timeout prevent concurrent confirmations from spending
+the same cash.
+
+Deposit, execution, purchase, and manual performance-baseline rows are
+append-only at both the Django and database-trigger layers. Supported manual
+quantity changes/removals append a post-change baseline. When another
+unpriceable holding prevents that valuation, the edit is retained with an
+immutable unavailable-boundary reason and contribution performance is
+withheld rather than guessed. Removing or correcting the blocking state can
+create a later valid baseline. Backups therefore must preserve these ledger
+tables together with portfolio snapshots and data assets.
+
 Build the owner's frozen sample portfolio from the latest provider-backed
 opportunity run:
 

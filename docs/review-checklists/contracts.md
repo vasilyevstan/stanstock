@@ -17,6 +17,9 @@ consumed by another app/module or by an external caller. Reviewer:
 - [ ] If SQLite recreates a table protected by custom triggers while adding a
       later constraint, a following migration reinstalls and tests those
       update/delete triggers.
+- [ ] New portfolio ledger/baseline tables are protected from ORM and direct
+      database update/delete on both SQLite and PostgreSQL, including after
+      every table-rebuilding constraint operation.
 
 ## Model and service interfaces
 
@@ -28,6 +31,12 @@ consumed by another app/module or by an external caller. Reviewer:
 - [ ] JSON fields (`metadata`, `component_scores`, `quality_flags`, etc.)
       keep a stable, documented shape; a shape change is treated as a
       schema change requiring the material-change simplifier gate.
+- [ ] Ledger-managed cash and holding quantities are never persisted by an
+      unrelated full-model save. Web and admin updates lock in portfolio-first
+      order and use explicit `update_fields` allow-lists.
+- [ ] A recoverable unavailable-boundary state has an explicit database
+      invariant (valid snapshot xor non-empty issue); expected valuation
+      failure cannot roll back the holding correction it is meant to record.
 
 ## Cross-app boundaries
 

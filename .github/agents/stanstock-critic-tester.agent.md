@@ -46,6 +46,15 @@ summary, not a substitute.
   `docs/review-checklists/operations.md`.
 - Regression risk: trusted-proxy client identification, persisted-value
   rounding, and stale ORM instances attempting to overwrite terminal states.
+- Regression risk: stale web or Django-admin model instances overwriting
+  ledger-managed cash, quantities, or weighted cost after a concurrent
+  deposit/confirmation; every economic write follows one portfolio-first lock
+  order and saves only intended fields.
+- Regression risk: contribution previews mutating state, duplicate deposits or
+  confirmations spending twice, stale plan hashes surviving price/analysis
+  changes, manual quantity changes becoming investment return, unavailable
+  re-baselines blocking holding recovery, or repeated snapshots clearing an
+  unresolved split warning.
 - Regression risk: duplicate/retry/restart behavior for jobs keyed by
   `(job_name, region, target_date, attempt)`.
 - Regression risk: a retry-time evidence grade or missing credential causing

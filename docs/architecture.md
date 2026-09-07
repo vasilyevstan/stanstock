@@ -11,7 +11,7 @@ research integrity, not to imitate a distributed system.
 | `data` | Permanent identities, universe snapshots, providers, immutable assets, filings, FX, and as-of reads |
 | `research` | Indicators, transparent scores, risk, scenarios, analyses, predictions, and outcomes |
 | `simulation` | One accounting model shared by backtests and portfolio simulations |
-| `portfolio` | Owner-scoped live holdings and immutable dated valuation snapshots |
+| `portfolio` | Owner-scoped holdings, immutable deposits/purchases/performance baselines, allocation planning, and dated valuations |
 | `web` | Authenticated server-rendered pages, filters, status, and lightweight JSON where needed |
 
 Raw provider clients belong under `stanstock.data.providers`. An architecture
@@ -28,7 +28,8 @@ SQLite. Relational rows hold:
 - source and provider status;
 - data-asset manifests and normalized filing/FX facts;
 - analyses, immutable predictions, outcomes, jobs, simulations, tracked
-  portfolios, and immutable portfolio valuations.
+  portfolios, immutable cash/purchase ledgers and performance baselines, and
+  immutable portfolio valuations.
 
 Large or source-native payloads live under `STANSTOCK_DATA_DIR`. `DataAsset`
 stores a relative path, SHA-256 checksum, retrieval time, availability time,
@@ -72,6 +73,11 @@ replacement.
     aggregate value used. Repeated identical inputs are idempotent; changed
     holdings can create another snapshot on the same market date. Database
     triggers reject snapshot and snapshot-position updates or deletes.
+11. External deposits, confirmed planner executions/purchases, and manual
+    performance baselines are append-only. Confirmation re-hashes locked
+    portfolio, price, and qualifying-analysis state. A manual quantity change
+    creates a post-change boundary (or an explicit unavailable-boundary
+    record), so contribution return is never inferred from unexplained state.
 
 ## Runtime
 

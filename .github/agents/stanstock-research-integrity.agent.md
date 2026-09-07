@@ -121,6 +121,17 @@ record; the summary below is not a substitute for reading it.
   symbols remain unavailable. ETF identity projection occurs after stock
   research commits, so a projection conflict is explicit and recoverable from
   the exact run asset without spending provider credits again.
+- **Contribution accounting and planner integrity**: external deposits,
+  confirmed plan executions, purchases, and manual performance baselines are
+  immutable evidence. Preview is side-effect free; confirmation locks and
+  re-derives total-NAV 70/30 arithmetic from exact holdings, market
+  sessions/assets, and short-horizon qualifying analysis provenance. It never
+  sells, promotes Under-$10 names, forces a satellite, or claims a broker
+  fill. Cash/quantity reconciliation and fresh coherent split-adjusted,
+  dividend-excluding boundaries are required for a numeric return. Manual
+  quantity changes restart from an immutable post-change baseline; unavailable
+  boundaries withhold performance without blocking recovery, and repeated
+  snapshots cannot clear an unresolved split warning.
 - **Prospective methodology versioning**: price-scale or liquidity corrections
   use a new immutable configuration and preserve historical hashes,
   calculation paths, predictions, and version-separated performance.

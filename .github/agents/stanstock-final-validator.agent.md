@@ -48,6 +48,10 @@ Read:
   research-grade-vs-observed labeling, per-valued-date FX availability cutoffs
   and conversion into one explicit base currency, complete-content input
   hashes, and missing-data honesty are intact across the diff.
+- For contribution-planner changes, verify immutable deposit/purchase/baseline
+  ledgers, exact qualification-bound plan hashes, portfolio-first locking,
+  stale web/admin save protection, persistent split warnings, recoverable
+  unavailable boundaries, and clear non-broker/simple-return labels.
 - Verify migrations are backward compatible or ship an explicit, tested
   rollback/backfill plan.
 - Verify CI (`.github/workflows/ci.yml`) evidence is real: a stale, skipped,

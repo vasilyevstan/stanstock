@@ -150,6 +150,15 @@ predictions, opportunities, or sample-stock baskets. ETF metrics retain their
 price-return/dividend basis, while personal portfolio valuation may use the
 supported ETF's current market row without inventing a stock rating.
 
+Contribution planning is also an evidence boundary. Deposits, confirmed
+purchases, and manual performance baselines are immutable; previews have no
+side effects. Confirmation recomputes one hash over locked portfolio state,
+market assets/sessions, and exact short-horizon qualification evidence.
+Manual quantity changes restart measurement from a visible post-change
+baseline, while unavailable valuation records withhold performance without
+blocking recovery. Admin and web saves must not write stale ledger-managed
+cash or quantities.
+
 ## No secrets, private data, or session paths
 
 No agent may print or persist: `.env` values, `DJANGO_SECRET_KEY`,

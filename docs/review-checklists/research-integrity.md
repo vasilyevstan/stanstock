@@ -201,6 +201,41 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       missing SEC, dilution/per-share, solvency/cash-runway, dollar-liquidity,
       split-event, and compatible 3y/5y evidence gates.
 
+## Tracked contributions and allocation plans
+
+- [ ] External deposits, confirmed plan executions, purchases, and manual
+      performance baselines are immutable and idempotent where a request can
+      be retried. Cash cannot be changed through an unrelated form/admin save.
+- [ ] Preview is side-effect free. Confirmation locks/reloads the portfolio,
+      holdings, every valued/purchased market row, and qualifying analysis,
+      then recomputes the complete plan hash before writing anything.
+- [ ] The plan hash binds settings, cash, quantities, prices, source asset
+      UUIDs/checksums/session dates, and the exact satellite
+      analysis/run/configuration/code/evidence criteria. A same-session
+      analysis replacement invalidates an older preview.
+- [ ] Allocation uses total NAV including cash, targets 70% SPY and 30%
+      non-SPY without selling, selects at most one explicitly short-horizon
+      qualified stock, preserves the Under-$10 0% gate, rounds down for the
+      selected share mode, and carries every unspent amount.
+- [ ] A recorded purchase is labeled as local research bookkeeping at a
+      persisted close, not a broker fill. Preview/confirmation makes no
+      provider or brokerage call.
+- [ ] Contribution profit/loss reconciles cash and quantities to immutable
+      boundaries, deposits, and purchases. Boundary/current valuations require
+      fresh non-future one-session provider evidence with compatible
+      split-adjusted/dividend treatment and no unresolved corporate action.
+- [ ] Manual quantity changes/removals append an immutable post-change
+      baseline rather than becoming return. If valuation is unavailable, the
+      change remains recoverable through an explicit unavailable-boundary
+      record and performance is withheld; an ordinary scheduled snapshot
+      alone cannot reset the boundary.
+- [ ] Split warnings persist across repeated snapshots while quantity is
+      unchanged. A supported quantity correction creates a visible new
+      baseline; history is never retroactively rewritten.
+- [ ] Contribution percentage is labeled as a simple since-boundary return,
+      not time-weighted or money-weighted performance, and all-time deposits
+      remain distinguishable from flows after the active boundary.
+
 ## Return and FX consistency
 
 - [ ] Return calculations use one consistent price basis; no unit mismatch
