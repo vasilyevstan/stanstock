@@ -62,8 +62,34 @@
           <span class="status-dot {% if prediction_count %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
           <h3>Predictions</h3>
         </div>
-        <p>{{ prediction_count }} immutable prediction{{ prediction_count|pluralize }}; {{ matured_count }} matured outcome{{ matured_count|pluralize }}.</p>
-        <strong>{% if matured_count >= 30 %}Evaluation available{% else %}Insufficient sample{% endif %}</strong>
+        <p>
+          {{ prediction_count }} latest-run immutable prediction{{ prediction_count|pluralize }};
+          {{ decision_matured_count }} matured decision and
+          {{ advisory_matured_count }} matured advisory outcome{{ advisory_matured_count|pluralize }}.
+        </p>
+        <strong>Evaluated in separate method cohorts</strong>
+      </article>
+      <article class="status-card">
+        <div class="status-line">
+          <span class="status-dot {% if medium_panel %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <h3>6m/12m forecast panel</h3>
+        </div>
+        <p>
+          {% if medium_panel %}
+            {{ medium_panel.metadata.row_count }} immutable panel rows for
+            {{ medium_panel.metadata.target_date }} ·
+            {{ medium_panel.metadata.method_version }}.
+          {% else %}
+            Awaiting the next eligible US price-only analysis run.
+          {% endif %}
+        </p>
+        <strong>
+          {% if medium_panel %}
+            Stored · {{ medium_panel.sha256|slice:":12" }}
+          {% else %}
+            Not yet generated
+          {% endif %}
+        </strong>
       </article>
       <article class="status-card">
         <div class="status-line">
@@ -147,8 +173,10 @@
             <th scope="col">Score</th>
             <th scope="col">Recommendation</th>
             <th scope="col">1-10 days</th>
-            <th scope="col">6-12 months</th>
-            <th scope="col">3+ years</th>
+            <th scope="col">6 months</th>
+            <th scope="col">12 months</th>
+            <th scope="col">3 years</th>
+            <th scope="col">5 years</th>
             <th scope="col">Risk</th>
             <th scope="col">Confidence</th>
           </tr>
@@ -164,8 +192,20 @@
               <td><strong>{{ stock.overall_score }}/100</strong></td>
               <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
               <td>{{ stock.short_forecast_scenario|scenario_range }}</td>
-              <td>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</td>
-              <td>{{ stock.legacy_long_forecast_scenario|scenario_range }}</td>
+              {% if stock.has_explicit_medium_forecasts %}
+                <td>{{ stock.six_month_forecast_scenario|scenario_range }}</td>
+                <td>{{ stock.twelve_month_forecast_scenario|scenario_range }}</td>
+              {% else %}
+                <td><small>Legacy 6-12m</small> {{ stock.legacy_medium_forecast_scenario|scenario_range }}</td>
+                <td>Not issued</td>
+              {% endif %}
+              {% if stock.has_explicit_advisory_forecasts %}
+                <td>{{ stock.three_year_forecast_scenario|scenario_range }}</td>
+                <td>{{ stock.five_year_forecast_scenario|scenario_range }}</td>
+              {% else %}
+                <td><small>Legacy 3+ years</small> {{ stock.legacy_long_forecast_scenario|scenario_range }}</td>
+                <td>Not issued</td>
+              {% endif %}
               <td>{{ stock.get_risk_class_display }}</td>
               <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
             </tr>
@@ -180,14 +220,16 @@
               <td><strong>{{ stock.score }}/100</strong></td>
               <td><span class="recommendation recommendation-{{ stock.recommendation|lower }}">{{ stock.recommendation }}</span></td>
               <td>{{ stock.short }}</td>
-              <td>{{ stock.medium }}</td>
-              <td>{{ stock.long }}</td>
+              <td><small>Legacy 6-12m</small> {{ stock.medium }}</td>
+              <td>Unavailable</td>
+              <td><small>Legacy 3+ years</small> {{ stock.long }}</td>
+              <td>Unavailable</td>
               <td>{{ stock.risk }}</td>
               <td>{{ stock.confidence }}</td>
             </tr>
           {% empty %}
             <tr>
-              <td colspan="9">No opportunity data is available.</td>
+              <td colspan="11">No opportunity data is available.</td>
             </tr>
           {% endfor %}
           {% endfor %}

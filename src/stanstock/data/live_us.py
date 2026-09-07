@@ -448,42 +448,58 @@ def run_us_daily(
         benchmark_series.retrieved_at,
         *(series.retrieved_at for series in series_by_symbol.values()),
     )
-    with transaction.atomic():
-        if require_on_time:
-            analysis_time = max(analysis_time, timezone.now())
-            _require_automatic_on_time(
-                target_date=target_date,
-                generated_at=analysis_time,
-            )
-        snapshot = _ensure_snapshot(
-            config=config,
-            target_date=target_date,
-            grade=snapshot_grade,
-            listings=listings,
-            exclusion_reasons=exclusion_reasons,
-            catalog_assets=catalog_assets,
-        )
-        results = analyze_snapshot(
-            universe_snapshot=snapshot,
-            decision_time=analysis_time,
-            target_date=target_date,
-            issued_on_time=(
-                snapshot_grade == UniverseSnapshot.Grade.OBSERVED
-                and is_us_prediction_on_time(
+    panel_paths: list[str] = []
+    try:
+        with transaction.atomic():
+            if require_on_time:
+                analysis_time = max(analysis_time, timezone.now())
+                _require_automatic_on_time(
                     target_date=target_date,
                     generated_at=analysis_time,
                 )
-            ),
-            provider=PROVIDER,
-            benchmark_subject=config.benchmark_symbol,
-            store=store,
-            config_path=default_us_scoring_config_path(),
-        )
-        if require_on_time:
-            _require_automatic_on_time(
+            snapshot = _ensure_snapshot(
+                config=config,
                 target_date=target_date,
-                generated_at=max(analysis_time, timezone.now()),
+                grade=snapshot_grade,
+                listings=listings,
+                exclusion_reasons=exclusion_reasons,
+                catalog_assets=catalog_assets,
             )
+            results = analyze_snapshot(
+                universe_snapshot=snapshot,
+                decision_time=analysis_time,
+                target_date=target_date,
+                issued_on_time=(
+                    snapshot_grade == UniverseSnapshot.Grade.OBSERVED
+                    and is_us_prediction_on_time(
+                        target_date=target_date,
+                        generated_at=analysis_time,
+                    )
+                ),
+                provider=PROVIDER,
+                benchmark_subject=config.benchmark_symbol,
+                store=store,
+                config_path=default_us_scoring_config_path(),
+            )
+            first_analysis = getattr(results[0], "analysis", None) if results else None
+            if first_analysis is not None:
+                panel_paths = list(
+                    DataAsset.objects.filter(
+                        provider="stanstock",
+                        kind="medium_forecast_panel",
+                        subject=str(first_analysis.run_id),
+                    ).values_list("relative_path", flat=True)
+                )
+            if require_on_time:
+                _require_automatic_on_time(
+                    target_date=target_date,
+                    generated_at=max(analysis_time, timezone.now()),
+                )
+    except Exception:
+        for relative_path in panel_paths:
+            if not DataAsset.objects.filter(relative_path=relative_path).exists():
+                store.resolve(relative_path).unlink(missing_ok=True)
+        raise
     _record_provider_success(
         at=analysis_time,
         target_date=target_date,

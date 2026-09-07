@@ -62,7 +62,8 @@ class Command(BaseCommand):
                 )
                 self.stdout.write(
                     self.style.SUCCESS(
-                        f"Analyzed {listing.ticker}: analysis={result.analysis.pk} predictions=3"
+                        f"Analyzed {listing.ticker}: analysis={result.analysis.pk} "
+                        f"predictions={len(result.predictions)}"
                     )
                 )
                 return

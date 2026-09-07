@@ -38,10 +38,25 @@
     {% if analysis.data_quality.analysis_mode == "price_only_baseline" %}
       <div class="notice" role="status">
         <strong>US price-only baseline.</strong>
-        This recommendation does not use company fundamentals. Only the
-        short-horizon scenario is supported; medium and long horizons are
-        intentionally withheld.
+        The recommendation remains short-horizon and does not use company
+        fundamentals.
+        {% if analysis.has_explicit_medium_forecasts %}
+          The 6- and 12-month ranges are separate advisory forecasts and
+          cannot change BUY/HOLD/AVOID or opportunity status.
+        {% else %}
+          Explicit 6- and 12-month advisory forecasts were not issued for this
+          legacy analysis.
+        {% endif %}
       </div>
+      {% if analysis.has_explicit_medium_forecasts %}
+        <div class="notice" role="status">
+          <strong>Reconstructed training evidence.</strong>
+          Medium-horizon ranges use non-overlapping historical states from the
+          current universe, which has survivorship bias. Prospective outcomes
+          are tracked separately; these reconstructed samples are not live-skill
+          evidence.
+        </div>
+      {% endif %}
     {% endif %}
     {% if current_price_band %}
       <div class="notice" role="status">
@@ -56,7 +71,7 @@
         {% endif %}
       </div>
     {% endif %}
-    <section class="metric-grid" aria-label="Current analysis">
+    <section class="metric-grid forecast-grid" aria-label="Current analysis and forecasts">
       <article>
         <small>Decision-run price</small>
         <strong>{{ analysis.current_price|price }} {{ listing.currency }}</strong>
@@ -77,43 +92,157 @@
         </span>
         {% if analysis.short_forecast_scenario.insufficiency_reason %}<span>{{ analysis.short_forecast_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
-      <article>
-        <small>6-12 month scenario</small>
-        <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
+      {% if analysis.has_explicit_medium_forecasts %}
+        <article>
+        {% with scenario=analysis.six_month_forecast_scenario %}
+        <small>6-month advisory forecast</small>
+        <strong>{{ scenario|scenario_range }}</strong>
         <span>
-          {% if analysis.legacy_medium_forecast_scenario.method %}
-            {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
+          {% if scenario.method_version %}
+            {{ scenario.method_version }}
+          {% elif scenario.method %}
+            {{ scenario.method|display_label }}
           {% else %}
-            Bear / base / bull
+            Not yet issued
           {% endif %}
         </span>
-        {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
-      </article>
-      <article>
-        <small>3+ year scenario</small>
-        {% if long_horizon_blocked %}
-          <strong>Forecast unavailable</strong>
-          <span>{{ long_horizon_band_reason }}</span>
-          {% if long_horizon_gates %}
-            <span>Missing activation gates:</span>
-            <ul class="compact-gate-list">
-              {% for gate in long_horizon_gates %}
-                <li>{{ gate }}</li>
-              {% endfor %}
-            </ul>
-          {% endif %}
-        {% else %}
-          <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
+        {% if scenario.support %}
           <span>
-            {% if analysis.legacy_long_forecast_scenario.method %}
-              {{ analysis.legacy_long_forecast_scenario.method|display_label }}
+            {{ scenario.support.effective_cohorts }} non-overlapping cohort{{ scenario.support.effective_cohorts|pluralize }}
+            · {{ scenario.support.distinct_listings }} listing{{ scenario.support.distinct_listings|pluralize }}
+            · {{ scenario.support.fallback_level|display_label }}
+          </span>
+        {% endif %}
+        {% if scenario.current_state %}
+          <span>
+            Relative momentum {{ scenario.current_state.relative_momentum|percentage }}
+            · drawdown {{ scenario.current_state.drawdown|percentage }}
+            · volatility {{ scenario.current_state.volatility|percentage }}
+          </span>
+          <span>
+            SPY trend {{ scenario.current_state.market_trend|percentage }}
+            · SPY volatility {{ scenario.current_state.market_volatility|percentage }}
+          </span>
+        {% endif %}
+        {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
+        {% if scenario.probability_positive is not None %}<span>Positive probability {{ scenario.probability_positive|percentage }}</span>{% endif %}
+        {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
+        {% endwith %}
+        </article>
+        <article>
+        {% with scenario=analysis.twelve_month_forecast_scenario %}
+        <small>12-month advisory forecast</small>
+        <strong>{{ scenario|scenario_range }}</strong>
+        <span>
+          {% if scenario.method_version %}
+            {{ scenario.method_version }}
+          {% elif scenario.method %}
+            {{ scenario.method|display_label }}
+          {% else %}
+            Not yet issued
+          {% endif %}
+        </span>
+        {% if scenario.support %}
+          <span>
+            {{ scenario.support.effective_cohorts }} non-overlapping cohort{{ scenario.support.effective_cohorts|pluralize }}
+            · {{ scenario.support.distinct_listings }} listing{{ scenario.support.distinct_listings|pluralize }}
+            · {{ scenario.support.fallback_level|display_label }}
+          </span>
+        {% endif %}
+        {% if scenario.current_state %}
+          <span>
+            Relative momentum {{ scenario.current_state.relative_momentum|percentage }}
+            · drawdown {{ scenario.current_state.drawdown|percentage }}
+            · volatility {{ scenario.current_state.volatility|percentage }}
+          </span>
+          <span>
+            SPY trend {{ scenario.current_state.market_trend|percentage }}
+            · SPY volatility {{ scenario.current_state.market_volatility|percentage }}
+          </span>
+        {% endif %}
+        {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
+        {% if scenario.probability_positive is not None %}<span>Positive probability {{ scenario.probability_positive|percentage }}</span>{% endif %}
+        {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
+        {% endwith %}
+        </article>
+      {% else %}
+        <article>
+          <small>Legacy 6-12 month scenario</small>
+          <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
+          <span>
+            {% if analysis.legacy_medium_forecast_scenario.method %}
+              {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
             {% else %}
-              Explicit uncertainty
+              Historical horizon definition retained
             {% endif %}
           </span>
-          {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
-        {% endif %}
-      </article>
+          {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+        </article>
+      {% endif %}
+      {% if analysis.has_explicit_advisory_forecasts %}
+        <article>
+          <small>3-year advisory forecast</small>
+          {% if long_horizon_blocked %}
+            <strong>Forecast unavailable</strong>
+            <span>{{ long_horizon_band_reason }}</span>
+            {% if long_horizon_gates %}
+              <span>Missing activation gates:</span>
+              <ul class="compact-gate-list">
+                {% for gate in long_horizon_gates %}
+                  <li>{{ gate }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          {% else %}
+            <strong>{{ analysis.three_year_forecast_scenario|scenario_range }}</strong>
+            <span>Requires point-in-time SEC evidence.</span>
+          {% endif %}
+        </article>
+        <article>
+          <small>5-year advisory forecast</small>
+          {% if long_horizon_blocked %}
+            <strong>Forecast unavailable</strong>
+            <span>{{ long_horizon_band_reason }}</span>
+            {% if long_horizon_gates %}
+              <span>Missing activation gates:</span>
+              <ul class="compact-gate-list">
+                {% for gate in long_horizon_gates %}
+                  <li>{{ gate }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          {% else %}
+            <strong>{{ analysis.five_year_forecast_scenario|scenario_range }}</strong>
+            <span>Requires point-in-time SEC evidence.</span>
+          {% endif %}
+        </article>
+      {% else %}
+        <article>
+          <small>Legacy 3+ year scenario</small>
+          {% if long_horizon_blocked %}
+            <strong>Forecast unavailable</strong>
+            <span>{{ long_horizon_band_reason }}</span>
+            {% if long_horizon_gates %}
+              <span>Missing activation gates:</span>
+              <ul class="compact-gate-list">
+                {% for gate in long_horizon_gates %}
+                  <li>{{ gate }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          {% else %}
+            <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
+            <span>
+              {% if analysis.legacy_long_forecast_scenario.method %}
+                {{ analysis.legacy_long_forecast_scenario.method|display_label }}
+              {% else %}
+                Historical horizon definition retained
+              {% endif %}
+            </span>
+            {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+          {% endif %}
+        </article>
+      {% endif %}
     </section>
 
     <div class="detail-grid">
@@ -191,7 +320,10 @@
       {% for prediction in predictions %}
         <article>
           <div>
-            <strong>{{ prediction.get_horizon_display }} · {{ prediction.get_recommendation_display }}</strong>
+            <strong>
+              {{ prediction.get_horizon_display }} · {{ prediction.get_evidence_role_display }}
+              {% if prediction.evidence_role == "decision" %}· {{ prediction.get_recommendation_display }}{% endif %}
+            </strong>
             <small>
               {{ prediction.target_date }} ·
               {{ prediction.bear_return|percentage }} /

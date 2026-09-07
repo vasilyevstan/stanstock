@@ -97,7 +97,13 @@
               </small>
             </td>
             <td>{{ prediction.get_horizon_display }}</td>
-            <td><span class="recommendation recommendation-{{ prediction.recommendation }}">{{ prediction.get_recommendation_display }}</span></td>
+            <td>
+              {% if prediction.evidence_role == "decision" %}
+                <span class="recommendation recommendation-{{ prediction.recommendation }}">{{ prediction.get_recommendation_display }}</span>
+              {% else %}
+                Not applicable
+              {% endif %}
+            </td>
             <td>{{ prediction.bear_return|percentage }} / {{ prediction.base_return|percentage }} / {{ prediction.bull_return|percentage }}</td>
             <td>
               {% if prediction.probability_positive is not None %}

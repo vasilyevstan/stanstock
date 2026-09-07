@@ -52,6 +52,10 @@ This command validates settings; it does not prove the database is reachable.
 - technical/fundamental math, canonical concept/restatement selection, and
   missing-value behavior;
 - recommendation, risk, scenario, and explanation determinism;
+- deterministic 6m/12m panel replay, fixed-epoch non-overlapping cohorts,
+  historical-anchor leakage exclusion, equal cohort weighting, shrinkage,
+  support/diversity/calibration withholding, immutable panel provenance, and
+  advisory isolation from recommendations and opportunities;
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
   detection, explicit 6m/12m/3y/5y maturity counts, provider-conflict
