@@ -56,6 +56,52 @@ jobs:
           DATABASE_URL: "postgresql://stanstock:stanstock@localhost:5432/stanstock"
         run: uv run python manage.py check --deploy --settings=stanstock.settings.prod
 
+  postgresql:
+    name: postgresql
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: stanstock
+          POSTGRES_USER: stanstock
+          POSTGRES_PASSWORD: stanstock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stanstock -d stanstock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.10"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Run PostgreSQL planner concurrency regression
+        env:
+          POSTGRES_USER: "stanstock"
+          POSTGRES_PASSWORD: "stanstock"
+          DJANGO_SECRET_KEY: "ci-only-postgresql-test-secret"
+        run: |
+          export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/stanstock"
+          uv run pytest -q \
+            tests/test_portfolio_planner.py::test_concurrent_confirmations_for_different_portfolios_do_not_deadlock \
+            tests/test_portfolio_planner.py::test_concurrent_deposit_and_confirmation_do_not_deadlock \
+            tests/test_portfolio_planner.py::test_deposit_does_not_block_on_snapshot_foreign_key_locks \
+            tests/test_portfolio_planner.py::test_confirmation_does_not_block_on_snapshot_foreign_key_locks \
+            --ds=stanstock.settings.dev
+
   container:
     name: container
     needs: quality

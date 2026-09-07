@@ -70,6 +70,19 @@ This command validates settings; it does not prove the database is reachable.
   boundaries, neutral band filtering, Under $10 promotion/sample exclusion,
   ETF sample exclusion, supported-SPY holding selection, and preservation of
   existing holdings;
+- immutable/idempotent external deposits, side-effect-free monthly previews,
+  70/30 total-NAV arithmetic, fractional and whole-share rounding, residual
+  cash, at-most-one explicitly short-horizon satellite, Under-$10 allocation
+  refusal, stale-plan rejection, exact price/research provenance in plan
+  hashes, compare-and-swap cash writes, portfolio-first lock order, duplicate
+  confirmation/removal handling, and stale web/admin save protection;
+- contribution performance reconciliation against immutable deposits,
+  purchases, and post-manual-change baselines; flat-price zero return,
+  all-time versus post-boundary contributions, stale/future/mixed-session or
+  incompatible-basis withholding, persistent split warnings, unavailable
+  baseline recovery, SQLite/PostgreSQL ledger immutability triggers, and
+  multi-connection PostgreSQL lock ordering across deposits, confirmations,
+  and snapshot foreign-key checks;
 - backup checksums, extraction safety, transactional PostgreSQL restore, and
   database/assets bundling;
 - architecture boundaries around raw provider modules.
@@ -82,7 +95,9 @@ responsive overflow, and critical flows once a browser runtime is available.
 
 ## Docker checks
 
-CI builds the production image after the Python quality job. Local Docker
-storage failures are environment failures, not successful image validation;
-record them and rerun on a host with sufficient Docker Desktop capacity rather
-than deleting unrelated shared volumes.
+CI runs the general suite on SQLite, exercises concurrent planner confirmation
+against PostgreSQL 17 with independent connections, and builds the production
+image after the Python quality job. Local Docker storage failures are
+environment failures, not successful image validation; record them and rerun
+on a host with sufficient Docker Desktop capacity rather than deleting
+unrelated shared volumes.

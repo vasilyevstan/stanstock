@@ -58,20 +58,38 @@ See `docs/operations.md` for the destructive termination procedure.
 
 ## Tracked portfolios
 
-- Tracked portfolios are current-position trackers, not brokerage ledgers.
-  They do not record tax lots, realized gains, commissions, deposits, or
-  withdrawals as transactions.
-- Historical total value includes any manual holding or cash changes and must
-  not be interpreted as a flow-adjusted return series.
+- Tracked portfolios are research-accounting records, not brokerage ledgers.
+  They record immutable external deposits and confirmed planner purchases,
+  but not withdrawals, tax lots, realized gains, commissions, bid/ask
+  spreads, taxes, or actual broker fills.
+- A confirmed planner purchase changes only the local portfolio ledger. It
+  sends no order and makes no provider request. Its price is the latest
+  eligible persisted close, not a claim that the owner could execute at that
+  price.
+- The monthly planner is USD-only, targets 70% of total NAV in SPY and at most
+  30% in one explicitly short-horizon qualified stock, never sells, and
+  carries unused cash. These fixed v1 targets are policy assumptions, not an
+  optimized allocation model.
+- Contribution-adjusted return is a simple return since the active immutable
+  boundary. It is not time-weighted or money-weighted, and dividends remain
+  excluded. All-time deposits are shown separately from the deposits applied
+  after the current boundary.
+- Manual quantity changes and removals create a visible immutable performance
+  restart instead of being counted as investment return. If the post-change
+  portfolio cannot be valued, the edit succeeds but percentage performance is
+  withheld from an explicit unavailable-boundary record until a later valid
+  manual baseline supersedes it.
 - Holdings are restricted to the portfolio base currency even though the
   simulation engine has point-in-time FX support. This is a deliberate first
   release boundary, not an implicit conversion.
-- A snapshot is withheld if a holding has no current price or is more than
-  seven days behind the newest holding price.
+- Contribution performance and planner execution require compatible Twelve
+  Data price evidence from one session. Stale, future-dated, mixed-session,
+  non-split-adjusted, dividend-ambiguous, or missing evidence is withheld.
 - Prices may be split-adjusted while user-entered quantities are not. A
-  split-sized move with unchanged quantity is flagged, but the owner must
-  restate quantity and average cost. Dividends are excluded unless the source
-  explicitly states otherwise.
+  split-sized move with unchanged quantity remains flagged across later
+  snapshots; the owner must explicitly restate quantity and average cost.
+  That quantity change creates a new performance baseline rather than
+  retroactively rewriting earlier values.
 - StanStock sample portfolios use immutable analysis reference closes so their
   construction can be reproduced. They are research-reference baskets, not
   claims of an executable same-close fill. Their composition is frozen, they

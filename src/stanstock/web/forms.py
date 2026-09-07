@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from stanstock.data.models import (
     UniverseSnapshot,
 )
 from stanstock.portfolio.models import Portfolio
+from stanstock.portfolio.planner import DEFAULT_MONTHLY_CONTRIBUTION
 from stanstock.portfolio.service import (
     SAMPLE_PORTFOLIO_DEFAULT_CAPITAL,
     SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
@@ -98,12 +100,35 @@ class OpportunityFilterForm(forms.Form):
 class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]
     class Meta:
         model = Portfolio
-        fields = ("name", "description", "base_currency", "cash_balance")
+        fields = (
+            "name",
+            "description",
+            "base_currency",
+            "cash_balance",
+            "monthly_contribution",
+            "allow_fractional_shares",
+        )
         widgets = {
             "description": forms.Textarea(attrs={"rows": 3}),
         }
+        labels = {
+            "cash_balance": "Starting cash",
+            "monthly_contribution": "Monthly contribution",
+            "allow_fractional_shares": "Allow fractional shares",
+        }
         help_texts = {
-            "cash_balance": "Uninvested cash held in the portfolio base currency.",
+            "cash_balance": (
+                "Initial uninvested cash. After creation, add cash through immutable "
+                "deposit events."
+            ),
+            "monthly_contribution": (
+                "Default amount for the contribution form; the planner also carries "
+                "unused cash forward."
+            ),
+            "allow_fractional_shares": (
+                "Enabled by default. Disable to preview and record whole-share "
+                "purchases with residual cash carried forward."
+            ),
             "base_currency": (
                 "Tracked holdings must currently trade in this currency; portfolio FX "
                 "conversion is intentionally not implicit."
@@ -119,11 +144,18 @@ class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]
         super().__init__(*args, **kwargs)
         self.owner = owner
         self.instance.owner_id = owner.pk
+        if self.instance._state.adding:
+            self.fields["monthly_contribution"].initial = DEFAULT_MONTHLY_CONTRIBUTION
+        else:
+            cash_field = self.fields["cash_balance"]
+            cash_field.disabled = True
+            cash_field.label = "Current cash"
+            cash_field.help_text = "Managed by immutable deposits and confirmed planner purchases."
 
     def clean_name(self) -> str:
         name = str(self.cleaned_data["name"]).strip()
         duplicate = Portfolio.objects.filter(owner_id=self.owner.pk, name__iexact=name)
-        if self.instance.pk:
+        if not self.instance._state.adding:
             duplicate = duplicate.exclude(pk=self.instance.pk)
         if duplicate.exists():
             raise forms.ValidationError("You already have a portfolio with this name.")
@@ -131,10 +163,30 @@ class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]
 
     def clean_base_currency(self) -> str:
         currency = str(self.cleaned_data["base_currency"])
-        if self.instance.pk and self.instance.holdings.exclude(listing__currency=currency).exists():
+        if (
+            not self.instance._state.adding
+            and self.instance.holdings.exclude(listing__currency=currency).exists()
+        ):
             raise forms.ValidationError(
                 "Remove holdings in other currencies before changing the base currency."
             )
+        if not self.instance._state.adding:
+            original_currency = (
+                Portfolio.objects.filter(pk=self.instance.pk)
+                .values_list(
+                    "base_currency",
+                    flat=True,
+                )
+                .first()
+            )
+            if (
+                original_currency is not None
+                and currency != original_currency
+                and self.instance.deposits.exists()
+            ):
+                raise forms.ValidationError(
+                    "The base currency cannot change after deposit tracking begins."
+                )
         return currency
 
 
@@ -190,6 +242,43 @@ class PortfolioHoldingForm(forms.Form):
             .select_related("security__company")
             .order_by("ticker")
         )
+
+
+class PortfolioDepositForm(forms.Form):
+    amount = forms.DecimalField(
+        max_digits=24,
+        decimal_places=6,
+        min_value=Decimal("0.000001"),
+        label="External deposit",
+    )
+    note = forms.CharField(
+        required=False,
+        max_length=240,
+        widget=forms.TextInput(attrs={"placeholder": "Optional note"}),
+    )
+    idempotency_key = forms.UUIDField(widget=forms.HiddenInput())
+
+    def __init__(self, *args: Any, portfolio: Portfolio, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.fields["amount"].initial = portfolio.monthly_contribution
+            self.fields["idempotency_key"].initial = uuid.uuid4()
+
+
+class PortfolioPlanConfirmationForm(forms.Form):
+    plan_hash = forms.CharField(max_length=64, widget=forms.HiddenInput())
+    idempotency_key = forms.UUIDField(widget=forms.HiddenInput())
+
+    def __init__(
+        self,
+        *args: Any,
+        plan_hash: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.fields["plan_hash"].initial = plan_hash
+            self.fields["idempotency_key"].initial = uuid.uuid4()
 
 
 class SamplePortfolioForm(forms.Form):

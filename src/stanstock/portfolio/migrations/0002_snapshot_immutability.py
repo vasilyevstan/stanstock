@@ -40,7 +40,7 @@ def protect_snapshots(apps, schema_editor):
             CREATE OR REPLACE FUNCTION {POSTGRES_FUNCTION}()
             RETURNS trigger AS $$
             BEGIN
-                RAISE EXCEPTION '% records are immutable', TG_TABLE_NAME
+                RAISE EXCEPTION '%% records are immutable', TG_TABLE_NAME
                     USING ERRCODE = '55000';
             END;
             $$ LANGUAGE plpgsql

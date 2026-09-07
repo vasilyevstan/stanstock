@@ -248,6 +248,26 @@ costs entered by the owner; cash is excluded from that return, dividends are
 excluded unless the source explicitly includes them, and the value history
 includes holding/cash changes rather than claiming a time-weighted return.
 
+Manual portfolios also support immutable external deposits and recorded
+monthly allocations. The editable monthly preference defaults to $600.
+Previews are side-effect free and target 70% of total NAV in SPY plus at most
+30% in one currently qualified short-horizon stock satellite. Fractional
+shares are enabled by default; whole-share mode rounds down and carries the
+remaining cash. The planner never sells, never allocates new money to the
+Under-$10 speculative watchlist, and never sends a brokerage order or makes a
+provider request. Confirmation recomputes a checksummed plan from locked
+portfolio, price, and analysis state before appending immutable purchase
+records tied to exact market sessions and source assets.
+
+Contribution-adjusted profit/loss subtracts immutable deposits from current
+NAV relative to an eligible valuation boundary. It is a simple since-boundary
+return, not a time-weighted or money-weighted result. Fresh, coherent,
+split-adjusted, dividend-excluding price evidence is required. A supported
+manual quantity change or removal appends an immutable post-change baseline
+so performance restarts without treating the change as profit; if that
+valuation cannot be established, the edit still succeeds and performance is
+explicitly withheld until a later valid baseline supersedes it.
+
 The same page can build an idempotent, frozen StanStock sample portfolio from
 the latest provider-backed opportunity run. It equal-weights up to five
 eligible USD listings by default, preserves the source run and reference
@@ -285,7 +305,9 @@ uv run python manage.py snapshot_portfolios
   identity, and provenance without a stock recommendation.
 - `/predictions` - the append-only prediction ledger.
 - `/performance` - matured outcomes with minimum-sample safeguards.
-- `/portfolios` - owner-scoped holdings and immutable valuation history.
+- `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
+  monthly allocation previews, contribution-aware performance, and valuation
+  history.
 - `/simulations` - backtest and portfolio runs through one accounting model.
 - `/status` - database, asset-store, provider, job, and prediction status.
 - `/methodology` - point-in-time, scoring, scenario, and limitation summary.

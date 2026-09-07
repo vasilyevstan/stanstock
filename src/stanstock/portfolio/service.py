@@ -16,6 +16,7 @@ from stanstock.data.models import DataAsset, LatestMarketData, Listing, Security
 from stanstock.portfolio.models import (
     Portfolio,
     PortfolioHolding,
+    PortfolioPerformanceBaseline,
     PortfolioSnapshot,
     PortfolioSnapshotHolding,
 )
@@ -145,24 +146,71 @@ def upsert_holding(
         raise PortfolioValuationError("Holding quantity must be positive.")
     if average_cost <= 0:
         raise PortfolioValuationError("Average cost must be positive.")
-    validate_holding_listing(portfolio=portfolio, listing=listing)
-    holding, _created = PortfolioHolding.objects.update_or_create(
-        portfolio=portfolio,
-        listing=listing,
-        defaults={
-            "quantity": quantity,
-            "average_cost": average_cost,
-            "acquired_on": acquired_on,
-            "notes": notes.strip(),
-        },
-    )
+    with transaction.atomic():
+        locked_portfolio = Portfolio.objects.select_for_update().get(pk=portfolio.pk)
+        validate_holding_listing(portfolio=locked_portfolio, listing=listing)
+        holding = (
+            PortfolioHolding.objects.select_for_update(of=("self",))
+            .filter(
+                portfolio=locked_portfolio,
+                listing=listing,
+            )
+            .order_by("pk")
+            .first()
+        )
+        quantity_changed = holding is None or holding.quantity != quantity
+        if holding is None:
+            holding = PortfolioHolding.objects.create(
+                portfolio=locked_portfolio,
+                listing=listing,
+                quantity=quantity,
+                average_cost=average_cost,
+                acquired_on=acquired_on,
+                notes=notes.strip(),
+            )
+        else:
+            holding.quantity = quantity
+            holding.average_cost = average_cost
+            holding.acquired_on = acquired_on
+            holding.notes = notes.strip()
+            holding.save(
+                update_fields=[
+                    "quantity",
+                    "average_cost",
+                    "acquired_on",
+                    "notes",
+                    "updated_at",
+                ]
+            )
+        if quantity_changed and locked_portfolio.deposits.exists():
+            _record_manual_performance_baseline(
+                locked_portfolio,
+                note=f"Manual quantity change for {listing.ticker}.",
+            )
     return holding
 
 
 def delete_holding(holding: PortfolioHolding) -> None:
-    if holding.portfolio.is_model_portfolio:
-        raise PortfolioValuationError("Model portfolio holdings are frozen.")
-    holding.delete()
+    with transaction.atomic():
+        portfolio = Portfolio.objects.select_for_update().get(pk=holding.portfolio_id)
+        if portfolio.is_model_portfolio:
+            raise PortfolioValuationError("Model portfolio holdings are frozen.")
+        locked_holding = (
+            PortfolioHolding.objects.select_for_update(of=("self",))
+            .filter(pk=holding.pk)
+            .order_by("pk")
+            .first()
+        )
+        if locked_holding is None:
+            return
+        ticker = locked_holding.listing.ticker
+        contribution_tracking_active = portfolio.deposits.exists()
+        locked_holding.delete()
+        if contribution_tracking_active:
+            _record_manual_performance_baseline(
+                portfolio,
+                note=f"Manual removal of {ticker}.",
+            )
 
 
 def build_sample_portfolio(
@@ -630,6 +678,26 @@ def portfolio_snapshot_series(portfolio: Portfolio) -> list[PortfolioSnapshot]:
     return list(portfolio.snapshots.order_by("recorded_at", "id"))
 
 
+def _record_manual_performance_baseline(
+    portfolio: Portfolio,
+    *,
+    note: str,
+) -> PortfolioPerformanceBaseline:
+    snapshot = None
+    boundary_issue = ""
+    try:
+        snapshot, _created = record_portfolio_snapshot(portfolio)
+    except PortfolioValuationError as exc:
+        boundary_issue = str(exc)[:240]
+    return PortfolioPerformanceBaseline.objects.create(
+        portfolio=portfolio,
+        snapshot=snapshot,
+        reason=PortfolioPerformanceBaseline.Reason.MANUAL_HOLDING_CHANGE,
+        boundary_issue=boundary_issue,
+        note=note,
+    )
+
+
 def snapshot_all_portfolios(
     *,
     expected_as_of_date: date | None = None,
@@ -693,7 +761,11 @@ def _corporate_action_suspected(position: ValuedHolding) -> bool:
         .order_by("-snapshot__as_of_date", "-snapshot__recorded_at", "-snapshot_id")
         .first()
     )
-    if previous is None or previous.quantity != position.holding.quantity:
+    if previous is None:
+        return False
+    if previous.corporate_action_suspected and previous.quantity == position.holding.quantity:
+        return True
+    if previous.quantity != position.holding.quantity:
         return False
     ratio = market_data.close / previous.price
     return ratio < SPLIT_WARNING_LOW_RATIO or ratio > SPLIT_WARNING_HIGH_RATIO

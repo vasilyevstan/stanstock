@@ -303,6 +303,56 @@ is immutable and retains its source asset and market-session date. A
 split-sized price move with unchanged quantity is flagged for manual review;
 StanStock does not silently rewrite the owner's quantity or average cost.
 
+External cash contributions are separate immutable events. Initial cash on a
+new manual portfolio is recorded as a deposit rather than unexplained mutable
+cash, and later cash is added only through the deposit workflow. Each deposit
+captures an eligible pre-flow snapshot when fresh, coherent, provider-backed
+price evidence exists; otherwise it preserves an explicit boundary issue.
+Confirmed planner purchases are separate immutable rows, not brokerage fills.
+They retain the exact listing, quantity, persisted close, market session,
+price asset, policy version, and plan hash.
+
+The versioned `monthly-allocation-v1` preview uses total NAV including cash:
+
+```text
+SPY budget = min(cash, max(0, 0.70 * NAV - SPY value))
+satellite budget =
+    min(remaining cash, max(0, 0.30 * NAV - other invested value))
+```
+
+It never sells. Fractional mode rounds quantities down to eight decimal
+places; whole-share mode rounds down to whole units. Any residual remains
+cash. At most one stock satellite is selected, and only from provider-backed
+analysis on the same session as SPY whose opportunity evidence is explicitly
+short-horizon. Under-$10 names remain ineligible for new allocation. The plan
+hash binds portfolio settings and holdings, current price assets and sessions,
+and the exact qualifying analysis/run/configuration/source-asset evidence.
+Confirmation locks and recomputes that complete state; a stale preview is
+rejected.
+
+Contribution-adjusted profit/loss is:
+
+```text
+current NAV - eligible tracking-boundary NAV - later external deposits
+```
+
+The percentage divides by the boundary NAV plus those later deposits, so it is
+labeled a simple since-boundary return rather than time-weighted or
+money-weighted performance. Cash and quantities must reconcile exactly to the
+immutable deposit and planner-purchase ledgers. Current and boundary
+valuations require one fresh, non-future market session, Twelve Data
+split-adjusted price-return metadata, dividend exclusion, and no unresolved
+corporate-action warning.
+
+A supported manual quantity change or removal is neither silently treated as
+return nor allowed to disable the metric forever. It appends an immutable
+post-change performance baseline and restarts measurement from that value.
+If another holding prevents a complete valuation, an immutable
+`boundary unavailable` baseline is recorded, the holding edit still commits,
+and performance remains withheld. A later valid manual change can append a
+newer eligible baseline. Ordinary scheduled snapshots do not themselves reset
+the performance boundary.
+
 A StanStock sample portfolio is a distinct frozen research artifact. It
 equal-weights eligible opportunities from one provider-backed analysis run,
 stores that run and the construction-policy version, and records a baseline at

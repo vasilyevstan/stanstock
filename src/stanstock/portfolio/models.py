@@ -42,6 +42,12 @@ class Portfolio(models.Model):
         null=True,
         blank=True,
     )
+    monthly_contribution = models.DecimalField(
+        max_digits=24,
+        decimal_places=6,
+        default=600,
+    )
+    allow_fractional_shares = models.BooleanField(default=True)
     archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -62,6 +68,10 @@ class Portfolio(models.Model):
                     models.Q(starting_capital__isnull=True) | models.Q(starting_capital__gt=0)
                 ),
                 name="portfolio_starting_capital_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(monthly_contribution__gt=0),
+                name="portfolio_monthly_contribution_positive",
             ),
             models.UniqueConstraint(
                 fields=["owner", "source_analysis_run"],
@@ -91,6 +101,8 @@ class Portfolio(models.Model):
                     "construction_policy",
                     "construction_metadata",
                     "starting_capital",
+                    "monthly_contribution",
+                    "allow_fractional_shares",
                 )
                 .first()
             )
@@ -120,6 +132,16 @@ class Portfolio(models.Model):
                         "starting_capital",
                         original["starting_capital"],
                         self.starting_capital,
+                    ),
+                    (
+                        "monthly_contribution",
+                        original["monthly_contribution"],
+                        self.monthly_contribution,
+                    ),
+                    (
+                        "allow_fractional_shares",
+                        original["allow_fractional_shares"],
+                        self.allow_fractional_shares,
                     ),
                 )
                 changed = [
@@ -205,6 +227,183 @@ class PortfolioHolding(models.Model):
         if self.portfolio.source_analysis_run_id is not None:
             raise ValidationError("Model portfolio holdings are frozen.")
         return super().delete(*args, **kwargs)
+
+
+class PortfolioDeposit(ImmutableEvidenceModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.PROTECT,
+        related_name="deposits",
+    )
+    amount = models.DecimalField(max_digits=24, decimal_places=6)
+    currency = models.CharField(max_length=3, choices=Portfolio.Currency.choices)
+    occurred_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    idempotency_key = models.UUIDField()
+    boundary_snapshot = models.ForeignKey(
+        "PortfolioSnapshot",
+        on_delete=models.PROTECT,
+        related_name="deposit_boundaries",
+        null=True,
+        blank=True,
+    )
+    boundary_issue = models.CharField(max_length=240, blank=True)
+    cash_balance_after = models.DecimalField(max_digits=24, decimal_places=6)
+    note = models.CharField(max_length=240, blank=True)
+
+    class Meta:
+        ordering = ["occurred_at", "recorded_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["portfolio", "idempotency_key"],
+                name="unique_portfolio_deposit_request",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="portfolio_deposit_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cash_balance_after__gte=0),
+                name="portfolio_deposit_balance_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(boundary_snapshot__isnull=False, boundary_issue="")
+                    | (models.Q(boundary_snapshot__isnull=True) & ~models.Q(boundary_issue=""))
+                ),
+                name="portfolio_deposit_boundary_state",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.portfolio_id}:{self.occurred_at}:{self.amount}"
+
+
+class PortfolioPlanExecution(ImmutableEvidenceModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.PROTECT,
+        related_name="plan_executions",
+    )
+    idempotency_key = models.UUIDField()
+    plan_hash = models.CharField(max_length=64)
+    policy_version = models.CharField(max_length=80)
+    executed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    starting_nav = models.DecimalField(max_digits=24, decimal_places=6)
+    starting_cash = models.DecimalField(max_digits=24, decimal_places=6)
+    ending_cash = models.DecimalField(max_digits=24, decimal_places=6)
+    fractional_shares = models.BooleanField()
+    metadata = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["-executed_at", "-recorded_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["portfolio", "idempotency_key"],
+                name="unique_portfolio_plan_execution_request",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(starting_nav__gte=0),
+                name="portfolio_execution_nav_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(starting_cash__gte=0),
+                name="portfolio_execution_start_cash_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ending_cash__gte=0),
+                name="portfolio_execution_end_cash_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.portfolio_id}:{self.executed_at}:{self.plan_hash[:12]}"
+
+
+class PortfolioPurchase(ImmutableEvidenceModel):
+    class Role(models.TextChoices):
+        CORE = "core", "Core ETF"
+        SATELLITE = "satellite", "Stock satellite"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.ForeignKey(
+        PortfolioPlanExecution,
+        on_delete=models.PROTECT,
+        related_name="purchases",
+    )
+    listing = models.ForeignKey(Listing, on_delete=models.PROTECT)
+    source_asset = models.ForeignKey(DataAsset, on_delete=models.PROTECT)
+    source_session_date = models.DateField()
+    role = models.CharField(max_length=16, choices=Role.choices)
+    quantity = models.DecimalField(max_digits=24, decimal_places=8)
+    price = models.DecimalField(max_digits=20, decimal_places=6)
+    amount = models.DecimalField(max_digits=24, decimal_places=6)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["role", "listing__ticker"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["execution", "listing"],
+                name="unique_execution_purchase_listing",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0),
+                name="portfolio_purchase_quantity_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(price__gt=0),
+                name="portfolio_purchase_price_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="portfolio_purchase_amount_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.execution_id}:{self.listing_id}:{self.quantity}"
+
+
+class PortfolioPerformanceBaseline(ImmutableEvidenceModel):
+    class Reason(models.TextChoices):
+        MANUAL_HOLDING_CHANGE = "manual_holding_change", "Manual holding change"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.PROTECT,
+        related_name="performance_baselines",
+    )
+    snapshot = models.ForeignKey(
+        "PortfolioSnapshot",
+        on_delete=models.PROTECT,
+        related_name="performance_baselines",
+        null=True,
+        blank=True,
+    )
+    reason = models.CharField(max_length=40, choices=Reason)
+    boundary_issue = models.CharField(max_length=240, blank=True)
+    note = models.CharField(max_length=240, blank=True)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-recorded_at", "-id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(snapshot__isnull=False, boundary_issue="")
+                    | (models.Q(snapshot__isnull=True) & ~models.Q(boundary_issue=""))
+                ),
+                name="portfolio_performance_baseline_state",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.portfolio_id}:{self.reason}:{self.recorded_at}"
 
 
 class PortfolioSnapshot(ImmutableEvidenceModel):
