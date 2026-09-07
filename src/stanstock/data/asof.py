@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date, datetime
 from uuid import UUID
 
 import polars as pl
-from django.db.models import Q, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import (
@@ -80,27 +81,61 @@ class AsOfData:
         concepts: list[str] | None = None,
         available_through: datetime | None = None,
     ) -> QuerySet[FundamentalFact]:
+        return self._fundamental_facts(
+            company_filter={"company_id": company_id},
+            concepts=concepts,
+            available_through=available_through,
+        )
+
+    def fundamental_facts_for_companies(
+        self,
+        *,
+        company_ids: Iterable[UUID],
+        concepts: list[str] | None = None,
+        available_through: datetime | None = None,
+    ) -> QuerySet[FundamentalFact]:
+        return self._fundamental_facts(
+            company_filter={"company_id__in": tuple(company_ids)},
+            concepts=concepts,
+            available_through=available_through,
+        )
+
+    def _fundamental_facts(
+        self,
+        *,
+        company_filter: dict[str, object],
+        concepts: list[str] | None,
+        available_through: datetime | None,
+    ) -> QuerySet[FundamentalFact]:
         availability_cutoff = available_through or self.decision_time
         if availability_cutoff > self.decision_time:
             raise ValueError(
                 "Fundamental availability cutoff cannot be after the as-of decision time"
             )
-        queryset = FundamentalFact.objects.filter(
-            company_id=company_id,
-            available_at__lte=availability_cutoff,
+        filing_evidence = FundamentalFactEvidence.objects.filter(
+            fact_id=OuterRef("pk"),
+            role=FundamentalFactEvidence.Role.FILING,
             source_asset__available_at__lte=self.decision_time,
             source_asset__retrieved_at__lte=self.decision_time,
-        ).filter(
-            ~Q(provider="sec")
-            | Q(
-                evidence_links__role=FundamentalFactEvidence.Role.FILING,
-                evidence_links__source_asset__available_at__lte=self.decision_time,
-                evidence_links__source_asset__retrieved_at__lte=self.decision_time,
+        )
+        queryset = (
+            FundamentalFact.objects.filter(
+                **company_filter,
+                available_at__lte=availability_cutoff,
+                source_asset__available_at__lte=self.decision_time,
+                source_asset__retrieved_at__lte=self.decision_time,
             )
+            .annotate(filing_evidence_visible=Exists(filing_evidence))
+            .filter(~Q(provider="sec") | Q(filing_evidence_visible=True))
         )
         if concepts:
             queryset = queryset.filter(concept__in=concepts)
-        return queryset.distinct().order_by("concept", "period_end", "available_at")
+        return queryset.order_by(
+            "company_id",
+            "concept",
+            "period_end",
+            "available_at",
+        )
 
     def fx_rates(
         self,
@@ -140,16 +175,53 @@ class AsOfData:
         *,
         company_id: UUID,
         scheme: str | None = None,
+        available_through: datetime | None = None,
     ) -> QuerySet[CompanyClassificationObservation]:
+        return self._company_classifications(
+            company_filter={"company_id": company_id},
+            scheme=scheme,
+            available_through=available_through,
+        )
+
+    def company_classifications_for_companies(
+        self,
+        *,
+        company_ids: Iterable[UUID],
+        scheme: str | None = None,
+        available_through: datetime | None = None,
+    ) -> QuerySet[CompanyClassificationObservation]:
+        return self._company_classifications(
+            company_filter={"company_id__in": tuple(company_ids)},
+            scheme=scheme,
+            available_through=available_through,
+        )
+
+    def _company_classifications(
+        self,
+        *,
+        company_filter: dict[str, object],
+        scheme: str | None,
+        available_through: datetime | None,
+    ) -> QuerySet[CompanyClassificationObservation]:
+        availability_cutoff = available_through or self.decision_time
+        if availability_cutoff > self.decision_time:
+            raise ValueError(
+                "Classification availability cutoff cannot be after the as-of decision time"
+            )
         queryset = CompanyClassificationObservation.objects.filter(
-            company_id=company_id,
-            available_at__lte=self.decision_time,
+            **company_filter,
+            available_at__lte=availability_cutoff,
             source_asset__available_at__lte=self.decision_time,
             source_asset__retrieved_at__lte=self.decision_time,
         )
         if scheme is not None:
             queryset = queryset.filter(scheme=scheme)
-        return queryset.select_related("source_asset").order_by("scheme", "available_at")
+        return queryset.select_related("source_asset").order_by(
+            "company_id",
+            "scheme",
+            "available_at",
+            "pk",
+        )
 
 
 def _clip_to_through_date(

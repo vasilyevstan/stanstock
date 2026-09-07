@@ -93,10 +93,10 @@ ticker/exchange/CIK mapping, submissions plus referenced history files, and
 Companyfacts.
 
 Long-term forecasts require business fundamentals. The first supported scope
-will be the current US universe using SEC submissions and Companyfacts.
+is the current US universe using SEC submissions and Companyfacts.
 
 The ingestion layer retains accession, reporting period, unit, filing
-acceptance time, amendment, and first-seen time. It will derive trailing
+acceptance time, amendment, and first-seen time. It derives trailing
 twelve-month or annual values only from filings available at the decision
 time. Required canonical inputs are:
 
@@ -128,7 +128,11 @@ The released implementation also:
   reconciliation;
 - keeps SPY and every ETF outside corporate fundamentals.
 
-## Stage 3: deterministic 6-12 month fundamental forecast
+## Stage 3: deferred 6-12 month fundamental variant
+
+**Not enabled.** The released 6m/12m method remains intentionally price-only.
+The following identity is retained as a possible separately reviewed future
+method, not as current application behavior.
 
 The medium-horizon base case will use the identity:
 
@@ -178,51 +182,81 @@ fundamentals or turn an unsupported forecast into a BUY.
 
 ## Stage 4: deterministic 3- and 5-year forecast
 
-The long-horizon forecast will estimate business growth first and valuation
-second.
+**Released.** The long-horizon engine estimates business growth first and
+valuation second without changing the short recommendation policy.
 
 Sustainable growth is bounded by reinvestment economics:
 
 ```text
-reinvestment_rate = retained_operating_cash / supported_operating_base
+NOPAT = operating_income * (1 - bounded_cash_tax_rate)
+invested_capital = compatible_debt + equity - cash
+reinvestment_rate =
+    (ending_invested_capital - beginning_invested_capital) / NOPAT
 sustainable_growth = ROIC * reinvestment_rate
 ```
 
 The base growth path blends the company's historical per-share growth,
-sustainable growth, and the sector median. It then fades each year toward a
-conservative terminal growth rate:
+sustainable growth, and the point-in-time same-family SIC-peer median. It then
+fades each year toward a conservative terminal growth rate:
 
 ```text
-growth_year_t =
-    fade_t * company_growth
-    + (1 - fade_t) * terminal_growth
+g0 = cap(
+    0.45 * historical_per_share_growth
+  + 0.30 * sustainable_growth
+  + 0.25 * peer_per_share_growth
+)
 
-fundamental_year_t =
-    fundamental_year_(t-1) * (1 + growth_year_t)
+growth_year_t = fade_t * g0 + (1 - fade_t) * terminal_growth
 
-terminal_price =
-    fundamental_year_T * normalized_terminal_multiple
+bounded_current_multiple = cap(actual_current_multiple)
+
+terminal_multiple = capped_geometric_interpolation(
+    bounded_current_multiple,
+    adjusted_peer_multiple,
+    reversion
+)
+
+cumulative_price_return =
+    product(1 + growth_year_t)
+    * terminal_multiple / actual_current_multiple
+    - 1
 
 annualized_return =
-    (terminal_price / current_price) ** (1 / T) - 1
+    (1 + cumulative_price_return) ** (1 / T) - 1
 ```
 
-When free cash flow is the reliable input, the same calculation uses a
-normalized free-cash-flow yield instead of inventing EPS. Net debt and dilution
-are carried explicitly. Negative or structurally inconsistent fundamentals
-produce `insufficient evidence`, not a substituted metric.
+Positive compatible FCF/share takes priority. EPS/share is considered only
+when FCF evidence is genuinely unavailable; negative, weak, or
+share-inconsistent FCF blocks silent switching. Both branches require at
+least three contiguous annual periods, a reported diluted-EPS consistency
+check for every selected period, and TTM diluted shares within 15% of the
+latest overlapping annual basis. Beginning and ending invested capital must
+also use identical canonical and source concepts for cash, equity, and debt.
+A raw current multiple below its configured family floor is withheld rather
+than mechanically raised before reversion. Unsupported financial SICs,
+missing classifications, stale metrics, missing sustainable-growth terms,
+incompatible price evidence, and peer sets below fixed SIC-4/SIC-3/SIC-2
+floors produce `Insufficient evidence`.
 
-The scenario assumptions will be mechanical:
+The scenario assumptions are mechanical:
 
-- **Bear:** lower growth, margin compression, no balance-sheet improvement,
-  and a lower normalized multiple.
-- **Base:** shrunk sustainable growth, normalized margins, and partial
-  valuation convergence.
-- **Bull:** capped growth and margin improvement supported by company history,
-  plus an upper but bounded normalized multiple.
+- **Bear:** fixed negative growth delta, lower reinvestment multiplier, and
+  lower peer-multiple multiplier.
+- **Base:** no growth delta and neutral reinvestment/peer-multiple multipliers.
+- **Bull:** fixed positive growth delta and bounded higher multipliers.
 
-Long-term probability will remain unavailable until enough comparable
-walk-forward or live outcomes exist.
+Each advisory prediction stores complete target fact values, periods,
+accessions, availability timestamps, source revisions, Companyfacts assets,
+and filing-evidence assets, plus exact peer fact references, classification
+observations, price assets, formula paths, and configuration hashes. Target
+facts are inlined completely; peer inputs use immutable fact references plus
+self-contained derived growth and multiple values to avoid duplicating the
+full peer panel in every row.
+Stored scenarios are cumulative split-adjusted price returns; annualized
+values are display-only, dividends are excluded, and probability remains
+unavailable until qualifying prospective outcomes exist. Each calculation
+also records the days between its latest verified SEC share basis and target
+as residual, unverified post-period split exposure.
 
 ## Stage 5: walk-forward validation and uncertainty
 
@@ -247,18 +281,15 @@ sufficient, a conservative volatility-based floor remains in force.
 
 ## Delivery order
 
-1. Build on the released forecast-identity and advisory-outcome schema, then
-   implement the conditional price-only 126- and 252-session scenarios and
-   expose them as research-grade medium forecasts.
-2. Complete point-in-time SEC ingestion and canonical US fundamental
-   calculations.
-3. Add the versioned medium and long formula configurations, calculation
-   records, and deterministic explanation breakdown.
-4. Add 3- and 5-year scenario views and immutable prediction records.
-5. Add walk-forward evaluation, interval calibration, and model-portfolio
-   attribution by formula version.
-6. Enable serving only after leakage, missing-data, accounting, and
-   reproducibility tests pass.
+1. **Released:** forecast identity, advisory outcomes, and compatibility
+   migration.
+2. **Released:** deterministic price-only 6m/12m forecasts.
+3. **Released:** point-in-time SEC ingestion and canonical US fundamentals.
+4. **Released:** deterministic SEC-backed 3y/5y scenario views and immutable
+   advisory predictions.
+5. **Next:** accumulate prospective outcomes and complete integrated
+   forecast-error, interval, direction, benchmark, and portfolio reporting by
+   exact method/configuration version.
 
 European long-term forecasts remain out of scope until an equally defensible
 point-in-time filing pipeline exists.

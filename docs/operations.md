@@ -200,6 +200,11 @@ The automated market child requires a clean Git worktree and records the exact
 40-character HEAD revision. A retry recovers any successful child before
 provider configuration, credentials, or quota are used again. A failed enabled
 SEC child blocks market analysis so stale or absent facts cannot look current.
+When Twelve Data and SEC are both enabled under the released US scoring
+version, the market child issues separate 3y/5y advisory predictions after all
+eligible stock computations are built against one shared point-in-time peer
+context. Missing long inputs create explicit insufficient-evidence predictions;
+they do not fail the market refresh or alter BUY/HOLD/AVOID.
 Evaluation and portfolio
 snapshots are attempted independently after market success, so one downstream
 failure does not hide the other's result. Holidays and already completed

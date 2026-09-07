@@ -69,6 +69,28 @@ the taxonomy reports a compatible total. Annual history remains separate from
 TTM. Current SEC SIC metadata is an immutable retrieval-time observation and
 is not backdated across earlier filings.
 
+The deterministic 3y/5y engine reads SEC facts and SIC observations only
+through this as-of gate. It filters economic period ends at the forecast
+target, requires both the Companyfacts and exact filing-evidence assets to be
+visible, and records each target input fact with value, unit, complete period
+identity, accession, acceptance/availability metadata, source revision,
+Companyfacts asset, and filing asset. Peer calculations retain the
+self-contained current price, classification, historical growth, and
+multiple, while their inputs are compact immutable references carrying fact
+ID, concept, accession, availability time, revision, and both asset IDs. The
+referenced fact and evidence rows are immutable and every asset remains in
+the prediction's exact source closure. A classification or revised fact
+retrieved later cannot change an earlier forecast. The current and peer price
+assets must likewise be visible at the decision time and explicitly prove
+split-adjusted, dividend-excluded price-return semantics.
+
+Split-adjusted price evidence does not prove that no split occurred after the
+latest SEC metric period. Long-v1 therefore reconciles every selected annual
+share period to reported diluted EPS, requires TTM diluted shares within 15%
+of the latest overlapping annual basis, and stores the remaining
+metric-period-to-target interval as `unverified_post_period_split` exposure.
+It does not infer or claim a corporate action from adjusted prices.
+
 When a European filing source does not provide the authority's submission
 timestamp, StanStock uses the later known repository-added timestamp. It never
 backdates availability to the financial period end.

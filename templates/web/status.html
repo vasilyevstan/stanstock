@@ -230,7 +230,8 @@
           </tr>
         </thead>
         <tbody>
-          {% for stock in opportunities %}
+          {% for card in opportunities %}
+            {% with stock=card.analysis %}
             <tr>
               <td>
                 <a href="{% url 'stock-detail' stock.listing_id %}"><strong>{{ stock.listing.ticker }}</strong></a>
@@ -247,7 +248,10 @@
                 <td><small>Legacy 6-12m</small> {{ stock.legacy_medium_forecast_scenario|scenario_range }}</td>
                 <td>Not issued</td>
               {% endif %}
-              {% if stock.has_explicit_advisory_forecasts %}
+              {% if card.long_horizon_blocked %}
+                <td>Forecast unavailable</td>
+                <td>Forecast unavailable</td>
+              {% elif stock.has_explicit_long_forecasts %}
                 <td>{{ stock.three_year_forecast_scenario|scenario_range }}</td>
                 <td>{{ stock.five_year_forecast_scenario|scenario_range }}</td>
               {% else %}
@@ -257,6 +261,7 @@
               <td>{{ stock.get_risk_class_display }}</td>
               <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
             </tr>
+            {% endwith %}
           {% empty %}
           {% for stock in demo_opportunities %}
             <tr>

@@ -118,10 +118,13 @@ def status_page(request: HttpRequest) -> HttpResponse:
     latest_run = _latest_analysis_run()
     data_mode = analysis_run_data_mode(latest_run)
     data_providers = analysis_run_source_providers(latest_run)
-    persisted_opportunities = (
+    persisted_analyses = (
         list(
             StockAnalysis.objects.filter(run=latest_run)
-            .select_related("listing__security__company")
+            .select_related(
+                "listing__security__company",
+                "listing__latest_market_data",
+            )
             .order_by("-overall_score")[:10]
         )
         if latest_run
@@ -170,9 +173,9 @@ def status_page(request: HttpRequest) -> HttpResponse:
         "system_ok": all(bool(component["ok"]) for component in components),
         "data_mode": data_mode,
         "data_mode_label": data_mode_label(data_mode, data_providers),
-        "opportunities": persisted_opportunities,
+        "opportunities": [_opportunity_card(analysis) for analysis in persisted_analyses],
         "demo_opportunities": (
-            DEMO_OPPORTUNITIES if settings.DEMO_MODE and not persisted_opportunities else []
+            DEMO_OPPORTUNITIES if settings.DEMO_MODE and not persisted_analyses else []
         ),
         "latest_run": latest_run,
         "providers": ProviderRecord.objects.order_by("provider"),
