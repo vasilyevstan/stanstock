@@ -93,6 +93,32 @@ benchmark has no target-date close, the run fails rather than creating a
 partial snapshot. Repeating a successful target produces a skipped `JobRun`
 and makes no market-data requests.
 
+SPY is fetched exactly once in that budget. The same immutable benchmark
+price asset advances the separate investable SPY ETF market row; SPY remains
+outside the stock universe and analysis pipeline. When upgrading an
+installation that already has SPY benchmark assets, hydrate the ETF identity
+without network access or quota use:
+
+```bash
+uv run python manage.py migrate
+uv run python manage.py sync_investable_etfs
+```
+
+The sync command selects the latest persisted Twelve Data SPY price asset,
+validates its ETF/USD/listing-identity metadata, and idempotently creates or
+advances the SPY listing. A provider-supplied MIC must be ARCX; when the
+optional field is absent, the normalized asset records an explicit
+`configured_spy_identity` ARCX resolution. It fails rather than guessing when
+the asset is absent or incompatible. Recovery of a specific completed
+analysis run follows the single benchmark asset UUID and checksum recorded by
+every analysis in that run; it never substitutes a newer same-date vintage.
+
+ETF materialization runs only after the stock snapshot, analyses, and
+predictions commit. If an ETF identity conflict fails that final step, the
+market job is failed visibly but a retry recovers the completed research and
+retries ETF synchronization without provider credentials or additional
+credits.
+
 ### Daily macOS LaunchAgent
 
 The supported unattended local workflow is one user LaunchAgent at 02:00

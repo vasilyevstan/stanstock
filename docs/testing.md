@@ -42,6 +42,13 @@ This command validates settings; it does not prove the database is reachable.
   credential-free recovery of committed targets across retry-time grades,
   supported-horizon-only prediction persistence, and monotonic current-market
   session updates;
+- explicit security-type boundaries, one-fetch SPY benchmark/ETF reuse with
+  unchanged credit accounting, zero-credit ETF reconstruction from immutable
+  assets, exact completed-run benchmark-vintage recovery, cutoff-safe ETF
+  metrics, fail-closed return-basis metadata, explicit fallback provenance for
+  an omitted provider MIC, post-analysis ETF failure recovery, no ETF universe
+  membership or stock analysis, and SPY portfolio valuation without a
+  `StockAnalysis`;
 - technical/fundamental math, canonical concept/restatement selection, and
   missing-value behavior;
 - recommendation, risk, scenario, and explanation determinism;
@@ -61,7 +68,8 @@ This command validates settings; it does not prove the database is reachable.
   refusal, same-day snapshot deduplication, snapshot database immutability,
   split warnings, opportunity-policy highlighting, exact price-band
   boundaries, neutral band filtering, Under $10 promotion/sample exclusion,
-  and preservation of existing holdings;
+  ETF sample exclusion, supported-SPY holding selection, and preservation of
+  existing holdings;
 - backup checksums, extraction safety, transactional PostgreSQL restore, and
   database/assets bundling;
 - architecture boundaries around raw provider modules.

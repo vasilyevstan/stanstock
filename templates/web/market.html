@@ -32,6 +32,29 @@
     {% endfor %}
   </section>
 
+  {% if etf_rows %}
+    <section>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Investable benchmark</p>
+          <h2>ETF core</h2>
+        </div>
+      </div>
+      <div class="portfolio-grid">
+        {% for item in etf_rows %}
+          <article class="portfolio-card">
+            <span class="badge">ETF · Benchmark</span>
+            <a href="{% url 'etf-detail' item.row.listing_id %}"><h3>{{ item.row.listing.ticker }}</h3></a>
+            <p>{{ item.row.listing.security.company.name }}</p>
+            <strong>{{ item.row.close|price }} {{ item.row.listing.currency }}</strong>
+            <small>{{ item.change|percentage }} · session {{ item.row.session_date }}</small>
+            <small>Core portfolio role; no stock recommendation label.</small>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   <div class="detail-grid">
     <section class="panel">
       <p class="eyebrow">Cross-section</p>

@@ -10,6 +10,7 @@ urlpatterns = [
     path("status", views.status_page, name="status"),
     path("opportunities", views.opportunities_page, name="opportunities"),
     path("stocks/<uuid:listing_id>", views.stock_detail_page, name="stock-detail"),
+    path("etfs/<uuid:listing_id>", views.etf_detail_page, name="etf-detail"),
     path("market", views.market_overview_page, name="market"),
     path("predictions", views.prediction_history_page, name="predictions"),
     path("performance", views.performance_page, name="performance"),

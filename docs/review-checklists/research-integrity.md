@@ -76,6 +76,26 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       error semantics rather than the short-horizon recommendation copied
       from their parent analysis.
 
+## ETF identity and stock-research isolation
+
+- [ ] An investable benchmark ETF reuses the already-required immutable
+      benchmark asset; no second provider request or credit is consumed.
+- [ ] The ETF has explicit security identity and no stock-universe membership.
+      Analysis, fundamentals, predictions, opportunity promotion, and
+      sample-stock construction reject or exclude it at service boundaries.
+- [ ] ETF return, volatility, and drawdown use the persisted split-adjusted
+      price series and label dividend exclusion; no stock recommendation or
+      long-horizon claim is inferred from those metrics.
+- [ ] Personal portfolios may value the supported ETF from
+      `LatestMarketData` without creating a `StockAnalysis`; unsupported ETF
+      symbols remain unavailable.
+- [ ] Retry/recovery and upgrade synchronization can reconstruct the ETF
+      market row from an existing immutable asset without credentials, quota,
+      or network access.
+- [ ] ETF identity materialization cannot roll back an already completed stock
+      analysis run; a failed final projection is explicit and retryable from
+      the run's exact benchmark asset at zero additional credits.
+
 ## Empirical 6m/12m panels
 
 - [ ] The complete training panel is persisted as an immutable derived asset

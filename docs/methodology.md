@@ -132,6 +132,28 @@ Under-$10-specific dollar-liquidity, verified split-event, and compatible
 3-year/5-year formula evidence exists. The configured stock universe is not
 expanded merely to populate a price band.
 
+## ETF evidence boundary
+
+Common stocks and ADRs are the only security types accepted by the stock
+analysis, prediction, opportunity, and sample-stock services. An ETF sent
+through those paths fails explicitly instead of receiving a stock rating.
+
+SPY is the first and only enabled investable ETF. The daily US workflow uses
+the already-required SPY benchmark response for both benchmark evidence and
+the ETF's latest market row, so ETF support consumes no additional provider
+credit and creates no stock-universe membership. Its ETF page reports
+split-adjusted cumulative price return, annualized close-to-close volatility,
+and peak-to-trough maximum drawdown from at most 253 persisted closes ending
+at the displayed market session, even if the immutable asset contains later
+rows. The source asset must explicitly prove daily, split-only,
+dividend-excluding price-return metadata; incompatible or missing provenance
+is rejected rather than defaulted. If Twelve Data omits its optional MIC
+field, the normalized asset records that ARCX came from StanStock's reviewed
+SPY identity rather than pretending it came from the provider. Dividends are
+not included, so none of these values is a total return. SPY has no
+fundamental score, BUY/HOLD/AVOID recommendation, opportunity status, or stock
+forecast.
+
 ## Scenarios
 
 - **1-10 trading days:** empirical/rule ranges driven primarily by trend,
@@ -267,9 +289,10 @@ identity it had before FX conversion existed.
 
 Tracked portfolios are separate from historical simulations. The owner enters
 current quantity and average cost for each holding. Current value uses the
-latest persisted `LatestMarketData` row, and a snapshot is refused when a
-holding is inactive, unpriced, in another currency, or more than seven
-calendar days behind the newest holding price.
+latest persisted `LatestMarketData` row. SPY can therefore be held and valued
+without a `StockAnalysis`; unsupported ETF symbols are rejected. A snapshot
+is refused when a holding is inactive, unpriced, in another currency, or more
+than seven calendar days behind the newest holding price.
 
 Unrealized gain is securities value minus entered holding cost basis. Cash is
 included in total portfolio value but excluded from gain and return, avoiding
@@ -291,5 +314,6 @@ The current price-only sample records a short-horizon signal, so later
 buy-and-hold performance is observational rather than evidence that the
 original short thesis remained valid. New sample construction records the
 price-band policy, classifies the analysis reference close at the run's target
-date, and excludes Under $10 names without consulting later market state. An
-older frozen basket is never rewritten when the policy advances.
+date, and excludes both ETFs and Under $10 names without consulting later
+market state. An older frozen basket is never rewritten when the policy
+advances.

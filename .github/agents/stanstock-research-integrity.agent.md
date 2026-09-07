@@ -111,6 +111,16 @@ record; the summary below is not a substitute for reading it.
   `LatestMarketData`; run-dated sample construction must instead classify the
   immutable analysis reference close, and missing current USD state fails
   closed for promotion.
+- **ETF identity and isolation**: an investable benchmark ETF reuses its one
+  immutable provider series without duplicate requests or credits, remains
+  outside stock universe membership, and is rejected explicitly by stock
+  analysis, fundamentals, predictions, opportunities, and sample-stock
+  construction. ETF return/volatility/drawdown evidence keeps its price-return
+  and dividend basis explicit. Personal portfolio valuation may use the ETF's
+  current market row without manufacturing a `StockAnalysis`; unsupported ETF
+  symbols remain unavailable. ETF identity projection occurs after stock
+  research commits, so a projection conflict is explicit and recoverable from
+  the exact run asset without spending provider credits again.
 - **Prospective methodology versioning**: price-scale or liquidity corrections
   use a new immutable configuration and preserve historical hashes,
   calculation paths, predictions, and version-separated performance.

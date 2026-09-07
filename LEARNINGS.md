@@ -167,6 +167,18 @@ reviews and should not be re-litigated without an explicit new decision.
 - **Twelve Data's daily `end_date` is exclusive.** Request the following
   calendar date, but keep validating parsed bars against StanStock's original
   inclusive cutoff so no future session can enter an analysis.
+- **One immutable series can serve benchmark and investable identities
+  without duplicate acquisition.** SPY is fetched once, then its checksummed
+  benchmark asset advances a separate ETF listing and current market row at
+  zero extra credits. Explicit security-type guards keep that ETF out of stock
+  universe membership, scoring, predictions, opportunities, and sample
+  baskets while still allowing portfolio valuation without a fabricated stock
+  analysis. Recovery follows the exact asset UUID/checksum recorded by the
+  completed analysis, metrics stop at the displayed market session, and
+  missing split-only/dividend provenance fails closed. ETF projection happens
+  after stock research commits, allowing an identity conflict to be repaired
+  and retried from immutable evidence without sacrificing the on-time
+  analysis or spending provider credits again.
 - **Synthetic refreshes use observed synthetic sessions.** `refresh_demo`
   defaults to the research snapshot's `as_of_date`, rejects later or
   non-session target dates, and relies on `JobRun` to skip a repeated

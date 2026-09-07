@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import polars as pl
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from stanstock.data.assets import AssetStore, register_asset
+from stanstock.data.etfs import sync_investable_spy_from_asset
 from stanstock.data.models import (
     Company,
     DataAsset,
@@ -162,6 +165,48 @@ def persisted_analysis() -> StockAnalysis:
     return analysis
 
 
+def _persist_spy_etf(tmp_path) -> Listing:
+    start = date(2025, 12, 1)
+    dates = [start + timedelta(days=index) for index in range(260)]
+    closes = [500.0 + index * 0.25 + (index % 7) * 0.1 for index in range(260)]
+    store = AssetStore(tmp_path)
+    stored = store.write_frame(
+        "tests/web-spy.parquet",
+        pl.DataFrame(
+            {
+                "date": dates,
+                "close": closes,
+                "volume": [10_000_000 + index for index in range(260)],
+            }
+        ),
+    )
+    observed_at = datetime(2026, 9, 5, 1, tzinfo=UTC)
+    asset = register_asset(
+        provider="twelve_data",
+        kind="price_history",
+        subject="SPY",
+        stored=stored,
+        retrieved_at=observed_at,
+        available_at=observed_at,
+        period_start=dates[0],
+        period_end=dates[-1],
+        metadata={
+            "currency": "USD",
+            "mic_code": "ARCX",
+            "instrument_type": "ETF",
+            "interval": "1day",
+            "adjustment": "splits",
+            "return_definition": "split_adjusted_price_return",
+            "dividends_included": False,
+        },
+    )
+    return sync_investable_spy_from_asset(
+        asset=asset,
+        target_date=dates[-1],
+        store=store,
+    )
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "name",
@@ -263,6 +308,42 @@ def test_opportunities_display_every_price_band_including_empty_bands(
     assert "$50-$300" in content
     assert "$300+" in content
     assert content.count("No persisted analysis in this price band") == 3
+
+
+@pytest.mark.django_db
+def test_spy_etf_has_a_separate_market_and_detail_path(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    tmp_path,
+) -> None:
+    with override_settings(DATA_DIR=tmp_path):
+        spy = _persist_spy_etf(tmp_path)
+        market = authenticated_client.get(reverse("market"))
+        detail = authenticated_client.get(reverse("etf-detail", args=[spy.pk]))
+        stock_path = authenticated_client.get(reverse("stock-detail", args=[spy.pk]))
+        opportunities = authenticated_client.get(reverse("opportunities"))
+
+    assert market.status_code == 200
+    assert market.context["regions"][0]["listing_count"] == 1
+    market_content = market.content.decode()
+    assert "ETF core" in market_content
+    assert "SPY" in market_content
+    assert "no stock recommendation label" in market_content
+
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert "Benchmark ETF, not a stock recommendation." in detail_content
+    assert "Trailing price return" in detail_content
+    assert "Annualized volatility" in detail_content
+    assert "Maximum drawdown" in detail_content
+    assert "Core benchmark ETF" in detail_content
+    assert 'class="recommendation' not in detail_content
+
+    assert stock_path.status_code == 302
+    assert stock_path.url == reverse("etf-detail", args=[spy.pk])
+    assert "SPY" not in opportunities.content.decode()
+    assert not StockAnalysis.objects.filter(listing=spy).exists()
+    assert not Prediction.objects.filter(listing=spy).exists()
 
 
 @pytest.mark.django_db

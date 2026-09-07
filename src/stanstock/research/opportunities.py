@@ -16,6 +16,7 @@ from stanstock.research.affordability import (
     PriceBandAssessment,
     latest_price_band,
 )
+from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.models import Recommendation, StockAnalysis
 
 POLICY_PATH = (
@@ -111,6 +112,10 @@ def assess_opportunity(
     *,
     price_band: PriceBandAssessment | None | _ResolveLatestPriceBand = (_RESOLVE_LATEST_PRICE_BAND),
 ) -> OpportunityAssessment:
+    require_stock_research_listing(
+        analysis.listing,
+        operation="Stock opportunity assessment",
+    )
     policy = load_opportunity_policy()
     data_quality = analysis.data_quality if isinstance(analysis.data_quality, dict) else {}
     analysis_mode = str(data_quality.get("analysis_mode") or "full")

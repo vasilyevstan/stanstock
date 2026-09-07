@@ -14,6 +14,7 @@ from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import DataAsset, Listing, UniverseMembership, UniverseSnapshot
 from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
+from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.explanations import generate_reasons, generate_risks
 from stanstock.research.fundamentals import calculate_fundamentals, inputs_from_facts
 from stanstock.research.indicators import calculate_indicators
@@ -65,6 +66,7 @@ def compute_listing_analysis(
     source_assets: list[DataAsset] | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> AnalysisComputation:
+    require_stock_research_listing(listing, operation="Stock analysis")
     indicators = calculate_indicators(
         price_frame, benchmark=benchmark_frame, windows=config.windows
     )
@@ -316,6 +318,7 @@ def analyze_listing(
     config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> PersistedAnalysis:
+    require_stock_research_listing(listing, operation="Stock analysis")
     generated_at = decision_time or timezone.now()
     logical_target_date = target_date or generated_at.date()
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
@@ -418,9 +421,16 @@ def analyze_snapshot(
     )
     model_version = _model_version(config.version, run.id.hex)
     results: list[PersistedAnalysis] = []
-    memberships = UniverseMembership.objects.select_related(
-        "listing__security__company",
-    ).filter(snapshot=universe_snapshot, eligible=True)
+    memberships = list(
+        UniverseMembership.objects.select_related(
+            "listing__security__company",
+        ).filter(snapshot=universe_snapshot, eligible=True)
+    )
+    for membership in memberships:
+        require_stock_research_listing(
+            membership.listing,
+            operation="Snapshot stock analysis",
+        )
     for membership in memberships:
         computation = _compute_listing_from_asof(
             listing=membership.listing,
@@ -460,6 +470,10 @@ def append_predictions(
     source_assets: list[dict[str, Any]],
     code_revision_value: str,
 ) -> tuple[Prediction, ...]:
+    require_stock_research_listing(
+        analysis.listing,
+        operation="Stock prediction issuance",
+    )
     if issued_on_time and (
         not analysis.run.issued_on_time or generated_at != analysis.run.generated_at
     ):

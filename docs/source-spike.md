@@ -98,8 +98,11 @@ explicit display-rights confirmation.
   strictly normalizes only the configured symbols. A malformed configured
   symbol still fails the run.
 - The committed `us_liquid_starter_v1.yaml` is a curated 100-symbol
-  NASDAQ/NYSE common-stock set with SPY as benchmark. It is not an S&P 500,
-  Nasdaq-100, or other licensed-index reproduction.
+  NASDAQ/NYSE common-stock set. SPY is fetched separately as its benchmark and
+  the same immutable response maintains the investable SPY ETF market row.
+  SPY is fetched once, consumes one credit, and never becomes a universe
+  member or stock-analysis candidate. The configured universe is not an S&P
+  500, Nasdaq-100, or other licensed-index reproduction.
 - `/time_series` costs one API credit per symbol. The Basic quota profile is
   8 credits/minute and 800/day, reset at midnight UTC
   (<https://support.twelvedata.com/en/articles/5615854-credits>). One full

@@ -13,6 +13,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from stanstock.core.models import JobRun
+from stanstock.data.etfs import INVESTABLE_US_ETF_NAME
 from stanstock.data.models import (
     Company,
     DataAsset,
@@ -43,6 +44,7 @@ from stanstock.research.models import (
     StockAnalysis,
 )
 from stanstock.research.opportunities import assess_opportunity
+from stanstock.web.forms import PortfolioHoldingForm
 
 
 @pytest.fixture
@@ -250,6 +252,83 @@ def test_portfolio_valuation_excludes_cash_from_return(owner, priced_listing: Li
     assert valuation.cost_basis == Decimal("800")
     assert valuation.unrealized_gain == Decimal("200")
     assert valuation.return_pct == Decimal("0.25")
+
+
+@pytest.mark.django_db
+def test_spy_etf_can_be_held_and_valued_without_stock_analysis(
+    owner,
+    priced_listing: Listing,
+) -> None:
+    priced_listing.security.security_type = Security.SecurityType.ETF
+    priced_listing.security.name = INVESTABLE_US_ETF_NAME
+    priced_listing.security.company.name = INVESTABLE_US_ETF_NAME
+    priced_listing.security.company.save(update_fields=["name"])
+    priced_listing.security.save(update_fields=["security_type", "name"])
+    priced_listing.ticker = "SPY"
+    priced_listing.provider_symbol = "SPY"
+    priced_listing.exchange_mic = "ARCX"
+    priced_listing.is_primary = True
+    priced_listing.save(
+        update_fields=[
+            "ticker",
+            "provider_symbol",
+            "exchange_mic",
+            "is_primary",
+        ]
+    )
+    portfolio = Portfolio.objects.create(
+        owner=owner,
+        name="ETF core",
+        base_currency="USD",
+    )
+
+    holding = upsert_holding(
+        portfolio=portfolio,
+        listing=priced_listing,
+        quantity=Decimal("1.5"),
+        average_cost=Decimal("90"),
+    )
+    valuation = calculate_portfolio_valuation(portfolio)
+    form = PortfolioHoldingForm(portfolio=portfolio)
+
+    assert holding.listing.security.security_type == Security.SecurityType.ETF
+    assert valuation.complete is True
+    assert valuation.securities_value == Decimal("150.000000")
+    assert form.fields["listing"].label == "Security"
+    assert form.fields["listing"].queryset.filter(pk=priced_listing.pk).exists()
+    assert not StockAnalysis.objects.filter(listing=priced_listing).exists()
+
+    unsupported_security = Security.objects.create(
+        company=priced_listing.security.company,
+        name="Unsupported ETF",
+        security_type=Security.SecurityType.ETF,
+    )
+    unsupported_etf = Listing.objects.create(
+        security=unsupported_security,
+        ticker="QQQ",
+        provider_symbol="QQQ",
+        exchange_mic="XNAS",
+        currency="USD",
+        region=Region.US,
+    )
+    LatestMarketData.objects.create(
+        listing=unsupported_etf,
+        observed_at=priced_listing.latest_market_data.observed_at,
+        session_date=priced_listing.latest_market_data.session_date,
+        close=Decimal("100"),
+        previous_close=Decimal("98"),
+        volume=1_000_000,
+        source_asset=priced_listing.latest_market_data.source_asset,
+    )
+    form = PortfolioHoldingForm(portfolio=portfolio)
+    assert not form.fields["listing"].queryset.filter(pk=unsupported_etf.pk).exists()
+    with pytest.raises(PortfolioValuationError, match="only SPY is enabled"):
+        upsert_holding(
+            portfolio=portfolio,
+            listing=unsupported_etf,
+            quantity=Decimal("1"),
+            average_cost=Decimal("100"),
+        )
 
 
 @pytest.mark.django_db
@@ -530,6 +609,10 @@ def test_opportunity_policy_is_analysis_mode_aware(priced_listing: Listing) -> N
     assert assessment.price_band.slug == "50_to_300"
     analysis.short_scenario = {"bear": -0.03, "base": -0.01, "bull": 0.05}
     assert assess_opportunity(analysis).eligible is False
+    analysis.listing.security.security_type = Security.SecurityType.ETF
+    analysis.listing.security.save(update_fields=["security_type"])
+    with pytest.raises(ValueError, match="opportunity assessment"):
+        assess_opportunity(analysis)
 
 
 @pytest.mark.django_db
@@ -695,6 +778,29 @@ def test_under_10_is_excluded_from_new_sample_but_existing_holdings_remain_track
     assert holding.listing_id == listings[0].id
     assert valuation.positions[0].market_data is not None
     assert valuation.positions[0].market_data.close == Decimal("9.99")
+
+
+@pytest.mark.django_db
+def test_etf_analysis_is_excluded_from_new_sample_portfolios(owner) -> None:
+    run, listings = _provider_analysis_run(count=3)
+    etf_listing = listings[0]
+    etf_listing.security.security_type = Security.SecurityType.ETF
+    etf_listing.security.save(update_fields=["security_type"])
+
+    portfolio, created = build_sample_portfolio(
+        owner=owner,
+        source_run=run,
+        starting_capital=Decimal("100000"),
+        top_n=3,
+    )
+
+    assert created is True
+    assert list(
+        portfolio.holdings.order_by("listing__ticker").values_list("listing_id", flat=True)
+    ) == [
+        listings[1].id,
+        listings[2].id,
+    ]
 
 
 @pytest.mark.django_db

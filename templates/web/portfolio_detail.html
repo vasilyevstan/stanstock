@@ -213,8 +213,13 @@
             {% with position=card.position %}
               <tr{% if card.opportunity.eligible %} class="opportunity-row"{% endif %}>
                 <td>
-                  <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                  {% if card.is_etf %}
+                    <a href="{% url 'etf-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                  {% else %}
+                    <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                  {% endif %}
                   <small>{{ position.holding.listing.security.company.name }}</small>
+                  {% if card.is_etf %}<small>Exchange-traded fund · core benchmark role</small>{% endif %}
                   {% if card.price_band %}
                     <small>{{ card.price_band.label }} · {{ card.price_band.price_date }}</small>
                   {% endif %}
@@ -244,7 +249,9 @@
                   {% endif %}
                 </td>
                 <td>
-                  {% if card.opportunity.eligible %}
+                  {% if card.is_etf %}
+                    <span class="badge">ETF · no stock rating</span>
+                  {% elif card.opportunity.eligible %}
                     <span class="opportunity-badge">{{ card.opportunity.label }}</span>
                     <small>{{ card.opportunity.policy_version }}</small>
                   {% elif card.analysis %}
