@@ -7,11 +7,13 @@ from uuid import uuid4
 
 import polars as pl
 import pytest
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import override_settings
 from django.utils import timezone
 
+from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import Company, Listing, Region, Security, Universe, UniverseSnapshot
 from stanstock.research.jobs import eligible_pending_predictions
@@ -23,7 +25,23 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
-from stanstock.research.outcomes import evaluate_prediction
+from stanstock.research.outcomes import (
+    HORIZON_SESSION_COUNTS,
+    evaluate_prediction,
+    evaluate_predictions,
+)
+
+
+def test_forecast_horizon_session_counts_keep_legacy_identity() -> None:
+    assert HORIZON_SESSION_COUNTS == {
+        Prediction.Horizon.SHORT.value: 10,
+        Prediction.Horizon.SIX_MONTH.value: 126,
+        Prediction.Horizon.TWELVE_MONTH.value: 252,
+        Prediction.Horizon.THREE_YEAR.value: 756,
+        Prediction.Horizon.FIVE_YEAR.value: 1260,
+        Prediction.Horizon.MEDIUM.value: 252,
+        Prediction.Horizon.LONG.value: 756,
+    }
 
 
 @pytest.mark.django_db
@@ -32,7 +50,10 @@ def test_short_prediction_matures_on_nth_observed_session_without_fabricating_we
 ) -> None:
     listing, analysis = _analysis()
     prediction = _prediction(
-        analysis, horizon=Prediction.Horizon.SHORT, recommendation=Recommendation.BUY
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        price_provider="synthetic",
     )
     target = prediction.target_date
     sessions = _business_dates_after(target, 10)
@@ -83,6 +104,234 @@ def test_insufficient_observed_sessions_create_unresolved_without_returns(tmp_pa
     assert result.outcome.benchmark_return is None
     assert result.outcome.success is None
     assert result.outcome.error is None
+
+
+@pytest.mark.django_db
+def test_unchanged_unresolved_outcome_is_not_rewritten(tmp_path) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+    )
+    evaluation_date = prediction.target_date + timedelta(days=30)
+    first_time = _evaluation_time() - timedelta(minutes=1)
+    first = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=evaluation_date,
+        evaluation_time=first_time,
+        store=AssetStore(tmp_path),
+    )
+
+    second = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=evaluation_date,
+        evaluation_time=_evaluation_time(),
+        store=AssetStore(tmp_path),
+    )
+
+    second.outcome.refresh_from_db()
+    assert first.action == "created"
+    assert second.action == "skipped"
+    assert second.outcome.evaluated_at == first_time
+
+
+@pytest.mark.django_db
+def test_recorded_price_provider_rejects_conflicting_override(tmp_path) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        price_provider="twelve_data",
+    )
+
+    with pytest.raises(ValueError, match="conflicts with requested provider"):
+        evaluate_prediction(
+            prediction,
+            provider="synthetic",
+            evaluation_date=prediction.target_date + timedelta(days=30),
+            evaluation_time=_evaluation_time(),
+            store=AssetStore(tmp_path),
+        )
+
+    assert not PredictionOutcome.objects.filter(prediction=prediction).exists()
+
+
+@pytest.mark.django_db
+def test_evaluator_uses_recorded_price_subject(tmp_path) -> None:
+    listing, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        price_provider="synthetic",
+        price_subject=f"{listing.ticker}:US",
+        recommendation=Recommendation.BUY,
+    )
+    sessions = _business_dates_after(prediction.target_date, 10)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        prediction.price_subject,
+        _evaluation_time(),
+        sessions,
+        [101 + index for index in range(10)],
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluation_time=_evaluation_time(),
+        store=store,
+    )
+
+    assert result.outcome.status == PredictionOutcome.Status.MATURED
+    assert result.outcome.metadata["subject"] == prediction.price_subject
+
+
+@pytest.mark.django_db
+def test_advisory_prediction_matures_without_decision_success(tmp_path) -> None:
+    listing, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        price_provider="synthetic",
+        recommendation=Recommendation.BUY,
+        bear=Decimal("-0.10"),
+        base=Decimal("0.10"),
+        bull=Decimal("0.30"),
+    )
+    sessions = _business_dates_after(prediction.target_date, 126)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        listing.ticker,
+        _evaluation_time(),
+        sessions,
+        [101 + index * (19 / 125) for index in range(126)],
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluation_time=_evaluation_time(),
+        store=store,
+    )
+
+    assert result.outcome.status == PredictionOutcome.Status.MATURED
+    assert result.outcome.actual_return == Decimal("0.2")
+    assert result.outcome.success is None
+    assert result.outcome.direction_correct is True
+    assert result.outcome.interval_covered is True
+    assert result.outcome.signed_error == Decimal("0.1")
+    assert result.outcome.metadata["evidence_role"] == Prediction.EvidenceRole.ADVISORY
+
+
+@pytest.mark.django_db
+def test_batch_evaluation_reuses_identical_price_frame(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, analysis = _analysis()
+    first = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        version="cache-one",
+    )
+    second = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        version="cache-two",
+    )
+    sessions = _business_dates_after(first.target_date, 10)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        listing.ticker,
+        _evaluation_time(),
+        sessions,
+        [101 + index for index in range(10)],
+    )
+    original_price_frame = AsOfData.price_frame
+    calls: list[tuple[str, str, date | None]] = []
+
+    def counting_price_frame(
+        self: AsOfData,
+        *,
+        provider: str,
+        subject: str,
+        through_date: date | None = None,
+    ) -> pl.DataFrame:
+        calls.append((provider, subject, through_date))
+        return original_price_frame(
+            self,
+            provider=provider,
+            subject=subject,
+            through_date=through_date,
+        )
+
+    monkeypatch.setattr(AsOfData, "price_frame", counting_price_frame)
+
+    results = evaluate_predictions(
+        [first, second],
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluation_time=_evaluation_time(),
+        store=store,
+    )
+
+    assert [result.outcome.status for result in results] == [
+        PredictionOutcome.Status.MATURED,
+        PredictionOutcome.Status.MATURED,
+    ]
+    assert calls == [("synthetic", listing.ticker, sessions[-1])]
+
+
+@pytest.mark.django_db
+def test_batch_provider_conflict_is_rejected_before_any_outcome_is_written(
+    tmp_path,
+) -> None:
+    listing, analysis = _analysis()
+    synthetic = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        version="synthetic-source",
+        price_provider="synthetic",
+    )
+    conflicting = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        version="other-source",
+        price_provider="twelve_data",
+    )
+    sessions = _business_dates_after(synthetic.target_date, 10)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        listing.ticker,
+        _evaluation_time(),
+        sessions,
+        [101 + index for index in range(10)],
+    )
+
+    with pytest.raises(ValueError, match="conflicts with requested provider"):
+        evaluate_predictions(
+            [synthetic, conflicting],
+            provider="synthetic",
+            evaluation_date=sessions[-1],
+            evaluation_time=_evaluation_time(),
+            store=store,
+        )
+
+    assert PredictionOutcome.objects.count() == 0
 
 
 @pytest.mark.django_db
@@ -443,7 +692,17 @@ def test_success_semantics_are_recommendation_specific(tmp_path) -> None:
 def test_evaluate_command_all_pending_uses_tmp_asset_store(tmp_path) -> None:
     listing, analysis = _analysis()
     prediction = _prediction(
-        analysis, horizon=Prediction.Horizon.SHORT, recommendation=Recommendation.BUY
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        price_provider="synthetic",
+    )
+    other_provider = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+        version="other-provider",
+        price_provider="twelve_data",
     )
     sessions = _business_dates_after(prediction.target_date, 10)
     store = AssetStore(tmp_path)
@@ -468,6 +727,7 @@ def test_evaluate_command_all_pending_uses_tmp_asset_store(tmp_path) -> None:
         PredictionOutcome.objects.get(prediction=prediction).status
         == PredictionOutcome.Status.MATURED
     )
+    assert not PredictionOutcome.objects.filter(prediction=other_provider).exists()
 
 
 @pytest.mark.django_db
@@ -538,6 +798,115 @@ def test_prediction_outcome_constraints_enforce_matured_and_unresolved_contracts
             actual_return=Decimal("0.01"),
             resolution="invalid",
         )
+
+
+@pytest.mark.django_db
+def test_outcome_validation_separates_decision_and_advisory_success() -> None:
+    _, analysis = _analysis()
+    decision = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        version="decision-validation",
+    )
+    advisory = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.TWELVE_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        version="advisory-validation",
+    )
+
+    decision_outcome = PredictionOutcome(
+        prediction=decision,
+        evaluated_at=_evaluation_time(),
+        evaluation_date=decision.target_date,
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.01"),
+        success=None,
+        resolution="invalid decision",
+    )
+    advisory_outcome = PredictionOutcome(
+        prediction=advisory,
+        evaluated_at=_evaluation_time(),
+        evaluation_date=advisory.target_date,
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.01"),
+        success=True,
+        resolution="invalid advisory",
+    )
+
+    with pytest.raises(ValidationError, match="decision outcomes require"):
+        decision_outcome.full_clean()
+    with pytest.raises(ValidationError, match="must not use decision success"):
+        advisory_outcome.full_clean()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PredictionOutcome.objects.create(
+            prediction=decision,
+            evaluated_at=_evaluation_time(),
+            evaluation_date=decision.target_date,
+            status=PredictionOutcome.Status.MATURED,
+            actual_return=Decimal("0.01"),
+            success=None,
+            resolution="invalid decision",
+        )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PredictionOutcome.objects.create(
+            prediction=advisory,
+            evaluated_at=_evaluation_time(),
+            evaluation_date=advisory.target_date,
+            status=PredictionOutcome.Status.MATURED,
+            actual_return=Decimal("0.01"),
+            success=True,
+            resolution="invalid advisory",
+        )
+
+
+@pytest.mark.django_db
+def test_prediction_horizon_and_evidence_role_must_match() -> None:
+    _, analysis = _analysis()
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _prediction(
+            analysis,
+            horizon=Prediction.Horizon.SIX_MONTH,
+            evidence_role=Prediction.EvidenceRole.DECISION,
+            version="invalid-canonical-decision",
+        )
+
+
+@pytest.mark.django_db
+def test_outcome_role_integrity_triggers_are_installed() -> None:
+    table_name = PredictionOutcome._meta.db_table
+    with connection.cursor() as cursor:
+        if connection.vendor == "sqlite":
+            cursor.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'trigger' AND tbl_name = %s
+                """,
+                [table_name],
+            )
+            expected_triggers = {
+                "research_predictionoutcome_role_insert",
+                "research_predictionoutcome_role_update",
+            }
+        elif connection.vendor == "postgresql":
+            cursor.execute(
+                """
+                SELECT trigger_name
+                FROM information_schema.triggers
+                WHERE event_object_schema = current_schema()
+                  AND event_object_table = %s
+                """,
+                [table_name],
+            )
+            expected_triggers = {"research_predictionoutcome_role_guard"}
+        else:
+            pytest.skip(f"Unsupported database vendor: {connection.vendor}")
+
+        trigger_names = {row[0] for row in cursor.fetchall()}
+
+    assert expected_triggers <= trigger_names
 
 
 @pytest.mark.django_db
@@ -731,6 +1100,9 @@ def _prediction(
     price_at_prediction: Decimal = Decimal("100"),
     data_cutoff: datetime | None = None,
     source_assets: list[dict[str, str]] | None = None,
+    evidence_role: Prediction.EvidenceRole = Prediction.EvidenceRole.DECISION,
+    price_provider: str = "",
+    price_subject: str = "",
 ) -> Prediction:
     return Prediction.objects.create(
         analysis=analysis,
@@ -738,6 +1110,9 @@ def _prediction(
         generated_at=analysis.run.generated_at,
         target_date=target_date or analysis.run.target_date,
         horizon=horizon,
+        evidence_role=evidence_role,
+        price_provider=price_provider,
+        price_subject=price_subject,
         price_at_prediction=price_at_prediction,
         bear_return=bear,
         base_return=base,

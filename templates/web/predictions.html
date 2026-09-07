@@ -26,6 +26,15 @@
       </select>
     </label>
     <label>
+      <span>Evidence role</span>
+      <select name="evidence_role">
+        <option value="">All roles</option>
+        {% for value, label in evidence_roles %}
+          <option value="{{ value }}"{% if filters.evidence_role == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
       <span>Recommendation</span>
       <select name="recommendation">
         <option value="">All</option>
@@ -45,6 +54,7 @@
           <th scope="col">Generated</th>
           <th scope="col">Stock</th>
           <th scope="col">Evidence grade</th>
+          <th scope="col">Role / provider</th>
           <th scope="col">Horizon</th>
           <th scope="col">Recommendation</th>
           <th scope="col">Bear / base / bull</th>
@@ -60,18 +70,29 @@
             <td>{{ prediction.generated_at }}<small>Target {{ prediction.target_date }}</small></td>
             <td><a href="{% url 'stock-detail' prediction.listing_id %}"><strong>{{ prediction.listing.ticker }}</strong></a><small>{{ prediction.listing.security.company.name }}</small></td>
             <td>
-              {% if prediction.issued_on_time and prediction.analysis.run.universe_snapshot.grade == "observed" %}
+              {% if prediction.issued_on_time and prediction.evidence_grade == "observed" and prediction.source_mode == "provider" and prediction.price_provider %}
                 Observed · issued on time
               {% else %}
                 Research-grade reconstruction / late version
               {% endif %}
               <small>
-                {% if card.source_mode == "provider" %}
-                  Provider-backed · {{ card.source_providers|label_list }}
-                {% elif card.source_mode == "synthetic" %}
+                {% if prediction.source_mode == "provider" %}
+                  Provider-backed · {{ prediction.price_provider|display_label }}
+                {% elif prediction.source_mode == "synthetic" %}
                   Synthetic fixtures
                 {% else %}
                   Source unavailable
+                {% endif %}
+              </small>
+            </td>
+            <td>
+              {{ prediction.get_evidence_role_display }}
+              <small>
+                {% if prediction.price_provider %}
+                  {{ prediction.price_provider|display_label }}
+                  {% if prediction.price_subject %} · {{ prediction.price_subject }}{% endif %}
+                {% else %}
+                  Legacy provider not proven
                 {% endif %}
               </small>
             </td>
@@ -98,7 +119,7 @@
           </tr>
           {% endwith %}
         {% empty %}
-          <tr><td colspan="9">No predictions have been recorded.</td></tr>
+          <tr><td colspan="10">No predictions have been recorded.</td></tr>
         {% endfor %}
       </tbody>
     </table>

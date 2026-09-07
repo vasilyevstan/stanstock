@@ -57,23 +57,32 @@ replacement.
    physically removes rows after the requested market date.
 6. An `AnalysisRun` records `generated_at`, `data_cutoff`, the universe
    snapshot, configuration hash, and code revision.
-7. `Prediction` stores the complete issued result and provenance. Django
-   guards and database triggers reject updates and deletes. The same
-   application/database immutability rule protects `DataAsset`,
-   `FundamentalFact`, and `FxRate`.
-8. Outcomes append after the horizon matures; matured and corporate-event
-   states are terminal and do not alter the original prediction.
-9. A simulation stores its base currency, result curve, and exact price,
+7. `StockAnalysis.forecast_scenarios` is the schema-versioned scenario read
+   path. The legacy short/medium/long columns remain temporarily for rollback
+   compatibility, but application policy reads through the unified accessor.
+8. `Prediction` stores the complete issued result and provenance, including
+   its forecast identity, decision/advisory role, evidence grade, source mode,
+   exact price provider and source subject when proven, and a structured
+   calculation record. Performance reporting reads these immutable prediction
+   fields rather than mutable parent metadata. Django guards and database
+   triggers reject updates and deletes. The same application/database
+   immutability rule protects `DataAsset`, `FundamentalFact`, and `FxRate`.
+9. Outcomes append after the horizon matures; matured and corporate-event
+   states are terminal and do not alter the original prediction. Decision
+   outcomes retain recommendation success, while advisory outcomes use
+   direction, interval coverage, and signed forecast error with
+   `success=NULL`.
+10. A simulation stores its base currency, result curve, and exact price,
    signal, benchmark, and FX frames as checksummed assets keyed by the run
    UUID. Converted price rows keep their native price and currency beside the
    converted value. Its input hash covers complete canonical frame contents
    and any explicit calendar.
-10. A tracked portfolio snapshot stores the exact quantity, average cost,
+11. A tracked portfolio snapshot stores the exact quantity, average cost,
     latest persisted price, price session, source asset, code revision, and
     aggregate value used. Repeated identical inputs are idempotent; changed
     holdings can create another snapshot on the same market date. Database
     triggers reject snapshot and snapshot-position updates or deletes.
-11. External deposits, confirmed planner executions/purchases, and manual
+12. External deposits, confirmed planner executions/purchases, and manual
     performance baselines are append-only. Confirmation re-hashes locked
     portfolio, price, and qualifying-analysis state. A manual quantity change
     creates a post-change boundary (or an explicit unavailable-boundary

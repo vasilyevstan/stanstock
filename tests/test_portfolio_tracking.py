@@ -607,7 +607,19 @@ def test_opportunity_policy_is_analysis_mode_aware(priced_listing: Listing) -> N
     assert assessment.policy_version == "great-opportunity-v2"
     assert assessment.price_band is not None
     assert assessment.price_band.slug == "50_to_300"
-    analysis.short_scenario = {"bear": -0.03, "base": -0.01, "bull": 0.05}
+    analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            "short": {"bear": -0.03, "base": 0.04, "bull": 0.08},
+            "6m": {"bear": -0.90, "base": -0.80, "bull": -0.70},
+        },
+    }
+    assert assess_opportunity(analysis).eligible is True
+    analysis.forecast_scenarios["horizons"]["short"] = {
+        "bear": -0.03,
+        "base": -0.01,
+        "bull": 0.05,
+    }
     assert assess_opportunity(analysis).eligible is False
     analysis.listing.security.security_type = Security.SecurityType.ETF
     analysis.listing.security.save(update_fields=["security_type"])

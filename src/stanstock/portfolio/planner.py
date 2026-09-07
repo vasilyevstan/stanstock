@@ -934,7 +934,7 @@ def _satellite_qualification(
         "confidence": str(analysis.confidence),
         "risk_class": analysis.risk_class,
         "component_scores": analysis.component_scores,
-        "short_scenario": analysis.short_scenario,
+        "short_scenario": analysis.short_forecast_scenario,
         "opportunity": {
             "policy_version": assessment.policy_version,
             "label": assessment.label,

@@ -179,9 +179,11 @@ parameter optimization.
 ## Predictions and evaluation
 
 A prediction records the actual generation time, target market date,
-permanent listing ID, source price, horizon, scenarios, confidence,
-recommendation, component scores, source assets, configuration hash, and code
-revision.
+permanent listing ID, source price, explicit forecast horizon, evidence role,
+price provider and subject when the exact listing asset proves them, scenarios,
+immutable evidence grade and source classification, confidence,
+recommendation, component scores, structured calculation provenance, source
+assets, configuration hash, and code revision.
 
 Predictions are append-only. A correction uses a new model/configuration
 version. Missed runs can be reconstructed for research but cannot be presented
@@ -189,20 +191,32 @@ as calls issued on time. On-time status belongs to each immutable prediction,
 not only its parent analysis, so a later reissued version is excluded from live
 performance evidence.
 
+Scoring groups remain `short`, `medium`, and `long`; they are not forecast
+identities. Forecast identities are `short`, `6m`, `12m`, `3y`, and `5y`,
+while historical `medium` and `long` predictions retain their original labels
+and 252-/756-session meanings. The corresponding canonical maturities are 10,
+126, 252, 756, and 1260 observed sessions; calendar weekends and holidays are
+never manufactured.
+
 Performance reports only matured outcomes and retains unresolved corporate
 events in coverage counts. Aggregate return, hit-rate, or calibration metrics
-are withheld below the configured minimum sample. Short, medium, and long
-outcomes mature after 10, 252, and 756 observed sessions respectively; calendar
-weekends and holidays are never manufactured. BUY succeeds on a positive
-return, AVOID on a non-positive return, and HOLD only when the realized return
-falls inside its stored bear/bull range.
+are withheld below the configured minimum sample. Decision predictions keep
+the existing BUY/HOLD/AVOID success semantics. Advisory predictions never
+receive a decision-success value; they record direction correctness, bear/bull
+interval coverage, signed base-case error, and benchmark return separately.
 
-The performance page aggregates only outcomes from observed universe snapshots
-whose individual predictions were issued before the next market session.
-Matured synthetic, unsupported, or later-reissued outcomes remain visibly
-excluded from live, out-of-sample claims. A price-only baseline persists only
-the short horizon it supports; withheld medium and long scenarios are not
-prediction records and therefore cannot enter evaluation denominators.
+The decision headline on the performance page aggregates only decision
+outcomes from observed universe snapshots whose individual predictions were
+issued before the next market session. Reportability uses the immutable
+evidence grade, source mode, and exact price provider copied onto each
+prediction at issuance; later edits to parent snapshot metadata cannot
+reclassify evidence. Advisory outcomes have separate exact
+method/configuration/provider/horizon cohorts and cannot enter the decision
+denominator. Matured synthetic, unsupported, or later-reissued outcomes remain
+visibly excluded from live, out-of-sample claims. A price-only baseline
+persists only the short horizon it supports; withheld medium and long
+scenarios are not prediction records and therefore cannot enter evaluation
+denominators.
 
 The evaluator also compares the target-date close in the evaluation vintage
 with the immutable prediction source price. A material mismatch is classified

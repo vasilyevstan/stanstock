@@ -9,6 +9,7 @@ from django.db import models
 from django.db.models.base import ModelBase
 
 from stanstock.data.models import Listing, UniverseSnapshot
+from stanstock.research.forecasting import scenario_from_document
 
 
 class Recommendation(models.TextChoices):
@@ -62,6 +63,7 @@ class StockAnalysis(models.Model):
     confidence = models.DecimalField(max_digits=6, decimal_places=2)
     confidence_status = models.CharField(max_length=32, default="heuristic")
     component_scores = models.JSONField(default=dict)
+    forecast_scenarios = models.JSONField(default=dict)
     short_scenario = models.JSONField(default=dict)
     medium_scenario = models.JSONField(default=dict)
     long_scenario = models.JSONField(default=dict)
@@ -93,12 +95,48 @@ class StockAnalysis(models.Model):
     def __str__(self) -> str:
         return f"{self.run_id}:{self.listing_id}:{self.overall_score}"
 
+    def scenario_for_horizon(self, horizon: str) -> dict[str, Any]:
+        return scenario_from_document(
+            self.forecast_scenarios,
+            horizon,
+            legacy_fallbacks={
+                "short": self.short_scenario,
+                "medium": self.medium_scenario,
+                "long": self.long_scenario,
+            },
+        )
+
+    @property
+    def short_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("short")
+
+    @property
+    def legacy_medium_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("medium")
+
+    @property
+    def legacy_long_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("long")
+
 
 class Prediction(models.Model):
     class Horizon(models.TextChoices):
         SHORT = "short", "1-10 trading days"
-        MEDIUM = "medium", "6-12 months"
-        LONG = "long", "3+ years"
+        SIX_MONTH = "6m", "6 months"
+        TWELVE_MONTH = "12m", "12 months"
+        THREE_YEAR = "3y", "3 years"
+        FIVE_YEAR = "5y", "5 years"
+        MEDIUM = "medium", "Legacy 6-12 months"
+        LONG = "long", "Legacy 3+ years"
+
+    class EvidenceRole(models.TextChoices):
+        DECISION = "decision", "Decision"
+        ADVISORY = "advisory", "Advisory"
+
+    class SourceMode(models.TextChoices):
+        PROVIDER = "provider", "Provider-backed"
+        SYNTHETIC = "synthetic", "Synthetic"
+        UNKNOWN = "unknown", "Unknown"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     analysis = models.ForeignKey(StockAnalysis, on_delete=models.PROTECT)
@@ -107,6 +145,26 @@ class Prediction(models.Model):
     target_date = models.DateField()
     issued_on_time = models.BooleanField(default=False)
     horizon = models.CharField(max_length=8, choices=Horizon)
+    evidence_role = models.CharField(
+        max_length=12,
+        choices=EvidenceRole,
+        default=EvidenceRole.DECISION,
+        db_index=True,
+    )
+    evidence_grade = models.CharField(
+        max_length=12,
+        choices=UniverseSnapshot.Grade,
+        default=UniverseSnapshot.Grade.RESEARCH,
+        db_index=True,
+    )
+    source_mode = models.CharField(
+        max_length=12,
+        choices=SourceMode,
+        default=SourceMode.UNKNOWN,
+        db_index=True,
+    )
+    price_provider = models.CharField(max_length=40, blank=True, db_index=True)
+    price_subject = models.CharField(max_length=128, blank=True)
     price_at_prediction = models.DecimalField(max_digits=20, decimal_places=6)
     bear_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     base_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
@@ -119,9 +177,11 @@ class Prediction(models.Model):
     overall_score = models.DecimalField(max_digits=6, decimal_places=2)
     component_scores = models.JSONField(default=dict)
     model_version = models.CharField(max_length=40)
+    method_version = models.CharField(max_length=40, blank=True, db_index=True)
     config_hash = models.CharField(max_length=64)
     data_cutoff = models.DateTimeField()
     source_assets = models.JSONField(default=list)
+    calculation = models.JSONField(default=dict)
     code_revision = models.CharField(max_length=64)
 
     class Meta:
@@ -179,6 +239,19 @@ class Prediction(models.Model):
                 ),
                 name="prediction_scenarios_ordered",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        evidence_role="decision",
+                        horizon__in=("short", "medium", "long"),
+                    )
+                    | models.Q(
+                        evidence_role="advisory",
+                        horizon__in=("6m", "12m", "3y", "5y"),
+                    )
+                ),
+                name="prediction_horizon_role_valid",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -227,18 +300,18 @@ class PredictionOutcome(models.Model):
     actual_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     benchmark_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     success = models.BooleanField(null=True)
+    direction_correct = models.BooleanField(null=True)
+    interval_covered = models.BooleanField(null=True)
     resolution = models.CharField(max_length=120)
     error = models.DecimalField(max_digits=10, decimal_places=4, null=True)
+    signed_error = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=(
-                    ~models.Q(status="matured")
-                    | (models.Q(actual_return__isnull=False) & models.Q(success__isnull=False))
-                ),
-                name="outcome_matured_actual_success",
+                condition=(~models.Q(status="matured") | models.Q(actual_return__isnull=False)),
+                name="outcome_matured_actual",
             ),
             models.CheckConstraint(
                 condition=(
@@ -247,7 +320,10 @@ class PredictionOutcome(models.Model):
                         actual_return__isnull=True,
                         benchmark_return__isnull=True,
                         success__isnull=True,
+                        direction_correct__isnull=True,
+                        interval_covered__isnull=True,
                         error__isnull=True,
+                        signed_error__isnull=True,
                     )
                 ),
                 name="outcome_unresolved_nulls",
@@ -259,7 +335,10 @@ class PredictionOutcome(models.Model):
                         actual_return__isnull=True,
                         benchmark_return__isnull=True,
                         success__isnull=True,
+                        direction_correct__isnull=True,
+                        interval_covered__isnull=True,
                         error__isnull=True,
+                        signed_error__isnull=True,
                     )
                 ),
                 name="outcome_corporate_event_nulls",
@@ -268,3 +347,20 @@ class PredictionOutcome(models.Model):
 
     def __str__(self) -> str:
         return f"{self.prediction_id}:{self.status}:{self.evaluation_date}"
+
+    def clean(self) -> None:
+        super().clean()
+        if self.status != self.Status.MATURED or not self.prediction_id:
+            return
+        if (
+            self.prediction.evidence_role == Prediction.EvidenceRole.DECISION
+            and self.success is None
+        ):
+            raise ValidationError({"success": "Matured decision outcomes require a success value."})
+        if (
+            self.prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
+            and self.success is not None
+        ):
+            raise ValidationError(
+                {"success": "Matured advisory outcomes must not use decision success."}
+            )

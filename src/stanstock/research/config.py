@@ -18,7 +18,9 @@ COMPONENTS = (
     "risk_liquidity",
     "market_sector",
 )
-HORIZONS = ("short", "medium", "long")
+SCORE_HORIZONS = ("short", "medium", "long")
+# Compatibility alias for external imports; internal scoring code uses the explicit name.
+HORIZONS = SCORE_HORIZONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,20 +110,20 @@ class ScoringConfig:
     def from_mapping(cls, mapping: dict[str, Any]) -> Self:
         analysis_mode = str(mapping.get("analysis_mode") or "full")
         overall_horizon = str(mapping.get("overall_horizon") or "medium")
-        if overall_horizon not in HORIZONS:
+        if overall_horizon not in SCORE_HORIZONS:
             raise ValueError(f"Unsupported overall_horizon {overall_horizon!r}")
-        raw_supported = mapping.get("supported_horizons", list(HORIZONS))
+        raw_supported = mapping.get("supported_horizons", list(SCORE_HORIZONS))
         if not isinstance(raw_supported, list) or not raw_supported:
             raise ValueError("supported_horizons must be a non-empty list")
         supported_horizons = tuple(str(value) for value in raw_supported)
         if len(supported_horizons) != len(set(supported_horizons)):
             raise ValueError("supported_horizons contains duplicates")
-        if any(horizon not in HORIZONS for horizon in supported_horizons):
-            raise ValueError(f"supported_horizons must contain only {HORIZONS!r}")
+        if any(horizon not in SCORE_HORIZONS for horizon in supported_horizons):
+            raise ValueError(f"supported_horizons must contain only {SCORE_HORIZONS!r}")
         if overall_horizon not in supported_horizons:
             raise ValueError("overall_horizon must be included in supported_horizons")
         weights = cast(dict[str, dict[str, float]], mapping["horizon_weights"])
-        for horizon in HORIZONS:
+        for horizon in SCORE_HORIZONS:
             if horizon not in weights:
                 raise ValueError(f"Missing horizon weights for {horizon}")
             total = sum(float(weights[horizon].get(component, 0.0)) for component in COMPONENTS)
@@ -216,7 +218,7 @@ class ScoringConfig:
             windows=tuple(int(window) for window in cast(list[int], mapping["windows"])),
             horizon_weights={
                 horizon: {component: float(weights[horizon][component]) for component in COMPONENTS}
-                for horizon in HORIZONS
+                for horizon in SCORE_HORIZONS
             },
             component_factor_counts=component_factor_counts,
             factor_policy=FactorPolicyConfig(

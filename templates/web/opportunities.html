@@ -182,15 +182,15 @@
                   <div><dt>Score</dt><dd>{{ stock.overall_score }}/100</dd></div>
                   <div><dt>Risk</dt><dd>{{ stock.get_risk_class_display }}</dd></div>
                   <div><dt>Confidence</dt><dd>{{ stock.confidence|floatformat:"0" }}%</dd></div>
-                  <div><dt>1-10 days</dt><dd>{{ stock.short_scenario|scenario_range }}</dd></div>
-                  <div><dt>6-12 months</dt><dd>{{ stock.medium_scenario|scenario_range }}</dd></div>
+                  <div><dt>1-10 days</dt><dd>{{ stock.short_forecast_scenario|scenario_range }}</dd></div>
+                  <div><dt>6-12 months</dt><dd>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</dd></div>
                   <div>
                     <dt>3+ years</dt>
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
                       {% else %}
-                        {{ stock.long_scenario|scenario_range }}
+                        {{ stock.legacy_long_forecast_scenario|scenario_range }}
                       {% endif %}
                     </dd>
                   </div>

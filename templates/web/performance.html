@@ -7,12 +7,14 @@
   <section class="page-heading">
     <div>
       <p class="eyebrow">Observed, on-time evidence</p>
-      <h1>Method performance</h1>
+      <h1>Decision performance</h1>
       <p class="lede">
         Only matured predictions from observed universe snapshots that were
         generated on their target date count here. Reconstructed research
         results are excluded from live-performance claims. Headline metrics
-        use one exact configuration version and hash at a time.
+        use one exact configuration version and hash at a time. Advisory
+        forecasts are evaluated separately and never enter these decision
+        metrics.
       </p>
       {% if summary.config_version %}
         <p class="muted">
@@ -67,6 +69,8 @@
       <thead>
         <tr>
           <th scope="col">Method</th>
+          <th scope="col">Provider</th>
+          <th scope="col">Grade</th>
           <th scope="col">Horizon</th>
           <th scope="col">Recommendation</th>
           <th scope="col">Sample</th>
@@ -79,20 +83,70 @@
         {% for group in groups %}
           <tr>
             <td>
-              {{ group.prediction__analysis__run__config_version }}
+              {{ group.prediction__method_version|default:"Legacy method" }}
               <small>{{ group.prediction__config_hash|slice:":8" }}</small>
             </td>
+            <td>{{ group.prediction__price_provider|display_label }}</td>
+            <td>{{ group.prediction__evidence_grade|display_label }}</td>
             <td>{{ group.prediction__horizon|display_label }}</td>
             <td>{{ group.prediction__recommendation|upper }}</td>
             <td>{{ group.sample_count }}</td>
             <td>{% if group.sample_count >= 30 %}{{ group.mean_return|percentage }}{% else %}Withheld{% endif %}</td>
-            <td>{% if group.sample_count >= 30 %}{{ group.mean_benchmark_return|percentage }}{% else %}Withheld{% endif %}</td>
+            <td>{% if group.benchmark_sample_count >= 30 %}{{ group.mean_benchmark_return|percentage }}{% else %}Withheld{% endif %}</td>
             <td>{% if group.sample_count >= 30 %}Reportable{% else %}Insufficient sample{% endif %}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="7">No prediction has matured yet.</td></tr>
+          <tr><td colspan="9">No prediction has matured yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+
+  {% if advisory_matured_count %}
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Advisory evidence</p>
+        <h2>Forecast accuracy</h2>
+      </div>
+    </div>
+    <p class="muted">
+      Each row is an exact method, configuration, provider, evidence-grade, and
+      horizon cohort. Metrics remain withheld until that individual cohort has
+      at least 30 applicable observations.
+    </p>
+
+    <div class="table-scroll" tabindex="0" aria-label="Advisory forecast breakdown">
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th scope="col">Method</th>
+            <th scope="col">Horizon</th>
+            <th scope="col">Provider</th>
+            <th scope="col">Evidence grade</th>
+            <th scope="col">Sample</th>
+            <th scope="col">Direction accuracy</th>
+            <th scope="col">Interval coverage</th>
+            <th scope="col">Mean signed error</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for group in advisory_groups %}
+            <tr>
+              <td>
+                {{ group.prediction__method_version|default:"Legacy method" }}
+                <small>{{ group.prediction__config_hash|slice:":8" }}</small>
+              </td>
+              <td>{{ group.prediction__horizon|display_label }}</td>
+              <td>{{ group.prediction__price_provider|default:"Not proven"|display_label }}</td>
+              <td>{{ group.prediction__evidence_grade|display_label }}</td>
+              <td>{{ group.sample_count }}</td>
+              <td>{% if group.direction_sample_count >= 30 %}{{ group.direction_accuracy|percentage }}{% else %}Withheld{% endif %}<small>{{ group.direction_sample_count }} scored</small></td>
+              <td>{% if group.interval_sample_count >= 30 %}{{ group.interval_coverage|percentage }}{% else %}Withheld{% endif %}<small>{{ group.interval_sample_count }} scored</small></td>
+              <td>{% if group.signed_error_sample_count >= 30 %}{{ group.mean_signed_error|percentage }}{% else %}Withheld{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
 {% endblock %}

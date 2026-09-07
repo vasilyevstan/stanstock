@@ -67,27 +67,27 @@
       </article>
       <article>
         <small>Short scenario</small>
-        <strong>{{ analysis.short_scenario|scenario_range }}</strong>
+        <strong>{{ analysis.short_forecast_scenario|scenario_range }}</strong>
         <span>
-          {% if analysis.short_scenario.method %}
-            {{ analysis.short_scenario.method|display_label }}
+          {% if analysis.short_forecast_scenario.method %}
+            {{ analysis.short_forecast_scenario.method|display_label }}
           {% else %}
             Bear / base / bull
           {% endif %}
         </span>
-        {% if analysis.short_scenario.insufficiency_reason %}<span>{{ analysis.short_scenario.insufficiency_reason }}</span>{% endif %}
+        {% if analysis.short_forecast_scenario.insufficiency_reason %}<span>{{ analysis.short_forecast_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
       <article>
         <small>6-12 month scenario</small>
-        <strong>{{ analysis.medium_scenario|scenario_range }}</strong>
+        <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
         <span>
-          {% if analysis.medium_scenario.method %}
-            {{ analysis.medium_scenario.method|display_label }}
+          {% if analysis.legacy_medium_forecast_scenario.method %}
+            {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
           {% else %}
             Bear / base / bull
           {% endif %}
         </span>
-        {% if analysis.medium_scenario.insufficiency_reason %}<span>{{ analysis.medium_scenario.insufficiency_reason }}</span>{% endif %}
+        {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
       </article>
       <article>
         <small>3+ year scenario</small>
@@ -103,15 +103,15 @@
             </ul>
           {% endif %}
         {% else %}
-          <strong>{{ analysis.long_scenario|scenario_range }}</strong>
+          <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
           <span>
-            {% if analysis.long_scenario.method %}
-              {{ analysis.long_scenario.method|display_label }}
+            {% if analysis.legacy_long_forecast_scenario.method %}
+              {{ analysis.legacy_long_forecast_scenario.method|display_label }}
             {% else %}
               Explicit uncertainty
             {% endif %}
           </span>
-          {% if analysis.long_scenario.insufficiency_reason %}<span>{{ analysis.long_scenario.insufficiency_reason }}</span>{% endif %}
+          {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
         {% endif %}
       </article>
     </section>

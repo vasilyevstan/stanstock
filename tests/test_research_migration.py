@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime
 from importlib import import_module
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_analysis_cutoff_backfill_preserves_legacy_generation_time() -> None:
     migration = import_module(
@@ -136,6 +138,192 @@ def test_prediction_issued_on_time_backfill_requires_original_run_timestamp() ->
     migration.mark_existing_on_time_predictions(apps, schema_editor=None)
 
     assert updates == [("original", {"issued_on_time": True})]
+
+
+def test_explicit_forecast_migration_preserves_legacy_scenario_identities() -> None:
+    migration = import_module("stanstock.research.migrations.0008_explicit_forecast_horizons")
+    analysis = SimpleNamespace(
+        pk="analysis-1",
+        short_scenario={"base": 0.01},
+        medium_scenario={"base": 0.12},
+        long_scenario={"base": 0.40},
+    )
+    updates: list[dict[str, object]] = []
+
+    class QuerySet:
+        def __init__(self, *, rows=None) -> None:
+            self.rows = rows
+
+        def iterator(self, *, chunk_size: int):
+            assert chunk_size == 500
+            assert self.rows is not None
+            return iter(self.rows)
+
+        def update(self, **values: object) -> None:
+            updates.append(values)
+
+    class Manager:
+        def all(self) -> QuerySet:
+            return QuerySet(rows=[analysis])
+
+        def filter(self, **criteria: object) -> QuerySet:
+            assert criteria == {"pk": analysis.pk}
+            return QuerySet()
+
+    stock_analysis = SimpleNamespace(objects=Manager())
+    apps = SimpleNamespace(get_model=lambda app_label, model_name: stock_analysis)
+
+    migration.backfill_forecast_scenarios(apps, schema_editor=None)
+
+    assert updates == [
+        {
+            "forecast_scenarios": {
+                "schema_version": 1,
+                "horizons": {
+                    "short": {"base": 0.01},
+                    "medium": {"base": 0.12},
+                    "long": {"base": 0.40},
+                },
+            }
+        }
+    ]
+
+
+def test_prediction_metadata_backfill_uses_only_exact_listing_price_asset() -> None:
+    migration = import_module("stanstock.research.migrations.0008_explicit_forecast_horizons")
+    prediction = SimpleNamespace(
+        pk="prediction-1",
+        horizon="medium",
+        model_version="legacy-v1",
+        config_hash="b" * 64,
+        overall_score=70,
+        component_scores={"components": {"quality": 80}},
+        source_assets=[
+            {
+                "provider": "twelve_data",
+                "kind": "price_history",
+                "subject": "ACME",
+            },
+            {
+                "provider": "other_provider",
+                "kind": "price_history",
+                "subject": "SPY",
+            },
+        ],
+        listing=SimpleNamespace(provider_symbol="ACME", ticker="ACME"),
+        analysis=SimpleNamespace(
+            short_scenario={},
+            medium_scenario={"method": "historical_quantiles"},
+            long_scenario={},
+            data_quality={
+                "return_definition": "split-adjusted_price_return",
+                "dividends_included": False,
+            },
+            run=SimpleNamespace(
+                config_version="us-price-baseline-v1",
+                universe_snapshot=SimpleNamespace(grade="observed"),
+            ),
+        ),
+    )
+    updates: list[dict[str, object]] = []
+
+    class QuerySet:
+        def __init__(self, *, rows=None) -> None:
+            self.rows = rows
+
+        def select_related(self, *fields: str):
+            assert fields == (
+                "listing",
+                "analysis__run__universe_snapshot",
+            )
+            return self
+
+        def iterator(self, *, chunk_size: int):
+            assert chunk_size == 500
+            assert self.rows is not None
+            return iter(self.rows)
+
+        def update(self, **values: object) -> None:
+            updates.append(values)
+
+    class Manager:
+        def select_related(self, *fields: str) -> QuerySet:
+            return QuerySet(rows=[prediction]).select_related(*fields)
+
+        def filter(self, **criteria: object) -> QuerySet:
+            assert criteria == {"pk": prediction.pk}
+            return QuerySet()
+
+    prediction_model = SimpleNamespace(objects=Manager())
+    apps = SimpleNamespace(get_model=lambda app_label, model_name: prediction_model)
+
+    migration.backfill_prediction_metadata(apps, schema_editor=None)
+
+    assert updates[0]["evidence_role"] == "decision"
+    assert updates[0]["evidence_grade"] == "observed"
+    assert updates[0]["source_mode"] == "provider"
+    assert updates[0]["price_provider"] == "twelve_data"
+    assert updates[0]["price_subject"] == "ACME"
+    assert updates[0]["method_version"] == "us-price-baseline-v1"
+    calculation = updates[0]["calculation"]
+    assert isinstance(calculation, dict)
+    assert calculation["forecast_horizon"] == "medium"
+    assert calculation["score_group"] == "medium"
+    assert calculation["method_version"] == "us-price-baseline-v1"
+    assert calculation["prediction_version"] == "legacy-v1"
+    assert calculation["provenance"] == {
+        "backfilled_from_legacy": True,
+        "provenance_strengthened": False,
+    }
+
+
+def test_explicit_forecast_migration_refuses_lossy_reverse() -> None:
+    migration = import_module("stanstock.research.migrations.0008_explicit_forecast_horizons")
+    analysis = SimpleNamespace(
+        forecast_scenarios={
+            "schema_version": 1,
+            "horizons": {
+                "short": {"base": 0.01},
+                "medium": {"base": 0.12},
+                "long": {"base": 0.40},
+                "6m": {"base": 0.08},
+            },
+        },
+        short_scenario={"base": 0.01},
+        medium_scenario={"base": 0.12},
+        long_scenario={"base": 0.40},
+    )
+
+    class EmptyPredictionQuerySet:
+        def exists(self) -> bool:
+            return False
+
+    class PredictionManager:
+        def filter(self, *args: object, **kwargs: object) -> EmptyPredictionQuerySet:
+            return EmptyPredictionQuerySet()
+
+    class AnalysisQuerySet:
+        def only(self, *fields: str):
+            return self
+
+        def iterator(self, *, chunk_size: int):
+            assert chunk_size == 500
+            return iter([analysis])
+
+    class AnalysisManager:
+        def only(self, *fields: str) -> AnalysisQuerySet:
+            return AnalysisQuerySet().only(*fields)
+
+    models = {
+        "Prediction": SimpleNamespace(objects=PredictionManager()),
+        "StockAnalysis": SimpleNamespace(objects=AnalysisManager()),
+    }
+    apps = SimpleNamespace(
+        get_model=lambda app_label, model_name: models[model_name],
+    )
+
+    with pytest.raises(RuntimeError, match="unrepresentable scenarios exist"):
+        migration.reject_unsafe_reverse(apps, schema_editor=None)
 
 
 def test_latest_market_session_backfill_prefers_asset_period_end() -> None:

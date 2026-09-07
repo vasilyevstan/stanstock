@@ -6,7 +6,8 @@ from uuid import UUID
 
 from django.core.management.base import BaseCommand, CommandError
 
-from stanstock.research.models import Prediction, PredictionOutcome
+from stanstock.research.jobs import eligible_pending_predictions
+from stanstock.research.models import Prediction
 from stanstock.research.outcomes import evaluate_predictions
 
 
@@ -30,11 +31,17 @@ class Command(BaseCommand):
         if all_pending == bool(ids):
             raise CommandError("Provide either prediction IDs or --all-pending, but not both")
         evaluation_date = _parse_date(options["evaluation_date"])
+        provider = str(options["provider"])
         benchmark_subject = options.get("benchmark_subject")
-        predictions = _select_predictions(ids, all_pending)
+        predictions = _select_predictions(
+            ids,
+            all_pending,
+            provider=provider,
+            evaluation_date=evaluation_date,
+        )
         results = evaluate_predictions(
             predictions,
-            provider=str(options["provider"]),
+            provider=provider,
             evaluation_date=evaluation_date,
             benchmark_subject=str(benchmark_subject) if benchmark_subject is not None else None,
         )
@@ -52,10 +59,19 @@ def _parse_date(raw: object) -> date:
         raise CommandError("--evaluation-date must use YYYY-MM-DD") from exc
 
 
-def _select_predictions(ids: list[str], all_pending: bool) -> list[Prediction]:
+def _select_predictions(
+    ids: list[str],
+    all_pending: bool,
+    *,
+    provider: str,
+    evaluation_date: date,
+) -> list[Prediction]:
     queryset = Prediction.objects.select_related("listing").order_by("generated_at", "id")
     if all_pending:
-        return list(queryset.exclude(outcome__status=PredictionOutcome.Status.MATURED))
+        return eligible_pending_predictions(
+            provider=provider,
+            evaluation_date=evaluation_date,
+        )
     uuids: list[UUID] = []
     try:
         uuids = [UUID(raw) for raw in ids]

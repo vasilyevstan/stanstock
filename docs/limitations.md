@@ -154,6 +154,14 @@ unmeasurable.
 - Confidence is heuristic until calibration evidence exists.
 - Probability of positive return is withheld below its configured sample
   threshold.
+- The explicit `6m`, `12m`, `3y`, and `5y` identities and advisory evaluation
+  fields are available, but the corresponding forecast engines are not yet
+  released. Existing `medium` and `long` rows remain legacy identities rather
+  than being relabeled as exact horizons.
+- Legacy scenario columns remain in storage for rollback compatibility. New
+  application reads use the schema-versioned `forecast_scenarios` document;
+  the old columns can be retired only after all supported deployments have
+  crossed this migration and rollback is no longer required.
 - Long-horizon scenarios are explicit fundamental cases, not precise
   statistically validated forecasts.
 - Simulated or reconstructed performance is not live performance.
