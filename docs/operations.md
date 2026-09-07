@@ -78,6 +78,45 @@ and provider jobs fail closed if another active account exists. Grow, Pro,
 Ultra, and reviewed custom agreements use
 `PERSONAL_INTERNAL_DISPLAY_AUTHORIZED` instead.
 
+### SEC EDGAR fundamentals
+
+SEC EDGAR is unauthenticated and requires no API key. Put only an identifying
+application string and monitored contact address in the ignored, mode-0600
+`.env`:
+
+```bash
+SEC_USER_AGENT="StanStockResearch/0.1 monitored-address@example.com"
+set -a
+. ./.env
+set +a
+uv run python manage.py source_spike \
+  --skip twelve_data,stooq,filings_xbrl_org,ecb
+uv run python manage.py configure_sec --enable
+uv run python manage.py fetch_sec_mapping
+uv run python manage.py sync_sec_fundamentals --target-date YYYY-MM-DD
+```
+
+The preflight must return `sec: ok` before activation. The contact address is
+never stored in Git, the database, a `JobRun`, an asset manifest, or logs; it
+is sent only in SEC request headers. The initial sync preserves the reviewed
+ticker/exchange/CIK mapping, current submissions, every referenced historical
+submissions file, Companyfacts, and current SIC metadata. Repeated identical
+payloads reuse their immutable content asset.
+
+Steady-state automation polls submissions once per company. Companyfacts is
+requested only after changed submissions, when a relevant accession has not
+yet appeared in Companyfacts, or during staggered reconciliation. A newly
+missing accession is checked at most once per calendar day for seven days;
+after that bounded lag window, a fact-less amendment cannot force permanent
+daily downloads and the normal 30-day staggered reconciliation remains the
+backstop. Historical submission files are requested only when first discovered
+or during reconciliation. Successful normalization is checkpointed against
+the Companyfacts content, filing-source set, configuration, and normalizer
+version, so a retry replays cached raw evidence after an interruption instead
+of reporting a false no-op. SEC's configured request rate is five per second,
+below the documented ten-per-second ceiling, and is coordinated through locked
+provider metadata.
+
 The sign-in and sign-out routes remain available if a restored database no
 longer matches the stored licensed user ID. Sign out, ensure exactly one active
 StanStock account remains, then rerun the Basic activation command above from
@@ -152,13 +191,16 @@ private `~/Library/Logs/StanStock` directory.
 `scheduled_refresh` resolves the latest completed XNYS target and maintains an
 aggregate parent `JobRun` with independently recoverable children:
 
-1. `daily` market retrieval, universe snapshot, analysis, and prediction;
-2. provider- and maturity-filtered prediction outcome evaluation;
-3. immutable portfolio snapshots bound to the resolved XNYS session date.
+1. enabled SEC submissions/facts ingestion;
+2. `daily` market retrieval, universe snapshot, analysis, and prediction;
+3. provider- and maturity-filtered prediction outcome evaluation;
+4. immutable portfolio snapshots bound to the resolved XNYS session date.
 
 The automated market child requires a clean Git worktree and records the exact
 40-character HEAD revision. A retry recovers any successful child before
-provider credentials or quota are used again. Evaluation and portfolio
+provider configuration, credentials, or quota are used again. A failed enabled
+SEC child blocks market analysis so stale or absent facts cannot look current.
+Evaluation and portfolio
 snapshots are attempted independently after market success, so one downstream
 failure does not hide the other's result. Holidays and already completed
 targets become explicit skips. If macOS wakes the job after the next XNYS

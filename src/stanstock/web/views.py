@@ -26,7 +26,10 @@ from stanstock.data.etfs import (
 )
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import (
+    CompanyClassificationObservation,
     DataAsset,
+    FundamentalFact,
+    FundamentalFactEvidence,
     LatestMarketData,
     Listing,
     ProviderRecord,
@@ -134,6 +137,34 @@ def status_page(request: HttpRequest) -> HttpResponse:
         if latest_run is not None
         else None
     )
+    sec_facts = FundamentalFact.objects.filter(provider="sec")
+    sec_facts_with_filing_evidence = sec_facts.filter(
+        evidence_links__role=FundamentalFactEvidence.Role.FILING
+    ).distinct()
+    sec_coverage = {
+        "mapped_companies": Listing.objects.filter(
+            region=Region.US,
+            is_active=True,
+            security__security_type__in=(
+                Security.SecurityType.COMMON_STOCK,
+                Security.SecurityType.ADR,
+            ),
+        )
+        .exclude(security__company__cik="")
+        .values("security__company_id")
+        .distinct()
+        .count(),
+        "companies_with_facts": sec_facts_with_filing_evidence.values("company_id")
+        .distinct()
+        .count(),
+        "facts": sec_facts_with_filing_evidence.count(),
+        "fact_revisions": sec_facts.count(),
+        "classifications": CompanyClassificationObservation.objects.filter(
+            provider="sec",
+            scheme="sec_sic",
+        ).count(),
+        "latest_asset": DataAsset.objects.filter(provider="sec").order_by("-retrieved_at").first(),
+    }
     context = {
         "components": components,
         "system_ok": all(bool(component["ok"]) for component in components),
@@ -148,6 +179,7 @@ def status_page(request: HttpRequest) -> HttpResponse:
         "recent_jobs": JobRun.objects.order_by("-started_at")[:5],
         "scheduler": _scheduler_status(),
         "medium_panel": medium_panel,
+        "sec_coverage": sec_coverage,
         "prediction_count": Prediction.objects.filter(analysis__run=latest_run).count()
         if latest_run
         else 0,

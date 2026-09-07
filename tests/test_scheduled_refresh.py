@@ -16,7 +16,7 @@ from stanstock.core.management.commands import scheduled_refresh
 from stanstock.core.models import JobRun
 from stanstock.data.jobs import PreparedUsDailyJob, execute_us_daily_job
 from stanstock.data.live_us import UsUniverseConfig
-from stanstock.data.models import UniverseSnapshot
+from stanstock.data.models import ProviderRecord, UniverseSnapshot
 
 pytestmark = pytest.mark.django_db
 
@@ -177,3 +177,186 @@ def test_automatic_daily_child_refuses_late_research_grade(
 
     failed = JobRun.objects.get(job_name="daily")
     assert failed.status == JobRun.Status.FAILED
+
+
+def test_enabled_sec_stage_runs_before_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared()
+    order: list[str] = []
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: "a" * 40,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        lambda **kwargs: (
+            order.append("sec") or _successful_child("sec_fundamentals", "us", prepared.target_date)
+        ),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda *args, **kwargs: (
+            order.append("market") or _successful_child("daily", "us", prepared.target_date)
+        ),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        lambda **kwargs: _successful_child(
+            "evaluate_predictions",
+            "us",
+            prepared.target_date,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_portfolio_snapshot_job",
+        lambda **kwargs: _successful_child(
+            "scheduled_portfolio_snapshots",
+            "",
+            prepared.target_date,
+        ),
+    )
+
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+
+    assert order == ["sec", "market"]
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.SUCCESS
+
+
+def test_failed_sec_stage_blocks_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared()
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: "a" * 40,
+    )
+
+    def fail_sec(**kwargs: object) -> JobRun:
+        def task(run: JobRun) -> JobExecutionResult:
+            raise ValueError("SEC unavailable")
+
+        return execute_target_job(
+            job_name="sec_fundamentals",
+            region="us",
+            target_date=prepared.target_date,
+            task=task,
+        )
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        fail_sec,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda *args, **kwargs: pytest.fail("market stage must remain blocked"),
+    )
+
+    with pytest.raises(CommandError, match="SEC unavailable"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.FAILED
+    assert "market" not in parent.details["stages"]
+
+
+def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared()
+    _successful_child("sec_fundamentals", "us", prepared.target_date)
+    ProviderRecord.objects.create(provider="sec", enabled=False, status="disabled")
+    sec_calls = 0
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: "a" * 40,
+    )
+
+    def recover_sec(**kwargs: object) -> JobRun:
+        nonlocal sec_calls
+        sec_calls += 1
+        return _successful_child("sec_fundamentals", "us", prepared.target_date)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        recover_sec,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda *args, **kwargs: _successful_child(
+            "daily",
+            "us",
+            prepared.target_date,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        lambda **kwargs: _successful_child(
+            "evaluate_predictions",
+            "us",
+            prepared.target_date,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_portfolio_snapshot_job",
+        lambda **kwargs: _successful_child(
+            "scheduled_portfolio_snapshots",
+            "",
+            prepared.target_date,
+        ),
+    )
+
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+
+    assert sec_calls == 1
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.SKIPPED

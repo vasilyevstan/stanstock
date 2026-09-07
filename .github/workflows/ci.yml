@@ -103,6 +103,8 @@ jobs:
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \
             tests/test_research_outcomes.py::test_outcome_role_integrity_triggers_are_installed \
+            tests/test_data_immutability.py::test_company_classification_is_immutable_at_model_and_database_layers \
+            tests/test_data_immutability.py::test_fundamental_fact_evidence_is_immutable_at_model_and_database_layers \
             --ds=stanstock.settings.dev
 
   container:

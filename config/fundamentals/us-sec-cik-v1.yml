@@ -1,0 +1,108 @@
+schema_version: 1
+config_version: us-sec-cik-v1
+universe_config_version: us-liquid-starter-v1
+source_url: https://www.sec.gov/files/company_tickers_exchange.json
+source_retrieved_at: 2026-09-07T16:49:07.860026+00:00
+source_sha256: ec43db74f82d1739cce6340f36b9695dcb51231fc38edd493215677627bb01cd
+mappings:
+  AAPL: {"cik":"0000320193","official_ticker":"AAPL","exchange":"Nasdaq","company_name":"Apple Inc."}
+  MSFT: {"cik":"0000789019","official_ticker":"MSFT","exchange":"Nasdaq","company_name":"MICROSOFT CORP"}
+  NVDA: {"cik":"0001045810","official_ticker":"NVDA","exchange":"Nasdaq","company_name":"NVIDIA CORP"}
+  AMZN: {"cik":"0001018724","official_ticker":"AMZN","exchange":"Nasdaq","company_name":"AMAZON COM INC"}
+  GOOGL: {"cik":"0001652044","official_ticker":"GOOGL","exchange":"Nasdaq","company_name":"Alphabet Inc."}
+  META: {"cik":"0001326801","official_ticker":"META","exchange":"Nasdaq","company_name":"Meta Platforms, Inc."}
+  AVGO: {"cik":"0001730168","official_ticker":"AVGO","exchange":"Nasdaq","company_name":"Broadcom Inc."}
+  TSLA: {"cik":"0001318605","official_ticker":"TSLA","exchange":"Nasdaq","company_name":"Tesla, Inc."}
+  JPM: {"cik":"0000019617","official_ticker":"JPM","exchange":"NYSE","company_name":"JPMORGAN CHASE & CO"}
+  WMT: {"cik":"0000104169","official_ticker":"WMT","exchange":"Nasdaq","company_name":"Walmart Inc."}
+  V: {"cik":"0001403161","official_ticker":"V","exchange":"NYSE","company_name":"VISA INC."}
+  LLY: {"cik":"0000059478","official_ticker":"LLY","exchange":"NYSE","company_name":"ELI LILLY & Co"}
+  ORCL: {"cik":"0001341439","official_ticker":"ORCL","exchange":"NYSE","company_name":"ORACLE CORP"}
+  XOM: {"cik":"0002115436","official_ticker":"XOM","exchange":"NYSE","company_name":"ExxonMobil Holdings Corp"}
+  MA: {"cik":"0001141391","official_ticker":"MA","exchange":"NYSE","company_name":"Mastercard Inc"}
+  COST: {"cik":"0000909832","official_ticker":"COST","exchange":"Nasdaq","company_name":"COSTCO WHOLESALE CORP /NEW"}
+  NFLX: {"cik":"0001065280","official_ticker":"NFLX","exchange":"Nasdaq","company_name":"NETFLIX INC"}
+  JNJ: {"cik":"0000200406","official_ticker":"JNJ","exchange":"NYSE","company_name":"JOHNSON & JOHNSON"}
+  HD: {"cik":"0000354950","official_ticker":"HD","exchange":"NYSE","company_name":"HOME DEPOT, INC."}
+  PG: {"cik":"0000080424","official_ticker":"PG","exchange":"NYSE","company_name":"PROCTER & GAMBLE Co"}
+  BAC: {"cik":"0000070858","official_ticker":"BAC","exchange":"NYSE","company_name":"BANK OF AMERICA CORP /DE/"}
+  ABBV: {"cik":"0001551152","official_ticker":"ABBV","exchange":"NYSE","company_name":"AbbVie Inc."}
+  KO: {"cik":"0000021344","official_ticker":"KO","exchange":"NYSE","company_name":"COCA COLA CO"}
+  CRM: {"cik":"0001108524","official_ticker":"CRM","exchange":"NYSE","company_name":"Salesforce, Inc."}
+  AMD: {"cik":"0000002488","official_ticker":"AMD","exchange":"Nasdaq","company_name":"ADVANCED MICRO DEVICES INC"}
+  PLTR: {"cik":"0001321655","official_ticker":"PLTR","exchange":"Nasdaq","company_name":"Palantir Technologies Inc."}
+  GE: {"cik":"0000040545","official_ticker":"GE","exchange":"NYSE","company_name":"GENERAL ELECTRIC CO"}
+  CSCO: {"cik":"0000858877","official_ticker":"CSCO","exchange":"Nasdaq","company_name":"CISCO SYSTEMS, INC."}
+  IBM: {"cik":"0000051143","official_ticker":"IBM","exchange":"NYSE","company_name":"INTERNATIONAL BUSINESS MACHINES CORP"}
+  CVX: {"cik":"0000093410","official_ticker":"CVX","exchange":"NYSE","company_name":"CHEVRON CORP"}
+  MRK: {"cik":"0000310158","official_ticker":"MRK","exchange":"NYSE","company_name":"Merck & Co., Inc."}
+  CAT: {"cik":"0000018230","official_ticker":"CAT","exchange":"NYSE","company_name":"CATERPILLAR INC"}
+  UNH: {"cik":"0000731766","official_ticker":"UNH","exchange":"NYSE","company_name":"UNITEDHEALTH GROUP INC"}
+  PM: {"cik":"0001413329","official_ticker":"PM","exchange":"NYSE","company_name":"Philip Morris International Inc."}
+  WFC: {"cik":"0000072971","official_ticker":"WFC","exchange":"NYSE","company_name":"WELLS FARGO & COMPANY/MN"}
+  MCD: {"cik":"0000063908","official_ticker":"MCD","exchange":"NYSE","company_name":"MCDONALDS CORP"}
+  ABT: {"cik":"0000001800","official_ticker":"ABT","exchange":"NYSE","company_name":"ABBOTT LABORATORIES"}
+  TMO: {"cik":"0000097745","official_ticker":"TMO","exchange":"NYSE","company_name":"THERMO FISHER SCIENTIFIC INC."}
+  DIS: {"cik":"0001744489","official_ticker":"DIS","exchange":"NYSE","company_name":"Walt Disney Co"}
+  INTU: {"cik":"0000896878","official_ticker":"INTU","exchange":"Nasdaq","company_name":"INTUIT INC."}
+  QCOM: {"cik":"0000804328","official_ticker":"QCOM","exchange":"Nasdaq","company_name":"QUALCOMM INC/DE"}
+  AMGN: {"cik":"0000318154","official_ticker":"AMGN","exchange":"Nasdaq","company_name":"AMGEN INC"}
+  GS: {"cik":"0000886982","official_ticker":"GS","exchange":"NYSE","company_name":"GOLDMAN SACHS GROUP INC"}
+  TXN: {"cik":"0000097476","official_ticker":"TXN","exchange":"Nasdaq","company_name":"TEXAS INSTRUMENTS INC"}
+  RTX: {"cik":"0000101829","official_ticker":"RTX","exchange":"NYSE","company_name":"RTX Corp"}
+  ISRG: {"cik":"0001035267","official_ticker":"ISRG","exchange":"Nasdaq","company_name":"INTUITIVE SURGICAL INC"}
+  NOW: {"cik":"0001373715","official_ticker":"NOW","exchange":"NYSE","company_name":"ServiceNow, Inc."}
+  BKNG: {"cik":"0001075531","official_ticker":"BKNG","exchange":"Nasdaq","company_name":"Booking Holdings Inc."}
+  AMAT: {"cik":"0000006951","official_ticker":"AMAT","exchange":"Nasdaq","company_name":"APPLIED MATERIALS INC /DE"}
+  SPGI: {"cik":"0000064040","official_ticker":"SPGI","exchange":"NYSE","company_name":"S&P Global Inc."}
+  PEP: {"cik":"0000077476","official_ticker":"PEP","exchange":"Nasdaq","company_name":"PEPSICO INC"}
+  DHR: {"cik":"0000313616","official_ticker":"DHR","exchange":"NYSE","company_name":"DANAHER CORP /DE/"}
+  BLK: {"cik":"0002012383","official_ticker":"BLK","exchange":"NYSE","company_name":"BlackRock, Inc."}
+  LOW: {"cik":"0000060667","official_ticker":"LOW","exchange":"NYSE","company_name":"LOWES COMPANIES INC"}
+  C: {"cik":"0000831001","official_ticker":"C","exchange":"NYSE","company_name":"CITIGROUP INC"}
+  ADP: {"cik":"0000008670","official_ticker":"ADP","exchange":"Nasdaq","company_name":"AUTOMATIC DATA PROCESSING INC"}
+  GILD: {"cik":"0000882095","official_ticker":"GILD","exchange":"Nasdaq","company_name":"GILEAD SCIENCES, INC."}
+  SYK: {"cik":"0000310764","official_ticker":"SYK","exchange":"NYSE","company_name":"STRYKER CORP"}
+  PGR: {"cik":"0000080661","official_ticker":"PGR","exchange":"NYSE","company_name":"PROGRESSIVE CORP/OH/"}
+  MDLZ: {"cik":"0001103982","official_ticker":"MDLZ","exchange":"Nasdaq","company_name":"Mondelez International, Inc."}
+  PANW: {"cik":"0001327567","official_ticker":"PANW","exchange":"Nasdaq","company_name":"Palo Alto Networks Inc"}
+  LRCX: {"cik":"0000707549","official_ticker":"LRCX","exchange":"Nasdaq","company_name":"LAM RESEARCH CORP"}
+  CB: {"cik":"0000896159","official_ticker":"CB","exchange":"NYSE","company_name":"Chubb Ltd"}
+  MU: {"cik":"0000723125","official_ticker":"MU","exchange":"Nasdaq","company_name":"MICRON TECHNOLOGY INC"}
+  KLAC: {"cik":"0000319201","official_ticker":"KLAC","exchange":"Nasdaq","company_name":"KLA CORP"}
+  CME: {"cik":"0001156375","official_ticker":"CME","exchange":"Nasdaq","company_name":"CME GROUP INC."}
+  ADI: {"cik":"0000006281","official_ticker":"ADI","exchange":"Nasdaq","company_name":"ANALOG DEVICES INC"}
+  SO: {"cik":"0000092122","official_ticker":"SO","exchange":"NYSE","company_name":"SOUTHERN CO"}
+  DUK: {"cik":"0001326160","official_ticker":"DUK","exchange":"NYSE","company_name":"Duke Energy CORP"}
+  NEE: {"cik":"0000753308","official_ticker":"NEE","exchange":"NYSE","company_name":"NEXTERA ENERGY INC"}
+  COP: {"cik":"0001163165","official_ticker":"COP","exchange":"NYSE","company_name":"CONOCOPHILLIPS"}
+  SCHW: {"cik":"0000316709","official_ticker":"SCHW","exchange":"NYSE","company_name":"SCHWAB CHARLES CORP"}
+  TJX: {"cik":"0000109198","official_ticker":"TJX","exchange":"NYSE","company_name":"TJX COMPANIES INC /DE/"}
+  UPS: {"cik":"0001090727","official_ticker":"UPS","exchange":"NYSE","company_name":"UNITED PARCEL SERVICE INC"}
+  BA: {"cik":"0000012927","official_ticker":"BA","exchange":"NYSE","company_name":"BOEING CO"}
+  DE: {"cik":"0000315189","official_ticker":"DE","exchange":"NYSE","company_name":"DEERE & CO"}
+  ELV: {"cik":"0001156039","official_ticker":"ELV","exchange":"NYSE","company_name":"Elevance Health, Inc."}
+  MO: {"cik":"0000764180","official_ticker":"MO","exchange":"NYSE","company_name":"ALTRIA GROUP, INC."}
+  ICE: {"cik":"0001571949","official_ticker":"ICE","exchange":"NYSE","company_name":"Intercontinental Exchange, Inc."}
+  BMY: {"cik":"0000014272","official_ticker":"BMY","exchange":"NYSE","company_name":"BRISTOL MYERS SQUIBB CO"}
+  FISV: {"cik":"0000798354","official_ticker":"FISV","exchange":"Nasdaq","company_name":"FISERV INC"}
+  MRSH: {"cik":"0000062709","official_ticker":"MRSH","exchange":"NYSE","company_name":"MARSH & MCLENNAN COMPANIES, INC."}
+  APH: {"cik":"0000820313","official_ticker":"APH","exchange":"NYSE","company_name":"AMPHENOL CORP /DE/"}
+  SHW: {"cik":"0000089800","official_ticker":"SHW","exchange":"NYSE","company_name":"SHERWIN WILLIAMS CO"}
+  WM: {"cik":"0000823768","official_ticker":"WM","exchange":"NYSE","company_name":"WASTE MANAGEMENT INC"}
+  USB: {"cik":"0000036104","official_ticker":"USB","exchange":"NYSE","company_name":"US BANCORP DE"}
+  MCO: {"cik":"0001059556","official_ticker":"MCO","exchange":"NYSE","company_name":"MOODYS CORP /DE/"}
+  CVS: {"cik":"0000064803","official_ticker":"CVS","exchange":"NYSE","company_name":"CVS HEALTH Corp"}
+  EOG: {"cik":"0000821189","official_ticker":"EOG","exchange":"NYSE","company_name":"EOG RESOURCES INC"}
+  AON: {"cik":"0000315293","official_ticker":"AON","exchange":"NYSE","company_name":"Aon plc"}
+  CI: {"cik":"0001739940","official_ticker":"CI","exchange":"NYSE","company_name":"Cigna Group"}
+  CL: {"cik":"0000021665","official_ticker":"CL","exchange":"NYSE","company_name":"COLGATE PALMOLIVE CO"}
+  HCA: {"cik":"0000860730","official_ticker":"HCA","exchange":"NYSE","company_name":"HCA Healthcare, Inc."}
+  SLB: {"cik":"0000087347","official_ticker":"SLB","exchange":"NYSE","company_name":"SLB LIMITED/NV"}
+  MAR: {"cik":"0001048286","official_ticker":"MAR","exchange":"Nasdaq","company_name":"MARRIOTT INTERNATIONAL INC /MD/"}
+  ORLY: {"cik":"0000898173","official_ticker":"ORLY","exchange":"Nasdaq","company_name":"O REILLY AUTOMOTIVE INC"}
+  CTAS: {"cik":"0000723254","official_ticker":"CTAS","exchange":"Nasdaq","company_name":"CINTAS CORP"}
+  GD: {"cik":"0000040533","official_ticker":"GD","exchange":"NYSE","company_name":"GENERAL DYNAMICS CORP"}
+  HON: {"cik":"0000773840","official_ticker":"HON","exchange":"Nasdaq","company_name":"HONEYWELL INTERNATIONAL INC"}
+  LIN: {"cik":"0001707925","official_ticker":"LIN","exchange":"Nasdaq","company_name":"LINDE PLC"}
+excluded: {}

@@ -9,7 +9,13 @@ from django.core.management import call_command
 
 from stanstock.data.asof import AsOfData, PriceFrameSchemaError
 from stanstock.data.assets import AssetStore, register_asset
-from stanstock.data.models import DataAsset, FundamentalFact, FxRate, Listing
+from stanstock.data.models import (
+    CompanyClassificationObservation,
+    DataAsset,
+    FundamentalFact,
+    FxRate,
+    Listing,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -78,6 +84,45 @@ def test_fundamental_facts_not_visible_before_filing_delay_elapses() -> None:
     # the 6-hour post-filing delay means the fact filed at exactly filed_at
     # (with available_at = filed_at + 6h) is not yet visible.
     assert fact_2023.period_end not in period_ends
+
+
+def test_company_classification_respects_source_asset_availability() -> None:
+    call_command("seed_demo")
+    listing = Listing.objects.get(ticker="ZZUS001")
+    source_asset = DataAsset.objects.filter(
+        provider="synthetic_demo",
+        kind="fundamentals",
+        subject__startswith="ZZUS001:",
+    ).first()
+    assert source_asset is not None
+    observation = CompanyClassificationObservation.objects.create(
+        company=listing.security.company,
+        provider="sec",
+        scheme="sec_sic",
+        code="3571",
+        observed_at=source_asset.available_at,
+        available_at=source_asset.available_at,
+        source_asset=source_asset,
+    )
+
+    before = AsOfData(observation.available_at - timedelta(seconds=1))
+    assert (
+        list(
+            before.company_classifications(
+                company_id=listing.security.company_id,
+                scheme="sec_sic",
+            )
+        )
+        == []
+    )
+
+    at_observation = AsOfData(observation.available_at)
+    assert list(
+        at_observation.company_classifications(
+            company_id=listing.security.company_id,
+            scheme="sec_sic",
+        )
+    ) == [observation]
 
 
 def test_fx_rate_hidden_before_its_publication_convention_time() -> None:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC, datetime
 
 from stanstock.data.providers.contracts import FundamentalSourcePayload
@@ -32,10 +33,15 @@ from stanstock.data.providers.exceptions import (
 from stanstock.data.providers.http import HttpFetchResult, fetch
 
 PROVIDER = "sec"
+TERMS_URL = "https://www.sec.gov/about/developer-resources"
+USAGE_SCOPE = "public_edgar_api_private_research"
+TICKER_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+SUBMISSIONS_HISTORY_URL = "https://data.sec.gov/submissions/{filename}"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 _RECENT_FIELD_LIMIT = 25
 _ACCESSION_LIMIT = 50
+_SUBMISSIONS_HISTORY_PATTERN = re.compile(r"^CIK\d{10}-submissions-\d{3}\.json$")
 
 
 def build_user_agent(explicit: str | None = None) -> str:
@@ -90,6 +96,50 @@ def fetch_submissions(
     )
 
 
+def fetch_ticker_exchange_mapping(
+    *,
+    user_agent: str | None = None,
+) -> FundamentalSourcePayload:
+    """Fetch the SEC's current ticker/exchange/CIK mapping."""
+    ua = build_user_agent(user_agent)
+    result = fetch(TICKER_EXCHANGE_URL, user_agent=ua)
+    _raise_for_sec_status(result, subject="company_tickers_exchange")
+    metadata = _extract_ticker_exchange_metadata(result.content)
+    return FundamentalSourcePayload(
+        provider=PROVIDER,
+        subject="company_tickers_exchange",
+        content=result.content,
+        content_type=result.content_type or "application/json",
+        retrieved_at=datetime.now(tz=UTC),
+        source_url=result.url,
+        metadata=metadata,
+    )
+
+
+def fetch_submissions_history(
+    filename: str,
+    *,
+    user_agent: str | None = None,
+) -> FundamentalSourcePayload:
+    """Fetch one historical submissions file referenced by ``filings.files``."""
+    normalized = filename.strip()
+    if not _SUBMISSIONS_HISTORY_PATTERN.fullmatch(normalized):
+        raise ValueError(f"Invalid SEC submissions history filename: {filename!r}")
+    ua = build_user_agent(user_agent)
+    result = fetch(SUBMISSIONS_HISTORY_URL.format(filename=normalized), user_agent=ua)
+    _raise_for_sec_status(result, subject=normalized)
+    metadata = _extract_submission_rows_metadata(result.content, subject=normalized)
+    return FundamentalSourcePayload(
+        provider=PROVIDER,
+        subject=normalized,
+        content=result.content,
+        content_type=result.content_type or "application/json",
+        retrieved_at=datetime.now(tz=UTC),
+        source_url=result.url,
+        metadata=metadata,
+    )
+
+
 def fetch_companyfacts(
     cik: str | int,
     *,
@@ -117,7 +167,7 @@ def fetch_companyfacts(
 def _raise_for_sec_status(result: HttpFetchResult, *, subject: str) -> None:
     if result.status_code == 403:
         raise ProviderBlockedError(
-            f"SEC returned HTTP 403 for CIK {subject}. In StanStock's own "
+            f"SEC returned HTTP 403 for {subject}. In StanStock's own "
             "spike this reproduced even with a compliant SEC_USER_AGENT and "
             "was treated as environment/network egress blocking rather than "
             "SEC declaring the endpoint off-limits (see docs/source-spike.md). "
@@ -125,16 +175,16 @@ def _raise_for_sec_status(result: HttpFetchResult, *, subject: str) -> None:
             "access is unavailable to this deployment."
         )
     if result.status_code == 404:
-        raise ProviderResponseError(f"SEC has no record for CIK {subject} (HTTP 404)")
+        raise ProviderResponseError(f"SEC has no record for {subject} (HTTP 404)")
     if result.status_code >= 400:
         raise ProviderResponseError(
-            f"SEC returned unexpected HTTP {result.status_code} for CIK {subject}"
+            f"SEC returned unexpected HTTP {result.status_code} for {subject}"
         )
     content_type = result.content_type.lower()
     stripped = result.content.strip()
     if "json" not in content_type and not stripped.startswith(b"{"):
         raise ProviderResponseError(
-            f"SEC response for CIK {subject} was not JSON (content-type={content_type!r})"
+            f"SEC response for {subject} was not JSON (content-type={content_type!r})"
         )
 
 
@@ -155,9 +205,20 @@ def _extract_submissions_metadata(payload: bytes, *, subject: str) -> dict[str, 
     filings = data.get("filings")
     recent = filings.get("recent") if isinstance(filings, dict) else None
     recent = recent if isinstance(recent, dict) else {}
+    files = filings.get("files") if isinstance(filings, dict) else None
+    files = files if isinstance(files, list) else []
     return {
         "entity_name": data.get("name"),
         "cik": data.get("cik"),
+        "sic": data.get("sic"),
+        "sic_description": data.get("sicDescription"),
+        "tickers": data.get("tickers") if isinstance(data.get("tickers"), list) else [],
+        "exchanges": data.get("exchanges") if isinstance(data.get("exchanges"), list) else [],
+        "historical_files": [
+            item
+            for item in files
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and item.get("name")
+        ],
         "recent_accession_numbers": list(recent.get("accessionNumber", []))[:_RECENT_FIELD_LIMIT],
         "recent_forms": list(recent.get("form", []))[:_RECENT_FIELD_LIMIT],
         "recent_filing_dates": list(recent.get("filingDate", []))[:_RECENT_FIELD_LIMIT],
@@ -165,6 +226,45 @@ def _extract_submissions_metadata(payload: bytes, *, subject: str) -> dict[str, 
             :_RECENT_FIELD_LIMIT
         ],
     }
+
+
+def _extract_submission_rows_metadata(payload: bytes, *, subject: str) -> dict[str, object]:
+    data = _load_json(payload, subject=subject, kind="submissions history")
+    accessions = data.get("accessionNumber")
+    forms = data.get("form")
+    filing_dates = data.get("filingDate")
+    acceptance_datetimes = data.get("acceptanceDateTime")
+    return {
+        "row_count": len(accessions) if isinstance(accessions, list) else 0,
+        "recent_accession_numbers": (
+            accessions[:_RECENT_FIELD_LIMIT] if isinstance(accessions, list) else []
+        ),
+        "recent_forms": forms[:_RECENT_FIELD_LIMIT] if isinstance(forms, list) else [],
+        "recent_filing_dates": (
+            filing_dates[:_RECENT_FIELD_LIMIT] if isinstance(filing_dates, list) else []
+        ),
+        "recent_acceptance_datetimes": (
+            acceptance_datetimes[:_RECENT_FIELD_LIMIT]
+            if isinstance(acceptance_datetimes, list)
+            else []
+        ),
+    }
+
+
+def _extract_ticker_exchange_metadata(payload: bytes) -> dict[str, object]:
+    data = _load_json(payload, subject="company_tickers_exchange", kind="ticker mapping")
+    fields = data.get("fields")
+    rows = data.get("data")
+    if not isinstance(fields, list) or not all(isinstance(item, str) for item in fields):
+        raise ProviderResponseError("SEC ticker mapping fields were missing or invalid")
+    if not isinstance(rows, list):
+        raise ProviderResponseError("SEC ticker mapping data rows were missing or invalid")
+    required = {"cik", "name", "ticker", "exchange"}
+    if not required.issubset(set(fields)):
+        raise ProviderResponseError(
+            f"SEC ticker mapping fields did not contain {sorted(required)!r}"
+        )
+    return {"fields": fields, "row_count": len(rows)}
 
 
 def _extract_companyfacts_metadata(payload: bytes, *, subject: str) -> dict[str, object]:

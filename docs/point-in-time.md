@@ -34,10 +34,40 @@ clipped at creation time.
 
 ## Filing vintages
 
-SEC and ESEF facts are additive. Accessions, source concepts, units, reporting
-periods, filing dates, and availability remain attached to each row. A later
-amendment or restatement creates another fact; it does not overwrite the value
-that was visible to an earlier decision.
+SEC and ESEF facts are additive. SEC rows retain taxonomy, canonical and source
+concept, unit, instant/duration classification, complete start/end period
+identity, fiscal metadata, form, filing date, accession, exact acceptance
+timestamp, availability basis, source revision, observation hash, and raw
+Companyfacts asset. Each SEC fact also has an immutable filing-evidence link to
+the exact current-submissions or historical-submissions asset that supplied
+its acceptance or filing-date boundary. Quarterly and YTD facts sharing an end
+date therefore cannot collide. A changed observation under the same accession
+appends another source revision, including a value that reverts to an older
+number; a later amendment or restatement never overwrites the value visible to
+an earlier decision.
+
+Companyfacts does not carry acceptance time on each observation. StanStock
+joins `accn` to current and historical submissions. Explicit offsets are
+preserved; a naive acceptance timestamp is interpreted in
+`America/New_York`. If only a filing date exists, availability begins
+conservatively at 00:00 New York time on the following local day. An asset
+retrieved later remains gated by its actual retrieval timestamp, so historical
+facts from that asset are research reconstruction rather than observed
+evidence. An as-of read requires both the Companyfacts asset and the linked
+filing-evidence asset to have been retrieved by the decision boundary, so
+acceptance metadata learned later cannot leak through an older Companyfacts
+snapshot.
+
+Instant balance-sheet observations are never subtracted or summed as flows.
+Discrete quarters are accepted directly or derived from compatible YTD
+durations; a newer restated YTD derivation supersedes a stale direct quarter.
+Additive flow TTM values require four exactly adjacent quarters spanning
+350-380 days; weighted diluted shares use duration weighting instead of flow
+subtraction. Free cash flow is derived only as operating cash flow minus the
+absolute compatible capex observation. Debt components remain separate unless
+the taxonomy reports a compatible total. Annual history remains separate from
+TTM. Current SEC SIC metadata is an immutable retrieval-time observation and
+is not backdated across earlier filings.
 
 When a European filing source does not provide the authority's submission
 timestamp, StanStock uses the later known repository-added timestamp. It never
@@ -151,8 +181,8 @@ normal investment return.
   provider modules.
 - Database constraints enforce timestamp ordering, positive source prices,
   bounded returns, and valid score/probability/outcome states.
-- Prediction, data-asset, filing-fact, and FX-vintage updates and deletes fail
-  at both the Django and database layers.
+- Prediction, data-asset, filing-fact, filing-evidence-link, and FX-vintage
+  updates and deletes fail at both the Django and database layers.
 - Tests prove that a later source vintage cannot change an earlier as-of read.
 - SQLite migrations that rebuild a protected table must reinstall its
   immutability triggers afterward; this is covered by mutation tests.

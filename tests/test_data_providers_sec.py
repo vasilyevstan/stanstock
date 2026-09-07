@@ -47,6 +47,18 @@ COMPANYFACTS_JSON = b"""{
     }
 }"""
 
+TICKER_MAPPING_JSON = b"""{
+    "fields": ["cik", "name", "ticker", "exchange"],
+    "data": [[320193, "Apple Inc.", "AAPL", "Nasdaq"]]
+}"""
+
+SUBMISSIONS_HISTORY_JSON = b"""{
+    "accessionNumber": ["0000320193-24-000001"],
+    "form": ["10-K"],
+    "filingDate": ["2024-01-05"],
+    "acceptanceDateTime": ["2024-01-05T16:30:00.000Z"]
+}"""
+
 
 def _result(
     content: bytes, *, status_code: int = 200, content_type: str = "application/json"
@@ -113,6 +125,48 @@ def test_fetch_companyfacts_extracts_accessions(monkeypatch: pytest.MonkeyPatch)
         "0000320193-25-000099": "2025-10-01",
         "0000320193-26-000001": "2026-01-05",
     }
+
+
+def test_fetch_ticker_exchange_mapping_validates_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sec, "fetch", lambda *args, **kwargs: _result(TICKER_MAPPING_JSON))
+
+    payload = sec.fetch_ticker_exchange_mapping(
+        user_agent="StanStockResearch/0.1 admin@example.com"
+    )
+
+    assert payload.subject == "company_tickers_exchange"
+    assert payload.metadata == {
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "row_count": 1,
+    }
+
+
+def test_fetch_submissions_history_rejects_unsafe_filename() -> None:
+    with pytest.raises(ValueError, match="Invalid SEC submissions history filename"):
+        sec.fetch_submissions_history(
+            "../secrets.json",
+            user_agent="StanStockResearch/0.1 admin@example.com",
+        )
+
+
+def test_fetch_submissions_history_extracts_row_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sec,
+        "fetch",
+        lambda *args, **kwargs: _result(SUBMISSIONS_HISTORY_JSON),
+    )
+
+    payload = sec.fetch_submissions_history(
+        "CIK0000320193-submissions-001.json",
+        user_agent="StanStockResearch/0.1 admin@example.com",
+    )
+
+    assert payload.metadata["row_count"] == 1
+    assert payload.metadata["recent_accession_numbers"] == ["0000320193-24-000001"]
 
 
 def test_403_raises_provider_blocked_as_environment_signal(monkeypatch: pytest.MonkeyPatch) -> None:

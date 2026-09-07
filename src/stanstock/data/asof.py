@@ -4,10 +4,16 @@ from datetime import date, datetime
 from uuid import UUID
 
 import polars as pl
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from stanstock.data.assets import AssetStore
-from stanstock.data.models import DataAsset, FundamentalFact, FxRate
+from stanstock.data.models import (
+    CompanyClassificationObservation,
+    DataAsset,
+    FundamentalFact,
+    FundamentalFactEvidence,
+    FxRate,
+)
 
 DATE_COLUMN = "date"
 
@@ -84,10 +90,17 @@ class AsOfData:
             available_at__lte=availability_cutoff,
             source_asset__available_at__lte=self.decision_time,
             source_asset__retrieved_at__lte=self.decision_time,
+        ).filter(
+            ~Q(provider="sec")
+            | Q(
+                evidence_links__role=FundamentalFactEvidence.Role.FILING,
+                evidence_links__source_asset__available_at__lte=self.decision_time,
+                evidence_links__source_asset__retrieved_at__lte=self.decision_time,
+            )
         )
         if concepts:
             queryset = queryset.filter(concept__in=concepts)
-        return queryset.order_by("concept", "period_end", "available_at")
+        return queryset.distinct().order_by("concept", "period_end", "available_at")
 
     def fx_rates(
         self,
@@ -121,6 +134,22 @@ class AsOfData:
         if observation_end is not None:
             queryset = queryset.filter(observation_date__lte=observation_end)
         return queryset.select_related("source_asset").order_by("observation_date", "available_at")
+
+    def company_classifications(
+        self,
+        *,
+        company_id: UUID,
+        scheme: str | None = None,
+    ) -> QuerySet[CompanyClassificationObservation]:
+        queryset = CompanyClassificationObservation.objects.filter(
+            company_id=company_id,
+            available_at__lte=self.decision_time,
+            source_asset__available_at__lte=self.decision_time,
+            source_asset__retrieved_at__lte=self.decision_time,
+        )
+        if scheme is not None:
+            queryset = queryset.filter(scheme=scheme)
+        return queryset.select_related("source_asset").order_by("scheme", "available_at")
 
 
 def _clip_to_through_date(

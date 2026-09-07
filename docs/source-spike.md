@@ -160,7 +160,7 @@ explicit display-rights confirmation.
   become `GO` or `CONDITIONAL_GO` automatically. Only new research that
   establishes verified terms can change this constant.
 
-### SEC EDGAR — verdict `GO`, runtime `environment_blocked`
+### SEC EDGAR — verdict `GO`, runtime `ok`
 
 - Endpoints probed: `https://data.sec.gov/submissions/CIK##########.json`
   and `https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json`.
@@ -177,22 +177,28 @@ explicit display-rights confirmation.
   automated requests that identify themselves correctly, and 403 despite a
   compliant identifier is more consistent with this network's egress being
   blocked or filtered than with SEC rejecting a well-formed request.
+- **Observed 2026-09-07 from the actual local runtime:** the bounded
+  submissions probe returned HTTP 200 with the configured identifying
+  `SEC_USER_AGENT`. The official ticker/exchange/CIK mapping, submissions,
+  referenced historical submissions files, and Companyfacts then completed
+  successfully for all 100 configured stocks.
 - The **verdict is `GO`**: SEC access is treated as approved in general —
   this execution environment's 403 is a local/network condition to
   re-verify from a different, unblocked network or deployment, not a
   reason to mark SEC itself unusable.
-- StanStock's SEC client preserves, without discarding, the point-in-time
-  provenance fields needed for later normalization: `acceptanceDateTime`
-  (per recent filing) from submissions, and, per accession number, the
-  `filed` vintage date recovered from companyfacts observations
-  (`accession_filed_dates`), alongside the full set of accession numbers
-  referenced across all concepts.
+- StanStock preserves raw mapping, submissions history, and Companyfacts
+  payloads and normalizes only the reviewed concept allowlist. Facts retain
+  taxonomy, source concept, unit, full instant/duration period identity,
+  accession, form, filing date, exact acceptance time when present,
+  conservative date-only fallback, immutable source revision, and source
+  asset. A separate immutable evidence link retains the submissions/history
+  asset that supplied the filing boundary. Current SIC is stored as a
+  retrieval-time classification snapshot and is never silently backdated.
 - Note on rights: SEC filings are U.S. government work and not subject to
   copyright, but access is still governed by SEC's fair-access rate
-  limits, and this project has not established sustained bulk access from
-  a production network — the `GO` verdict is not a claim that SEC access
-  is solved end-to-end, only that the provider's own policy does not block
-  compliant automated access.
+  limits. The local implementation stays below the published ceiling,
+  coordinates requests, and avoids full-history downloads on unchanged daily
+  runs.
 
 ### filings.xbrl.org — verdict `CONDITIONAL_GO`, runtime `ok`
 
@@ -258,8 +264,8 @@ live.
 Run `python manage.py source_spike` to refresh the runtime classifications
 above. Twelve Data reports `configuration_missing` until
 `TWELVE_DATA_API_KEY` is present and `quota_exhausted` when the provider
-rejects the request for credit limits. SEC's `environment_blocked`
-classification may legitimately change on a different network or
-deployment, since it is attributed to this environment rather than to SEC.
+rejects the request for credit limits. SEC reports `configuration_missing`
+until `SEC_USER_AGENT` is exported and may still report
+`environment_blocked` on a network or deployment that filters SEC traffic.
 Stooq's runtime classification may occasionally show `ok`, but its `NO_GO`
 verdict remains fixed pending verified automation/retention rights.

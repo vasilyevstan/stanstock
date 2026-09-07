@@ -381,6 +381,23 @@ def test_skip_option_excludes_provider(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert providers == {"twelve_data", "stooq", "filings_xbrl_org"}
 
 
+def test_skip_option_uses_documented_filings_provider_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _patch_all_ok(monkeypatch)
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "source_spike",
+            skip="twelve_data,stooq,filings_xbrl_org,ecb",
+        )
+
+    report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
+    report = json.loads(report_path.read_text())
+    assert [probe["provider"] for probe in report["probes"]] == ["sec"]
+
+
 def test_never_touches_enabled_field(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     ProviderRecord.objects.create(provider="stooq", enabled=True)
     _patch_all_ok(monkeypatch)

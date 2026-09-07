@@ -16,6 +16,11 @@ import pytest
             "stanstock.portfolio.migrations.0004_contribution_planner",
             "protect_portfolio_ledger",
         ),
+        ("stanstock.data.migrations.0006_sec_fact_identity", "protect_evidence"),
+        (
+            "stanstock.data.migrations.0007_fundamental_fact_evidence",
+            "protect_fact_evidence",
+        ),
     ],
 )
 def test_postgresql_immutability_sql_escapes_psycopg_placeholders(
@@ -24,7 +29,10 @@ def test_postgresql_immutability_sql_escapes_psycopg_placeholders(
 ) -> None:
     statements: list[str] = []
     schema_editor = SimpleNamespace(
-        connection=SimpleNamespace(vendor="postgresql"),
+        connection=SimpleNamespace(
+            vendor="postgresql",
+            introspection=SimpleNamespace(table_names=lambda: []),
+        ),
         execute=statements.append,
         quote_name=lambda name: f'"{name}"',
     )
