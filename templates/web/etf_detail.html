@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}{{ listing.ticker }} ETF · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Exchange-traded fund · {{ listing.exchange_mic }}</p>
+      <h1>{{ listing.ticker }}</h1>
+      <p class="lede">{{ listing.security.company.name }}</p>
+    </div>
+    <div class="run-stamp">
+      <small>Latest market session</small>
+      <strong>{{ overview.market_data.session_date }}</strong>
+      <span>{{ overview.market_data.source_asset.provider|display_label }}</span>
+    </div>
+  </section>
+
+  <div class="notice" role="status">
+    <strong>Benchmark ETF, not a stock recommendation.</strong>
+    {{ listing.ticker }} is the {{ overview.benchmark_identity }} and its
+    portfolio role is {{ overview.portfolio_role|lower }}. It is excluded from
+    company fundamentals, stock recommendations, opportunity ranking, stock
+    forecasts, and sample-stock baskets.
+  </div>
+
+  <section class="metric-grid" aria-label="ETF market profile">
+    <article>
+      <small>Latest price</small>
+      <strong>{{ overview.market_data.close|price }} {{ listing.currency }}</strong>
+      <span>{{ overview.market_data.session_date }}</span>
+    </article>
+    <article>
+      <small>Trailing price return</small>
+      <strong>{{ overview.price_return|percentage }}</strong>
+      <span>{{ overview.observation_count }} observations from {{ overview.period_start }}</span>
+    </article>
+    <article>
+      <small>Annualized volatility</small>
+      <strong>{{ overview.annualized_volatility|percentage }}</strong>
+      <span>Daily close-to-close variability annualized over 252 sessions</span>
+    </article>
+    <article>
+      <small>Maximum drawdown</small>
+      <strong>{{ overview.max_drawdown|percentage }}</strong>
+      <span>Worst peak-to-trough move in the displayed trailing window</span>
+    </article>
+  </section>
+
+  <div class="detail-grid">
+    <section class="panel">
+      <p class="eyebrow">Portfolio use</p>
+      <h2>{{ overview.portfolio_role }}</h2>
+      <p>
+        This ETF can be held and valued in personal portfolios without a
+        <code>StockAnalysis</code>. No brokerage order is placed by StanStock.
+      </p>
+    </section>
+    <section class="panel">
+      <p class="eyebrow">Evidence basis</p>
+      <h2>Price-only benchmark history</h2>
+      <dl class="key-values">
+        <div><dt>Return definition</dt><dd>{{ overview.return_definition|display_label }}</dd></div>
+        <div><dt>Dividends included</dt><dd>{{ overview.dividends_included|yesno:"Yes,No" }}</dd></div>
+        <div><dt>Period end</dt><dd>{{ overview.period_end }}</dd></div>
+        <div><dt>Asset hash</dt><dd>{{ overview.market_data.source_asset.sha256|slice:":12" }}</dd></div>
+      </dl>
+    </section>
+  </div>
+{% endblock %}

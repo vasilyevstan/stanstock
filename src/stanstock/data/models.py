@@ -67,6 +67,7 @@ class Security(models.Model):
     class SecurityType(models.TextChoices):
         COMMON_STOCK = "common_stock", "Common stock"
         ADR = "adr", "Depositary receipt"
+        ETF = "etf", "Exchange-traded fund"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="securities")

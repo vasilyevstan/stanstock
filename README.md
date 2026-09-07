@@ -16,8 +16,11 @@ The original free-provider gate remains **NO_GO for broad US/European
 coverage**, but StanStock now has a **conditional US-only path** through
 Twelve Data's documented API.
 
-- The curated starter universe contains 100 NASDAQ/NYSE common-stock symbols
-  plus SPY as its benchmark. It is not represented as a licensed index.
+- The curated starter universe contains 100 NASDAQ/NYSE common-stock symbols.
+  SPY is fetched once as the separate benchmark and the same immutable series
+  maintains an investable SPY ETF listing without another provider request.
+  SPY is not a universe member and never enters stock scoring or ranking. The
+  universe is not represented as a licensed index.
 - Twelve Data prices are explicitly split-adjusted price returns; dividends
   are not included and results must not be labeled total returns.
 - Basic activation is limited to one authenticated active user who explicitly
@@ -126,11 +129,21 @@ reviewed custom agreement, use
 NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
 vintages, captures an observed universe snapshot for the latest eligible
 session, analyzes eligible listings, and appends the supported short-horizon
-price-only predictions. Medium and long scenarios remain explicitly withheld
-rather than entering the prediction or outcome ledgers. An explicit older
-`--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
-idempotent; another invocation creates a skipped job and makes no provider
-requests.
+price-only predictions. The single SPY benchmark response also advances its
+ETF market row; it is not fetched twice. Medium and long scenarios remain
+explicitly withheld rather than entering the prediction or outcome ledgers.
+An explicit older `--target-date YYYY-MM-DD` is labeled research-grade. A
+successful target is idempotent; another invocation creates a skipped job and
+makes no provider requests.
+
+After upgrading an existing database that already contains immutable SPY
+benchmark assets, create its ETF listing locally without consuming provider
+credits:
+
+```bash
+uv run python manage.py migrate
+uv run python manage.py sync_investable_etfs
+```
 
 On a private macOS checkout, install the validated local scheduler after the
 manual provider workflow succeeds:
@@ -228,11 +241,12 @@ mixed universe instead.
 Create several live tracked portfolios from `/portfolios`. Each portfolio is
 private to its owner and stores current holdings plus immutable dated
 valuation snapshots. Holdings are currently restricted to the portfolio's
-base currency and must have a current persisted market row. Snapshot returns
-are unrealized price returns against the average costs entered by the owner;
-cash is excluded from that return, dividends are excluded unless the source
-explicitly includes them, and the value history includes holding/cash changes
-rather than claiming a time-weighted return.
+base currency and must have a current persisted market row. SPY can be held
+and valued from its ETF market row without a stock analysis; other ETFs are
+not enabled. Snapshot returns are unrealized price returns against the average
+costs entered by the owner; cash is excluded from that return, dividends are
+excluded unless the source explicitly includes them, and the value history
+includes holding/cash changes rather than claiming a time-weighted return.
 
 The same page can build an idempotent, frozen StanStock sample portfolio from
 the latest provider-backed opportunity run. It equal-weights up to five
@@ -240,11 +254,12 @@ eligible USD listings by default, preserves the source run and reference
 prices, and creates an immutable baseline snapshot. The current price-only
 sample is a research-reference basket rather than an executable-fill claim;
 its short signal horizon, research grade, no-rebalance policy, split-adjusted
-price-return basis, and dividend exclusion remain visible. Newly constructed
-samples exclude the `Under $10 - speculative watchlist` band and record the
-price-band policy used. Construction classifies the immutable analysis
-reference close at the run's target date rather than a later mutable close;
-existing holdings and older frozen samples are not rewritten.
+price-return basis, and dividend exclusion remain visible. ETFs are excluded
+from stock sample construction. Newly constructed samples also exclude the
+`Under $10 - speculative watchlist` band and record the price-band policy
+used. Construction classifies the immutable analysis reference close at the
+run's target date rather than a later mutable close; existing holdings and
+older frozen samples are not rewritten.
 
 The equivalent command is:
 
@@ -266,6 +281,8 @@ uv run python manage.py snapshot_portfolios
 - `/opportunities` - ranked analyses grouped and filterable by neutral current
   USD price bands, with the close date displayed.
 - `/stocks/<listing-id>` - scenarios, factor evidence, risks, and provenance.
+- `/etfs/<listing-id>` - SPY price-return, volatility, drawdown, benchmark
+  identity, and provenance without a stock recommendation.
 - `/predictions` - the append-only prediction ledger.
 - `/performance` - matured outcomes with minimum-sample safeguards.
 - `/portfolios` - owner-scoped holdings and immutable valuation history.

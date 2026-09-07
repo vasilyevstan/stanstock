@@ -26,7 +26,11 @@ from stanstock.data.models import (
     UniverseSnapshot,
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
-from stanstock.research.service import analyze_listing, analyze_snapshot
+from stanstock.research.service import (
+    analyze_listing,
+    analyze_snapshot,
+    append_predictions,
+)
 
 
 @pytest.mark.django_db
@@ -73,6 +77,63 @@ def test_service_persists_analysis_and_appends_immutable_predictions(tmp_path) -
     assert source_asset["retrieved_at"]
     assert source_asset["available_at"]
     assert first.analysis.component_scores["components"]
+
+
+@pytest.mark.django_db
+def test_etf_is_rejected_by_stock_analysis_and_prediction_services(tmp_path) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    listing.security.security_type = Security.SecurityType.ETF
+    listing.security.save(update_fields=["security_type"])
+
+    with pytest.raises(ValueError, match="exchange-traded fund"):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=timezone.now(),
+            provider="synthetic",
+            store=AssetStore(tmp_path),
+        )
+    with pytest.raises(ValueError, match="exchange-traded fund"):
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=timezone.now(),
+            provider="synthetic",
+            store=AssetStore(tmp_path),
+        )
+    assert AnalysisRun.objects.count() == 0
+
+    listing.security.security_type = Security.SecurityType.COMMON_STOCK
+    listing.security.save(update_fields=["security_type"])
+    now = timezone.now()
+    price_asset = _register_price_asset(
+        AssetStore(tmp_path),
+        listing.ticker,
+        now - timedelta(minutes=5),
+    )
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=AssetStore(tmp_path),
+    )
+    listing.security.security_type = Security.SecurityType.ETF
+    listing.security.save(update_fields=["security_type"])
+
+    with pytest.raises(ValueError, match="prediction issuance"):
+        append_predictions(
+            analysis=persisted.analysis,
+            computation=persisted.computation,
+            generated_at=now + timedelta(minutes=1),
+            data_cutoff=persisted.run.data_cutoff,
+            issued_on_time=False,
+            supported_horizons=("short",),
+            model_version="blocked-etf",
+            config_hash_value=persisted.run.config_hash,
+            source_assets=persisted.computation.source_assets,
+            code_revision_value="test",
+        )
 
 
 @pytest.mark.django_db

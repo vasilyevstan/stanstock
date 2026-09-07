@@ -12,6 +12,7 @@ import yaml
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 
+import stanstock.data.live_us as live_us_module
 from stanstock.data.assets import AssetStore
 from stanstock.data.live_us import (
     PRIVATE_USAGE_SCOPE,
@@ -28,7 +29,9 @@ from stanstock.data.management.config_loader import default_us_universe_config_p
 from stanstock.data.models import (
     DataAsset,
     LatestMarketData,
+    Listing,
     ProviderRecord,
+    Security,
     Universe,
     UniverseMembership,
     UniverseSnapshot,
@@ -316,6 +319,7 @@ def test_config_rejects_duplicates_and_an_over_cap_symbol_list(tmp_path: Path) -
         ("exchanges", ["NASDAQ", "LSE"], "limited to NASDAQ and NYSE"),
         ("benchmark_currency", "EUR", "benchmark_currency must be"),
         ("benchmark_type", "Index", "benchmark_type must be"),
+        ("benchmark_symbol", "QQQ", "benchmark_symbol must be 'SPY'"),
     ],
 )
 def test_config_rejects_values_outside_the_reviewed_us_scope(
@@ -494,7 +498,15 @@ def test_run_us_daily_persists_vintages_snapshot_and_predictions(
     assert result.predictions == 2
     assert result.snapshot.grade == UniverseSnapshot.Grade.OBSERVED
     assert UniverseMembership.objects.filter(snapshot=result.snapshot, eligible=True).count() == 2
-    assert LatestMarketData.objects.count() == 2
+    assert LatestMarketData.objects.count() == 3
+    spy = Listing.objects.select_related("security").get(provider_symbol="SPY")
+    assert spy.security.security_type == Security.SecurityType.ETF
+    assert spy.exchange_mic == "ARCX"
+    assert spy.latest_market_data.session_date == TARGET_DATE
+    assert spy.latest_market_data.source_asset.subject == "SPY"
+    assert spy.latest_market_data.source_asset.metadata["resolved_mic_code"] == "ARCX"
+    assert spy.latest_market_data.source_asset.metadata["mic_code_source"] == "provider"
+    assert not UniverseMembership.objects.filter(listing=spy).exists()
     assert DataAsset.objects.filter(kind="stock_catalog").count() == 1
     assert DataAsset.objects.filter(kind="raw_price_history").count() == 3
     assert DataAsset.objects.filter(kind="price_history").count() == 3
@@ -515,6 +527,48 @@ def test_run_us_daily_persists_vintages_snapshot_and_predictions(
     assert "private-test-key" not in " ".join(
         DataAsset.objects.values_list("relative_path", flat=True)
     )
+
+
+def test_missing_optional_benchmark_mic_uses_reviewed_spy_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    _enable_provider()
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: _catalog(config),
+    )
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        series = _series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        )
+        return replace(series, mic_code=None) if symbol == "SPY" else series
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+    _patch_analysis(monkeypatch)
+
+    run_us_daily(
+        config=config,
+        target_date=TARGET_DATE,
+        snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+        api_key="private-test-key",
+        decision_time=RETRIEVED_AT,
+        store=AssetStore(tmp_path),
+        enforce_rate_limit=False,
+    )
+
+    spy = Listing.objects.get(provider_symbol="SPY")
+    metadata = spy.latest_market_data.source_asset.metadata
+    assert spy.exchange_mic == "ARCX"
+    assert metadata["mic_code"] is None
+    assert metadata["resolved_mic_code"] == "ARCX"
+    assert metadata["mic_code_source"] == "configured_spy_identity"
 
 
 def test_automatic_run_withholds_analysis_if_fetch_crosses_next_session_open(
@@ -661,6 +715,7 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
     assert AnalysisRun.objects.count() == 1
     assert StockAnalysis.objects.count() == 1
     assert Prediction.objects.count() == 1
+    assert not StockAnalysis.objects.filter(listing__provider_symbol="SPY").exists()
     analysis = StockAnalysis.objects.get()
     assert analysis.run.issued_on_time is True
     assert analysis.run.data_cutoff == analysis.run.generated_at
@@ -673,6 +728,32 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
         for asset in analysis.data_quality["source_assets"]
         for field in ("available_at", "retrieved_at")
     )
+    benchmark_reference = next(
+        asset for asset in analysis.data_quality["source_assets"] if asset["subject"] == "SPY"
+    )
+    base_spy_series = _long_series("SPY", instrument_type="ETF")
+    revised_spy_series = replace(
+        base_spy_series,
+        bars=(
+            *base_spy_series.bars[:-1],
+            replace(
+                base_spy_series.bars[-1],
+                close=Decimal("999"),
+            ),
+        ),
+        retrieved_at=RETRIEVED_AT + timedelta(hours=1),
+        raw_bytes=b'{"status":"ok","symbol":"SPY","revision":true}',
+    )
+    revised_spy_asset = _persist_price_series(
+        store=AssetStore(tmp_path),
+        series=revised_spy_series,
+        listing=None,
+    )
+    assert str(revised_spy_asset.pk) != benchmark_reference["id"]
+
+    spy = Listing.objects.get(provider_symbol="SPY")
+    spy.delete()
+    assert not Listing.objects.filter(provider_symbol="SPY").exists()
 
     repeated = run_us_daily(
         config=config,
@@ -691,6 +772,10 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
     assert repeated.raw_assets == 0
     assert catalog_calls == [None]
     assert price_calls == ["AAA", "SPY"]
+    restored_spy = Listing.objects.select_related("security").get(provider_symbol="SPY")
+    assert restored_spy.security.security_type == Security.SecurityType.ETF
+    assert restored_spy.latest_market_data.session_date == TARGET_DATE
+    assert str(restored_spy.latest_market_data.source_asset_id) == benchmark_reference["id"]
 
     conflicting_snapshot = UniverseSnapshot.objects.create(
         universe=result.snapshot.universe,
@@ -717,6 +802,83 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
             store=AssetStore(tmp_path),
             enforce_rate_limit=False,
         )
+
+
+def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+    catalog_calls: list[None] = []
+    price_calls: list[str] = []
+
+    def fetch_catalog(**kwargs: object) -> StockCatalog:
+        catalog_calls.append(None)
+        return _catalog(config)
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        price_calls.append(symbol)
+        return _long_series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        )
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        fetch_catalog,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.timezone.now",
+        lambda: datetime(2026, 9, 9, 15, tzinfo=UTC),
+    )
+    real_sync = live_us_module.sync_investable_spy_from_asset
+
+    def fail_sync(**kwargs: object) -> Listing:
+        raise ValueError("simulated ETF identity conflict")
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.sync_investable_spy_from_asset",
+        fail_sync,
+    )
+    with pytest.raises(ValueError, match="simulated ETF identity conflict"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+        )
+
+    assert AnalysisRun.objects.filter(status="complete").count() == 1
+    assert StockAnalysis.objects.count() == 1
+    assert Prediction.objects.count() == 1
+    assert not Listing.objects.filter(provider_symbol="SPY").exists()
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.sync_investable_spy_from_asset",
+        real_sync,
+    )
+    recovered = run_us_daily(
+        config=config,
+        target_date=TARGET_DATE,
+        snapshot_grade=UniverseSnapshot.Grade.RESEARCH,
+        api_key=None,
+        decision_time=datetime(2026, 9, 8, 15, tzinfo=UTC),
+        store=AssetStore(tmp_path),
+        enforce_rate_limit=False,
+    )
+
+    assert recovered.credits_used == 0
+    assert catalog_calls == [None]
+    assert price_calls == ["AAA", "SPY"]
+    assert Listing.objects.filter(provider_symbol="SPY").exists()
 
 
 def test_missing_target_bar_creates_an_explicit_ineligible_membership(
@@ -1016,6 +1178,7 @@ def test_analysis_failure_rolls_back_snapshot_but_keeps_immutable_source_assets(
     assert UniverseMembership.objects.count() == 0
     assert DataAsset.objects.count() == 7
     assert LatestMarketData.objects.count() == 2
+    assert not Listing.objects.filter(provider_symbol="SPY").exists()
 
 
 def test_duplicate_catalog_registration_does_not_delete_existing_asset_file(

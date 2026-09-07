@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import sleep
 from typing import Any
+from uuid import UUID
 
 import polars as pl
 from django.db import transaction
@@ -16,6 +17,11 @@ from django.utils import timezone
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
 from stanstock.data.assets import AssetStore, register_asset
+from stanstock.data.etfs import (
+    INVESTABLE_US_ETF_MIC,
+    INVESTABLE_US_ETF_SYMBOL,
+    sync_investable_spy_from_asset,
+)
 from stanstock.data.management.config_loader import (
     config_hash,
     default_us_scoring_config_path,
@@ -248,6 +254,8 @@ def load_us_universe_config(path: Path) -> UsUniverseConfig:
             f"received {unsupported_exchanges!r}"
         )
     benchmark_symbol = _normalize_symbol(raw.get("benchmark_symbol"))
+    if benchmark_symbol != INVESTABLE_US_ETF_SYMBOL:
+        raise ValueError(f"US universe benchmark_symbol must be {INVESTABLE_US_ETF_SYMBOL!r}")
     if benchmark_symbol in symbols:
         raise ValueError("US universe benchmark_symbol must not also be a member symbol")
     benchmark_currency = _required_text(raw, "benchmark_currency").upper()
@@ -331,9 +339,11 @@ def run_us_daily(
     require_on_time: bool = False,
 ) -> LiveUsRunResult:
     """Fetch, persist, and analyze one complete US target-date snapshot."""
+    store = store or AssetStore()
     existing_result = _existing_completed_result(
         config=config,
         target_date=target_date,
+        store=store,
     )
     if existing_result is not None:
         return existing_result
@@ -416,7 +426,6 @@ def run_us_daily(
             f"{config.minimum_eligible}"
         )
 
-    store = store or AssetStore()
     catalog_assets = [_persist_catalog(store, catalog) for catalog in catalogs]
     listings = _ensure_listings(config, references, target_date=target_date)
     price_assets: dict[str, DataAsset] = {}
@@ -426,7 +435,12 @@ def run_us_daily(
             series=series,
             listing=listings[symbol] if symbol in eligible_symbols else None,
         )
-    _persist_price_series(store=store, series=benchmark_series, listing=None)
+    benchmark_asset = _persist_price_series(
+        store=store,
+        series=benchmark_series,
+        listing=None,
+        resolved_mic_code=INVESTABLE_US_ETF_MIC,
+    )
 
     analysis_clock = decision_time if decision_time is not None else timezone.now()
     analysis_time = max(
@@ -475,6 +489,11 @@ def run_us_daily(
         target_date=target_date,
         eligible=len(eligible_symbols),
         excluded=len(config.symbols) - len(eligible_symbols),
+    )
+    sync_investable_spy_from_asset(
+        asset=benchmark_asset,
+        target_date=target_date,
+        store=store,
     )
     return LiveUsRunResult(
         snapshot=snapshot,
@@ -638,6 +657,8 @@ def _validate_benchmark_series(
         raise ValueError(
             f"Benchmark type {series.instrument_type!r} is not {config.benchmark_type!r}"
         )
+    if series.mic_code is not None and series.mic_code.upper() != INVESTABLE_US_ETF_MIC:
+        raise ValueError(f"Benchmark MIC {series.mic_code!r} is not {INVESTABLE_US_ETF_MIC!r}")
     if series.adjustment != config.price_adjustment:
         raise ValueError(
             f"Benchmark adjustment {series.adjustment!r} did not match {config.price_adjustment!r}"
@@ -681,6 +702,7 @@ def _persist_price_series(
     store: AssetStore,
     series: PriceSeries,
     listing: Listing | None,
+    resolved_mic_code: str | None = None,
 ) -> DataAsset:
     frame = _price_frame(series)
     digest = hashlib.sha256(series.raw_bytes).hexdigest()
@@ -711,6 +733,25 @@ def _persist_price_series(
                     "usage_scope": PRIVATE_USAGE_SCOPE,
                 },
             )
+            price_metadata: dict[str, Any] = {
+                "rows": frame.height,
+                "currency": series.currency,
+                "exchange": series.exchange,
+                "mic_code": series.mic_code,
+                "instrument_type": series.instrument_type,
+                "interval": "1day",
+                "adjustment": series.adjustment,
+                "return_definition": "split_adjusted_price_return",
+                "dividends_included": False,
+                "raw_asset_id": str(raw_asset.id),
+                "raw_sha256": raw_asset.sha256,
+                "usage_scope": PRIVATE_USAGE_SCOPE,
+            }
+            if resolved_mic_code is not None:
+                price_metadata["resolved_mic_code"] = resolved_mic_code
+                price_metadata["mic_code_source"] = (
+                    "provider" if series.mic_code is not None else "configured_spy_identity"
+                )
             price_asset = register_asset(
                 provider=PROVIDER,
                 kind="price_history",
@@ -720,20 +761,7 @@ def _persist_price_series(
                 available_at=series.retrieved_at,
                 period_start=series.bars[0].trade_date,
                 period_end=series.bars[-1].trade_date,
-                metadata={
-                    "rows": frame.height,
-                    "currency": series.currency,
-                    "exchange": series.exchange,
-                    "mic_code": series.mic_code,
-                    "instrument_type": series.instrument_type,
-                    "interval": "1day",
-                    "adjustment": series.adjustment,
-                    "return_definition": "split_adjusted_price_return",
-                    "dividends_included": False,
-                    "raw_asset_id": str(raw_asset.id),
-                    "raw_sha256": raw_asset.sha256,
-                    "usage_scope": PRIVATE_USAGE_SCOPE,
-                },
+                metadata=price_metadata,
             )
             if listing is not None:
                 latest = series.bars[-1]
@@ -890,6 +918,7 @@ def _existing_completed_result(
     *,
     config: UsUniverseConfig,
     target_date: date,
+    store: AssetStore,
 ) -> LiveUsRunResult | None:
     universe = Universe.objects.filter(
         slug=config.slug,
@@ -924,6 +953,16 @@ def _existing_completed_result(
     excluded = memberships.filter(eligible=False).count()
     analyses = StockAnalysis.objects.filter(run=run).count()
     predictions = Prediction.objects.filter(analysis__run=run).count()
+    benchmark_asset = _benchmark_asset_for_completed_run(
+        run=run,
+        benchmark_symbol=config.benchmark_symbol,
+        target_date=target_date,
+    )
+    sync_investable_spy_from_asset(
+        asset=benchmark_asset,
+        target_date=target_date,
+        store=store,
+    )
     return LiveUsRunResult(
         snapshot=snapshot,
         analyses=analyses,
@@ -935,6 +974,68 @@ def _existing_completed_result(
         credits_used=0,
         benchmark_symbol=config.benchmark_symbol,
     )
+
+
+def _benchmark_asset_for_completed_run(
+    *,
+    run: AnalysisRun,
+    benchmark_symbol: str,
+    target_date: date,
+) -> DataAsset:
+    identities: set[tuple[UUID, str]] = set()
+    analyses = list(
+        StockAnalysis.objects.filter(run=run).values_list(
+            "listing__ticker",
+            "data_quality",
+        )
+    )
+    if not analyses:
+        raise ValueError(f"Completed US run for {target_date.isoformat()} has no analyses")
+    for ticker, data_quality in analyses:
+        raw_assets = data_quality.get("source_assets") if isinstance(data_quality, dict) else None
+        matching_assets = []
+        if isinstance(raw_assets, list):
+            matching_assets = [
+                raw_asset
+                for raw_asset in raw_assets
+                if isinstance(raw_asset, dict)
+                and raw_asset.get("provider") == PROVIDER
+                and raw_asset.get("kind") == "price_history"
+                and raw_asset.get("subject") == benchmark_symbol
+            ]
+        if len(matching_assets) != 1:
+            raise ValueError(
+                f"Completed US run for {target_date.isoformat()} analysis {ticker} "
+                f"must reference exactly one {benchmark_symbol} benchmark asset"
+            )
+        for raw_asset in matching_assets:
+            try:
+                asset_id = UUID(str(raw_asset["id"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Completed US run for {target_date.isoformat()} has an invalid "
+                    "benchmark asset reference"
+                ) from exc
+            asset_sha256 = raw_asset.get("sha256")
+            if not isinstance(asset_sha256, str) or len(asset_sha256) != 64:
+                raise ValueError(
+                    f"Completed US run for {target_date.isoformat()} has an invalid "
+                    "benchmark asset checksum"
+                )
+            identities.add((asset_id, asset_sha256))
+    if len(identities) != 1:
+        raise ValueError(
+            f"Completed US run for {target_date.isoformat()} must reference exactly "
+            f"one {benchmark_symbol} benchmark asset"
+        )
+    asset_id, expected_sha256 = identities.pop()
+    asset = DataAsset.objects.filter(pk=asset_id).first()
+    if asset is None or asset.sha256 != expected_sha256:
+        raise ValueError(
+            f"Completed US run for {target_date.isoformat()} has unavailable or "
+            "conflicting benchmark evidence"
+        )
+    return asset
 
 
 def _enabled_provider_record() -> ProviderRecord:

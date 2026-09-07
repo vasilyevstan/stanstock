@@ -11,7 +11,8 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from stanstock.data.models import DataAsset, LatestMarketData, Listing
+from stanstock.data.etfs import is_supported_investable_etf
+from stanstock.data.models import DataAsset, LatestMarketData, Listing, Security
 from stanstock.portfolio.models import (
     Portfolio,
     PortfolioHolding,
@@ -26,6 +27,7 @@ from stanstock.research.affordability import (
     classify_price_band,
 )
 from stanstock.research.config import code_revision
+from stanstock.research.eligibility import STOCK_RESEARCH_SECURITY_TYPES
 from stanstock.research.models import AnalysisRun, StockAnalysis
 from stanstock.research.opportunities import OpportunityAssessment, assess_opportunity
 from stanstock.research.provenance import (
@@ -111,6 +113,13 @@ def validate_holding_listing(*, portfolio: Portfolio, listing: Listing) -> None:
         raise PortfolioValuationError("Model portfolio holdings are frozen.")
     if not listing.is_active:
         raise PortfolioValuationError(f"{listing.ticker} is not an active listing.")
+    if (
+        listing.security.security_type == Security.SecurityType.ETF
+        and not is_supported_investable_etf(listing)
+    ):
+        raise PortfolioValuationError(
+            f"{listing.ticker} is not a supported investable ETF; only SPY is enabled."
+        )
     if listing.currency.upper() != portfolio.base_currency:
         raise PortfolioValuationError(
             f"{listing.ticker} trades in {listing.currency}; this portfolio is "
@@ -196,6 +205,8 @@ def build_sample_portfolio(
         "listing__latest_market_data",
     ).order_by("-overall_score", "-confidence", "listing__ticker", "pk")
     for analysis in analyses:
+        if analysis.listing.security.security_type not in STOCK_RESEARCH_SECURITY_TYPES:
+            continue
         if analysis.listing.currency.upper() != Portfolio.Currency.USD:
             continue
         if not analysis.listing.is_active:

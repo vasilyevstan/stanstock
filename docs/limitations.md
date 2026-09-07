@@ -42,6 +42,20 @@ application using the same account, and provider coverage, symbols, plan
 entitlements, timing, and terms can change independently of this code.
 See `docs/operations.md` for the destructive termination procedure.
 
+## ETF scope
+
+- SPY is the only enabled investable ETF. It reuses the single benchmark
+  series already fetched by the US workflow; StanStock does not request a
+  second SPY series for portfolio use.
+- SPY is not part of the 100-stock universe and receives no stock
+  fundamentals, factor score, BUY/HOLD/AVOID recommendation, opportunity
+  rank, prediction, or sample-basket allocation.
+- The ETF page reports trailing split-adjusted price behavior only. Return
+  excludes dividends, volatility is historical rather than predictive, and
+  drawdown is limited to the available persisted window.
+- Portfolio valuation can price SPY without a `StockAnalysis`, but no other
+  ETF symbol is enabled in this release.
+
 ## Tracked portfolios
 
 - Tracked portfolios are current-position trackers, not brokerage ledgers.

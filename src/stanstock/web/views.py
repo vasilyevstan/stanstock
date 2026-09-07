@@ -18,12 +18,18 @@ from django.views.decorators.http import require_POST
 from stanstock.core.launchd import launch_agent_status
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
+from stanstock.data.etfs import (
+    INVESTABLE_US_ETF_MIC,
+    INVESTABLE_US_ETF_SYMBOL,
+    build_etf_overview,
+)
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import (
     LatestMarketData,
     Listing,
     ProviderRecord,
     Region,
+    Security,
     UniverseSnapshot,
 )
 from stanstock.portfolio.models import Portfolio, PortfolioHolding
@@ -156,7 +162,13 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
     latest_analysis_mode = ""
     if latest_run is not None:
         base_analyses = (
-            StockAnalysis.objects.filter(run=latest_run)
+            StockAnalysis.objects.filter(
+                run=latest_run,
+                listing__security__security_type__in=(
+                    Security.SecurityType.COMMON_STOCK,
+                    Security.SecurityType.ADR,
+                ),
+            )
             .select_related(
                 "listing__security__company",
                 "listing__latest_market_data",
@@ -292,6 +304,8 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
         ),
         pk=listing_id,
     )
+    if listing.security.security_type == Security.SecurityType.ETF:
+        return redirect("etf-detail", listing_id=listing.id)
     analysis = (
         StockAnalysis.objects.filter(listing=listing, run__status="complete")
         .select_related("run", "listing__latest_market_data")
@@ -332,6 +346,33 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
             "long_horizon_band_reason": long_horizon_band_reason,
             "long_horizon_gates": long_horizon_gates,
             "predictions": predictions,
+        },
+    )
+
+
+@login_required
+def etf_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
+    listing = get_object_or_404(
+        Listing.objects.select_related(
+            "security__company",
+            "latest_market_data__source_asset",
+        ),
+        pk=listing_id,
+        security__security_type=Security.SecurityType.ETF,
+        ticker=INVESTABLE_US_ETF_SYMBOL,
+        provider_symbol=INVESTABLE_US_ETF_SYMBOL,
+        exchange_mic=INVESTABLE_US_ETF_MIC,
+        currency="USD",
+        region=Region.US,
+        is_primary=True,
+        is_active=True,
+    )
+    return render(
+        request,
+        "web/etf_detail.html",
+        {
+            "listing": listing,
+            "overview": build_etf_overview(listing),
         },
     )
 
@@ -378,6 +419,11 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
     market_query = LatestMarketData.objects.select_related(
         "listing__security__company",
         "source_asset",
+    ).filter(
+        listing__security__security_type__in=(
+            Security.SecurityType.COMMON_STOCK,
+            Security.SecurityType.ADR,
+        )
     )
     if latest_run is not None:
         market_query = market_query.filter(
@@ -441,12 +487,38 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
         }
         for row in market_rows[:12]
     ]
+    etf_rows = [
+        {
+            "row": row,
+            "change": (
+                (row.close - row.previous_close) / row.previous_close
+                if row.previous_close is not None and row.previous_close > 0
+                else None
+            ),
+        }
+        for row in LatestMarketData.objects.select_related(
+            "listing__security__company",
+            "source_asset",
+        )
+        .filter(
+            listing__security__security_type=Security.SecurityType.ETF,
+            listing__ticker=INVESTABLE_US_ETF_SYMBOL,
+            listing__provider_symbol=INVESTABLE_US_ETF_SYMBOL,
+            listing__exchange_mic=INVESTABLE_US_ETF_MIC,
+            listing__currency="USD",
+            listing__region=Region.US,
+            listing__is_primary=True,
+            listing__is_active=True,
+        )
+        .order_by("listing__ticker")
+    ]
 
     return render(
         request,
         "web/market.html",
         {
             "market_rows": latest_listings,
+            "etf_rows": etf_rows,
             "regions": regions,
             "sectors": sectors,
             "data_mode": analysis_run_data_mode(latest_run),
@@ -989,6 +1061,10 @@ def _portfolio_detail_context(
             StockAnalysis.objects.filter(
                 listing_id__in=listing_ids,
                 run=latest_run,
+                listing__security__security_type__in=(
+                    Security.SecurityType.COMMON_STOCK,
+                    Security.SecurityType.ADR,
+                ),
             )
             .select_related("listing__latest_market_data")
             .order_by("-pk")
@@ -998,12 +1074,14 @@ def _portfolio_detail_context(
     position_cards = []
     for position in valuation.positions:
         latest_analysis = latest_by_listing.get(position.holding.listing_id)
-        current_price_band = latest_price_band(position.holding.listing)
+        is_etf = position.holding.listing.security.security_type == Security.SecurityType.ETF
+        current_price_band = None if is_etf else latest_price_band(position.holding.listing)
         position_cards.append(
             {
                 "position": position,
                 "analysis": latest_analysis,
                 "price_band": current_price_band,
+                "is_etf": is_etf,
                 "opportunity": (
                     assess_opportunity(
                         latest_analysis,

@@ -6,9 +6,17 @@ from typing import Any
 
 from django import forms
 from django.contrib.auth.models import User
+from django.db.models import Q
 
+from stanstock.data.etfs import INVESTABLE_US_ETF_MIC, INVESTABLE_US_ETF_SYMBOL
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
-from stanstock.data.models import Listing, Region, UniverseMembership, UniverseSnapshot
+from stanstock.data.models import (
+    Listing,
+    Region,
+    Security,
+    UniverseMembership,
+    UniverseSnapshot,
+)
 from stanstock.portfolio.models import Portfolio
 from stanstock.portfolio.service import (
     SAMPLE_PORTFOLIO_DEFAULT_CAPITAL,
@@ -133,7 +141,7 @@ class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]
 class PortfolioHoldingForm(forms.Form):
     listing = forms.ModelChoiceField(
         queryset=Listing.objects.none(),
-        label="Stock",
+        label="Security",
     )
     quantity = forms.DecimalField(
         max_digits=24,
@@ -167,6 +175,17 @@ class PortfolioHoldingForm(forms.Form):
                 is_active=True,
                 currency=portfolio.base_currency,
                 latest_market_data__isnull=False,
+            )
+            .filter(
+                ~Q(security__security_type=Security.SecurityType.ETF)
+                | Q(
+                    security__security_type=Security.SecurityType.ETF,
+                    ticker=INVESTABLE_US_ETF_SYMBOL,
+                    provider_symbol=INVESTABLE_US_ETF_SYMBOL,
+                    exchange_mic=INVESTABLE_US_ETF_MIC,
+                    region=Region.US,
+                    is_primary=True,
+                )
             )
             .select_related("security__company")
             .order_by("ticker")

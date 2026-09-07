@@ -143,6 +143,13 @@ mutable current market state. Existing holdings and frozen historical baskets
 are never rewritten, and missing current USD price state fails closed for new
 promotion.
 
+Investable ETF support preserves a separate evidence contract. A benchmark ETF
+reuses its single immutable provider series and credit, remains outside stock
+universe membership, and cannot enter stock analysis, fundamentals,
+predictions, opportunities, or sample-stock baskets. ETF metrics retain their
+price-return/dividend basis, while personal portfolio valuation may use the
+supported ETF's current market row without inventing a stock rating.
+
 ## No secrets, private data, or session paths
 
 No agent may print or persist: `.env` values, `DJANGO_SECRET_KEY`,
