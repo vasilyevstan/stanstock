@@ -1,0 +1,81 @@
+schema_version: 1
+version: us-price-medium-v1
+enabled_scoring_versions:
+  - us-price-baseline-v2
+calendar: XNYS
+fixed_epoch: 2010-01-04
+return_basis: split_adjusted_price_return
+dividends_included: false
+feature_windows:
+  momentum_sessions: 252
+  drawdown_sessions: 252
+  volatility_sessions: 63
+  short_trend_sessions: 50
+  long_trend_sessions: 200
+  liquidity_sessions: 20
+minimum_history_coverage: 0.95
+minimum_dollar_volume: 1000000
+quantiles:
+  bear: 0.20
+  base: 0.50
+  bull: 0.80
+bucket_boundaries:
+  relative_momentum: [-0.25, -0.05, 0.05, 0.25]
+  drawdown: [-0.40, -0.20, -0.08]
+  volatility: [0.20, 0.35, 0.55]
+  market_trend: [-0.10, 0.00, 0.10]
+  market_volatility: [0.15, 0.25, 0.40]
+fallback_order:
+  - name: exact_state
+    dimensions:
+      - relative_momentum_bucket
+      - drawdown_bucket
+      - volatility_bucket
+      - market_trend_bucket
+      - market_volatility_bucket
+  - name: without_market_volatility
+    dimensions:
+      - relative_momentum_bucket
+      - drawdown_bucket
+      - volatility_bucket
+      - market_trend_bucket
+  - name: stock_state
+    dimensions:
+      - relative_momentum_bucket
+      - drawdown_bucket
+      - volatility_bucket
+  - name: momentum_drawdown
+    dimensions:
+      - relative_momentum_bucket
+      - drawdown_bucket
+  - name: relative_momentum
+    dimensions:
+      - relative_momentum_bucket
+  - name: unconditional
+    dimensions: []
+horizons:
+  6m:
+    sessions: 126
+    minimum_raw_matches: 20
+    minimum_effective_cohorts: 3
+    minimum_distinct_listings: 10
+    shrinkage_prior_cohorts: 4
+    probability_minimum_effective_cohorts: 8
+    probability_minimum_distinct_listings: 30
+    probability_minimum_calendar_span_days: 1095
+    probability_minimum_distinct_market_regimes: 3
+  12m:
+    sessions: 252
+    minimum_raw_matches: 20
+    minimum_effective_cohorts: 3
+    minimum_distinct_listings: 10
+    shrinkage_prior_cohorts: 4
+    probability_minimum_effective_cohorts: 6
+    probability_minimum_distinct_listings: 30
+    probability_minimum_calendar_span_days: 1460
+    probability_minimum_distinct_market_regimes: 3
+calibration:
+  minimum_training_cohorts: 3
+  minimum_test_cohorts: 4
+  maximum_baseline_mae_ratio: 1.00
+  maximum_brier_score: 0.30

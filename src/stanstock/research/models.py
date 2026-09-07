@@ -118,6 +118,40 @@ class StockAnalysis(models.Model):
     def legacy_long_forecast_scenario(self) -> dict[str, Any]:
         return self.scenario_for_horizon("long")
 
+    @property
+    def six_month_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("6m")
+
+    @property
+    def twelve_month_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("12m")
+
+    @property
+    def three_year_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("3y")
+
+    @property
+    def five_year_forecast_scenario(self) -> dict[str, Any]:
+        return self.scenario_for_horizon("5y")
+
+    @property
+    def has_explicit_medium_forecasts(self) -> bool:
+        return self._has_canonical_forecast("6m") or self._has_canonical_forecast("12m")
+
+    @property
+    def has_explicit_long_forecasts(self) -> bool:
+        return self._has_canonical_forecast("3y") or self._has_canonical_forecast("5y")
+
+    @property
+    def has_explicit_advisory_forecasts(self) -> bool:
+        return self.has_explicit_medium_forecasts or self.has_explicit_long_forecasts
+
+    def _has_canonical_forecast(self, horizon: str) -> bool:
+        if not isinstance(self.forecast_scenarios, dict):
+            return False
+        horizons = self.forecast_scenarios.get("horizons")
+        return isinstance(horizons, dict) and isinstance(horizons.get(horizon), dict)
+
 
 class Prediction(models.Model):
     class Horizon(models.TextChoices):

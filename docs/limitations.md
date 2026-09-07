@@ -154,10 +154,16 @@ unmeasurable.
 - Confidence is heuristic until calibration evidence exists.
 - Probability of positive return is withheld below its configured sample
   threshold.
-- The explicit `6m`, `12m`, `3y`, and `5y` identities and advisory evaluation
-  fields are available, but the corresponding forecast engines are not yet
-  released. Existing `medium` and `long` rows remain legacy identities rather
-  than being relabeled as exact horizons.
+- The explicit `6m` and `12m` price-only engine uses the current configured
+  universe's history. Its backfilled panel is therefore survivorship-biased
+  research evidence, not proof of live skill. Probability is additionally
+  withheld unless effective non-overlapping cohort support, listing diversity,
+  calendar span, matched market-regime breadth, and fixed walk-forward
+  calibration gates pass.
+- The explicit `3y` and `5y` identities and advisory evaluation fields exist,
+  but their SEC-backed forecast engine is not yet released. Existing `medium`
+  and `long` rows remain legacy identities rather than being relabeled as exact
+  horizons.
 - Legacy scenario columns remain in storage for rollback compatibility. New
   application reads use the schema-versioned `forecast_scenarios` document;
   the old columns can be retired only after all supported deployments have

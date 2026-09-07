@@ -1,9 +1,9 @@
 # Deterministic Forecast Roadmap
 
-StanStock's next research phase will add medium- and long-horizon forecasts
-without LLMs, machine-learning models, analyst targets, or generated
-recommendations. Every forecast will come from versioned arithmetic,
-point-in-time source data, and empirical historical distributions.
+StanStock's research roadmap adds medium- and long-horizon forecasts without
+LLMs, machine-learning models, analyst targets, or generated recommendations.
+Every forecast comes from versioned arithmetic, point-in-time source data, and
+empirical historical distributions.
 
 ## Forecast contract
 
@@ -46,38 +46,45 @@ forecast identities:
 
 ## Stage 1: price-only 6-12 month ranges
 
-This stage can use the existing Twelve Data histories before fundamentals are
-available. It will replace an unconditional rolling-return range with a
-conditional empirical range.
+**Released.** This stage uses the existing Twelve Data histories before
+fundamentals are available and replaces an unconditional rolling-return range
+with separate conditional empirical 6- and 12-month ranges.
 
-For each historical decision date, StanStock will describe the stock using
+For each historical decision date, StanStock describes the stock using
 only values known on that date:
 
-- 6- and 12-month relative momentum;
-- position above or below the 50- and 200-day moving averages;
+- SPY-relative 12-month momentum;
 - drawdown from the 52-week high;
-- volatility and downside-volatility buckets;
-- liquidity bucket;
+- trailing volatility;
 - SPY trend and volatility regime.
 
-The current stock will be matched to prior observations in the same versioned
+The panel also records 50/200-session trend, downside volatility, and dollar
+liquidity as eligibility, risk, and explanation inputs rather than additional
+matching axes. The current stock is matched to prior observations in the same versioned
 state buckets. The 20th, 50th, and 80th percentiles of the subsequent 126- and
 252-session price returns become the bear, base, and bull cases.
 
 Sparse buckets will be shrunk toward the unconditional market distribution:
 
 ```text
-weight = matched_observations / (matched_observations + shrinkage_constant)
+weight = effective_non_overlapping_cohorts
+         / (effective_non_overlapping_cohorts + shrinkage_prior_cohorts)
 forecast_quantile =
     weight * matched_bucket_quantile
     + (1 - weight) * market_quantile
 ```
 
-The shrinkage constant and bucket boundaries will be fixed in versioned YAML,
-not selected by maximizing backtest results. Probability of a positive return
-will remain hidden until the matched sample clears the configured minimum.
-This stage is explicitly labeled `price-only` and cannot produce a
-fundamental long-term forecast.
+Rows are weighted so each market cohort contributes equal total weight even
+when many current-universe stocks share it. Bucket boundaries, fallback order,
+support floors, shrinkage, and calibration gates are frozen in
+`config/forecasts/us-price-medium-v1.yml`, not selected by maximizing backtest
+results. Probability of a positive return remains hidden until effective
+cohort support, listing diversity, calendar span, matched market-regime
+breadth, and walk-forward calibration all qualify.
+The complete panel is stored as a private immutable Parquet asset with source,
+calendar, configuration, content, and code hashes. This stage is explicitly
+labeled `price-only` and cannot produce a fundamental long-term forecast or
+alter recommendation policy.
 
 ## Stage 2: point-in-time US fundamentals
 

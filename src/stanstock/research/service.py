@@ -16,12 +16,23 @@ from stanstock.data.models import DataAsset, Listing, UniverseMembership, Univer
 from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
 from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.explanations import generate_reasons, generate_risks
+from stanstock.research.forecast_config import (
+    MediumForecastConfig,
+    load_medium_forecast_config,
+    medium_forecast_config_hash,
+)
 from stanstock.research.forecasting import (
     build_forecast_scenario_document,
     infer_price_source,
 )
 from stanstock.research.fundamentals import calculate_fundamentals, inputs_from_facts
 from stanstock.research.indicators import calculate_indicators
+from stanstock.research.medium_forecasts import (
+    MediumForecast,
+    MediumPanel,
+    build_medium_forecast_panel,
+    build_medium_forecasts,
+)
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.provenance import source_data_mode
 from stanstock.research.scenarios import build_scenarios
@@ -58,6 +69,15 @@ class PersistedAnalysis:
     analysis: StockAnalysis
     predictions: tuple[Prediction, ...]
     computation: AnalysisComputation
+
+
+@dataclass(frozen=True, slots=True)
+class AdvisoryForecastContext:
+    panel: MediumPanel
+    config: MediumForecastConfig
+    config_hash: str
+    model_version: str
+    forecasts: dict[str, dict[str, MediumForecast]]
 
 
 def compute_listing_analysis(
@@ -111,23 +131,7 @@ def compute_listing_analysis(
     )
     daily_change = indicators.values.get("return_1d")
     assets = _dedupe_assets(source_assets or [])
-    asset_payload: list[dict[str, Any]] = []
-    for asset in assets:
-        payload: dict[str, Any] = {
-            "id": str(asset.id),
-            "provider": asset.provider,
-            "kind": asset.kind,
-            "subject": asset.subject,
-            "relative_path": asset.relative_path,
-            "sha256": asset.sha256,
-            "retrieved_at": asset.retrieved_at.isoformat(),
-            "available_at": asset.available_at.isoformat(),
-        }
-        if isinstance(asset.metadata.get("return_definition"), str):
-            payload["return_definition"] = asset.metadata["return_definition"]
-        if isinstance(asset.metadata.get("dividends_included"), bool):
-            payload["dividends_included"] = asset.metadata["dividends_included"]
-        asset_payload.append(payload)
+    asset_payload = [_asset_payload(asset) for asset in assets]
     data_quality = {
         "indicator_missing": indicators.missing,
         "fundamental_missing": fundamentals.missing,
@@ -279,11 +283,20 @@ def _persist_listing_analysis(
     model_version: str,
     config_hash_value: str,
     code_revision_value: str,
+    advisory_context: AdvisoryForecastContext | None = None,
 ) -> PersistedAnalysis:
     if run.issued_on_time:
         _validate_on_time_source_assets(computation.source_assets, data_cutoff=data_cutoff)
-    analysis = _create_stock_analysis(run, listing, computation)
-    predictions = append_predictions(
+    advisory_forecasts = (
+        advisory_context.forecasts.get(str(listing.pk), {}) if advisory_context is not None else {}
+    )
+    analysis = _create_stock_analysis(
+        run,
+        listing,
+        computation,
+        advisory_forecasts=advisory_forecasts,
+    )
+    decision_predictions = append_predictions(
         analysis=analysis,
         computation=computation,
         generated_at=generated_at,
@@ -295,8 +308,25 @@ def _persist_listing_analysis(
         source_assets=computation.source_assets,
         code_revision_value=code_revision_value,
     )
+    advisory_predictions: tuple[Prediction, ...] = ()
+    if advisory_context is not None:
+        advisory_predictions = append_advisory_predictions(
+            analysis=analysis,
+            forecasts=advisory_forecasts,
+            panel_asset=advisory_context.panel.asset,
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            issued_on_time=run.issued_on_time,
+            model_version=advisory_context.model_version,
+            config_hash_value=advisory_context.config_hash,
+            source_assets=computation.source_assets,
+            code_revision_value=code_revision_value,
+        )
     return PersistedAnalysis(
-        run=run, analysis=analysis, predictions=predictions, computation=computation
+        run=run,
+        analysis=analysis,
+        predictions=(*decision_predictions, *advisory_predictions),
+        computation=computation,
     )
 
 
@@ -400,6 +430,7 @@ def analyze_snapshot(
     benchmark_subject: str | None = None,
     store: AssetStore | None = None,
     config_path: Path | None = None,
+    medium_forecast_config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> list[PersistedAnalysis]:
     generated_at = decision_time or timezone.now()
@@ -419,7 +450,8 @@ def analyze_snapshot(
     config = load_scoring_config(config_path)
     digest = config_hash(config)
     revision = code_revision()
-    asof = AsOfData(generated_at, store)
+    asset_store = store or AssetStore()
+    asof = AsOfData(generated_at, asset_store)
     run = _create_analysis_run(
         generated_at=generated_at,
         data_cutoff=data_cutoff,
@@ -442,29 +474,70 @@ def analyze_snapshot(
             membership.listing,
             operation="Snapshot stock analysis",
         )
-    for membership in memberships:
-        computation = _compute_listing_from_asof(
-            listing=membership.listing,
-            asof=asof,
-            provider=provider,
-            config=config,
-            decision_time=data_cutoff,
-            benchmark_subject=benchmark_subject,
-            sample_support=sample_support,
-            target_date=logical_target_date,
-        )
-        results.append(
-            _persist_listing_analysis(
-                run=run,
-                listing=membership.listing,
-                computation=computation,
+    advisory_context: AdvisoryForecastContext | None = None
+    panel_relative_path: str | None = None
+    try:
+        medium_config = load_medium_forecast_config(medium_forecast_config_path)
+        if (
+            benchmark_subject is not None
+            and config.version in medium_config.enabled_scoring_versions
+            and memberships
+        ):
+            medium_digest = medium_forecast_config_hash(medium_config)
+            panel = build_medium_forecast_panel(
+                listings=[membership.listing for membership in memberships],
+                asof=asof,
+                provider=provider,
+                benchmark_subject=benchmark_subject,
+                target_date=logical_target_date,
                 generated_at=generated_at,
-                data_cutoff=data_cutoff,
-                model_version=model_version,
-                config_hash_value=digest,
-                code_revision_value=revision,
+                run_id=run.id,
+                config=medium_config,
+                config_hash=medium_digest,
+                scoring_config_version=config.version,
+                scoring_config_hash=digest,
+                universe_snapshot_id=universe_snapshot.id,
+                universe_slug=universe_snapshot.universe.slug,
+                universe_config_hash=universe_snapshot.config_hash,
+                code_revision=revision,
+                store=asset_store,
             )
-        )
+            panel_relative_path = panel.asset.relative_path
+            advisory_context = AdvisoryForecastContext(
+                panel=panel,
+                config=medium_config,
+                config_hash=medium_digest,
+                model_version=_model_version(medium_config.version, run.id.hex),
+                forecasts=build_medium_forecasts(panel.frame, medium_config),
+            )
+        for membership in memberships:
+            computation = _compute_listing_from_asof(
+                listing=membership.listing,
+                asof=asof,
+                provider=provider,
+                config=config,
+                decision_time=data_cutoff,
+                benchmark_subject=benchmark_subject,
+                sample_support=sample_support,
+                target_date=logical_target_date,
+            )
+            results.append(
+                _persist_listing_analysis(
+                    run=run,
+                    listing=membership.listing,
+                    computation=computation,
+                    generated_at=generated_at,
+                    data_cutoff=data_cutoff,
+                    model_version=model_version,
+                    config_hash_value=digest,
+                    code_revision_value=revision,
+                    advisory_context=advisory_context,
+                )
+            )
+    except Exception:
+        if panel_relative_path is not None:
+            asset_store.resolve(panel_relative_path).unlink(missing_ok=True)
+        raise
     return results
 
 
@@ -521,12 +594,80 @@ def append_predictions(
     )
 
 
+def append_advisory_predictions(
+    *,
+    analysis: StockAnalysis,
+    forecasts: dict[str, MediumForecast],
+    panel_asset: DataAsset,
+    generated_at: datetime,
+    data_cutoff: datetime,
+    issued_on_time: bool,
+    model_version: str,
+    config_hash_value: str,
+    source_assets: list[dict[str, Any]],
+    code_revision_value: str,
+) -> tuple[Prediction, ...]:
+    require_stock_research_listing(
+        analysis.listing,
+        operation="Advisory forecast issuance",
+    )
+    if issued_on_time and (
+        not analysis.run.issued_on_time or generated_at != analysis.run.generated_at
+    ):
+        raise ValueError(
+            "Only forecasts created with the original on-time analysis may be marked on time"
+        )
+    expected_horizons = {
+        Prediction.Horizon.SIX_MONTH.value,
+        Prediction.Horizon.TWELVE_MONTH.value,
+    }
+    if set(forecasts) != expected_horizons:
+        raise ValueError("Advisory forecast issuance requires exactly 6m and 12m")
+    panel_payload = _asset_payload(panel_asset)
+    advisory_sources = [
+        *source_assets,
+        panel_payload,
+    ]
+    if issued_on_time:
+        _validate_on_time_source_assets(advisory_sources, data_cutoff=data_cutoff)
+    return tuple(
+        _create_advisory_prediction(
+            analysis=analysis,
+            horizon=Prediction.Horizon(horizon),
+            forecast=forecasts[horizon],
+            panel_asset=panel_asset,
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            issued_on_time=issued_on_time,
+            model_version=model_version,
+            config_hash_value=config_hash_value,
+            source_assets=advisory_sources,
+            code_revision_value=code_revision_value,
+        )
+        for horizon in (
+            Prediction.Horizon.SIX_MONTH.value,
+            Prediction.Horizon.TWELVE_MONTH.value,
+        )
+    )
+
+
 def _create_stock_analysis(
     run: AnalysisRun,
     listing: Listing,
     computation: AnalysisComputation,
+    *,
+    advisory_forecasts: dict[str, MediumForecast] | None = None,
 ) -> StockAnalysis:
     supported_horizons = {str(value) for value in computation.data_quality["supported_horizons"]}
+    scenario_payloads = {
+        horizon: scenario.as_dict() for horizon, scenario in computation.scenarios.items()
+    }
+    scenario_payloads.update(
+        {
+            horizon: forecast.scenario_payload()
+            for horizon, forecast in (advisory_forecasts or {}).items()
+        }
+    )
     return StockAnalysis.objects.create(
         run=run,
         listing=listing,
@@ -547,9 +688,7 @@ def _create_stock_analysis(
             },
             "factors": computation.aggregate.component_scores.factor_scores,
         },
-        forecast_scenarios=build_forecast_scenario_document(
-            {horizon: scenario.as_dict() for horizon, scenario in computation.scenarios.items()}
-        ),
+        forecast_scenarios=build_forecast_scenario_document(scenario_payloads),
         short_scenario=computation.scenarios["short"].as_dict(),
         medium_scenario=computation.scenarios["medium"].as_dict(),
         long_scenario=computation.scenarios["long"].as_dict(),
@@ -573,18 +712,7 @@ def _create_prediction(
     code_revision_value: str,
 ) -> Prediction:
     horizon_value = str(horizon)
-    price_source = analysis.data_quality.get("price_source")
-    if isinstance(price_source, dict):
-        price_provider = str(price_source.get("provider") or "")
-        price_subject = str(price_source.get("subject") or "")
-    else:
-        price_provider, price_subject = infer_price_source(
-            source_assets,
-            subjects=(
-                analysis.listing.provider_symbol or analysis.listing.ticker,
-                analysis.listing.ticker,
-            ),
-        )
+    price_provider, price_subject = _prediction_price_source(analysis, source_assets)
     return Prediction.objects.create(
         analysis=analysis,
         listing=analysis.listing,
@@ -646,6 +774,103 @@ def _create_prediction(
         },
         code_revision=code_revision_value,
     )
+
+
+def _create_advisory_prediction(
+    *,
+    analysis: StockAnalysis,
+    horizon: Prediction.Horizon,
+    forecast: MediumForecast,
+    panel_asset: DataAsset,
+    generated_at: datetime,
+    data_cutoff: datetime,
+    issued_on_time: bool,
+    model_version: str,
+    config_hash_value: str,
+    source_assets: list[dict[str, Any]],
+    code_revision_value: str,
+) -> Prediction:
+    price_provider, price_subject = _prediction_price_source(analysis, source_assets)
+    calculation = dict(forecast.calculation)
+    calculation.update(
+        {
+            "config_hash": config_hash_value,
+            "prediction_version": model_version,
+            "panel_asset_id": str(panel_asset.pk),
+            "panel_sha256": panel_asset.sha256,
+            "evidence_grade": analysis.run.universe_snapshot.grade,
+            "price_subject": price_subject,
+        }
+    )
+    scenario = forecast.scenario
+    return Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=generated_at,
+        target_date=analysis.run.target_date,
+        issued_on_time=issued_on_time,
+        horizon=horizon,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=analysis.run.universe_snapshot.grade,
+        source_mode=source_data_mode({"source_assets": source_assets}),
+        price_provider=price_provider,
+        price_subject=price_subject,
+        price_at_prediction=analysis.current_price,
+        bear_return=_optional_decimal(scenario.bear, places=4),
+        base_return=_optional_decimal(scenario.base, places=4),
+        bull_return=_optional_decimal(scenario.bull, places=4),
+        probability_positive=_optional_decimal(scenario.probability_positive, places=4),
+        confidence=_decimal(scenario.confidence, places=2),
+        confidence_status=scenario.confidence_status,
+        insufficiency_reason=scenario.insufficiency_reason,
+        recommendation=analysis.recommendation,
+        overall_score=analysis.overall_score,
+        component_scores=analysis.component_scores,
+        model_version=model_version,
+        method_version=str(calculation["method_version"]),
+        config_hash=config_hash_value,
+        data_cutoff=data_cutoff,
+        source_assets=source_assets,
+        calculation=calculation,
+        code_revision=code_revision_value,
+    )
+
+
+def _prediction_price_source(
+    analysis: StockAnalysis,
+    source_assets: list[dict[str, Any]],
+) -> tuple[str, str]:
+    price_source = analysis.data_quality.get("price_source")
+    if isinstance(price_source, dict):
+        return (
+            str(price_source.get("provider") or ""),
+            str(price_source.get("subject") or ""),
+        )
+    return infer_price_source(
+        source_assets,
+        subjects=(
+            analysis.listing.provider_symbol or analysis.listing.ticker,
+            analysis.listing.ticker,
+        ),
+    )
+
+
+def _asset_payload(asset: DataAsset) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": str(asset.id),
+        "provider": asset.provider,
+        "kind": asset.kind,
+        "subject": asset.subject,
+        "relative_path": asset.relative_path,
+        "sha256": asset.sha256,
+        "retrieved_at": asset.retrieved_at.isoformat(),
+        "available_at": asset.available_at.isoformat(),
+    }
+    if isinstance(asset.metadata.get("return_definition"), str):
+        payload["return_definition"] = asset.metadata["return_definition"]
+    if isinstance(asset.metadata.get("dividends_included"), bool):
+        payload["dividends_included"] = asset.metadata["dividends_included"]
+    return payload
 
 
 def _dedupe_assets(assets: list[DataAsset]) -> list[DataAsset]:

@@ -7,7 +7,7 @@ tracking, live personal portfolios, backtesting, and portfolio simulation.
 It is a rules-based research system, not an automated trading service. It does
 not use LLMs or trained machine-learning models to produce forecasts, scores,
 or recommendations, and forecasts are never presented as guarantees. The
-math-only medium- and long-horizon plan is documented in
+math-only medium-horizon implementation and long-horizon plan are documented in
 [`docs/forecast-roadmap.md`](docs/forecast-roadmap.md).
 
 ## Current data boundary
@@ -128,12 +128,21 @@ reviewed custom agreement, use
 `daily --region us` validates the configured symbols against Twelve Data's
 NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
 vintages, captures an observed universe snapshot for the latest eligible
-session, analyzes eligible listings, and appends the supported short-horizon
-price-only predictions. The single SPY benchmark response also advances its
-ETF market row; it is not fetched twice. Existing `medium` and `long` records
-retain their legacy identities; the explicit `6m`, `12m`, `3y`, and `5y`
-identities are reserved for advisory engines and do not enter the current
-decision ledger until those engines are released. An explicit older
+session, analyzes eligible listings, appends the supported short-horizon
+decision prediction, and issues separate 6- and 12-month price-only advisory
+forecasts. The medium engine writes one private immutable Parquet panel per
+analysis run, uses fixed-epoch non-overlapping cohorts, weights each market
+cohort equally, and shrinks conditional p20/p50/p80 returns toward the
+unconditional distribution. Probability stays hidden until effective support,
+listing diversity, calendar span, matched market-regime breadth, and
+walk-forward calibration all pass.
+
+The single SPY benchmark response supplies both regime evidence for those
+forecasts and the investable ETF market row; it is not fetched twice.
+Current-universe historical panels are explicitly labeled survivorship-biased
+research evidence and are not presented as live skill. Existing `medium` and
+`long` records retain their legacy identities. Exact `3y` and `5y` advisory
+forecasts remain reserved for the SEC-backed engine. An explicit older
 `--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
 idempotent; another invocation creates a skipped job and makes no provider
 requests.

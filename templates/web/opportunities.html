@@ -26,7 +26,8 @@
     <div class="notice" role="status">
       <strong>US price-only baseline.</strong>
       Rankings and recommendations use price, volume, market-relative, and
-      risk evidence only. Medium- and long-horizon scenarios are withheld
+      risk evidence only. The 6- and 12-month ranges are advisory and cannot
+      change the ranking. Three- and five-year forecasts remain withheld
       until point-in-time fundamentals are available.
     </div>
   {% endif %}
@@ -183,14 +184,34 @@
                   <div><dt>Risk</dt><dd>{{ stock.get_risk_class_display }}</dd></div>
                   <div><dt>Confidence</dt><dd>{{ stock.confidence|floatformat:"0" }}%</dd></div>
                   <div><dt>1-10 days</dt><dd>{{ stock.short_forecast_scenario|scenario_range }}</dd></div>
-                  <div><dt>6-12 months</dt><dd>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</dd></div>
+                  {% if stock.has_explicit_medium_forecasts %}
+                    <div><dt>6 months</dt><dd>{{ stock.six_month_forecast_scenario|scenario_range }}</dd></div>
+                    <div><dt>12 months</dt><dd>{{ stock.twelve_month_forecast_scenario|scenario_range }}</dd></div>
+                  {% else %}
+                    <div><dt>Legacy 6-12 months</dt><dd>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</dd></div>
+                    <div><dt>12 months</dt><dd>Not issued</dd></div>
+                  {% endif %}
                   <div>
-                    <dt>3+ years</dt>
+                    <dt>{% if stock.has_explicit_advisory_forecasts %}3 years{% else %}Legacy 3+ years{% endif %}</dt>
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
+                      {% elif stock.has_explicit_advisory_forecasts %}
+                        {{ stock.three_year_forecast_scenario|scenario_range }}
                       {% else %}
                         {{ stock.legacy_long_forecast_scenario|scenario_range }}
+                      {% endif %}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>5 years</dt>
+                    <dd>
+                      {% if card.long_horizon_blocked %}
+                        Forecast unavailable
+                      {% elif stock.has_explicit_advisory_forecasts %}
+                        {{ stock.five_year_forecast_scenario|scenario_range }}
+                      {% else %}
+                        Not issued
                       {% endif %}
                     </dd>
                   </div>

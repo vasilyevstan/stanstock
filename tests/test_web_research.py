@@ -266,6 +266,8 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     assert "78.50/100" in opportunity_content
     assert "$50-$300" in opportunity_content
     assert "Latest close" in opportunity_content
+    assert "Legacy 6-12 months" in opportunity_content
+    assert "Legacy 3+ years" in opportunity_content
 
     excluded = authenticated_client.get(
         reverse("opportunities"),
@@ -285,6 +287,9 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     content = detail.content.decode()
     assert "Quality is above the configured threshold." in content
     assert "Prediction history" in content
+    assert "Legacy 6-12 month scenario" in content
+    assert "Legacy 3+ year scenario" in content
+    assert "Reconstructed training evidence." not in content
 
 
 @pytest.mark.django_db
@@ -533,18 +538,88 @@ def test_price_only_analysis_discloses_model_and_return_limits(
         "return_definition": "split_adjusted_price_return",
         "dividends_included": False,
     }
-    persisted_analysis.save(update_fields=["data_quality"])
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            "short": persisted_analysis.short_scenario,
+            "medium": persisted_analysis.medium_scenario,
+            "long": persisted_analysis.long_scenario,
+            "6m": {
+                "bear": -0.10,
+                "base": 0.08,
+                "bull": 0.24,
+                "probability_positive": None,
+                "confidence": 55,
+                "confidence_status": "empirical_range_only",
+                "insufficiency_reason": "Probability withheld: effective cohorts 4/8",
+                "method": "conditional_empirical_price",
+                "method_version": "us-price-medium-v1",
+                "support": {
+                    "effective_cohorts": 4,
+                    "distinct_listings": 36,
+                    "fallback_level": "stock_state",
+                },
+                "current_state": {
+                    "relative_momentum": 0.07,
+                    "drawdown": -0.12,
+                    "volatility": 0.25,
+                    "market_trend": 0.04,
+                    "market_volatility": 0.16,
+                },
+                "return_basis": "split_adjusted_price_return",
+            },
+            "12m": {
+                "bear": -0.18,
+                "base": 0.14,
+                "bull": 0.38,
+                "probability_positive": None,
+                "confidence": 48,
+                "confidence_status": "empirical_range_only",
+                "insufficiency_reason": (
+                    "Probability withheld: walk-forward calibration insufficient"
+                ),
+                "method": "conditional_empirical_price",
+                "method_version": "us-price-medium-v1",
+                "support": {
+                    "effective_cohorts": 3,
+                    "distinct_listings": 41,
+                    "fallback_level": "relative_momentum",
+                },
+                "current_state": {
+                    "relative_momentum": 0.07,
+                    "drawdown": -0.12,
+                    "volatility": 0.25,
+                    "market_trend": 0.04,
+                    "market_volatility": 0.16,
+                },
+                "return_basis": "split_adjusted_price_return",
+            },
+        },
+    }
+    persisted_analysis.save(update_fields=["data_quality", "forecast_scenarios"])
 
     opportunities = authenticated_client.get(reverse("opportunities"))
     detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
 
     assert opportunities.status_code == 200
-    assert "US price-only baseline." in opportunities.content.decode()
-    assert "Medium- and long-horizon scenarios are withheld" in opportunities.content.decode()
+    opportunity_content = opportunities.content.decode()
+    assert "US price-only baseline." in opportunity_content
+    assert "The 6- and 12-month ranges are advisory" in opportunity_content
+    assert "Three- and five-year forecasts remain withheld" in opportunity_content
     assert detail.status_code == 200
     detail_content = detail.content.decode()
-    assert "This recommendation does not use company fundamentals." in detail_content
+    assert "The recommendation remains short-horizon" in detail_content
     assert "Split-adjusted price return; dividends excluded." in detail_content
+    assert "Reconstructed training evidence." in detail_content
+    assert "6-month advisory forecast" in detail_content
+    assert "12-month advisory forecast" in detail_content
+    assert "3-year advisory forecast" in detail_content
+    assert "5-year advisory forecast" in detail_content
+    assert "-10.0% / +8.0% / +24.0%" in detail_content
+    assert "-18.0% / +14.0% / +38.0%" in detail_content
+    assert "4 non-overlapping cohorts" in detail_content
+    assert "Relative momentum +7.0%" in detail_content
+    assert "Split-adjusted price return · dividends excluded" in detail_content
 
 
 @pytest.mark.django_db
@@ -651,6 +726,55 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     performance_content = performance.content.decode()
     assert "Insufficient sample" in performance_content
     assert "Withheld" in performance_content
+
+
+@pytest.mark.django_db
+def test_recommendation_filter_excludes_advisory_predictions(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    decision = Prediction.objects.get(analysis=persisted_analysis)
+    Prediction.objects.create(
+        analysis=persisted_analysis,
+        listing=persisted_analysis.listing,
+        generated_at=decision.generated_at,
+        target_date=decision.target_date,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        price_at_prediction=decision.price_at_prediction,
+        bear_return=Decimal("-0.10"),
+        base_return=Decimal("0.08"),
+        bull_return=Decimal("0.20"),
+        probability_positive=None,
+        confidence=Decimal("40"),
+        confidence_status="empirical_range_only",
+        insufficiency_reason="Probability withheld",
+        recommendation=Recommendation.BUY,
+        overall_score=decision.overall_score,
+        model_version="advisory-filter-v1",
+        method_version="advisory-filter-v1",
+        config_hash="f" * 64,
+        data_cutoff=decision.data_cutoff,
+        code_revision=decision.code_revision,
+    )
+
+    decisions = authenticated_client.get(
+        reverse("predictions"),
+        {"recommendation": Recommendation.BUY},
+    )
+    incompatible = authenticated_client.get(
+        reverse("predictions"),
+        {
+            "recommendation": Recommendation.BUY,
+            "evidence_role": Prediction.EvidenceRole.ADVISORY,
+        },
+    )
+
+    assert decisions.status_code == 200
+    assert decisions.context["result_count"] == 1
+    assert decisions.context["prediction_cards"][0]["prediction"].evidence_role == "decision"
+    assert incompatible.status_code == 200
+    assert incompatible.context["result_count"] == 0
 
 
 @pytest.mark.django_db

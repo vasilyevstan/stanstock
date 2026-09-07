@@ -26,6 +26,7 @@ from stanstock.data.etfs import (
 )
 from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import (
+    DataAsset,
     LatestMarketData,
     Listing,
     ProviderRecord,
@@ -123,6 +124,16 @@ def status_page(request: HttpRequest) -> HttpResponse:
         if latest_run
         else []
     )
+    medium_panel = (
+        DataAsset.objects.filter(
+            kind="medium_forecast_panel",
+            subject=str(latest_run.pk),
+        )
+        .order_by("-available_at")
+        .first()
+        if latest_run is not None
+        else None
+    )
     context = {
         "components": components,
         "system_ok": all(bool(component["ok"]) for component in components),
@@ -136,14 +147,28 @@ def status_page(request: HttpRequest) -> HttpResponse:
         "providers": ProviderRecord.objects.order_by("provider"),
         "recent_jobs": JobRun.objects.order_by("-started_at")[:5],
         "scheduler": _scheduler_status(),
+        "medium_panel": medium_panel,
         "prediction_count": Prediction.objects.filter(analysis__run=latest_run).count()
         if latest_run
         else 0,
-        "matured_count": PredictionOutcome.objects.filter(
-            prediction__analysis__run=latest_run, status=PredictionOutcome.Status.MATURED
-        ).count()
-        if latest_run
-        else 0,
+        "decision_matured_count": (
+            PredictionOutcome.objects.filter(
+                prediction__analysis__run=latest_run,
+                prediction__evidence_role=Prediction.EvidenceRole.DECISION,
+                status=PredictionOutcome.Status.MATURED,
+            ).count()
+            if latest_run
+            else 0
+        ),
+        "advisory_matured_count": (
+            PredictionOutcome.objects.filter(
+                prediction__analysis__run=latest_run,
+                prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
+                status=PredictionOutcome.Status.MATURED,
+            ).count()
+            if latest_run
+            else 0
+        ),
     }
     return render(request, "web/status.html", context)
 
@@ -397,10 +422,13 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
     evidence_role = request.GET.get("evidence_role", "")
     if horizon in Prediction.Horizon.values:
         predictions = predictions.filter(horizon=horizon)
-    if recommendation in Recommendation.values:
-        predictions = predictions.filter(recommendation=recommendation)
     if evidence_role in Prediction.EvidenceRole.values:
         predictions = predictions.filter(evidence_role=evidence_role)
+    if recommendation in Recommendation.values:
+        predictions = predictions.filter(
+            evidence_role=Prediction.EvidenceRole.DECISION,
+            recommendation=recommendation,
+        )
 
     displayed_predictions = list(predictions[:100])
     prediction_cards = [{"prediction": prediction} for prediction in displayed_predictions]

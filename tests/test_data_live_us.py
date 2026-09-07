@@ -711,18 +711,24 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
     )
 
     assert result.analyses == 1
-    assert result.predictions == 1
+    assert result.predictions == 3
     assert AnalysisRun.objects.count() == 1
     assert StockAnalysis.objects.count() == 1
-    assert Prediction.objects.count() == 1
+    assert Prediction.objects.count() == 3
     assert not StockAnalysis.objects.filter(listing__provider_symbol="SPY").exists()
     analysis = StockAnalysis.objects.get()
     assert analysis.run.issued_on_time is True
     assert analysis.run.data_cutoff == analysis.run.generated_at
     assert analysis.data_quality["source_assets"][0]["provider"] == "twelve_data"
-    prediction = Prediction.objects.get()
-    assert prediction.horizon == Prediction.Horizon.SHORT
-    assert prediction.issued_on_time is True
+    predictions = list(Prediction.objects.order_by("horizon"))
+    assert {prediction.horizon for prediction in predictions} == {"short", "6m", "12m"}
+    assert all(prediction.issued_on_time is True for prediction in predictions)
+    advisory = [prediction for prediction in predictions if prediction.evidence_role == "advisory"]
+    assert len(advisory) == 2
+    assert all(prediction.method_version == "us-price-medium-v1" for prediction in advisory)
+    assert all(prediction.calculation["panel_asset_id"] for prediction in advisory)
+    assert DataAsset.objects.filter(kind="medium_forecast_panel").count() == 1
+    assert set(analysis.forecast_scenarios["horizons"]) == {"short", "medium", "long", "6m", "12m"}
     assert all(
         datetime.fromisoformat(asset[field]) <= analysis.run.data_cutoff
         for asset in analysis.data_quality["source_assets"]
@@ -804,6 +810,54 @@ def test_run_us_daily_reaches_the_real_analysis_and_prediction_layer(
         )
 
 
+def test_post_analysis_deadline_rollback_removes_derived_forecast_panel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: _catalog(config),
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        lambda symbol, **kwargs: _long_series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        ),
+    )
+    deadline_checks = 0
+
+    def enforce_deadline(*, target_date: date, generated_at: datetime) -> None:
+        nonlocal deadline_checks
+        deadline_checks += 1
+        if deadline_checks == 2:
+            raise ValueError("forced post-analysis deadline failure")
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us._require_automatic_on_time",
+        enforce_deadline,
+    )
+
+    with pytest.raises(ValueError, match="forced post-analysis deadline failure"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+            require_on_time=True,
+        )
+
+    assert deadline_checks == 2
+    assert AnalysisRun.objects.count() == 0
+    assert DataAsset.objects.filter(kind="medium_forecast_panel").count() == 0
+    assert list(tmp_path.glob("derived/forecast/medium/**/*.parquet")) == []
+
+
 def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -858,7 +912,7 @@ def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
 
     assert AnalysisRun.objects.filter(status="complete").count() == 1
     assert StockAnalysis.objects.count() == 1
-    assert Prediction.objects.count() == 1
+    assert Prediction.objects.count() == 3
     assert not Listing.objects.filter(provider_symbol="SPY").exists()
 
     monkeypatch.setattr(

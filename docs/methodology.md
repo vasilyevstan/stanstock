@@ -158,17 +158,34 @@ forecast.
 
 - **1-10 trading days:** empirical/rule ranges driven primarily by trend,
   momentum, volume, volatility, liquidity, and market regime.
-- **6-12 months:** empirical/rule ranges combining valuation, quality, growth,
-  momentum, risk, and regional/sector context.
-- **3+ years:** explicit fundamental cases for growth, margins, free cash flow,
-  balance-sheet resilience, and valuation normalization.
+- **6 months and 12 months:** separate price-only advisory ranges built from
+  fixed-epoch, non-overlapping 126- and 252-session cohorts. Matching uses
+  SPY-relative 12-month momentum, 52-week drawdown, trailing volatility, and
+  SPY trend/volatility regimes. Each cohort receives equal aggregate weight
+  before p20/p50/p80 estimation, and sparse conditional ranges shrink toward
+  the unconditional horizon distribution.
+- **3 years and 5 years:** reserved for explicit fundamental cases using
+  point-in-time SEC evidence; these remain unavailable until that engine is
+  released.
 
 Bear, base, and bull are ordered ranges, not precise target prices.
-Probability of positive return is omitted with an insufficiency reason until
-the relevant historical sample satisfies its configured minimum.
+Medium-horizon probability of positive return is omitted with an insufficiency
+reason until non-overlapping cohort support, listing diversity, calendar span,
+matched market-regime breadth, and frozen walk-forward calibration gates
+all pass. Walk-forward calibration compares the conditional range midpoint
+with both the unconditional median and a SPY-relative decomposition baseline:
+the historical SPY median for the matching market regime plus the historical
+excess-return median for the matching relative-momentum bucket.
+Because the narrowest fallback levels explicitly condition on market regime,
+they may yield a useful range while still failing the matched-regime breadth
+gate for probability. StanStock does not switch to a broader fallback merely
+to publish a probability.
 
-Confidence remains labeled `heuristic` until out-of-sample calibration
-evidence exists.
+The medium panel stores 50/200-session trend, downside volatility, and dollar
+liquidity for eligibility and explanation, but those values do not add hidden
+matching dimensions. All panel inputs are capped at their historical anchor,
+and a forward label is present only when its complete outcome ends on or
+before the current forecast target.
 
 The planned implementation sequence and exact math-only forecast identities
 are documented in
@@ -213,10 +230,11 @@ prediction at issuance; later edits to parent snapshot metadata cannot
 reclassify evidence. Advisory outcomes have separate exact
 method/configuration/provider/horizon cohorts and cannot enter the decision
 denominator. Matured synthetic, unsupported, or later-reissued outcomes remain
-visibly excluded from live, out-of-sample claims. A price-only baseline
-persists only the short horizon it supports; withheld medium and long
-scenarios are not prediction records and therefore cannot enter evaluation
-denominators.
+visibly excluded from live, out-of-sample claims. The price-only baseline
+persists one short decision prediction plus separate `6m` and `12m` advisory
+predictions. Historical current-universe panel rows are survivorship-biased
+research evidence; only subsequently matured on-time predictions can
+contribute observed advisory outcomes.
 
 The evaluator also compares the target-date close in the evaluation vintage
 with the immutable prediction source price. A material mismatch is classified
