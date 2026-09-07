@@ -644,6 +644,8 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     assert persisted_analysis.listing.ticker in prediction_content
     assert "Insufficient evidence" in prediction_content
     assert "Research-grade reconstruction" in prediction_content
+    assert "Decision" in prediction_content
+    assert "Legacy provider not proven" in prediction_content
 
     assert performance.status_code == 200
     performance_content = performance.content.decode()
@@ -714,6 +716,10 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
         target_date=run.target_date,
         issued_on_time=True,
         horizon=Prediction.Horizon.SHORT,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=analysis.listing.ticker,
         price_at_prediction=Decimal("102"),
         bear_return=Decimal("-0.03"),
         base_return=Decimal("0.02"),
@@ -725,6 +731,7 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
         recommendation=Recommendation.HOLD,
         overall_score=Decimal("70"),
         model_version="overnight-observed-v1",
+        method_version="us-price-baseline-v1",
         config_hash="d" * 64,
         data_cutoff=run.data_cutoff,
         code_revision="test-revision",
@@ -746,6 +753,10 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
         target_date=run.target_date,
         issued_on_time=False,
         horizon=Prediction.Horizon.SHORT,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=analysis.listing.ticker,
         price_at_prediction=Decimal("102"),
         bear_return=Decimal("-0.03"),
         base_return=Decimal("0.02"),
@@ -757,6 +768,7 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
         recommendation=Recommendation.HOLD,
         overall_score=Decimal("70"),
         model_version="overnight-reissued-v2",
+        method_version="us-price-baseline-v1",
         config_hash="d" * 64,
         data_cutoff=run.data_cutoff,
         code_revision="test-revision",
@@ -771,12 +783,62 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
         success=True,
         resolution="Late reissued outcome",
     )
+    advisory_prediction = Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=generated_at,
+        target_date=run.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=analysis.listing.ticker,
+        price_at_prediction=Decimal("102"),
+        bear_return=Decimal("-0.10"),
+        base_return=Decimal("0.08"),
+        bull_return=Decimal("0.25"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="experimental",
+        insufficiency_reason="",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="medium-price-v1",
+        method_version="medium-price-v1",
+        config_hash="e" * 64,
+        data_cutoff=run.data_cutoff,
+        calculation={"evidence_grade": "observed"},
+        code_revision="test-revision",
+    )
+    PredictionOutcome.objects.create(
+        prediction=advisory_prediction,
+        evaluated_at=datetime(2027, 3, 10, 12, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.10"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=True,
+        interval_covered=True,
+        signed_error=Decimal("0.02"),
+        resolution="Observed advisory outcome",
+    )
+    snapshot.grade = UniverseSnapshot.Grade.RESEARCH
+    snapshot.save(update_fields=["grade"])
 
     response = authenticated_client.get(reverse("performance"))
 
     assert response.status_code == 200
     assert response.context["summary"]["sample_count"] == 1
     assert response.context["summary"]["research_matured_count"] == 1
+    advisory_groups = response.context["advisory_groups"]
+    assert len(advisory_groups) == 1
+    assert advisory_groups[0]["sample_count"] == 1
+    assert advisory_groups[0]["direction_accuracy"] is None
+    assert advisory_groups[0]["direction_sample_count"] == 1
+    assert "Advisory evidence" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -823,6 +885,10 @@ def test_performance_never_pools_distinct_configuration_versions(
                 target_date=run.target_date,
                 issued_on_time=True,
                 horizon=Prediction.Horizon.SHORT,
+                evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+                source_mode=Prediction.SourceMode.PROVIDER,
+                price_provider="twelve_data",
+                price_subject=listing.ticker,
                 price_at_prediction=Decimal("100"),
                 bear_return=Decimal("-0.03"),
                 base_return=Decimal("0.02"),
@@ -834,6 +900,7 @@ def test_performance_never_pools_distinct_configuration_versions(
                 recommendation=Recommendation.HOLD,
                 overall_score=Decimal("70"),
                 model_version=f"method-{method_index}-{prediction_index}",
+                method_version=version,
                 config_hash=digest,
                 data_cutoff=generated_at,
                 code_revision="test-revision",

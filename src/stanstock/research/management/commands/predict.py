@@ -19,6 +19,12 @@ from stanstock.research.types import (
     Scenario,
 )
 
+SCORE_HORIZONS = (
+    Prediction.Horizon.SHORT.value,
+    Prediction.Horizon.MEDIUM.value,
+    Prediction.Horizon.LONG.value,
+)
+
 
 class Command(BaseCommand):
     help = "Append a new immutable prediction version from an existing persisted analysis."
@@ -66,13 +72,11 @@ def _supported_horizons(analysis: StockAnalysis) -> tuple[str, ...]:
     data_quality = analysis.data_quality if isinstance(analysis.data_quality, dict) else {}
     raw_horizons = data_quality.get("supported_horizons")
     if raw_horizons is None:
-        return tuple(Prediction.Horizon.values)
+        return SCORE_HORIZONS
     if not isinstance(raw_horizons, list) or not raw_horizons:
         raise CommandError("Analysis supported_horizons must be a non-empty list")
     invalid = [
-        value
-        for value in raw_horizons
-        if not isinstance(value, str) or value not in Prediction.Horizon.values
+        value for value in raw_horizons if not isinstance(value, str) or value not in SCORE_HORIZONS
     ]
     if invalid:
         raise CommandError(f"Analysis contains invalid supported horizons: {invalid}")
@@ -111,9 +115,8 @@ def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
         freshness_penalty=1.0,
     )
     scenarios: dict[str, Scenario] = {
-        Prediction.Horizon.SHORT.value: _scenario_from_mapping(analysis.short_scenario),
-        Prediction.Horizon.MEDIUM.value: _scenario_from_mapping(analysis.medium_scenario),
-        Prediction.Horizon.LONG.value: _scenario_from_mapping(analysis.long_scenario),
+        horizon: _scenario_from_mapping(analysis.scenario_for_horizon(horizon))
+        for horizon in SCORE_HORIZONS
     }
     return AnalysisComputation(
         indicators=IndicatorResult(values={}),

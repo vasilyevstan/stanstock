@@ -77,8 +77,6 @@ from stanstock.research.provenance import (
     data_mode_label,
     latest_provider_backed_analysis_run,
     latest_serving_analysis_run,
-    source_data_mode,
-    source_providers,
 )
 from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
@@ -396,20 +394,16 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
     ).order_by("-generated_at", "listing__ticker")
     horizon = request.GET.get("horizon", "")
     recommendation = request.GET.get("recommendation", "")
+    evidence_role = request.GET.get("evidence_role", "")
     if horizon in Prediction.Horizon.values:
         predictions = predictions.filter(horizon=horizon)
     if recommendation in Recommendation.values:
         predictions = predictions.filter(recommendation=recommendation)
+    if evidence_role in Prediction.EvidenceRole.values:
+        predictions = predictions.filter(evidence_role=evidence_role)
 
     displayed_predictions = list(predictions[:100])
-    prediction_cards = [
-        {
-            "prediction": prediction,
-            "source_mode": source_data_mode({"source_assets": prediction.source_assets}),
-            "source_providers": source_providers({"source_assets": prediction.source_assets}),
-        }
-        for prediction in displayed_predictions
-    ]
+    prediction_cards = [{"prediction": prediction} for prediction in displayed_predictions]
     return render(
         request,
         "web/predictions.html",
@@ -418,6 +412,7 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
             "result_count": predictions.count(),
             "horizons": Prediction.Horizon.choices,
             "recommendations": Recommendation.choices,
+            "evidence_roles": Prediction.EvidenceRole.choices,
             "filters": request.GET,
         },
     )
@@ -542,23 +537,30 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def performance_page(request: HttpRequest) -> HttpResponse:
-    outcomes = PredictionOutcome.objects.select_related("prediction__listing__security__company")
+    all_outcomes = PredictionOutcome.objects.select_related(
+        "prediction__listing__security__company"
+    )
+    outcomes = all_outcomes.filter(prediction__evidence_role=Prediction.EvidenceRole.DECISION)
     matured = outcomes.filter(
         status=PredictionOutcome.Status.MATURED,
         actual_return__isnull=False,
     )
-    on_time_observed = Q(
-        prediction__analysis__run__universe_snapshot__grade=UniverseSnapshot.Grade.OBSERVED,
+    reportable_evidence = Q(
+        prediction__evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        prediction__source_mode=Prediction.SourceMode.PROVIDER,
         prediction__analysis__run__issued_on_time=True,
         prediction__issued_on_time=True,
-    )
-    reportable_matured = matured.filter(on_time_observed)
+    ) & ~Q(prediction__price_provider="")
+    reportable_matured = matured.filter(reportable_evidence)
     latest_method_prediction = (
         Prediction.objects.filter(
-            analysis__run__universe_snapshot__grade=UniverseSnapshot.Grade.OBSERVED,
+            evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+            source_mode=Prediction.SourceMode.PROVIDER,
             analysis__run__issued_on_time=True,
             issued_on_time=True,
+            evidence_role=Prediction.EvidenceRole.DECISION,
         )
+        .exclude(price_provider="")
         .select_related("analysis__run")
         .order_by("-generated_at", "-id")
         .first()
@@ -566,19 +568,25 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     current_method_matured = reportable_matured.none()
     current_method_outcomes = outcomes.none()
     current_config_version = ""
+    current_method_version = ""
     current_config_hash = ""
+    current_price_provider = ""
     if latest_method_prediction is not None:
         current_config_version = latest_method_prediction.analysis.run.config_version
+        current_method_version = latest_method_prediction.method_version
         current_config_hash = latest_method_prediction.config_hash
+        current_price_provider = latest_method_prediction.price_provider
         method_filter = Q(
-            prediction__analysis__run__config_version=current_config_version,
+            prediction__method_version=current_method_version,
             prediction__config_hash=current_config_hash,
+            prediction__price_provider=current_price_provider,
         )
         current_method_matured = reportable_matured.filter(method_filter)
         current_method_outcomes = outcomes.filter(method_filter)
 
     summary = current_method_matured.aggregate(
         sample_count=Count("prediction"),
+        benchmark_sample_count=Count("benchmark_return"),
         mean_return=Avg("actual_return"),
         mean_benchmark_return=Avg("benchmark_return"),
     )
@@ -589,7 +597,9 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     summary.update(
         {
             "config_version": current_config_version,
+            "method_version": current_method_version,
             "config_hash": current_config_hash,
+            "price_provider": current_price_provider,
             "positive_rate": (
                 Decimal(positive_count) / Decimal(sample_count) if sample_count else None
             ),
@@ -598,17 +608,18 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             ),
             "sufficient_sample": sample_count >= 30,
             "unresolved_count": current_method_outcomes.filter(
-                on_time_observed,
+                reportable_evidence,
                 status=PredictionOutcome.Status.UNRESOLVED,
             ).count(),
             "corporate_event_count": current_method_outcomes.filter(
-                on_time_observed,
+                reportable_evidence,
                 status=PredictionOutcome.Status.CORPORATE_EVENT,
             ).count(),
-            "research_matured_count": matured.exclude(on_time_observed).count(),
+            "research_matured_count": matured.exclude(reportable_evidence).count(),
             "method_count": reportable_matured.values(
-                "prediction__analysis__run__config_version",
+                "prediction__method_version",
                 "prediction__config_hash",
+                "prediction__price_provider",
             )
             .distinct()
             .count(),
@@ -616,29 +627,85 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     )
     groups = (
         reportable_matured.values(
-            "prediction__analysis__run__config_version",
+            "prediction__method_version",
             "prediction__config_hash",
+            "prediction__price_provider",
+            "prediction__evidence_grade",
             "prediction__horizon",
             "prediction__recommendation",
         )
         .annotate(
             sample_count=Count("prediction"),
+            benchmark_sample_count=Count("benchmark_return"),
             mean_return=Avg("actual_return"),
             mean_benchmark_return=Avg("benchmark_return"),
         )
         .order_by(
-            "prediction__analysis__run__config_version",
+            "prediction__method_version",
             "prediction__config_hash",
+            "prediction__price_provider",
             "prediction__horizon",
             "prediction__recommendation",
         )
     )
+    reportable_advisory_matured = all_outcomes.filter(
+        status=PredictionOutcome.Status.MATURED,
+        actual_return__isnull=False,
+        prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
+    ).filter(reportable_evidence)
+    raw_advisory_groups = reportable_advisory_matured.values(
+        "prediction__method_version",
+        "prediction__config_hash",
+        "prediction__price_provider",
+        "prediction__horizon",
+        "prediction__evidence_grade",
+    ).annotate(
+        sample_count=Count("prediction"),
+        direction_sample_count=Count("direction_correct"),
+        direction_correct_count=Count(
+            "prediction",
+            filter=Q(direction_correct=True),
+        ),
+        interval_sample_count=Count("interval_covered"),
+        interval_covered_count=Count(
+            "prediction",
+            filter=Q(interval_covered=True),
+        ),
+        signed_error_sample_count=Count("signed_error"),
+        mean_signed_error=Avg("signed_error"),
+    )
+    advisory_groups: list[dict[str, Any]] = []
+    for raw_group in raw_advisory_groups.order_by(
+        "prediction__method_version",
+        "prediction__config_hash",
+        "prediction__price_provider",
+        "prediction__horizon",
+    ):
+        group: dict[str, Any] = dict(raw_group)
+        direction_sample_count = int(group["direction_sample_count"])
+        interval_sample_count = int(group["interval_sample_count"])
+        signed_error_sample_count = int(group["signed_error_sample_count"])
+        group["direction_accuracy"] = (
+            Decimal(group["direction_correct_count"]) / Decimal(direction_sample_count)
+            if direction_sample_count >= 30
+            else None
+        )
+        group["interval_coverage"] = (
+            Decimal(group["interval_covered_count"]) / Decimal(interval_sample_count)
+            if interval_sample_count >= 30
+            else None
+        )
+        if signed_error_sample_count < 30:
+            group["mean_signed_error"] = None
+        advisory_groups.append(group)
     return render(
         request,
         "web/performance.html",
         {
             "summary": summary,
             "groups": groups,
+            "advisory_groups": advisory_groups,
+            "advisory_matured_count": reportable_advisory_matured.count(),
         },
     )
 

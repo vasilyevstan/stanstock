@@ -77,6 +77,34 @@ def test_service_persists_analysis_and_appends_immutable_predictions(tmp_path) -
     assert source_asset["retrieved_at"]
     assert source_asset["available_at"]
     assert first.analysis.component_scores["components"]
+    assert first.analysis.forecast_scenarios == {
+        "schema_version": 1,
+        "horizons": {
+            horizon: scenario.as_dict() for horizon, scenario in first.computation.scenarios.items()
+        },
+    }
+    assert all(
+        prediction.evidence_role == Prediction.EvidenceRole.DECISION
+        for prediction in first.predictions
+    )
+    assert all(
+        prediction.evidence_grade == UniverseSnapshot.Grade.OBSERVED
+        for prediction in first.predictions
+    )
+    assert all(
+        prediction.source_mode == Prediction.SourceMode.SYNTHETIC
+        for prediction in first.predictions
+    )
+    assert all(prediction.price_provider == "synthetic" for prediction in first.predictions)
+    assert all(
+        prediction.method_version == first.run.config_version for prediction in first.predictions
+    )
+    assert all(prediction.calculation["schema_version"] == 1 for prediction in first.predictions)
+    assert {prediction.calculation["score_group"] for prediction in first.predictions} == {
+        "short",
+        "medium",
+        "long",
+    }
 
 
 @pytest.mark.django_db
@@ -134,6 +162,41 @@ def test_etf_is_rejected_by_stock_analysis_and_prediction_services(tmp_path) -> 
             source_assets=persisted.computation.source_assets,
             code_revision_value="test",
         )
+
+
+@pytest.mark.django_db
+def test_prediction_preserves_explicit_price_subject_override(tmp_path) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_subject = f"{listing.ticker}:US"
+    price_asset = _register_price_asset(
+        store,
+        price_subject,
+        now - timedelta(minutes=5),
+    )
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        subject=price_subject,
+        store=store,
+    )
+
+    assert persisted.analysis.data_quality["price_source"] == {
+        "asset_id": str(price_asset.id),
+        "provider": "synthetic",
+        "subject": price_subject,
+    }
+    assert all(
+        prediction.price_provider == "synthetic"
+        and prediction.price_subject == price_subject
+        and prediction.calculation["price_subject"] == price_subject
+        for prediction in persisted.predictions
+    )
 
 
 @pytest.mark.django_db
@@ -540,8 +603,10 @@ def test_predict_command_rejects_incomplete_scenario_payload(tmp_path) -> None:
         provider="synthetic",
         store=store,
     )
-    persisted.analysis.short_scenario = {"base": 0.01, "bull": 0.02}
-    persisted.analysis.save(update_fields=["short_scenario"])
+    forecast_scenarios = persisted.analysis.forecast_scenarios
+    forecast_scenarios["horizons"]["short"] = {"base": 0.01, "bull": 0.02}
+    persisted.analysis.forecast_scenarios = forecast_scenarios
+    persisted.analysis.save(update_fields=["forecast_scenarios"])
 
     with pytest.raises(CommandError, match="scenario payload is incomplete"):
         call_command(
@@ -552,6 +617,36 @@ def test_predict_command_rejects_incomplete_scenario_payload(tmp_path) -> None:
         )
 
     assert Prediction.objects.filter(model_version="manual-v3").count() == 0
+
+
+@pytest.mark.django_db
+def test_decision_prediction_service_rejects_advisory_horizons(tmp_path) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=store,
+    )
+
+    with pytest.raises(ValueError, match="scoring-group horizons only"):
+        append_predictions(
+            analysis=persisted.analysis,
+            computation=persisted.computation,
+            generated_at=now + timedelta(minutes=1),
+            data_cutoff=persisted.run.data_cutoff,
+            issued_on_time=False,
+            supported_horizons=(Prediction.Horizon.SIX_MONTH.value,),
+            model_version="invalid-advisory-decision",
+            config_hash_value=persisted.run.config_hash,
+            source_assets=persisted.computation.source_assets,
+            code_revision_value="test",
+        )
 
 
 def _listing_and_snapshot(

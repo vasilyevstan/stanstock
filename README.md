@@ -130,11 +130,13 @@ NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
 vintages, captures an observed universe snapshot for the latest eligible
 session, analyzes eligible listings, and appends the supported short-horizon
 price-only predictions. The single SPY benchmark response also advances its
-ETF market row; it is not fetched twice. Medium and long scenarios remain
-explicitly withheld rather than entering the prediction or outcome ledgers.
-An explicit older `--target-date YYYY-MM-DD` is labeled research-grade. A
-successful target is idempotent; another invocation creates a skipped job and
-makes no provider requests.
+ETF market row; it is not fetched twice. Existing `medium` and `long` records
+retain their legacy identities; the explicit `6m`, `12m`, `3y`, and `5y`
+identities are reserved for advisory engines and do not enter the current
+decision ledger until those engines are released. An explicit older
+`--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
+idempotent; another invocation creates a skipped job and makes no provider
+requests.
 
 After upgrading an existing database that already contains immutable SPY
 benchmark assets, create its ETF listing locally without consuming provider
@@ -303,8 +305,10 @@ uv run python manage.py snapshot_portfolios
 - `/stocks/<listing-id>` - scenarios, factor evidence, risks, and provenance.
 - `/etfs/<listing-id>` - SPY price-return, volatility, drawdown, benchmark
   identity, and provenance without a stock recommendation.
-- `/predictions` - the append-only prediction ledger.
-- `/performance` - matured outcomes with minimum-sample safeguards.
+- `/predictions` - the append-only prediction ledger, including explicit
+  decision/advisory role and the recorded price provider/subject.
+- `/performance` - decision outcomes with minimum-sample safeguards and a
+  separate advisory-error section when advisory outcomes exist.
 - `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
   monthly allocation previews, contribution-aware performance, and valuation
   history.

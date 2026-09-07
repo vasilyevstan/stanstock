@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable
 from datetime import date
 
-from stanstock.research.config import COMPONENTS, HORIZONS, ScoringConfig
+from stanstock.research.config import COMPONENTS, SCORE_HORIZONS, ScoringConfig
 from stanstock.research.indicators import last_observation_date
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.research.types import (
@@ -287,7 +287,7 @@ def aggregate_score(
 ) -> AggregateScore:
     horizon_scores = {
         horizon: _weighted_score(component_scores.components, config.horizon_weights[horizon])
-        for horizon in HORIZONS
+        for horizon in SCORE_HORIZONS
     }
     raw = horizon_scores[config.overall_horizon]
     missingness_penalty = max(

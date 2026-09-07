@@ -54,7 +54,11 @@ This command validates settings; it does not prove the database is reachable.
 - recommendation, risk, scenario, and explanation determinism;
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
-  detection, and reconstructed/live evidence separation;
+  detection, explicit 6m/12m/3y/5y maturity counts, provider-conflict
+  rejection, batch price-frame reuse, unchanged-unresolved no-op behavior,
+  decision/advisory outcome semantics, cross-table role-guard trigger
+  persistence on SQLite and PostgreSQL, and reconstructed/live evidence
+  separation;
 - shared simulation accounting, point-in-time FX derivation (direct, inverse,
   cross, bounded carry, per-valued-date availability cutoffs, observed-versus-
   research retrieval, missing/stale/ambiguous failure), accounted-date FX

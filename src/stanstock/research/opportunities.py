@@ -169,8 +169,7 @@ def assess_opportunity(
 
 
 def _scenario_for_horizon(analysis: StockAnalysis, horizon: str) -> dict[str, Any]:
-    value = getattr(analysis, f"{horizon}_scenario")
-    return value if isinstance(value, dict) else {}
+    return analysis.scenario_for_horizon(horizon)
 
 
 def _decimal_or_none(value: object) -> Decimal | None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from stanstock.research.config import HORIZONS, ScoringConfig
+from stanstock.research.config import SCORE_HORIZONS, ScoringConfig
 from stanstock.research.types import AggregateScore, IndicatorResult, ResearchValues, Scenario
 
 
@@ -24,7 +24,7 @@ def build_scenarios(
         ),
         "long": _long_scenario(fundamentals, score, config, support.get("long", 0)),
     }
-    for horizon in HORIZONS:
+    for horizon in SCORE_HORIZONS:
         if horizon not in config.supported_horizons:
             scenarios[horizon] = _missing_scenario(
                 score.confidence,

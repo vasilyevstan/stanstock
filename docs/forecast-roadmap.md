@@ -23,6 +23,27 @@ The implementation will not use an LLM, neural network, fitted black-box
 model, or automated parameter search. Medians, percentiles, compounding,
 shrinkage, and fixed formulas are the permitted tools.
 
+## Released forecast foundation
+
+The persistence and evaluation boundary now distinguishes scoring groups from
+forecast identities:
+
+- scoring continues to use `short`, `medium`, and `long`;
+- new advisory predictions use explicit `6m`, `12m`, `3y`, and `5y`
+  identities;
+- historical `medium` and `long` predictions retain their original labels and
+  252-/756-session maturity semantics;
+- analyses expose one schema-versioned scenario document while retaining the
+  three legacy columns temporarily for rollback compatibility;
+- every new prediction records a decision/advisory role, immutable evidence
+  grade/source mode, exact price provider and source subject when proven, and
+  structured calculation provenance;
+- advisory outcomes use direction correctness, interval coverage, signed
+  error, and benchmark return, with no recommendation-success value;
+- decision performance and opportunity policy explicitly exclude advisory
+  forecasts, and advisory metrics remain separated by exact method,
+  configuration, provider, evidence grade, and horizon.
+
 ## Stage 1: price-only 6-12 month ranges
 
 This stage can use the existing Twelve Data histories before fundamentals are
@@ -197,7 +218,8 @@ sufficient, a conservative volatility-based floor remains in force.
 
 ## Delivery order
 
-1. Implement the conditional price-only 126- and 252-session scenarios and
+1. Build on the released forecast-identity and advisory-outcome schema, then
+   implement the conditional price-only 126- and 252-session scenarios and
    expose them as research-grade medium forecasts.
 2. Complete point-in-time SEC ingestion and canonical US fundamental
    calculations.

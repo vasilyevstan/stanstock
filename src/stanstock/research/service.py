@@ -16,9 +16,14 @@ from stanstock.data.models import DataAsset, Listing, UniverseMembership, Univer
 from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
 from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.explanations import generate_reasons, generate_risks
+from stanstock.research.forecasting import (
+    build_forecast_scenario_document,
+    infer_price_source,
+)
 from stanstock.research.fundamentals import calculate_fundamentals, inputs_from_facts
 from stanstock.research.indicators import calculate_indicators
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
+from stanstock.research.provenance import source_data_mode
 from stanstock.research.scenarios import build_scenarios
 from stanstock.research.scoring import (
     aggregate_score,
@@ -64,6 +69,7 @@ def compute_listing_analysis(
     benchmark_frame: pl.DataFrame | None = None,
     facts: Any = (),
     source_assets: list[DataAsset] | None = None,
+    price_asset: DataAsset | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> AnalysisComputation:
     require_stock_research_listing(listing, operation="Stock analysis")
@@ -148,16 +154,20 @@ def compute_listing_analysis(
             "buy_min_liquidity_20d": config.recommendation.buy_min_liquidity_20d,
         },
     }
-    price_asset_metadata = next(
-        (
-            asset
-            for asset in asset_payload
-            if asset["kind"] == "price_history"
-            and asset["subject"] == (listing.provider_symbol or listing.ticker)
-        ),
-        None,
+    price_asset_metadata = (
+        next(
+            (asset for asset in asset_payload if asset["id"] == str(price_asset.id)),
+            None,
+        )
+        if price_asset is not None
+        else None
     )
     if price_asset_metadata is not None:
+        data_quality["price_source"] = {
+            "asset_id": price_asset_metadata["id"],
+            "provider": price_asset_metadata["provider"],
+            "subject": price_asset_metadata["subject"],
+        }
         if "return_definition" in price_asset_metadata:
             data_quality["return_definition"] = price_asset_metadata["return_definition"]
         if "dividends_included" in price_asset_metadata:
@@ -229,6 +239,7 @@ def _compute_listing_from_asof(
         benchmark_frame=benchmark_frame,
         facts=facts,
         source_assets=source_assets,
+        price_asset=price_asset,
         config=config,
         decision_time=decision_time,
         sample_support=sample_support,
@@ -480,6 +491,16 @@ def append_predictions(
         raise ValueError(
             "Only predictions created with the original on-time analysis may be marked on time"
         )
+    unsupported = set(supported_horizons) - {
+        Prediction.Horizon.SHORT.value,
+        Prediction.Horizon.MEDIUM.value,
+        Prediction.Horizon.LONG.value,
+    }
+    if unsupported:
+        raise ValueError(
+            "Decision prediction issuance accepts scoring-group horizons only: "
+            + ", ".join(sorted(unsupported))
+        )
     horizons = tuple(Prediction.Horizon(value) for value in supported_horizons)
     if not horizons:
         raise ValueError("At least one supported prediction horizon is required")
@@ -526,6 +547,9 @@ def _create_stock_analysis(
             },
             "factors": computation.aggregate.component_scores.factor_scores,
         },
+        forecast_scenarios=build_forecast_scenario_document(
+            {horizon: scenario.as_dict() for horizon, scenario in computation.scenarios.items()}
+        ),
         short_scenario=computation.scenarios["short"].as_dict(),
         medium_scenario=computation.scenarios["medium"].as_dict(),
         long_scenario=computation.scenarios["long"].as_dict(),
@@ -548,6 +572,19 @@ def _create_prediction(
     source_assets: list[dict[str, Any]],
     code_revision_value: str,
 ) -> Prediction:
+    horizon_value = str(horizon)
+    price_source = analysis.data_quality.get("price_source")
+    if isinstance(price_source, dict):
+        price_provider = str(price_source.get("provider") or "")
+        price_subject = str(price_source.get("subject") or "")
+    else:
+        price_provider, price_subject = infer_price_source(
+            source_assets,
+            subjects=(
+                analysis.listing.provider_symbol or analysis.listing.ticker,
+                analysis.listing.ticker,
+            ),
+        )
     return Prediction.objects.create(
         analysis=analysis,
         listing=analysis.listing,
@@ -555,6 +592,11 @@ def _create_prediction(
         target_date=analysis.run.target_date,
         issued_on_time=issued_on_time,
         horizon=horizon,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        evidence_grade=analysis.run.universe_snapshot.grade,
+        source_mode=source_data_mode({"source_assets": source_assets}),
+        price_provider=price_provider,
+        price_subject=price_subject,
         price_at_prediction=analysis.current_price,
         bear_return=_optional_decimal(scenario.bear, places=4),
         base_return=_optional_decimal(scenario.base, places=4),
@@ -567,9 +609,41 @@ def _create_prediction(
         overall_score=analysis.overall_score,
         component_scores=analysis.component_scores,
         model_version=model_version,
+        method_version=analysis.run.config_version,
         config_hash=config_hash_value,
         data_cutoff=data_cutoff,
         source_assets=source_assets,
+        calculation={
+            "schema_version": 1,
+            "method": scenario.method,
+            "method_version": analysis.run.config_version,
+            "prediction_version": model_version,
+            "config_hash": config_hash_value,
+            "forecast_horizon": horizon_value,
+            "score_group": horizon_value,
+            "support": {
+                "confidence": scenario.confidence,
+                "confidence_status": scenario.confidence_status,
+                "insufficiency_reason": scenario.insufficiency_reason,
+            },
+            "formula_inputs": {
+                "scenario": {
+                    "bear": scenario.bear,
+                    "base": scenario.base,
+                    "bull": scenario.bull,
+                    "probability_positive": scenario.probability_positive,
+                },
+                "overall_score": float(analysis.overall_score),
+                "risk_score": (
+                    float(analysis.risk_score) if analysis.risk_score is not None else None
+                ),
+            },
+            "contribution_detail": analysis.component_scores,
+            "return_basis": analysis.data_quality.get("return_definition"),
+            "dividends_included": analysis.data_quality.get("dividends_included"),
+            "evidence_grade": analysis.run.universe_snapshot.grade,
+            "price_subject": price_subject,
+        },
         code_revision=code_revision_value,
     )
 

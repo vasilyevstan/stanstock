@@ -33,14 +33,22 @@ def eligible_pending_predictions(
 
     candidates = (
         Prediction.objects.select_related("listing")
-        .filter(maturity_filter)
+        .filter(
+            maturity_filter,
+            evidence_role__in=Prediction.EvidenceRole.values,
+        )
+        .filter(Q(price_provider=provider) | Q(price_provider=""))
         .exclude(outcome__status__in=TERMINAL_OUTCOME_STATUSES)
         .order_by("generated_at", "id")
     )
     return [
         prediction
         for prediction in candidates
-        if provider in source_providers({"source_assets": prediction.source_assets})
+        if prediction.price_provider == provider
+        or (
+            not prediction.price_provider
+            and provider in source_providers({"source_assets": prediction.source_assets})
+        )
     ]
 
 

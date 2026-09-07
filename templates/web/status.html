@@ -163,9 +163,9 @@
               <td>{{ stock.current_price|price }} {{ stock.listing.currency }} <small>{{ stock.daily_change|percentage }}</small></td>
               <td><strong>{{ stock.overall_score }}/100</strong></td>
               <td><span class="recommendation recommendation-{{ stock.recommendation }}">{{ stock.get_recommendation_display }}</span></td>
-              <td>{{ stock.short_scenario|scenario_range }}</td>
-              <td>{{ stock.medium_scenario|scenario_range }}</td>
-              <td>{{ stock.long_scenario|scenario_range }}</td>
+              <td>{{ stock.short_forecast_scenario|scenario_range }}</td>
+              <td>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</td>
+              <td>{{ stock.legacy_long_forecast_scenario|scenario_range }}</td>
               <td>{{ stock.get_risk_class_display }}</td>
               <td>{{ stock.confidence|floatformat:"0" }}% <small>{{ stock.confidence_status|display_label }}</small></td>
             </tr>
