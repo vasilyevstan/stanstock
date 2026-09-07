@@ -3,8 +3,10 @@ from django.contrib import admin
 from stanstock.core.admin_mixins import ReadOnlyModelAdmin
 from stanstock.data.models import (
     Company,
+    CompanyClassificationObservation,
     DataAsset,
     FundamentalFact,
+    FundamentalFactEvidence,
     FxRate,
     LatestMarketData,
     Listing,
@@ -28,7 +30,9 @@ for editable_model in (
 
 for readonly_model in (
     DataAsset,
+    CompanyClassificationObservation,
     FundamentalFact,
+    FundamentalFactEvidence,
     FxRate,
     LatestMarketData,
 ):

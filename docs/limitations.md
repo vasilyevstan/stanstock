@@ -160,8 +160,15 @@ unmeasurable.
   withheld unless effective non-overlapping cohort support, listing diversity,
   calendar span, matched market-regime breadth, and fixed walk-forward
   calibration gates pass.
+- Point-in-time SEC facts are available for the configured US universe, but
+  Companyfacts excludes custom issuer concepts and segment dimensions. Current
+  SIC snapshots are not historical classifications, ambiguous taxonomies stay
+  missing, debt components are not promoted to a total unless they are
+  compatible and non-overlapping, and banks/financials/REIT-like accounting
+  may remain unsupported by long v1.
 - The explicit `3y` and `5y` identities and advisory evaluation fields exist,
-  but their SEC-backed forecast engine is not yet released. Existing `medium`
+  but their deterministic SEC-backed forecast engine is not yet released.
+  Existing `medium`
   and `long` rows remain legacy identities rather than being relabeled as exact
   horizons.
 - Legacy scenario columns remain in storage for rollback compatibility. New

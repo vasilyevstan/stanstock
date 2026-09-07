@@ -152,6 +152,54 @@
     </div>
   </section>
 
+  <section aria-labelledby="sec-coverage-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Point-in-time fundamentals</p>
+        <h2 id="sec-coverage-title">SEC evidence coverage</h2>
+      </div>
+    </div>
+    <div class="status-grid">
+      <article class="status-card">
+        <div class="status-line">
+          <span class="status-dot {% if sec_coverage.mapped_companies %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <h3>Reviewed CIK mappings</h3>
+        </div>
+        <strong>{{ sec_coverage.mapped_companies }} companies</strong>
+      </article>
+      <article class="status-card">
+        <div class="status-line">
+          <span class="status-dot {% if sec_coverage.companies_with_facts %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <h3>Normalized facts</h3>
+        </div>
+        <strong>{{ sec_coverage.facts }} point-in-time facts</strong>
+        <small>
+          {{ sec_coverage.companies_with_facts }} companies ·
+          {{ sec_coverage.fact_revisions }} immutable revisions retained
+        </small>
+      </article>
+      <article class="status-card">
+        <div class="status-line">
+          <span class="status-dot {% if sec_coverage.classifications %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <h3>SIC observations</h3>
+        </div>
+        <strong>{{ sec_coverage.classifications }} immutable snapshots</strong>
+      </article>
+      <article class="status-card">
+        <div class="status-line">
+          <span class="status-dot {% if sec_coverage.latest_asset %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <h3>Latest SEC asset</h3>
+        </div>
+        {% if sec_coverage.latest_asset %}
+          <strong>{{ sec_coverage.latest_asset.kind|display_label }}</strong>
+          <small>{{ sec_coverage.latest_asset.retrieved_at }}</small>
+        {% else %}
+          <strong>Not ingested</strong>
+        {% endif %}
+      </article>
+    </div>
+  </section>
+
   <section aria-labelledby="opportunities-title">
     <div class="section-heading">
       <div>

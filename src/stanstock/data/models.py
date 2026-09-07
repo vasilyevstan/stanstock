@@ -226,23 +226,42 @@ class DataAsset(ImmutableEvidenceModel):
 
 
 class FundamentalFact(ImmutableEvidenceModel):
+    class PeriodType(models.TextChoices):
+        INSTANT = "instant", "Instant"
+        DURATION = "duration", "Duration"
+        UNCLASSIFIED = "unclassified", "Unclassified"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="facts")
     provider = models.CharField(max_length=40)
     concept = models.CharField(max_length=100)
+    taxonomy = models.CharField(max_length=40, blank=True)
     source_concept = models.CharField(max_length=240)
     value = models.DecimalField(max_digits=32, decimal_places=8)
     unit = models.CharField(max_length=24)
     currency = models.CharField(max_length=3, blank=True)
+    period_type = models.CharField(
+        max_length=16,
+        choices=PeriodType,
+        default=PeriodType.UNCLASSIFIED,
+    )
+    period_identity = models.CharField(max_length=160)
     period_start = models.DateField(null=True, blank=True)
     period_end = models.DateField()
     fiscal_year = models.IntegerField(null=True, blank=True)
     fiscal_period = models.CharField(max_length=8, blank=True)
+    frame = models.CharField(max_length=32, blank=True)
     accession = models.CharField(max_length=80)
+    filing_form = models.CharField(max_length=16, blank=True)
+    filing_date = models.DateField(null=True, blank=True)
     filed_at = models.DateTimeField(null=True, blank=True)
+    acceptance_at = models.DateTimeField(null=True, blank=True)
     available_at = models.DateTimeField()
+    availability_basis = models.CharField(max_length=40, default="legacy")
     ingested_at = models.DateTimeField(auto_now_add=True)
     is_amendment = models.BooleanField(default=False)
+    source_revision = models.PositiveIntegerField(default=1)
+    observation_hash = models.CharField(max_length=64)
     quality_flags = models.JSONField(default=list, blank=True)
     source_asset = models.ForeignKey(DataAsset, on_delete=models.PROTECT)
 
@@ -254,9 +273,10 @@ class FundamentalFact(ImmutableEvidenceModel):
                     "company",
                     "provider",
                     "source_concept",
-                    "period_end",
+                    "period_identity",
                     "accession",
                     "unit",
+                    "source_revision",
                 ],
                 name="unique_fundamental_vintage",
             ),
@@ -266,6 +286,32 @@ class FundamentalFact(ImmutableEvidenceModel):
                     | models.Q(available_at__gte=models.F("filed_at"))
                 ),
                 name="fact_available_after_filing",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(acceptance_at__isnull=True)
+                    | models.Q(available_at__gte=models.F("acceptance_at"))
+                ),
+                name="fact_available_after_acceptance",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(period_type="unclassified")
+                    | models.Q(
+                        period_type="instant",
+                        period_start__isnull=True,
+                    )
+                    | models.Q(
+                        period_type="duration",
+                        period_start__isnull=False,
+                        period_start__lte=models.F("period_end"),
+                    )
+                ),
+                name="fact_period_type_consistent",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(period_identity="") & ~models.Q(observation_hash=""),
+                name="fact_identity_present",
             ),
         ]
         indexes = [
@@ -277,6 +323,124 @@ class FundamentalFact(ImmutableEvidenceModel):
 
     def __str__(self) -> str:
         return f"{self.company_id}:{self.concept}:{self.period_end}:{self.accession}"
+
+    def save(
+        self,
+        *,
+        force_insert: bool | tuple[ModelBase, ...] = False,
+        force_update: bool = False,
+        using: str | None = None,
+        update_fields: Iterable[str] | None = None,
+    ) -> None:
+        from stanstock.data.fact_identity import (
+            build_observation_hash,
+            build_period_identity,
+        )
+
+        if not self.period_identity:
+            if self.period_type == self.PeriodType.UNCLASSIFIED:
+                self.period_type = (
+                    self.PeriodType.DURATION
+                    if self.period_start is not None
+                    else self.PeriodType.INSTANT
+                )
+            self.period_identity = build_period_identity(
+                period_type=self.period_type,
+                period_start=self.period_start,
+                period_end=self.period_end,
+                fiscal_period=self.fiscal_period,
+                frame=self.frame,
+            )
+        if not self.observation_hash:
+            self.observation_hash = build_observation_hash(
+                taxonomy=self.taxonomy,
+                source_concept=self.source_concept,
+                value=self.value,
+                unit=self.unit,
+                currency=self.currency,
+                period_identity=self.period_identity,
+                fiscal_year=self.fiscal_year,
+                fiscal_period=self.fiscal_period,
+                accession=self.accession,
+                filing_form=self.filing_form,
+                filing_date=self.filing_date,
+                acceptance_at=self.acceptance_at,
+                frame=self.frame,
+            )
+        super().save(
+            force_insert=force_insert,
+            force_update=force_update,
+            using=using,
+            update_fields=update_fields,
+        )
+
+
+class FundamentalFactEvidence(ImmutableEvidenceModel):
+    class Role(models.TextChoices):
+        FILING = "filing", "Filing availability"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fact = models.ForeignKey(
+        FundamentalFact,
+        on_delete=models.PROTECT,
+        related_name="evidence_links",
+    )
+    role = models.CharField(max_length=24, choices=Role.choices)
+    source_asset = models.ForeignKey(DataAsset, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["fact", "role", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["fact", "role"],
+                name="unique_fundamental_fact_evidence_role",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.fact_id}:{self.role}:{self.source_asset_id}"
+
+
+class CompanyClassificationObservation(ImmutableEvidenceModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="classification_observations",
+    )
+    provider = models.CharField(max_length=40)
+    scheme = models.CharField(max_length=32)
+    code = models.CharField(max_length=32)
+    description = models.CharField(max_length=240, blank=True)
+    observed_at = models.DateTimeField()
+    available_at = models.DateTimeField()
+    ingested_at = models.DateTimeField(auto_now_add=True)
+    accession = models.CharField(max_length=80, blank=True)
+    quality_flags = models.JSONField(default=list, blank=True)
+    source_asset = models.ForeignKey(DataAsset, on_delete=models.PROTECT)
+
+    class Meta:
+        ordering = ["company", "scheme", "-available_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "provider", "scheme", "code", "source_asset"],
+                name="unique_company_classification_observation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(available_at__gte=models.F("observed_at")),
+                name="classification_available_after_observed",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["company", "scheme", "available_at"],
+                name="classification_asof_lookup",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.company_id}:{self.scheme}:{self.code}:{self.available_at.isoformat()}"
 
 
 class FxRate(ImmutableEvidenceModel):

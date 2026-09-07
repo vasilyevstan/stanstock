@@ -8,7 +8,14 @@ from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.utils import timezone
 
-from stanstock.data.models import Company, DataAsset, FundamentalFact, FxRate
+from stanstock.data.models import (
+    Company,
+    CompanyClassificationObservation,
+    DataAsset,
+    FundamentalFact,
+    FundamentalFactEvidence,
+    FxRate,
+)
 
 
 @pytest.fixture
@@ -75,3 +82,44 @@ def test_database_triggers_reject_bulk_evidence_mutation(
     with pytest.raises(DatabaseError, match="immutable"):
         with transaction.atomic():
             FxRate.objects.filter(pk=rate.pk).update(value=Decimal("1.20"))
+
+
+@pytest.mark.django_db
+def test_company_classification_is_immutable_at_model_and_database_layers(
+    evidence_records: tuple[DataAsset, FundamentalFact, FxRate],
+) -> None:
+    asset, fact, _rate = evidence_records
+    observation = CompanyClassificationObservation.objects.create(
+        company=fact.company,
+        provider="sec",
+        scheme="sec_sic",
+        code="3571",
+        description="Electronic Computers",
+        observed_at=asset.available_at,
+        available_at=asset.available_at,
+        source_asset=asset,
+    )
+
+    with pytest.raises(ValidationError, match="immutable"):
+        observation.save()
+    with pytest.raises(DatabaseError, match="immutable"):
+        with transaction.atomic():
+            CompanyClassificationObservation.objects.filter(pk=observation.pk).delete()
+
+
+@pytest.mark.django_db
+def test_fundamental_fact_evidence_is_immutable_at_model_and_database_layers(
+    evidence_records: tuple[DataAsset, FundamentalFact, FxRate],
+) -> None:
+    asset, fact, _rate = evidence_records
+    evidence = FundamentalFactEvidence.objects.create(
+        fact=fact,
+        role=FundamentalFactEvidence.Role.FILING,
+        source_asset=asset,
+    )
+
+    with pytest.raises(ValidationError, match="immutable"):
+        evidence.save()
+    with pytest.raises(DatabaseError, match="immutable"):
+        with transaction.atomic():
+            FundamentalFactEvidence.objects.filter(pk=evidence.pk).delete()

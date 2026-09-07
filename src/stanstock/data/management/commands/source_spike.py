@@ -376,6 +376,13 @@ PROBES = (
     _probe_filings_xbrl,
     _probe_ecb,
 )
+PROBE_PROVIDER_NAMES = {
+    _probe_twelve_data: "twelve_data",
+    _probe_stooq: "stooq",
+    _probe_sec: "sec",
+    _probe_filings_xbrl: "filings_xbrl_org",
+    _probe_ecb: "ecb",
+}
 
 
 class Command(BaseCommand):
@@ -395,8 +402,8 @@ class Command(BaseCommand):
         skip = {name.strip() for name in str(options.get("skip") or "").split(",") if name.strip()}
         outcomes: list[ProbeOutcome] = []
         for probe in PROBES:
-            provider_guess = probe.__name__.removeprefix("_probe_")
-            if provider_guess in skip or provider_guess.replace("_", "") in skip:
+            provider_name = PROBE_PROVIDER_NAMES[probe]
+            if provider_name in skip or provider_name.replace("_", "") in skip:
                 continue
             outcomes.append(probe())
 

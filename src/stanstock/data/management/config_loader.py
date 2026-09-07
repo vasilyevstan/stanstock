@@ -44,3 +44,11 @@ def default_us_universe_config_path() -> Path:
 
 def default_us_scoring_config_path() -> Path:
     return CONFIG_ROOT / "scoring" / "us-price-baseline-v2.yml"
+
+
+def default_sec_fundamentals_config_path() -> Path:
+    return CONFIG_ROOT / "fundamentals" / "us-sec-fundamentals-v1.yml"
+
+
+def default_sec_cik_mapping_path() -> Path:
+    return CONFIG_ROOT / "fundamentals" / "us-sec-cik-v1.yml"

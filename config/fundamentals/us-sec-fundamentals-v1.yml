@@ -1,0 +1,143 @@
+schema_version: 1
+config_version: us-sec-fundamentals-v1
+provider: sec
+mapping_endpoint: https://www.sec.gov/files/company_tickers_exchange.json
+submissions_reconciliation_days: 30
+companyfacts_lag_retry_days: 7
+requests_per_second: 5
+allowed_taxonomies:
+  - us-gaap
+allowed_forms:
+  - 10-K
+  - 10-K/A
+  - 10-Q
+  - 10-Q/A
+  - 20-F
+  - 20-F/A
+  - 40-F
+  - 40-F/A
+concepts:
+  revenue:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - RevenueFromContractWithCustomerExcludingAssessedTax
+      - Revenues
+      - SalesRevenueNet
+  operating_income:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - OperatingIncomeLoss
+  pretax_income:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest
+      - IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments
+  income_tax_expense:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - IncomeTaxExpenseBenefit
+  net_income:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - NetIncomeLoss
+      - ProfitLoss
+  diluted_eps:
+    period_type: duration
+    units: [USD/shares, USD-per-shares]
+    source_concepts:
+      - EarningsPerShareDiluted
+  weighted_average_diluted_shares:
+    period_type: duration
+    units: [shares]
+    source_concepts:
+      - WeightedAverageNumberOfDilutedSharesOutstanding
+  operating_cash_flow:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - NetCashProvidedByUsedInOperatingActivities
+  capital_expenditure:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - PaymentsToAcquirePropertyPlantAndEquipment
+  depreciation_amortization:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - DepreciationDepletionAndAmortization
+      - DepreciationDepletionAndAmortizationPropertyPlantAndEquipment
+  cash_and_equivalents:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - CashAndCashEquivalentsAtCarryingValue
+      - CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+  short_term_debt:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - ShortTermBorrowings
+  current_long_term_debt:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - LongTermDebtAndFinanceLeaseObligationsCurrent
+      - LongTermDebtCurrent
+  long_term_debt:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - LongTermDebtAndFinanceLeaseObligationsNoncurrent
+      - LongTermDebtNoncurrent
+  reported_long_term_debt:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - LongTermDebtAndFinanceLeaseObligations
+      - LongTermDebt
+  equity:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - StockholdersEquity
+      - StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+  assets:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - Assets
+  current_assets:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - AssetsCurrent
+  current_liabilities:
+    period_type: instant
+    units: [USD]
+    source_concepts:
+      - LiabilitiesCurrent
+  interest_expense:
+    period_type: duration
+    units: [USD]
+    source_concepts:
+      - InterestExpenseNonOperating
+      - InterestAndDebtExpense
+  dividends_paid:
+    period_type: duration
+    units: [USD]
+    explanation_only: true
+    source_concepts:
+      - PaymentsOfDividends
+      - PaymentsOfDividendsCommonStock
+  share_repurchases:
+    period_type: duration
+    units: [USD]
+    explanation_only: true
+    source_concepts:
+      - PaymentsForRepurchaseOfCommonStock

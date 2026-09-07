@@ -51,6 +51,16 @@ This command validates settings; it does not prove the database is reachable.
   `StockAnalysis`;
 - technical/fundamental math, canonical concept/restatement selection, and
   missing-value behavior;
+- SEC mapping/config validation, safe historical-file paths, immutable raw
+  submissions/history/Companyfacts replay, full period identity,
+  acceptance/date-only availability, same-accession source revisions,
+  value reversion, exact filing-source retrieval gates, interrupted
+  normalization replay, bounded once-daily Companyfacts lag retries, amendment
+  selection, instant/duration separation, restated-quarter precedence,
+  gap-free TTM derivation, weighted-share arithmetic, FCF sign handling,
+  non-overlapping debt components, SIC as-of reads, ETF exclusion, incremental
+  request suppression, scheduler ordering/recovery, and SQLite/PostgreSQL
+  immutability triggers;
 - recommendation, risk, scenario, and explanation determinism;
 - deterministic 6m/12m panel replay, fixed-epoch non-overlapping cohorts,
   historical-anchor leakage exclusion, equal cohort weighting, shrinkage,

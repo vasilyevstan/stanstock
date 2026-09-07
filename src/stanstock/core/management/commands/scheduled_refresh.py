@@ -16,8 +16,11 @@ from stanstock.core.models import JobRun
 from stanstock.core.revision import clean_git_revision
 from stanstock.data.jobs import execute_us_daily_job, prepare_us_daily_job
 from stanstock.data.management.config_loader import default_us_universe_config_path
-from stanstock.data.providers import twelve_data
+from stanstock.data.models import ProviderRecord
+from stanstock.data.providers import sec, twelve_data
 from stanstock.data.providers.exceptions import ProviderError
+from stanstock.data.sec_jobs import JOB_NAME as SEC_JOB_NAME
+from stanstock.data.sec_jobs import execute_sec_fundamentals_job
 from stanstock.portfolio.jobs import execute_portfolio_snapshot_job
 from stanstock.research.jobs import execute_prediction_evaluation_job
 
@@ -61,6 +64,34 @@ class Command(BaseCommand):
                 revision = clean_git_revision(Path(settings.BASE_DIR))
                 os.environ["STANSTOCK_CODE_REVISION"] = revision
                 details["code_revision"] = revision
+
+                sec_required = (
+                    ProviderRecord.objects.filter(
+                        provider=sec.PROVIDER,
+                        enabled=True,
+                    ).exists()
+                    or JobRun.objects.filter(
+                        job_name=SEC_JOB_NAME,
+                        region="us",
+                        target_date=prepared.target_date,
+                        status=JobRun.Status.SUCCESS,
+                    ).exists()
+                )
+                if sec_required:
+                    sec_run = _run_stage(
+                        parent=parent,
+                        details=details,
+                        stage_name="sec_fundamentals",
+                        job_name=SEC_JOB_NAME,
+                        region="us",
+                        target_date=prepared.target_date,
+                        task=lambda: execute_sec_fundamentals_job(
+                            target_date=prepared.target_date,
+                            universe_config_path=config_path,
+                        ),
+                    )
+                    if sec_run is None or sec_run.status not in SATISFIED_STAGE_STATUSES:
+                        raise ValueError("Required SEC fundamentals stage was not satisfied")
 
                 market = _run_stage(
                     parent=parent,

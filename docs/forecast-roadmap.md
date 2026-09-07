@@ -88,23 +88,45 @@ alter recommendation policy.
 
 ## Stage 2: point-in-time US fundamentals
 
+**Released.** The current 100-stock US universe now uses the official SEC
+ticker/exchange/CIK mapping, submissions plus referenced history files, and
+Companyfacts.
+
 Long-term forecasts require business fundamentals. The first supported scope
 will be the current US universe using SEC submissions and Companyfacts.
 
-The ingestion layer will retain accession, reporting period, unit, filing
+The ingestion layer retains accession, reporting period, unit, filing
 acceptance time, amendment, and first-seen time. It will derive trailing
 twelve-month or annual values only from filings available at the decision
 time. Required canonical inputs are:
 
 - revenue, operating income, net income, and diluted EPS;
 - operating cash flow, capital expenditure, and free cash flow;
-- cash, debt, equity, and interest expense;
+- cash, separately identified debt components, equity, and interest expense;
 - diluted shares and per-share values;
 - dividends and repurchases only when the source supports them consistently.
 
 Growth is calculated per share where dilution matters. Restatements never
 rewrite an older prediction's input. A concept that cannot be mapped
 unambiguously remains missing.
+
+The released implementation also:
+
+- preserves identical raw content once and records idempotent job recovery;
+- distinguishes instant, duration, and conservatively unclassified periods;
+- appends changed observations under the same accession as source revisions;
+- joins Companyfacts `accn` values to exact submissions acceptance times;
+- links each normalized fact to the immutable submissions/history asset that
+  supplied that acceptance boundary;
+- uses next-day New York availability only when the SEC exposes a filing date
+  without acceptance time;
+- derives compatible discrete quarters, annual series, TTM flows, weighted
+  diluted shares, and free cash flow without treating instant values as flows;
+- stores current SIC only as a retrieval-time immutable observation;
+- polls submissions daily, retries a newly missing Companyfacts accession once
+  daily for seven days, and bounds later refreshes with staggered
+  reconciliation;
+- keeps SPY and every ETF outside corporate fundamentals.
 
 ## Stage 3: deterministic 6-12 month fundamental forecast
 

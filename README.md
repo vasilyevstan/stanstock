@@ -125,6 +125,32 @@ for any other user. There is no public signup. For Grow, Pro, Ultra, or a
 reviewed custom agreement, use
 `--confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`.
 
+SEC EDGAR needs no account or API key. Automated requests must identify the
+application and a monitored contact in `SEC_USER_AGENT`; keep that value only
+in the ignored local `.env`:
+
+```bash
+SEC_USER_AGENT="StanStockResearch/0.1 monitored-address@example.com"
+set -a
+. ./.env
+set +a
+uv run python manage.py source_spike \
+  --skip twelve_data,stooq,filings_xbrl_org,ecb
+uv run python manage.py configure_sec --enable
+uv run python manage.py fetch_sec_mapping
+uv run python manage.py sync_sec_fundamentals --target-date YYYY-MM-DD
+```
+
+The reviewed CIK configuration covers the 100-stock US universe and excludes
+SPY. SEC ingestion preserves the official mapping, current and historical
+submissions, Companyfacts, exact accession/acceptance provenance, append-only
+revisions, full instant/duration period identity, and current SIC snapshots.
+Daily automation polls submissions, refreshes Companyfacts after a new filing,
+retries a still-missing filing at most once daily for seven days, and then
+falls back to staggered periodic reconciliation rather than downloading all
+history every night. Normalized facts retain a separate immutable link to the
+submissions or history asset that supplied their acceptance boundary.
+
 `daily --region us` validates the configured symbols against Twelve Data's
 NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
 vintages, captures an observed universe snapshot for the latest eligible
@@ -141,8 +167,8 @@ The single SPY benchmark response supplies both regime evidence for those
 forecasts and the investable ETF market row; it is not fetched twice.
 Current-universe historical panels are explicitly labeled survivorship-biased
 research evidence and are not presented as live skill. Existing `medium` and
-`long` records retain their legacy identities. Exact `3y` and `5y` advisory
-forecasts remain reserved for the SEC-backed engine. An explicit older
+`long` records retain their legacy identities. Exact `3y` and `5y` advisory forecasts consume this SEC evidence through a
+separate deterministic engine. An explicit older
 `--target-date YYYY-MM-DD` is labeled research-grade. A successful target is
 idempotent; another invocation creates a skipped job and makes no provider
 requests.
