@@ -230,11 +230,17 @@
                 · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
               </span>
             {% endif %}
-            {% if scenario.split_basis %}
+            {% if scenario.split_basis.verified_through %}
               <span>
                 Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
                 the following {{ scenario.split_basis.post_period_exposure_days }}-day interval
                 has no independent split-event verification.
+              </span>
+            {% elif scenario.split_basis.assessed_through %}
+              <span>
+                Diluted-share basis is {{ scenario.split_basis.assessment_status|display_label }}
+                as of {{ scenario.split_basis.assessed_through }}; no split-adjusted
+                verification is claimed.
               </span>
             {% endif %}
             {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
@@ -288,11 +294,17 @@
                 · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
               </span>
             {% endif %}
-            {% if scenario.split_basis %}
+            {% if scenario.split_basis.verified_through %}
               <span>
                 Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
                 the following {{ scenario.split_basis.post_period_exposure_days }}-day interval
                 has no independent split-event verification.
+              </span>
+            {% elif scenario.split_basis.assessed_through %}
+              <span>
+                Diluted-share basis is {{ scenario.split_basis.assessment_status|display_label }}
+                as of {{ scenario.split_basis.assessed_through }}; no split-adjusted
+                verification is claimed.
               </span>
             {% endif %}
             {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}

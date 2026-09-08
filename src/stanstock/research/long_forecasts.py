@@ -37,6 +37,21 @@ METHOD_NAME = "sec_per_share_growth_multiple_reversion"
 MAX_SQL_IN_ITEMS = 500
 
 
+def _display_version_label(config: LongForecastConfig) -> str:
+    """User-facing wording for reason strings, derived from behavior.
+
+    Returns ``"long-v2"`` only when the adjacent annual diluted-share
+    continuity capability is actually enabled; otherwise returns the
+    original frozen ``"long-v1"`` wording. This keeps historical v1 reason
+    strings byte-identical even though `config.version` now carries the
+    full pinned identifier (e.g. ``"us-sec-long-v1"``). Method/config/model
+    identity elsewhere continues to use the full `config.version`.
+    """
+    if config.adjacent_selected_annual_diluted_share_continuity is True:
+        return "long-v2"
+    return "long-v1"
+
+
 @dataclass(frozen=True, slots=True)
 class LongForecast:
     scenario: Scenario
@@ -91,6 +106,8 @@ class _MetricAssessment:
     reason: str
     evidence: _MetricEvidence | None
     fact_ids: tuple[str, ...] = ()
+    share_consistency: tuple[dict[str, Any], ...] = ()
+    assessed_through: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +151,8 @@ class _CompanyState:
     fact_map: dict[str, FundamentalFact]
     filing_assets: dict[str, DataAsset]
     failure_fact_ids: tuple[str, ...] = ()
+    failure_share_consistency: tuple[dict[str, Any], ...] = ()
+    failure_assessed_through: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +329,8 @@ def _company_state(
             metric=None,
             sustainable=None,
             insufficiency_reason=(
-                f"SEC SIC {normalized_sic} is outside the supported long-v1 industries"
+                f"SEC SIC {normalized_sic} is outside the supported "
+                f"{_display_version_label(config)} industries"
             ),
             fact_map=fact_map,
             filing_assets=filing_assets,
@@ -348,6 +368,8 @@ def _company_state(
             fact_map=fact_map,
             filing_assets=filing_assets,
             failure_fact_ids=fcf.fact_ids,
+            failure_share_consistency=fcf.share_consistency,
+            failure_assessed_through=fcf.assessed_through,
         )
     elif eps.status == "eligible":
         metric = eps.evidence
@@ -364,6 +386,10 @@ def _company_state(
             fact_map=fact_map,
             filing_assets=filing_assets,
             failure_fact_ids=_dedupe_text((*fcf.fact_ids, *eps.fact_ids)),
+            failure_share_consistency=(*fcf.share_consistency, *eps.share_consistency),
+            failure_assessed_through=(
+                fcf.assessed_through if fcf.assessed_through is not None else eps.assessed_through
+            ),
         )
     assert metric is not None
     sustainable, sustainable_reason = _sustainable_growth(
@@ -493,6 +519,9 @@ def _metric_assessment(
         current_shares=shares,
         minimum_periods=config.eligibility.minimum_share_consistency_periods,
         tolerance=config.eligibility.share_consistency_relative_tolerance,
+        require_adjacent_selected_annual_diluted_share_continuity=(
+            config.adjacent_selected_annual_diluted_share_continuity is True
+        ),
     )
     if share_reason:
         return _MetricAssessment(
@@ -507,6 +536,8 @@ def _metric_assessment(
                     *share_fact_ids,
                 )
             ),
+            share_consistency=share_consistency,
+            assessed_through=metric.period_end,
         )
     growth_raw, growth_capped, growth_observations = _historical_growth(
         selected_points,
@@ -518,7 +549,7 @@ def _metric_assessment(
             status="failed",
             reason=(
                 f"{family} current multiple {multiple_raw:.3f} is below the supported "
-                f"long-v1 minimum {family_config.multiple_minimum:.3f}"
+                f"{_display_version_label(config)} minimum {family_config.multiple_minimum:.3f}"
             ),
             evidence=None,
             fact_ids=_dedupe_text(
@@ -641,6 +672,7 @@ def _share_consistency(
     current_shares: FundamentalValue,
     minimum_periods: int,
     tolerance: float,
+    require_adjacent_selected_annual_diluted_share_continuity: bool,
 ) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...], str]:
     net_income = {
         (value.period_start, value.period_end): value
@@ -701,6 +733,38 @@ def _share_consistency(
                 f"Share basis differs from reported diluted EPS by "
                 f"{relative_difference:.1%}, above {tolerance:.1%}",
             )
+    if require_adjacent_selected_annual_diluted_share_continuity:
+        for previous_period, current_period in zip(
+            required_periods, required_periods[1:], strict=False
+        ):
+            previous_shares = shares[previous_period]
+            current_period_shares = shares[current_period]
+            previous_share_value = float(previous_shares.value)
+            current_share_value = float(current_period_shares.value)
+            relative_difference = abs(current_share_value / previous_share_value - 1.0)
+            checks.append(
+                {
+                    "check": "adjacent_annual_diluted_shares",
+                    "previous_period_end": previous_period[1].isoformat(),
+                    "current_period_end": current_period[1].isoformat(),
+                    "previous_shares": previous_share_value,
+                    "current_shares": current_share_value,
+                    "relative_difference": relative_difference,
+                    "tolerance": tolerance,
+                }
+            )
+            fact_ids.extend(
+                (*previous_shares.source_fact_ids, *current_period_shares.source_fact_ids)
+            )
+            if relative_difference > tolerance:
+                return (
+                    tuple(checks),
+                    _dedupe_text(fact_ids),
+                    "Adjacent annual diluted-share basis continuity is incompatible/unverified "
+                    f"between {previous_period[1].isoformat()} and "
+                    f"{current_period[1].isoformat()}: {relative_difference:.1%} exceeds "
+                    f"{tolerance:.1%}",
+                )
     latest_period = required_periods[-1]
     latest_annual_shares = shares[latest_period]
     if not (current_shares.period_start <= latest_period[1] <= current_shares.period_end):
@@ -998,6 +1062,33 @@ def _invested_capital_near(
     return None, f"no compatible balance sheet within {tolerance_days} days of {target_date}"
 
 
+def _forecasts_for_state_split_basis(
+    *,
+    state: _CompanyState,
+    target_date: date,
+    config: LongForecastConfig,
+) -> dict[str, Any] | None:
+    if state.metric is not None:
+        return _split_basis_payload(
+            checks=state.metric.share_consistency,
+            verified_through=state.metric.current_period_end,
+            assessed_through=None,
+            target_date=target_date,
+            config=config,
+        )
+    if config.adjacent_selected_annual_diluted_share_continuity is not True:
+        return None
+    if not state.failure_share_consistency or state.failure_assessed_through is None:
+        return None
+    return _split_basis_payload(
+        checks=state.failure_share_consistency,
+        verified_through=None,
+        assessed_through=state.failure_assessed_through,
+        target_date=target_date,
+        config=config,
+    )
+
+
 def _forecasts_for_state(
     *,
     state: _CompanyState,
@@ -1006,14 +1097,10 @@ def _forecasts_for_state(
     config: LongForecastConfig,
     sec_config: SecFundamentalsConfig,
 ) -> dict[str, LongForecast]:
-    split_basis = (
-        _split_basis_payload(
-            metric=state.metric,
-            target_date=target_date,
-            config=config,
-        )
-        if state.metric is not None
-        else None
+    split_basis = _forecasts_for_state_split_basis(
+        state=state,
+        target_date=target_date,
+        config=config,
     )
     if state.metric is None or state.sustainable is None or state.sic is None:
         return _missing_forecasts(
@@ -1156,7 +1243,9 @@ def _forecast_horizon(
             peer_set=[_peer_payload(member) for member in peers.members],
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=_split_basis_payload(
-                metric=state.metric,
+                checks=state.metric.share_consistency,
+                verified_through=state.metric.current_period_end,
+                assessed_through=None,
                 target_date=target_date,
                 config=config,
             ),
@@ -1172,8 +1261,8 @@ def _forecast_horizon(
         + min(len(peers.members), 10),
     )
     probability_reason = (
-        "Positive-return probability is unavailable for deterministic long-v1 "
-        "until qualifying prospective outcomes exist"
+        "Positive-return probability is unavailable for deterministic "
+        f"{_display_version_label(config)} until qualifying prospective outcomes exist"
     )
     scenario = Scenario(
         bear=returns[0],
@@ -1246,7 +1335,9 @@ def _forecast_horizon(
             "multiple_reversion": horizon_config.multiple_reversion,
         },
         "split_basis": _split_basis_payload(
-            metric=state.metric,
+            checks=state.metric.share_consistency,
+            verified_through=state.metric.current_period_end,
+            assessed_through=None,
             target_date=target_date,
             config=config,
         ),
@@ -1634,18 +1725,31 @@ def _invested_capital_payload(value: _InvestedCapital) -> dict[str, Any]:
 
 def _split_basis_payload(
     *,
-    metric: _MetricEvidence,
+    checks: tuple[dict[str, Any], ...],
+    verified_through: date | None,
+    assessed_through: date | None,
     target_date: date,
     config: LongForecastConfig,
 ) -> dict[str, Any]:
+    if verified_through is not None:
+        return {
+            "basis": "as_filed_diluted_shares_vs_split_adjusted_price",
+            "verified_through": verified_through.isoformat(),
+            "post_period_exposure_days": (target_date - verified_through).days,
+            "maximum_exposure_days": config.eligibility.maximum_metric_age_days,
+            "continuity_tolerance": (config.eligibility.share_consistency_relative_tolerance),
+            "continuity_checks": list(checks),
+            "residual_risk": "unverified_post_period_split",
+        }
+    assert assessed_through is not None
     return {
         "basis": "as_filed_diluted_shares_vs_split_adjusted_price",
-        "verified_through": metric.current_period_end.isoformat(),
-        "post_period_exposure_days": (target_date - metric.current_period_end).days,
+        "assessment_status": "incompatible_or_unverified",
+        "assessed_through": assessed_through.isoformat(),
+        "post_period_exposure_days": (target_date - assessed_through).days,
         "maximum_exposure_days": config.eligibility.maximum_metric_age_days,
         "continuity_tolerance": (config.eligibility.share_consistency_relative_tolerance),
-        "continuity_checks": list(metric.share_consistency),
-        "residual_risk": "unverified_post_period_split",
+        "continuity_checks": list(checks),
     }
 
 

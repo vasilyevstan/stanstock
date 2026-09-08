@@ -188,9 +188,23 @@ unmeasurable.
 - Long-v1 verifies the SEC diluted-share basis through the latest metric
   period, including every selected annual EPS/share period and TTM-to-annual
   continuity. It cannot verify a split between that period and the forecast
-  target from split-adjusted prices alone. Each prediction exposes the bounded
-  number of unverified post-period days; this is residual risk, not evidence
-  that a split occurred or did not occur.
+  target from split-adjusted prices alone. Each prediction exposes the
+  bounded number of unverified post-period days; this is residual risk, not
+  evidence that a split occurred or did not occur. Long-v1 is frozen and
+  never checks continuity between adjacent selected annual diluted-share
+  bases; its pinned configuration hash and prior predictions are unaffected
+  by later configuration versions.
+- Long-v2 is the default configuration and retains every long-v1 assumption
+  except that it enables the adjacent-period diluted-share basis continuity
+  capability: checking continuity between every adjacent pair of selected
+  annual periods (same 15% tolerance). An incompatible adjacent-period
+  diluted-share basis is withheld as unverified continuity, never asserted as
+  a confirmed split. Persisted output is not otherwise byte-identical: long-v2
+  also persists the structured assessed share-consistency evidence on
+  share-basis failures, while frozen long-v1's withheld-failure payloads are
+  unchanged. Long-v1 and long-v2 predictions carry distinct method versions
+  and configuration hashes and are never pooled into the same performance
+  cohort.
 - Long-v1 withholds raw current FCF/share or EPS/share multiples below the
   configured family floor because raising a cheap multiple to that floor
   before reversion would overstate return. High raw multiples retain the

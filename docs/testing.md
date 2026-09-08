@@ -68,7 +68,9 @@ This command validates settings; it does not prove the database is reachable.
   advisory isolation from recommendations and opportunities;
 - deterministic 3y/5y FCF/share and separately eligible EPS/share branches,
   negative/partial-FCF fallback refusal, selected-period and near-zero-EPS
-  share-basis checks, bidirectional TTM-to-annual diluted-share continuity,
+  share-basis checks, config-gated adjacent-selected-period diluted-share
+  continuity (default v2 enabled, frozen pinned v1 disabled and
+  reproducible), bidirectional TTM-to-annual diluted-share continuity,
   bounded post-period split exposure, current SIC peer floors and fallback
   levels, unsupported-financial and low-multiple withholding, compatible
   invested-capital canonical/source bases and tax inputs, bounded
@@ -76,11 +78,13 @@ This command validates settings; it does not prove the database is reachable.
   return identity, cumulative/annualized parity, dividend exclusion, complete
   target provenance, compact immutable peer references and payload budgets,
   future-fact/classification exclusion, bounded SQLite evidence loading,
-  observed/research-grade prediction issuance, and
-  recommendation/opportunity isolation;
+  observed/research-grade prediction issuance, method/config-hash cohort
+  separation between long-v1 and long-v2, and recommendation/opportunity
+  isolation;
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
-  detection, explicit 6m/12m/3y/5y maturity counts, provider-conflict
+  detection, explicit 6m/12m/3y/5y maturity counts, withheld-scenario
+  fail-closed unresolved outcomes, provider-conflict
   rejection, batch price-frame reuse, unchanged-unresolved no-op behavior,
   decision/advisory outcome semantics, cross-table role-guard trigger
   persistence on SQLite and PostgreSQL, and reconstructed/live evidence

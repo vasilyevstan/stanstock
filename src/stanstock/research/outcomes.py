@@ -84,6 +84,23 @@ def evaluate_prediction(
                 "target_date": prediction.target_date.isoformat(),
             },
         )
+    if (
+        prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
+        and prediction.bear_return is None
+        and prediction.base_return is None
+        and prediction.bull_return is None
+    ):
+        return _save_unresolved(
+            prediction,
+            existing=existing,
+            evaluated_at=evaluated_at,
+            evaluation_date=evaluation_date,
+            resolution="Withheld forecast has no scenario to evaluate",
+            metadata={
+                "provider": selected_provider,
+                "insufficiency_reason": prediction.insufficiency_reason,
+            },
+        )
 
     asof = AsOfData(evaluated_at, store)
     subject = (

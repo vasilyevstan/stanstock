@@ -238,6 +238,23 @@ missing classifications, stale metrics, missing sustainable-growth terms,
 incompatible price evidence, and peer sets below fixed SIC-4/SIC-3/SIC-2
 floors produce `Insufficient evidence`.
 
+The `us-sec-long-v1` configuration is frozen and remains reproducible exactly
+as originally released: reported diluted-EPS consistency for every selected
+annual period plus TTM-to-latest-annual-share continuity, with no check
+between adjacent selected annual periods. `us-sec-long-v2` retains every
+v1 assumption except that it enables
+`adjacent_selected_annual_diluted_share_continuity`, which also requires each
+adjacent pair of selected annual diluted-share bases to stay within the same
+15% tolerance; an incompatible adjacent pair is withheld as unverified
+continuity, never asserted as a confirmed split. Persisted output is not
+otherwise identical: v2 also persists the structured assessed
+share-consistency evidence on share-basis failures, while frozen v1's
+withheld-failure payloads are unchanged. `us-sec-long-v2` is the default
+configuration for new analyses. Predictions, method versions, configuration
+hashes, and performance cohorts from the two configurations never mix: v1
+predictions already recorded remain immutable and keep scoring under their
+original pinned configuration hash.
+
 The scenario assumptions are mechanical:
 
 - **Bear:** fixed negative growth delta, lower reinvestment multiplier, and

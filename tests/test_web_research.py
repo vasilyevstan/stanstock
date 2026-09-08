@@ -728,6 +728,88 @@ def test_explicit_long_forecasts_render_method_support_and_annualized_values(
 
 
 @pytest.mark.django_db
+def test_v2_withheld_forecast_renders_assessed_split_basis_not_verified(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """CT-1 template regression: a v2 withheld/assessed split_basis renders
+
+    the assessed/unverified wording and must never render the verified-basis
+    wording reserved for a metric that actually passed continuity.
+    """
+    horizons = {
+        **persisted_analysis.forecast_scenarios.get("horizons", {}),
+        "short": persisted_analysis.short_scenario,
+        "medium": persisted_analysis.medium_scenario,
+        "long": persisted_analysis.long_scenario,
+    }
+    for horizon, years in (("3y", 3), ("5y", 5)):
+        horizons[horizon] = {
+            "bear": None,
+            "base": None,
+            "bull": None,
+            "probability_positive": None,
+            "confidence": 0.0,
+            "confidence_status": "insufficient_evidence",
+            "insufficiency_reason": (
+                "Adjacent annual diluted-share basis continuity is "
+                "incompatible/unverified between 2023-12-31 and 2024-12-31: "
+                "100.0% exceeds 15.0%"
+            ),
+            "method": "sec_per_share_growth_multiple_reversion",
+            "method_version": "us-sec-long-v2",
+            "metric_family": None,
+            "years": years,
+            "support": {},
+            "formula_inputs": {},
+            "annualized_return": {},
+            "return_basis": "split_adjusted_price_return",
+            "evidence_grade": "observed",
+            "split_basis": {
+                "basis": "as_filed_diluted_shares_vs_split_adjusted_price",
+                "assessment_status": "incompatible_or_unverified",
+                "assessed_through": "2025-12-31",
+                "post_period_exposure_days": 58,
+                "maximum_exposure_days": 200,
+                "continuity_tolerance": 0.15,
+                "continuity_checks": [
+                    {
+                        "check": "adjacent_annual_diluted_shares",
+                        "previous_period_end": "2023-12-31",
+                        "current_period_end": "2024-12-31",
+                        "previous_shares": 10.0,
+                        "current_shares": 20.0,
+                        "relative_difference": 1.0,
+                        "tolerance": 0.15,
+                    }
+                ],
+            },
+        }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": horizons,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert "3-year advisory forecast" in detail_content
+    assert "5-year advisory forecast" in detail_content
+    assert "us-sec-long-v2" in detail_content
+    assert "Diluted-share basis is Incompatible Or Unverified" in detail_content
+    assert "as of 2025-12-31" in detail_content
+    assert "no split-adjusted" in detail_content
+    assert "verification is claimed." in detail_content
+    assert "Diluted-share basis verified through" not in detail_content
+    assert (
+        "Adjacent annual diluted-share basis continuity is incompatible/unverified"
+        in detail_content
+    )
+
+
+@pytest.mark.django_db
 @override_settings(DEMO_MODE=False)
 def test_synthetic_provenance_banner_does_not_depend_on_demo_setting(
     authenticated_client,
@@ -1068,6 +1150,119 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
     assert advisory_groups[0]["direction_accuracy"] is None
     assert advisory_groups[0]["direction_sample_count"] == 1
     assert "Advisory evidence" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    run = persisted_analysis.run
+    run.issued_on_time = True
+    run.save(update_fields=["issued_on_time"])
+    listing = persisted_analysis.listing
+    generated_at = run.generated_at
+
+    issued_prediction = Prediction.objects.create(
+        analysis=persisted_analysis,
+        listing=listing,
+        generated_at=generated_at,
+        target_date=run.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("101.25"),
+        bear_return=Decimal("-0.10"),
+        base_return=Decimal("0.08"),
+        bull_return=Decimal("0.25"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="experimental",
+        insufficiency_reason="",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="advisory-issued-v1",
+        method_version="advisory-issued-v1",
+        config_hash="c" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    PredictionOutcome.objects.create(
+        prediction=issued_prediction,
+        evaluated_at=datetime(2027, 3, 10, 12, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.10"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=True,
+        interval_covered=True,
+        signed_error=Decimal("0.02"),
+        resolution="Observed advisory outcome",
+    )
+    withheld_prediction = Prediction.objects.create(
+        analysis=persisted_analysis,
+        listing=listing,
+        generated_at=generated_at,
+        target_date=run.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.TWELVE_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("101.25"),
+        bear_return=None,
+        base_return=None,
+        bull_return=None,
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="experimental",
+        insufficiency_reason="Withheld forecast",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="advisory-withheld-v1",
+        method_version="advisory-withheld-v1",
+        config_hash="c" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    # Simulates a historical malformed row: matured despite no issued scenario.
+    PredictionOutcome.objects.create(
+        prediction=withheld_prediction,
+        evaluated_at=datetime(2027, 3, 10, 12, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.10"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=True,
+        interval_covered=None,
+        signed_error=Decimal("0.02"),
+        resolution="Malformed legacy withheld-scenario outcome",
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert response.context["advisory_matured_count"] == 1
+    advisory_groups = {
+        group["prediction__horizon"]: group for group in response.context["advisory_groups"]
+    }
+    assert Prediction.Horizon.TWELVE_MONTH.value not in advisory_groups
+    assert advisory_groups[Prediction.Horizon.SIX_MONTH.value]["sample_count"] == 1
+
+    status_response = authenticated_client.get(reverse("status"))
+    assert status_response.status_code == 200
+    assert status_response.context["advisory_matured_count"] == 1
 
 
 @pytest.mark.django_db
