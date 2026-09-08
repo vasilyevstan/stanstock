@@ -146,9 +146,23 @@
         </div>
         {% if group.slug == "under_10" %}
           <div class="notice">
-            <strong>Long-horizon forecast unavailable.</strong>
-            Missing activation gates:
-            {{ under_10_long_horizon_gates|join:", " }}.
+            <strong>Long-horizon (3y/5y) forecast unavailable.</strong>
+            <p>Available foundations:</p>
+            <ul class="compact-gate-list">
+              {% for foundation in under_10_available_foundations %}
+                <li>{{ foundation }}</li>
+              {% endfor %}
+            </ul>
+            <p>Unreleased activation controls:</p>
+            <ul class="compact-gate-list">
+              {% for control in under_10_unreleased_activation_controls %}
+                <li>{{ control }}</li>
+              {% endfor %}
+            </ul>
+            <p>
+              Joint Under-$10 review and candidate-specific eligibility remain
+              outstanding.
+            </p>
           </div>
         {% endif %}
         <div class="price-band-stock-grid">
@@ -218,12 +232,7 @@
                   </div>
                 </dl>
                 {% if card.long_horizon_blocked %}
-                  <small class="muted">
-                    {{ card.long_horizon_band_reason }}
-                    {% if card.long_horizon_gates %}
-                      Requires {{ card.long_horizon_gates|join:", " }}.
-                    {% endif %}
-                  </small>
+                  <small class="muted">{{ card.long_horizon_band_reason }}</small>
                 {% endif %}
                 {% for reason in card.opportunity.blocking_reasons %}
                   <small class="muted">{{ reason }}</small>

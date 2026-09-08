@@ -216,9 +216,14 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       close at the run target. Later mutable closes cannot change archive and
       rebuild composition, and missing current USD state fails closed for
       promotion.
-- [ ] Under-$10 long-horizon output says `Forecast unavailable` and names the
-      missing SEC, dilution/per-share, solvency/cash-runway, dollar-liquidity,
-      split-event, and compatible 3y/5y evidence gates.
+- [ ] Under-$10 long-horizon output says `Forecast unavailable` and separates
+      released reusable foundations from unreleased activation controls.
+      Point-in-time SEC adverse-versus-missing behavior, long-v2
+      diluted-share/per-share continuity assessment, and the deterministic
+      3y/5y engine are foundations only, not candidate approvals. Dedicated
+      solvency/cash-runway, Under-$10 dollar-liquidity, and verified
+      split/reverse-split controls remain unreleased; joint review and
+      candidate-specific eligibility remain required.
 
 ## Tracked contributions and allocation plans
 

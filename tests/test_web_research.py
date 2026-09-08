@@ -23,6 +23,10 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.research.affordability import (
+    UNDER_10_AVAILABLE_FOUNDATIONS,
+    UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
+)
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -37,6 +41,7 @@ from stanstock.simulation.models import (
     SimulationRun,
     SimulationTrade,
 )
+from stanstock.web.views import STOCK_DETAIL_PREDICTIONS_PER_PAGE
 
 
 @pytest.fixture
@@ -163,6 +168,61 @@ def persisted_analysis() -> StockAnalysis:
         code_revision="test-revision",
     )
     return analysis
+
+
+def _create_prediction(
+    analysis: StockAnalysis,
+    *,
+    horizon: Prediction.Horizon,
+    evidence_role: Prediction.EvidenceRole,
+    model_version: str,
+    bear_return: Decimal,
+    base_return: Decimal,
+    bull_return: Decimal,
+) -> Prediction:
+    decision = Prediction.objects.get(
+        analysis=analysis,
+        model_version="baseline-v1",
+    )
+    return Prediction.objects.create(
+        analysis=analysis,
+        listing=analysis.listing,
+        generated_at=decision.generated_at,
+        target_date=decision.target_date,
+        horizon=horizon,
+        evidence_role=evidence_role,
+        evidence_grade=decision.evidence_grade,
+        source_mode=decision.source_mode,
+        price_provider=decision.price_provider,
+        price_subject=decision.price_subject,
+        price_at_prediction=decision.price_at_prediction,
+        bear_return=bear_return,
+        base_return=base_return,
+        bull_return=bull_return,
+        probability_positive=None,
+        confidence=decision.confidence,
+        confidence_status="deterministic_point_in_time",
+        insufficiency_reason="",
+        recommendation=decision.recommendation,
+        overall_score=decision.overall_score,
+        component_scores=decision.component_scores,
+        model_version=model_version,
+        method_version="us-sec-long-v2",
+        config_hash=decision.config_hash,
+        data_cutoff=decision.data_cutoff,
+        source_assets=decision.source_assets,
+        calculation={"evidence_role": evidence_role},
+        code_revision=decision.code_revision,
+    )
+
+
+def _prediction_history_row(content: str, model_version: str) -> str:
+    normalized_content = " ".join(content.split())
+    for row in normalized_content.split("<article>")[1:]:
+        row = row.split("</article>", 1)[0]
+        if f'<span class="badge">{model_version}</span>' in row:
+            return row
+    raise AssertionError(f"Prediction history row not found for {model_version}")
 
 
 def _persist_spy_etf(tmp_path) -> Listing:
@@ -381,10 +441,37 @@ def test_great_opportunity_is_highlighted_with_versioned_policy(
 
 
 @pytest.mark.django_db
-def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates(
+def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="immutable-long-3y-v1",
+        bear_return=Decimal("-0.11"),
+        base_return=Decimal("0.41"),
+        bull_return=Decimal("0.91"),
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.FIVE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="immutable-long-5y-v1",
+        bear_return=Decimal("-0.19"),
+        base_return=Decimal("0.79"),
+        bull_return=Decimal("1.59"),
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.LONG,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        model_version="immutable-legacy-long-v1",
+        bear_return=Decimal("-0.27"),
+        base_return=Decimal("0.57"),
+        bull_return=Decimal("1.17"),
+    )
     persisted_analysis.overall_score = Decimal("85")
     persisted_analysis.confidence = Decimal("70")
     persisted_analysis.risk_class = RiskClass.LOW
@@ -427,24 +514,95 @@ def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates
     status = authenticated_client.get(reverse("status"))
 
     opportunity_content = opportunities.content.decode()
+    normalized_opportunity_content = " ".join(opportunity_content.split())
     assert opportunities.status_code == 200
     assert "Under $10 - speculative watchlist" in opportunity_content
     assert "0% new allocation" in opportunity_content
     assert "9.99 USD" in opportunity_content
+    assert "<strong>Long-horizon (3y/5y) forecast unavailable.</strong>" in opportunity_content
+    assert "<p>Available foundations:</p>" in opportunity_content
+    assert "<p>Unreleased activation controls:</p>" in opportunity_content
+    assert normalized_opportunity_content.count("Forecast unavailable") == 2
     price_band_groups = opportunities.context["price_band_groups"]
-    assert price_band_groups[0]["cards"][0]["price_band"].price_date == date(
-        2026,
-        9,
-        5,
-    )
+    under_10_card = price_band_groups[0]["cards"][0]
+    assert under_10_card["price_band"].price_date == date(2026, 9, 5)
+    assert len(under_10_card["long_horizon_available_foundations"]) == 3
+    assert len(under_10_card["long_horizon_unreleased_activation_controls"]) == 3
     assert "Strong short-term setup" not in opportunity_content
     assert persisted_analysis.listing.ticker not in excluded_band.content.decode()
+    assert (
+        "Point-in-time SEC facts with adverse-versus-missing branch behavior" in opportunity_content
+    )
+    assert "Dedicated solvency and cash-runway policy" in opportunity_content
+    assert "Joint Under-$10 review and candidate-specific eligibility remain" in opportunity_content
 
     detail_content = detail.content.decode()
+    normalized_detail_content = " ".join(detail_content.split())
     assert detail.status_code == 200
-    assert "Forecast unavailable" in detail_content
-    assert "Point-in-time SEC facts with adverse-versus-missing states" in detail_content
-    assert "Verified split and reverse-split events" in detail_content
+    assert normalized_detail_content.count("<strong>Forecast unavailable</strong>") == 2
+    assert normalized_detail_content.count("<p>Available foundations:</p>") == 1
+    assert normalized_detail_content.count("<p>Unreleased activation controls:</p>") == 1
+    assert "Released foundations are not candidate approvals." in detail_content
+    assert (
+        "Joint Under-$10 review and candidate-specific eligibility remain"
+        in normalized_detail_content
+    )
+    for disclosure_item in (
+        *UNDER_10_AVAILABLE_FOUNDATIONS,
+        *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
+    ):
+        assert opportunity_content.count(disclosure_item) == 1
+        assert detail_content.count(disclosure_item) == 1
+    assert (
+        "Point-in-time SEC facts with adverse-versus-missing branch behavior "
+        "(released foundation; candidate qualification still required)" in detail_content
+    )
+    assert (
+        "Long-v2 diluted-share/per-share continuity assessment with withholding, "
+        "not post-period event verification (released foundation; candidate "
+        "qualification still required)" in detail_content
+    )
+    assert (
+        "Deterministic 3-year/5-year formula engine with missing-input withholding "
+        "(released foundation; candidate qualification still required)" in detail_content
+    )
+    assert "Dedicated solvency and cash-runway policy" in detail_content
+    assert "Versioned Under-$10-specific dollar-liquidity policy" in detail_content
+    assert "Verified split and reverse-split event source" in detail_content
+    assert "-12.0% / +45.0% / +92.0%" not in detail_content
+    assert "-20.0% / +80.0% / +160.0%" not in detail_content
+    assert normalized_detail_content.count("-11.0% / +41.0% / +91.0%") == 1
+    assert normalized_detail_content.count("-19.0% / +79.0% / +159.0%") == 1
+    under_10_context = (
+        "Immutable advisory evidence; current activation context: Under-$10 "
+        "long-horizon forecast remains unavailable; joint review and "
+        "candidate-specific eligibility remain outstanding."
+    )
+    legacy_under_10_context = (
+        "Immutable legacy long-horizon evidence; current activation context: "
+        "Under-$10 long-horizon forecast remains unavailable; joint review and "
+        "candidate-specific eligibility remain outstanding."
+    )
+    legacy_row = _prediction_history_row(detail_content, "immutable-legacy-long-v1")
+    three_year_row = _prediction_history_row(detail_content, "immutable-long-3y-v1")
+    five_year_row = _prediction_history_row(detail_content, "immutable-long-5y-v1")
+    short_row = _prediction_history_row(detail_content, "baseline-v1")
+    assert "Legacy 3+ years · Decision · BUY" in legacy_row
+    assert "-27.0% / +57.0% / +117.0%" in legacy_row
+    assert legacy_under_10_context in legacy_row
+    assert under_10_context not in legacy_row
+    assert "3 years · Advisory" in three_year_row
+    assert "-11.0% / +41.0% / +91.0%" in three_year_row
+    assert under_10_context in three_year_row
+    assert legacy_under_10_context not in three_year_row
+    assert "5 years · Advisory" in five_year_row
+    assert "-19.0% / +79.0% / +159.0%" in five_year_row
+    assert under_10_context in five_year_row
+    assert legacy_under_10_context not in five_year_row
+    assert "1-10 trading days · Decision · BUY" in short_row
+    assert "current activation context" not in short_row
+    assert normalized_detail_content.count(legacy_under_10_context) == 1
+    assert normalized_detail_content.count(under_10_context) == 2
     status_content = status.content.decode()
     assert status.status_code == 200
     assert "Forecast unavailable" in status_content
@@ -456,10 +614,253 @@ def test_under_10_band_blocks_promotion_and_discloses_missing_long_horizon_gates
 
 
 @pytest.mark.django_db
+def test_stock_detail_keeps_complete_prediction_history_and_current_context_labels(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    horizon_roles = (
+        (Prediction.Horizon.SHORT, Prediction.EvidenceRole.DECISION),
+        (Prediction.Horizon.MEDIUM, Prediction.EvidenceRole.DECISION),
+        (Prediction.Horizon.LONG, Prediction.EvidenceRole.DECISION),
+        (Prediction.Horizon.SIX_MONTH, Prediction.EvidenceRole.ADVISORY),
+        (Prediction.Horizon.TWELVE_MONTH, Prediction.EvidenceRole.ADVISORY),
+        (Prediction.Horizon.THREE_YEAR, Prediction.EvidenceRole.ADVISORY),
+        (Prediction.Horizon.FIVE_YEAR, Prediction.EvidenceRole.ADVISORY),
+    )
+    prediction_rows: list[tuple[Prediction, str]] = []
+    for horizon_index, (horizon, evidence_role) in enumerate(horizon_roles):
+        for version_index in range(5):
+            value_index = horizon_index * 5 + version_index
+            offset = Decimal(value_index) / Decimal("1000")
+            bear_return = Decimal("-0.90") + offset
+            base_return = Decimal("-0.20") + offset
+            bull_return = Decimal("0.50") + offset
+            prediction = _create_prediction(
+                persisted_analysis,
+                horizon=horizon,
+                evidence_role=evidence_role,
+                model_version=f"history-{horizon}-{version_index}",
+                bear_return=bear_return,
+                base_return=base_return,
+                bull_return=bull_return,
+            )
+            scenario_values = " / ".join(
+                f"{value * Decimal(100):+.1f}%" for value in (bear_return, base_return, bull_return)
+            )
+            prediction_rows.append((prediction, scenario_values))
+
+    assert len(prediction_rows) == 35
+    assert len({prediction.model_version for prediction, _ in prediction_rows}) == 35
+    assert len({scenario_values for _, scenario_values in prediction_rows}) == 35
+
+    expected_predictions = list(
+        Prediction.objects.filter(listing=persisted_analysis.listing).order_by(
+            "-generated_at",
+            "horizon",
+            "pk",
+        )
+    )
+    expected_order = [
+        (prediction.pk, prediction.model_version) for prediction in expected_predictions
+    ]
+    expected_combinations = {
+        (
+            prediction.model_version,
+            prediction.horizon,
+            prediction.evidence_role,
+            prediction.bear_return,
+            prediction.base_return,
+            prediction.bull_return,
+        )
+        for prediction in expected_predictions
+    }
+    expected_page_count = (
+        len(expected_predictions) + STOCK_DETAIL_PREDICTIONS_PER_PAGE - 1
+    ) // STOCK_DETAIL_PREDICTIONS_PER_PAGE
+    detail_url = reverse("stock-detail", args=[persisted_analysis.listing_id])
+
+    def traverse_prediction_pages():
+        responses = []
+        page_number = 1
+        while True:
+            response = authenticated_client.get(
+                detail_url,
+                {"prediction_page": page_number},
+            )
+            assert response.status_code == 200
+            prediction_page = response.context["prediction_page"]
+            assert prediction_page.number == page_number
+            assert response.context["predictions"] is prediction_page.object_list
+            assert len(prediction_page.object_list) <= STOCK_DETAIL_PREDICTIONS_PER_PAGE
+            responses.append(response)
+            if not prediction_page.has_next():
+                return responses
+            page_number = prediction_page.next_page_number()
+
+    def collect_prediction_rows(responses):
+        ordered_rows = []
+        combinations = set()
+        rendered_rows = {}
+        for response in responses:
+            content = response.content.decode()
+            for prediction in response.context["predictions"]:
+                ordered_rows.append((prediction.pk, prediction.model_version))
+                combinations.add(
+                    (
+                        prediction.model_version,
+                        prediction.horizon,
+                        prediction.evidence_role,
+                        prediction.bear_return,
+                        prediction.base_return,
+                        prediction.bull_return,
+                    )
+                )
+                row = _prediction_history_row(content, prediction.model_version)
+                rendered_rows[prediction.model_version] = row
+                assert prediction.get_horizon_display() in row
+                assert prediction.get_evidence_role_display() in row
+                scenario_values = " / ".join(
+                    f"{value * Decimal(100):+.1f}%"
+                    for value in (
+                        prediction.bear_return,
+                        prediction.base_return,
+                        prediction.bull_return,
+                    )
+                )
+                assert scenario_values in row
+        return ordered_rows, combinations, rendered_rows
+
+    market_data = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    market_data.close = Decimal("9.99")
+    market_data.session_date = date(2026, 9, 5)
+    market_data.save(update_fields=["close", "session_date"])
+
+    blocked_pages = traverse_prediction_pages()
+
+    assert len(blocked_pages) == expected_page_count == 2
+    assert all(response.context["long_horizon_blocked"] is True for response in blocked_pages)
+    first_blocked_page = blocked_pages[0].context["prediction_page"]
+    last_blocked_page = blocked_pages[-1].context["prediction_page"]
+    assert len(first_blocked_page.object_list) == STOCK_DETAIL_PREDICTIONS_PER_PAGE
+    assert len(last_blocked_page.object_list) == (
+        len(expected_predictions) - STOCK_DETAIL_PREDICTIONS_PER_PAGE
+    )
+    assert first_blocked_page.has_previous() is False
+    assert first_blocked_page.has_next() is True
+    assert last_blocked_page.has_previous() is True
+    assert last_blocked_page.has_next() is False
+
+    first_blocked_content = " ".join(blocked_pages[0].content.decode().split())
+    last_blocked_content = " ".join(blocked_pages[-1].content.decode().split())
+    assert "36 predictions total · Page 1 of 2" in first_blocked_content
+    assert '<nav aria-label="Prediction history pages">' in first_blocked_content
+    assert ">Previous</a>" not in first_blocked_content
+    assert '<a class="text-link" href="?prediction_page=2">Next</a>' in first_blocked_content
+    assert "36 predictions total · Page 2 of 2" in last_blocked_content
+    assert '<nav aria-label="Prediction history pages">' in last_blocked_content
+    assert '<a class="text-link" href="?prediction_page=1">Previous</a>' in last_blocked_content
+    assert ">Next</a>" not in last_blocked_content
+
+    invalid_page = authenticated_client.get(
+        detail_url,
+        {"prediction_page": "not-a-page"},
+    )
+    out_of_range_page = authenticated_client.get(
+        detail_url,
+        {"prediction_page": expected_page_count + 10},
+    )
+    assert invalid_page.status_code == 200
+    assert invalid_page.context["prediction_page"].number == 1
+    assert out_of_range_page.status_code == 200
+    assert out_of_range_page.context["prediction_page"].number == expected_page_count
+
+    page_queryset = first_blocked_page.object_list
+    loaded_fields, defer_mode = page_queryset.query.deferred_loading
+    assert defer_mode is False
+    assert loaded_fields == {
+        "id",
+        "generated_at",
+        "horizon",
+        "evidence_role",
+        "recommendation",
+        "target_date",
+        "bear_return",
+        "base_return",
+        "bull_return",
+        "model_version",
+    }
+    assert page_queryset.query.select_related is False
+    assert StockAnalysis._meta.db_table not in {
+        join.table_name for join in page_queryset.query.alias_map.values()
+    }
+
+    blocked_order, blocked_combinations, blocked_rows = collect_prediction_rows(blocked_pages)
+    assert blocked_order == expected_order
+    assert len({prediction_id for prediction_id, _ in blocked_order}) == len(expected_predictions)
+    assert len({model_version for _, model_version in blocked_order}) == len(expected_predictions)
+    assert blocked_combinations == expected_combinations
+    assert set(blocked_rows) == {prediction.model_version for prediction in expected_predictions}
+
+    legacy_context_label = "Immutable legacy long-horizon evidence; current activation context:"
+    advisory_context_label = "Immutable advisory evidence; current activation context:"
+    for prediction in expected_predictions:
+        row = blocked_rows[prediction.model_version]
+        if prediction.horizon == Prediction.Horizon.LONG:
+            assert legacy_context_label in row
+            assert advisory_context_label not in row
+        elif prediction.horizon in (
+            Prediction.Horizon.THREE_YEAR,
+            Prediction.Horizon.FIVE_YEAR,
+        ):
+            assert advisory_context_label in row
+            assert legacy_context_label not in row
+        else:
+            assert "current activation context" not in row
+    assert (
+        sum(response.content.decode().count(legacy_context_label) for response in blocked_pages)
+        == 5
+    )
+    assert (
+        sum(response.content.decode().count(advisory_context_label) for response in blocked_pages)
+        == 10
+    )
+
+    market_data.close = Decimal("25")
+    market_data.save(update_fields=["close"])
+    unblocked_pages = traverse_prediction_pages()
+
+    assert len(unblocked_pages) == expected_page_count
+    assert all(response.context["long_horizon_blocked"] is False for response in unblocked_pages)
+    unblocked_order, unblocked_combinations, unblocked_rows = collect_prediction_rows(
+        unblocked_pages
+    )
+    assert unblocked_order == expected_order
+    assert unblocked_combinations == expected_combinations
+    assert set(unblocked_rows) == set(blocked_rows)
+    for response in unblocked_pages:
+        unblocked_content = response.content.decode()
+        assert "current activation context" not in unblocked_content
+        for disclosure_item in (
+            *UNDER_10_AVAILABLE_FOUNDATIONS,
+            *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
+        ):
+            assert disclosure_item not in unblocked_content
+
+
+@pytest.mark.django_db
 def test_missing_current_usd_price_band_fails_closed(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="immutable-missing-price-3y-v1",
+        bear_return=Decimal("-0.13"),
+        base_return=Decimal("0.43"),
+        bull_return=Decimal("0.93"),
+    )
     persisted_analysis.overall_score = Decimal("85")
     persisted_analysis.confidence = Decimal("70")
     persisted_analysis.risk_class = RiskClass.LOW
@@ -489,15 +890,37 @@ def test_missing_current_usd_price_band_fails_closed(
     card = unavailable_group["cards"][0]
     assert card["opportunity"].eligible is False
     assert card["long_horizon_blocked"] is True
+    assert card["long_horizon_available_foundations"] == ()
+    assert card["long_horizon_unreleased_activation_controls"] == ()
     content = opportunities.content.decode()
     assert "Strong short-term setup" not in content
     assert "Forecast unavailable" in content
     assert "No valid latest persisted USD close is available" in content
 
     assert detail.status_code == 200
+    assert detail.context["long_horizon_available_foundations"] == ()
+    assert detail.context["long_horizon_unreleased_activation_controls"] == ()
     detail_content = detail.content.decode()
+    normalized_detail_content = " ".join(detail_content.split())
     assert "Forecast unavailable" in detail_content
     assert "No valid latest persisted USD close is available" in detail_content
+    assert "Under-$10 long-horizon policy disclosure." not in detail_content
+    assert "<p>Available foundations:</p>" not in detail_content
+    assert "<p>Unreleased activation controls:</p>" not in detail_content
+    for disclosure_item in (
+        *UNDER_10_AVAILABLE_FOUNDATIONS,
+        *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
+    ):
+        assert disclosure_item not in detail_content
+    assert normalized_detail_content.count("-13.0% / +43.0% / +93.0%") == 1
+    missing_price_context = (
+        "Immutable advisory evidence; current activation context: No valid latest "
+        "persisted USD close is available to apply the guarded price-band policy."
+    )
+    assert normalized_detail_content.count(missing_price_context) == 1
+    assert (
+        "Immutable advisory evidence; current activation context: Under-$10" not in detail_content
+    )
 
 
 @pytest.mark.django_db

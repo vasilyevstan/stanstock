@@ -115,7 +115,9 @@ This command validates settings; it does not prove the database is reachable.
   refusal, same-day snapshot deduplication, snapshot database immutability,
   split warnings, opportunity-policy highlighting, exact price-band
   boundaries, neutral band filtering, Under $10 promotion/sample exclusion,
-  ETF sample exclusion, supported-SPY holding selection, and preservation of
+  released-foundation versus unreleased-control disclosure, complete
+  stock-detail prediction history, current activation-context labels, ETF
+  sample exclusion, supported-SPY holding selection, and preservation of
   existing holdings;
 - immutable/idempotent external deposits, side-effect-free monthly previews,
   70/30 total-NAV arithmetic, fractional and whole-share rounding, residual

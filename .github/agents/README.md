@@ -170,10 +170,14 @@ historical hashes, predictions, and performance cohorts remain separate.
 Current USD price bands remain display/filter/execution metadata and show
 their session date. Under $10 is a 0%-new-allocation speculative watchlist,
 not a positive signal; it cannot enter highlights or newly constructed sample
-baskets, and missing long-horizon activation gates are displayed explicitly.
-Sample construction classifies the decision-run reference close rather than
-mutable current market state. Existing holdings and frozen historical baskets
-are never rewritten, and missing current USD price state fails closed for new
+baskets. Its disclosure separates released reusable foundations from
+unreleased activation controls: foundations are not candidate approvals, and
+joint review plus candidate-specific eligibility remain required. Immutable
+long-horizon ledger evidence stays visible with its original horizon and
+evidence role, labeled only with the current activation context. Sample
+construction classifies the decision-run reference close rather than mutable
+current market state. Existing holdings and frozen historical baskets are
+never rewritten, and missing current USD price state fails closed for new
 promotion.
 
 Investable ETF support preserves a separate evidence contract. A benchmark ETF
