@@ -208,13 +208,14 @@ An unsafe timezone blocks installation; the installer never silently changes
 the chosen hour. The timezone is recorded in the plist, and runtime refuses to
 continue after a machine-timezone change until the LaunchAgent is reinstalled.
 
-The plist contains only paths and non-secret runtime flags. The committed
-`scripts/run-scheduled-refresh.sh` runner requires the ignored local `.env`,
-rejects group/other-readable permissions, exports it inside the child process,
-disables unattended Keychain fallback, and then executes the absolute
-`.venv/bin/python`. A missing key therefore fails promptly instead of opening
-or waiting on a Keychain prompt. Logs are written below the current user's
-private `~/Library/Logs/StanStock` directory.
+The plist contains only paths and non-secret runtime flags. It invokes the
+application-owned Python entrypoint directly through the absolute
+`.venv/bin/python`; no shell wrapper or resident scheduler is involved. The
+entrypoint validates and loads the ignored local `.env` before Django settings
+initialize, rejects group/other-readable permissions and invalid assignments,
+and disables unattended Keychain fallback. A missing key therefore fails
+promptly instead of opening or waiting on a Keychain prompt. Logs are written
+below the current user's private `~/Library/Logs/StanStock` directory.
 
 `scheduled_refresh` resolves the latest completed XNYS target and maintains an
 aggregate parent `JobRun` with independently recoverable children:

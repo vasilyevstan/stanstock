@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import plistlib
-import stat
 import subprocess
 import sys
 import tempfile
@@ -13,10 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
+from stanstock.core.environment import validate_private_environment_file
 from stanstock.data.live_us import DEFAULT_CLOSE_DELAY_MINUTES
 
 LAUNCH_AGENT_LABEL = "com.stanstock.daily-refresh"
 LAUNCH_AGENT_FILENAME = f"{LAUNCH_AGENT_LABEL}.plist"
+SCHEDULED_REFRESH_MODULE = "stanstock.core.scheduled_refresh_entrypoint"
 SCHEDULED_WEEKDAYS = frozenset({1, 2, 3, 4, 5})
 LAUNCHD_WEEKDAYS = (2, 3, 4, 5, 6)
 SCHEDULE_HOUR = 2
@@ -164,10 +165,16 @@ def build_launch_agent(
     stdout_path: Path,
     stderr_path: Path,
 ) -> dict[str, object]:
-    runner = project_root / "scripts" / "run-scheduled-refresh.sh"
+    interpreter = project_root / ".venv" / "bin" / "python"
+    env_file = project_root / ".env"
     return {
         "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": [str(runner)],
+        "Program": str(interpreter),
+        "ProgramArguments": [
+            str(interpreter),
+            "-m",
+            SCHEDULED_REFRESH_MODULE,
+        ],
         "WorkingDirectory": str(project_root),
         "StartCalendarInterval": [
             {
@@ -178,6 +185,7 @@ def build_launch_agent(
             for weekday in LAUNCHD_WEEKDAYS
         ],
         "EnvironmentVariables": {
+            "STANSTOCK_ENV_FILE": str(env_file),
             "STANSTOCK_SCHEDULE_TIMEZONE": timezone_name,
             "STANSTOCK_DISABLE_KEYCHAIN": "1",
             "PYTHONUNBUFFERED": "1",
@@ -206,13 +214,13 @@ def install_launch_agent(
     _require_macos()
     root = project_root.resolve()
     interpreter = root / ".venv" / "bin" / "python"
-    runner = root / "scripts" / "run-scheduled-refresh.sh"
+    entrypoint = root / "src" / "stanstock" / "core" / "scheduled_refresh_entrypoint.py"
     env_file = root / ".env"
     if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         raise ValueError(f"Project interpreter is not executable: {interpreter}")
-    if not runner.is_file() or not os.access(runner, os.X_OK):
-        raise ValueError(f"Scheduled refresh runner is not executable: {runner}")
-    _validate_private_env_file(env_file)
+    if not entrypoint.is_file():
+        raise ValueError("The scheduled refresh application entrypoint is missing")
+    validate_private_environment_file(env_file)
     validation = validate_schedule(timezone_name)
     plist_path, stdout_path, stderr_path = launch_agent_paths(home)
     plist_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -276,16 +284,6 @@ def launch_agent_status(home: Path | None = None) -> dict[str, object]:
 
 def validation_details(validation: ScheduleValidation) -> dict[str, object]:
     return asdict(validation)
-
-
-def _validate_private_env_file(path: Path) -> None:
-    if not path.is_file():
-        raise ValueError(f"Scheduled refresh requires the ignored local credential file: {path}")
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if path.stat().st_uid != os.getuid():
-        raise ValueError(f"{path} must be owned by the current user")
-    if mode & 0o077:
-        raise ValueError(f"{path} must not be readable or writable by group or other users")
 
 
 def _write_private_plist(path: Path, payload: dict[str, object]) -> None:
