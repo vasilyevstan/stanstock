@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
+from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Avg, Count, Q, QuerySet
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -60,7 +61,8 @@ from stanstock.research.affordability import (
     PRICE_BAND_POLICY_VERSION,
     PRICE_BANDS,
     PRICE_BANDS_BY_SLUG,
-    UNDER_10_LONG_HORIZON_GATES,
+    UNDER_10_AVAILABLE_FOUNDATIONS,
+    UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
     PriceBandAssessment,
     PriceBandDefinition,
     latest_price_band,
@@ -98,6 +100,8 @@ from stanstock.web.forms import (
     SamplePortfolioForm,
     SimulationForm,
 )
+
+STOCK_DETAIL_PREDICTIONS_PER_PAGE = 30
 
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -362,7 +366,8 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
             "filter_form": filter_form,
             "price_band_currency": PRICE_BAND_CURRENCY,
             "price_band_policy_version": PRICE_BAND_POLICY_VERSION,
-            "under_10_long_horizon_gates": UNDER_10_LONG_HORIZON_GATES,
+            "under_10_available_foundations": UNDER_10_AVAILABLE_FOUNDATIONS,
+            "under_10_unreleased_activation_controls": (UNDER_10_UNRELEASED_ACTIVATION_CONTROLS),
         },
     )
 
@@ -384,16 +389,32 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
         .order_by("-run__generated_at")
         .first()
     )
-    predictions = (
+    prediction_queryset = (
         Prediction.objects.filter(listing=listing)
-        .select_related("analysis")
-        .order_by("-generated_at", "horizon")[:30]
+        .only(
+            "id",
+            "generated_at",
+            "horizon",
+            "evidence_role",
+            "recommendation",
+            "target_date",
+            "bear_return",
+            "base_return",
+            "bull_return",
+            "model_version",
+        )
+        .order_by("-generated_at", "horizon", "pk")
     )
+    prediction_page = Paginator(
+        prediction_queryset,
+        STOCK_DETAIL_PREDICTIONS_PER_PAGE,
+    ).get_page(request.GET.get("prediction_page"))
     current_price_band = latest_price_band(listing)
     (
         long_horizon_blocked,
         long_horizon_band_reason,
-        long_horizon_gates,
+        long_horizon_available_foundations,
+        long_horizon_unreleased_activation_controls,
     ) = _long_horizon_band_state(
         listing=listing,
         current_price_band=current_price_band,
@@ -416,8 +437,12 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
             "price_band_policy_version": PRICE_BAND_POLICY_VERSION,
             "long_horizon_blocked": long_horizon_blocked,
             "long_horizon_band_reason": long_horizon_band_reason,
-            "long_horizon_gates": long_horizon_gates,
-            "predictions": predictions,
+            "long_horizon_available_foundations": long_horizon_available_foundations,
+            "long_horizon_unreleased_activation_controls": (
+                long_horizon_unreleased_activation_controls
+            ),
+            "prediction_page": prediction_page,
+            "predictions": prediction_page.object_list,
         },
     )
 
@@ -1175,7 +1200,8 @@ def _opportunity_card(analysis: StockAnalysis) -> dict[str, Any]:
     (
         long_horizon_blocked,
         long_horizon_band_reason,
-        long_horizon_gates,
+        long_horizon_available_foundations,
+        long_horizon_unreleased_activation_controls,
     ) = _long_horizon_band_state(
         listing=analysis.listing,
         current_price_band=current_price_band,
@@ -1186,7 +1212,10 @@ def _opportunity_card(analysis: StockAnalysis) -> dict[str, Any]:
         "price_band": current_price_band,
         "long_horizon_blocked": long_horizon_blocked,
         "long_horizon_band_reason": long_horizon_band_reason,
-        "long_horizon_gates": long_horizon_gates,
+        "long_horizon_available_foundations": long_horizon_available_foundations,
+        "long_horizon_unreleased_activation_controls": (
+            long_horizon_unreleased_activation_controls
+        ),
     }
 
 
@@ -1194,12 +1223,14 @@ def _long_horizon_band_state(
     *,
     listing: Listing,
     current_price_band: PriceBandAssessment | None,
-) -> tuple[bool, str, tuple[str, ...]]:
+) -> tuple[bool, str, tuple[str, ...], tuple[str, ...]]:
     if current_price_band is not None and current_price_band.blocks_long_horizon:
         return (
             True,
-            "Under-$10 long-horizon activation gates are not yet available.",
-            UNDER_10_LONG_HORIZON_GATES,
+            "Under-$10 long-horizon forecast remains unavailable; joint review "
+            "and candidate-specific eligibility remain outstanding.",
+            UNDER_10_AVAILABLE_FOUNDATIONS,
+            UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
         )
     if listing.currency.upper() == PRICE_BAND_CURRENCY and current_price_band is None:
         return (
@@ -1207,8 +1238,9 @@ def _long_horizon_band_state(
             "No valid latest persisted USD close is available to apply the "
             "guarded price-band policy.",
             (),
+            (),
         )
-    return False, "", ()
+    return False, "", (), ()
 
 
 def _analyses_in_price_band(

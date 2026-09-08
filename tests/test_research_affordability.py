@@ -9,7 +9,9 @@ import pytest
 
 from stanstock.research.affordability import (
     PRICE_BAND_POLICY_VERSION,
-    UNDER_10_LONG_HORIZON_GATES,
+    UNDER_10_ALLOCATION_REASON,
+    UNDER_10_AVAILABLE_FOUNDATIONS,
+    UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
     classify_price_band,
     price_band_choices,
 )
@@ -82,7 +84,17 @@ def test_under_10_policy_is_neutral_but_not_newly_investable() -> None:
     assert assessment.label == "Under $10 - speculative watchlist"
     assert assessment.new_allocation_eligible is False
     assert assessment.blocks_long_horizon is True
-    assert len(UNDER_10_LONG_HORIZON_GATES) == 6
+    assert len(UNDER_10_AVAILABLE_FOUNDATIONS) == 3
+    assert len(UNDER_10_UNRELEASED_ACTIVATION_CONTROLS) == 3
+    assert set(UNDER_10_AVAILABLE_FOUNDATIONS).isdisjoint(UNDER_10_UNRELEASED_ACTIVATION_CONTROLS)
+    assert all(
+        "candidate qualification still required" in foundation
+        for foundation in UNDER_10_AVAILABLE_FOUNDATIONS
+    )
+    assert UNDER_10_ALLOCATION_REASON == (
+        "New allocation remains 0% pending joint Under-$10 review and "
+        "candidate-specific eligibility."
+    )
     assert price_band_choices() == [
         ("under_10", "Under $10 - speculative watchlist"),
         ("10_to_50", "$10-$50"),

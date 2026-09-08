@@ -97,10 +97,19 @@ See `docs/operations.md` for the destructive termination procedure.
   trading days even though the basket can remain visible afterward.
 - Nominal price bands are affordability context, not evidence of
   undervaluation. Under $10 is a non-investable speculative watchlist for new
-  allocations and sample construction. Existing holdings remain trackable,
-  but no 3-year/5-year forecast is shown until SEC, dilution, solvency,
-  dollar-liquidity, verified split-event, and compatible formula evidence is
-  available.
+  allocations and sample construction. Existing holdings remain trackable.
+  Long-horizon activation remains unavailable pending joint Under-$10 review
+  and candidate-specific eligibility. Released reusable foundations are
+  point-in-time SEC facts with adverse-versus-missing branch behavior, the
+  long-v2 diluted-share/per-share continuity assessment with withholding (not
+  post-period event verification), and the deterministic 3-year/5-year formula
+  engine with missing-input withholding; none establishes candidate
+  qualification. Unreleased activation controls are a dedicated
+  solvency/cash-runway policy, a versioned Under-$10-specific dollar-liquidity
+  policy, and a verified split/reverse-split event source. Previously issued
+  immutable long-horizon ledger evidence remains visible, with its original
+  horizon and evidence role preserved, and is labeled with the current
+  activation context.
 - Sample-portfolio return is current total value versus starting capital. It
   is a split-adjusted price return excluding dividends. A possible split
   suppresses the headline return until its quantity basis is reviewed.

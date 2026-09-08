@@ -106,11 +106,15 @@ record; the summary below is not a substitute for reading it.
   persisted close and show its session date, but never enter score,
   confidence, valuation, or recommendation arithmetic. Under $10 remains a
   0%-new-allocation speculative watchlist, is excluded from new highlights
-  and sample construction, shows explicit missing 3y/5y gates, and does not
-  erase existing holdings or frozen historical baskets. Current UI bands use
-  `LatestMarketData`; run-dated sample construction must instead classify the
-  immutable analysis reference close, and missing current USD state fails
-  closed for promotion.
+  and sample construction, and does not erase existing holdings or frozen
+  historical baskets. Disclosure must separate released reusable foundations
+  from unreleased activation controls without treating a foundation as a
+  candidate approval; joint review and candidate-specific eligibility remain
+  required. Immutable long-horizon ledger evidence stays visible with its
+  original horizon and evidence role and is labeled only with current
+  activation context. Current UI bands use `LatestMarketData`; run-dated
+  sample construction must instead classify the immutable analysis reference
+  close, and missing current USD state fails closed for promotion.
 - **ETF identity and isolation**: an investable benchmark ETF reuses its one
   immutable provider series without duplicate requests or credits, remains
   outside stock universe membership, and is rejected explicitly by stock

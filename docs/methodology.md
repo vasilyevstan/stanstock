@@ -127,9 +127,17 @@ from current opportunity promotion. Newly constructed sample portfolios apply
 the same boundaries to the immutable decision-run reference close, never a
 later mutable market row, while existing holdings and frozen historical
 portfolios remain visible. Its long-horizon forecast is explicitly unavailable
-until point-in-time SEC, dilution/per-share, solvency/cash-runway,
-Under-$10-specific dollar-liquidity, verified split-event, and compatible
-3-year/5-year formula evidence exists. The configured stock universe is not
+pending joint Under-$10 review and candidate-specific eligibility. Released
+foundations are point-in-time SEC facts with adverse-versus-missing branch
+behavior; the long-v2 diluted-share/per-share continuity assessment with
+withholding (which does not verify post-period corporate actions); and the
+deterministic 3-year/5-year formula engine with missing-input withholding.
+These foundations do not establish candidate qualification. Unreleased
+activation controls are a dedicated solvency/cash-runway policy, a versioned
+Under-$10-specific dollar-liquidity policy, and a verified split/reverse-split
+event source. Previously issued immutable long-horizon ledger evidence remains
+visible, with its original horizon and evidence role preserved, and is labeled
+with the current activation context. The configured stock universe is not
 expanded merely to populate a price band.
 
 ## ETF evidence boundary

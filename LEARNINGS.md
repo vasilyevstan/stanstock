@@ -201,6 +201,12 @@ reviews and should not be re-litigated without an explicit new decision.
   broader display requires a display-entitled plan or agreement. Stooq remains
   `NO_GO`, Europe remains deferred, and default flows stay visibly
   `synthetic_demo`.
+- **Released foundations are not candidate activation approvals.** A guarded
+  watchlist must separate reusable data/forecast capabilities from dedicated
+  controls that remain unreleased, keep allocation and forecasts fail-closed
+  until joint review and candidate-specific eligibility pass, and preserve
+  every immutable prediction row with its original role while labeling only
+  the current activation context.
 - **Large provider catalogs can contain irrelevant malformed rows.** Preserve
   the complete raw response, but normalize only the symbols in the reviewed
   universe and continue to fail closed when any configured symbol is missing,

@@ -19,21 +19,25 @@ PRICE_DATE_BASES = frozenset(
 )
 
 UNDER_10_ALLOCATION_REASON = (
-    "New allocation remains 0% until point-in-time SEC, dilution, solvency, "
-    "Under-$10-specific dollar-liquidity, split-event, and compatible 3-year "
-    "and 5-year evidence gates are released."
+    "New allocation remains 0% pending joint Under-$10 review and candidate-specific eligibility."
 )
 PRICE_BAND_UNAVAILABLE_ALLOCATION_REASON = (
     "New allocation is withheld because no valid latest persisted USD close "
     "is available to apply the guarded price-band policy."
 )
-UNDER_10_LONG_HORIZON_GATES = (
-    "Point-in-time SEC facts with adverse-versus-missing states",
-    "Diluted-share history and compatible per-share growth",
-    "Solvency and cash-runway evidence",
-    "A versioned Under-$10-specific dollar-liquidity activation gate",
-    "Verified split and reverse-split events",
-    "Compatible 3-year and 5-year formula evidence",
+UNDER_10_AVAILABLE_FOUNDATIONS = (
+    "Point-in-time SEC facts with adverse-versus-missing branch behavior "
+    "(released foundation; candidate qualification still required)",
+    "Long-v2 diluted-share/per-share continuity assessment with withholding, "
+    "not post-period event verification (released foundation; candidate "
+    "qualification still required)",
+    "Deterministic 3-year/5-year formula engine with missing-input withholding "
+    "(released foundation; candidate qualification still required)",
+)
+UNDER_10_UNRELEASED_ACTIVATION_CONTROLS = (
+    "Dedicated solvency and cash-runway policy",
+    "Versioned Under-$10-specific dollar-liquidity policy",
+    "Verified split and reverse-split event source",
 )
 
 

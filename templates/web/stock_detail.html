@@ -75,6 +75,27 @@
         {% endif %}
       </div>
     {% endif %}
+    {% if long_horizon_available_foundations %}
+      <div class="notice" role="status">
+        <strong>Under-$10 long-horizon policy disclosure.</strong>
+        <p>Available foundations:</p>
+        <ul class="compact-gate-list">
+          {% for foundation in long_horizon_available_foundations %}
+            <li>{{ foundation }}</li>
+          {% endfor %}
+        </ul>
+        <p>Unreleased activation controls:</p>
+        <ul class="compact-gate-list">
+          {% for control in long_horizon_unreleased_activation_controls %}
+            <li>{{ control }}</li>
+          {% endfor %}
+        </ul>
+        <p>
+          Released foundations are not candidate approvals. Joint Under-$10
+          review and candidate-specific eligibility remain outstanding.
+        </p>
+      </div>
+    {% endif %}
     <section class="metric-grid forecast-grid" aria-label="Current analysis and forecasts">
       <article>
         <small>Decision-run price</small>
@@ -190,14 +211,6 @@
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
             <span>{{ long_horizon_band_reason }}</span>
-            {% if long_horizon_gates %}
-              <span>Missing activation gates:</span>
-              <ul class="compact-gate-list">
-                {% for gate in long_horizon_gates %}
-                  <li>{{ gate }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
           {% else %}
             <strong>{{ scenario|scenario_range }}</strong>
             {% if scenario.annualized_return %}
@@ -254,14 +267,6 @@
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
             <span>{{ long_horizon_band_reason }}</span>
-            {% if long_horizon_gates %}
-              <span>Missing activation gates:</span>
-              <ul class="compact-gate-list">
-                {% for gate in long_horizon_gates %}
-                  <li>{{ gate }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
           {% else %}
             <strong>{{ scenario|scenario_range }}</strong>
             {% if scenario.annualized_return %}
@@ -318,14 +323,6 @@
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
             <span>{{ long_horizon_band_reason }}</span>
-            {% if long_horizon_gates %}
-              <span>Missing activation gates:</span>
-              <ul class="compact-gate-list">
-                {% for gate in long_horizon_gates %}
-                  <li>{{ gate }}</li>
-                {% endfor %}
-              </ul>
-            {% endif %}
           {% else %}
             <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
             <span>
@@ -411,6 +408,10 @@
         <p class="eyebrow">Append-only record</p>
         <h2>Prediction history</h2>
       </div>
+      <p class="muted">
+        {{ prediction_page.paginator.count }} prediction{{ prediction_page.paginator.count|pluralize }} total ·
+        Page {{ prediction_page.number }} of {{ prediction_page.paginator.num_pages }}
+      </p>
     </div>
     <div class="compact-list">
       {% for prediction in predictions %}
@@ -426,6 +427,13 @@
               {{ prediction.base_return|percentage }} /
               {{ prediction.bull_return|percentage }}
             </small>
+            {% if long_horizon_blocked %}
+              {% if prediction.horizon == "long" %}
+                <small>Immutable legacy long-horizon evidence; current activation context: {{ long_horizon_band_reason }}</small>
+              {% elif prediction.horizon == "3y" or prediction.horizon == "5y" %}
+                <small>Immutable advisory evidence; current activation context: {{ long_horizon_band_reason }}</small>
+              {% endif %}
+            {% endif %}
           </div>
           <span class="badge">{{ prediction.model_version }}</span>
         </article>
@@ -433,5 +441,15 @@
         <p class="empty-state">No immutable predictions have been issued for this listing.</p>
       {% endfor %}
     </div>
+    {% if prediction_page.has_other_pages %}
+      <nav aria-label="Prediction history pages">
+        {% if prediction_page.has_previous %}
+          <a class="text-link" href="?prediction_page={{ prediction_page.previous_page_number }}">Previous</a>
+        {% endif %}
+        {% if prediction_page.has_next %}
+          <a class="text-link" href="?prediction_page={{ prediction_page.next_page_number }}">Next</a>
+        {% endif %}
+      </nav>
+    {% endif %}
   </section>
 {% endblock %}
