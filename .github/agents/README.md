@@ -119,6 +119,39 @@ each valued date's own availability cutoff and into one explicit base currency
 canonical simulation inputs rather than aggregate summaries. These safeguards
 are correctness requirements, not optional complexity.
 
+No reissue of an immutable prediction inherits another version's on-time
+status. Each version, including a same-target reissue, is checked
+independently against its own next-market-session-open deadline from
+cutoff-safe evidence: a reissue created before that deadline may still be
+observed. An unsafe explicit observed request raises; a separate non-observed
+reconstruction is research-grade. Aggregate reporting counts the earliest
+reportable prediction once per exact listing/target/horizon/evidence-role/
+method/config/provider observation, while later valid observed reissues remain
+immutable ledger rows evaluated per version. `manage.py analyze` is
+demo/research tooling, not the live-US or observed-reissue interface: it
+explicitly requests `issued_on_time=False` for every target, regardless of its
+provider/config/benchmark flags or `STANSTOCK_CODE_REVISION`. Only an
+exceptional direct
+`analyze_snapshot(..., issued_on_time=True, ...)` service-level call can
+request an observed same-target reissue, and only once it has independently
+reproved the next-market-session-open deadline; that call must also
+explicitly bind the reviewed production scoring config, `provider=
+"twelve_data"`, the reviewed benchmark (currently SPY), and the exact
+committed `STANSTOCK_CODE_REVISION`.
+
+A frozen methodology/config version's contract covers its config bytes/
+effective hash, eligibility, reason wording, and both successful and withheld
+calculation/scenario payloads. A stricter eligibility gate is a new version,
+proven with differential base/head reproduction tests showing the frozen
+version's hash, behavior, and payloads are unchanged. Evidence that
+disqualifies a prediction is recorded as assessed (`assessed_through`/an
+explicit incompatible-or-unverified status citing the disqualifying source
+facts), never as `verified_through` or a claimed corporate action. An
+advisory prediction whose scenario returns are all null is non-evaluable:
+evaluation resolves it before any price lookup, and it is excluded from
+advisory denominators; this is separate from decision BUY/AVOID/HOLD success
+semantics.
+
 Forecast work additionally keeps score groups separate from persisted
 forecast identities, labels advisory evidence independently from decision
 evidence, uses cumulative price-return units consistently, and prevents

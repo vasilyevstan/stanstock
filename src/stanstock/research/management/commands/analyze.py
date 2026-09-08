@@ -13,7 +13,14 @@ from stanstock.research.service import analyze_listing, analyze_snapshot
 
 
 class Command(BaseCommand):
-    help = "Run the transparent rules-only research engine for a universe snapshot."
+    help = (
+        "Run the transparent rules-only research engine for a universe snapshot. "
+        "This is demo/research tooling, not the live-US or observed-reissue "
+        "interface: every analysis explicitly requests issued_on_time=False, "
+        "regardless of the snapshot's grade, the requested target date, or "
+        "provider/config flags. An exceptional observed reissue requires a "
+        "direct analyze_snapshot(..., issued_on_time=True, ...) service call."
+    )
 
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--snapshot", required=True, help="UniverseSnapshot UUID")
@@ -53,6 +60,7 @@ class Command(BaseCommand):
                     universe_snapshot=snapshot,
                     decision_time=timezone.now(),
                     target_date=target_date,
+                    issued_on_time=False,
                     provider=str(options["provider"]),
                     subject=str(subject) if subject is not None else None,
                     benchmark_subject=str(benchmark_subject)
@@ -62,8 +70,8 @@ class Command(BaseCommand):
                 )
                 self.stdout.write(
                     self.style.SUCCESS(
-                        f"Analyzed {listing.ticker}: analysis={result.analysis.pk} "
-                        f"predictions={len(result.predictions)}"
+                        f"Analyzed {listing.ticker} (research-grade, issued_on_time=False): "
+                        f"analysis={result.analysis.pk} predictions={len(result.predictions)}"
                     )
                 )
                 return
@@ -71,6 +79,7 @@ class Command(BaseCommand):
                 universe_snapshot=snapshot,
                 decision_time=timezone.now(),
                 target_date=target_date,
+                issued_on_time=False,
                 provider=str(options["provider"]),
                 benchmark_subject=str(options["benchmark_subject"])
                 if options.get("benchmark_subject") is not None
@@ -84,7 +93,11 @@ class Command(BaseCommand):
             Listing.DoesNotExist,
         ) as exc:
             raise CommandError(str(exc)) from exc
-        self.stdout.write(self.style.SUCCESS(f"Analyzed {len(results)} listings"))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Analyzed {len(results)} listings (research-grade, issued_on_time=False)"
+            )
+        )
 
 
 def _parse_target_date(raw: object) -> date | None:

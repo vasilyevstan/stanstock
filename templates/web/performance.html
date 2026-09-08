@@ -10,11 +10,20 @@
       <h1>Decision performance</h1>
       <p class="lede">
         Only matured predictions from observed universe snapshots that were
-        generated on their target date count here. Reconstructed research
-        results are excluded from live-performance claims. Headline metrics
-        use one exact configuration version and hash at a time. Advisory
-        forecasts are evaluated separately and never enter these decision
-        metrics.
+        issued on time count here: generated on the target date itself, or
+        generated later but before the next market session opened.
+        Reconstructed research results are excluded from live-performance
+        claims. Headline metrics use one exact configuration version and
+        hash at a time. Advisory forecasts are evaluated separately and
+        never enter these decision metrics.
+      </p>
+      <p class="lede">
+        Each exact listing, target date, horizon, and evidence-role
+        observation within a method/configuration/provider cohort counts
+        once, from its earliest reportable issuance. A later, independently
+        on-time reissue of the same observation stays in the immutable
+        prediction ledger and is evaluated on its own, but it does not
+        replace or recount the original observation here.
       </p>
       {% if summary.config_version %}
         <p class="muted">

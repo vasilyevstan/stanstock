@@ -916,6 +916,27 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
 
 
 @pytest.mark.django_db
+def test_performance_lede_states_next_market_session_open_and_canonical_reissue_copy(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """The disclosure text must not claim reportability requires generation
+    on the target calendar date -- next-market-session-open/on-time is the
+    actual rule -- and must state the fixed canonical-reissue copy."""
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    # Collapse whitespace so template line-wrapping cannot break a substring
+    # check that spans a wrapped line boundary.
+    content = " ".join(response.content.decode().split())
+    assert "generated on their target date count" not in content
+    assert "next market session opened" in content
+    assert "earliest reportable issuance" in content
+    assert "immutable prediction ledger" in content
+    assert "does not replace or recount" in content
+
+
+@pytest.mark.django_db
 def test_recommendation_filter_excludes_advisory_predictions(
     authenticated_client,
     persisted_analysis: StockAnalysis,
@@ -1249,6 +1270,79 @@ def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
         signed_error=Decimal("0.02"),
         resolution="Malformed legacy withheld-scenario outcome",
     )
+    # Same-key canonical case: earliest is withheld/all-null (non-evaluable,
+    # no outcome yet); a later reissue of the exact same key is evaluable and
+    # matures. The reissue is not canonical, so it must not contribute a
+    # sample to this cohort even though it is individually evaluable.
+    samekey_withheld_earliest = Prediction.objects.create(
+        analysis=persisted_analysis,
+        listing=listing,
+        generated_at=generated_at,
+        target_date=run.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("101.25"),
+        bear_return=None,
+        base_return=None,
+        bull_return=None,
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="experimental",
+        insufficiency_reason="Withheld forecast",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="advisory-samekey-earliest",
+        method_version="advisory-samekey-v1",
+        config_hash="e" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    samekey_reissue = Prediction.objects.create(
+        analysis=persisted_analysis,
+        listing=listing,
+        generated_at=generated_at + timedelta(hours=1),
+        target_date=samekey_withheld_earliest.target_date,
+        issued_on_time=True,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider="twelve_data",
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("101.25"),
+        bear_return=Decimal("-0.09"),
+        base_return=Decimal("0.07"),
+        bull_return=Decimal("0.22"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="experimental",
+        insufficiency_reason="",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version="advisory-samekey-reissue",
+        method_version="advisory-samekey-v1",
+        config_hash="e" * 64,
+        data_cutoff=run.data_cutoff,
+        code_revision="test-revision",
+    )
+    PredictionOutcome.objects.create(
+        prediction=samekey_reissue,
+        evaluated_at=datetime(2027, 3, 10, 12, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.09"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=True,
+        interval_covered=True,
+        signed_error=Decimal("0.02"),
+        resolution="Later reissued advisory outcome for a withheld-earliest key",
+    )
 
     response = authenticated_client.get(reverse("performance"))
 
@@ -1259,10 +1353,135 @@ def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
     }
     assert Prediction.Horizon.TWELVE_MONTH.value not in advisory_groups
     assert advisory_groups[Prediction.Horizon.SIX_MONTH.value]["sample_count"] == 1
+    assert "advisory-samekey-v1" not in {
+        group["prediction__method_version"] for group in response.context["advisory_groups"]
+    }
 
     status_response = authenticated_client.get(reverse("status"))
     assert status_response.status_code == 200
-    assert status_response.context["advisory_matured_count"] == 1
+    # Uncanonicalized, run-scoped count: correctly includes the same-key
+    # reissue's own matured advisory outcome (2 = issued_prediction +
+    # samekey_reissue; samekey_withheld_earliest has no outcome yet).
+    assert status_response.context["advisory_matured_count"] == 2
+
+
+def _reportable_prediction(
+    snapshot: UniverseSnapshot,
+    listing: Listing,
+    *,
+    generated_at: datetime,
+    target_date: date,
+    model_version: str,
+    method_version: str = "us-price-baseline-v2",
+    config_hash: str = "2" * 64,
+    price_provider: str = "twelve_data",
+    horizon: str = Prediction.Horizon.SHORT,
+    evidence_role: str = Prediction.EvidenceRole.DECISION,
+) -> Prediction:
+    """Focused helper: one observed/on-time/provider-backed Prediction (with
+    its own run and analysis) per call. Used by the canonical-reporting
+    tests below in place of near-duplicate fixture bodies."""
+    run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=generated_at,
+        target_date=target_date,
+        issued_on_time=True,
+        universe_snapshot=snapshot,
+        config_version=method_version,
+        config_hash=config_hash,
+        code_revision="test-revision",
+    )
+    analysis = StockAnalysis.objects.create(
+        run=run,
+        listing=listing,
+        current_price=Decimal("100"),
+        overall_score=Decimal("70"),
+        recommendation=Recommendation.HOLD,
+        risk_score=Decimal("35"),
+        risk_class=RiskClass.MEDIUM,
+        confidence=Decimal("60"),
+    )
+    return Prediction.objects.create(
+        analysis=analysis,
+        listing=listing,
+        generated_at=generated_at,
+        target_date=target_date,
+        issued_on_time=True,
+        horizon=horizon,
+        evidence_role=evidence_role,
+        evidence_grade=UniverseSnapshot.Grade.OBSERVED,
+        source_mode=Prediction.SourceMode.PROVIDER,
+        price_provider=price_provider,
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("100"),
+        bear_return=Decimal("-0.03"),
+        base_return=Decimal("0.02"),
+        bull_return=Decimal("0.07"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="heuristic",
+        insufficiency_reason="",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version=model_version,
+        method_version=method_version,
+        config_hash=config_hash,
+        data_cutoff=generated_at,
+        code_revision="test-revision",
+    )
+
+
+def _matured_decision_outcome(
+    prediction: Prediction,
+    *,
+    actual_return: Decimal = Decimal("0.05"),
+    benchmark_return: Decimal | None = Decimal("0.02"),
+    success: bool | None = True,
+    evaluated_at: datetime = datetime(2026, 10, 1, 12, tzinfo=UTC),
+    evaluation_date: date = date(2026, 10, 1),
+    resolution: str = "Observed method cohort",
+) -> PredictionOutcome:
+    return PredictionOutcome.objects.create(
+        prediction=prediction,
+        evaluated_at=evaluated_at,
+        evaluation_date=evaluation_date,
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=actual_return,
+        benchmark_return=benchmark_return,
+        success=success,
+        resolution=resolution,
+    )
+
+
+def _reportable_matured_cohort(
+    snapshot: UniverseSnapshot,
+    listing: Listing,
+    *,
+    method_version: str,
+    config_hash: str,
+    count: int,
+    generated_at: datetime,
+    target_date_start: date,
+) -> list[Prediction]:
+    """`count` genuinely distinct reportable+matured observations sharing one
+    method/config/provider cohort. Each gets its own `target_date` (and thus
+    its own canonical observation key), so the cohort's canonical sample
+    size is exactly `count` rather than collapsing to one reissued
+    observation distinguished only by `model_version`."""
+    predictions = []
+    for index in range(count):
+        prediction = _reportable_prediction(
+            snapshot,
+            listing,
+            generated_at=generated_at,
+            target_date=target_date_start + timedelta(days=index),
+            model_version=f"{method_version}-{index}",
+            method_version=method_version,
+            config_hash=config_hash,
+        )
+        _matured_decision_outcome(prediction)
+        predictions.append(prediction)
+    return predictions
 
 
 @pytest.mark.django_db
@@ -1280,65 +1499,21 @@ def test_performance_never_pools_distinct_configuration_versions(
             ("us-price-baseline-v2", "2" * 64),
         )
     ):
-        generated_at = datetime(2026, 9, 8 + method_index, 1, tzinfo=UTC)
-        run = AnalysisRun.objects.create(
-            generated_at=generated_at,
-            data_cutoff=generated_at,
-            target_date=date(2026, 9, 7 + method_index),
-            issued_on_time=True,
-            universe_snapshot=snapshot,
-            config_version=version,
+        # Each of the 15 rows per cohort is a genuinely distinct market
+        # observation (its own target_date), not 15 reissues of one
+        # observation distinguished only by `model_version` -- the canonical
+        # observation key excludes `model_version`, so same-key rows would
+        # collapse to a single canonical sample and silently defeat this
+        # insufficient-sample proof.
+        _reportable_matured_cohort(
+            snapshot,
+            listing,
+            method_version=version,
             config_hash=digest,
-            code_revision="test-revision",
+            count=15,
+            generated_at=datetime(2026, 9, 8 + method_index, 1, tzinfo=UTC),
+            target_date_start=date(2026, 1, 1) + timedelta(days=method_index * 100),
         )
-        analysis = StockAnalysis.objects.create(
-            run=run,
-            listing=listing,
-            current_price=Decimal("100"),
-            overall_score=Decimal("70"),
-            recommendation=Recommendation.HOLD,
-            risk_score=Decimal("35"),
-            risk_class=RiskClass.MEDIUM,
-            confidence=Decimal("60"),
-        )
-        for prediction_index in range(15):
-            prediction = Prediction.objects.create(
-                analysis=analysis,
-                listing=listing,
-                generated_at=generated_at,
-                target_date=run.target_date,
-                issued_on_time=True,
-                horizon=Prediction.Horizon.SHORT,
-                evidence_grade=UniverseSnapshot.Grade.OBSERVED,
-                source_mode=Prediction.SourceMode.PROVIDER,
-                price_provider="twelve_data",
-                price_subject=listing.ticker,
-                price_at_prediction=Decimal("100"),
-                bear_return=Decimal("-0.03"),
-                base_return=Decimal("0.02"),
-                bull_return=Decimal("0.07"),
-                probability_positive=None,
-                confidence=Decimal("60"),
-                confidence_status="heuristic",
-                insufficiency_reason="",
-                recommendation=Recommendation.HOLD,
-                overall_score=Decimal("70"),
-                model_version=f"method-{method_index}-{prediction_index}",
-                method_version=version,
-                config_hash=digest,
-                data_cutoff=generated_at,
-                code_revision="test-revision",
-            )
-            PredictionOutcome.objects.create(
-                prediction=prediction,
-                evaluated_at=datetime(2026, 10, 1, 12, tzinfo=UTC),
-                evaluation_date=date(2026, 10, 1),
-                status=PredictionOutcome.Status.MATURED,
-                actual_return=Decimal("0.05"),
-                benchmark_return=Decimal("0.02"),
-                success=True,
-                resolution="Observed method cohort",
-            )
 
     response = authenticated_client.get(reverse("performance"))
 
@@ -1350,6 +1525,291 @@ def test_performance_never_pools_distinct_configuration_versions(
     assert len(groups) == 2
     assert {group["sample_count"] for group in groups} == {15}
     assert "Method versions remain separate." in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_performance_reissues_cannot_inflate_sample_sufficiency_but_a_new_observation_can(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    listing = persisted_analysis.listing
+    method_version = "us-price-baseline-v2"
+    config_hash = "2" * 64
+    predictions = _reportable_matured_cohort(
+        snapshot,
+        listing,
+        method_version=method_version,
+        config_hash=config_hash,
+        count=29,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date_start=date(2026, 1, 1),
+    )
+    last = predictions[-1]
+    # Reissuing the 29th observation's exact key several times must never
+    # raise the canonical sample count above 29.
+    for reissue_index in range(3):
+        reissue = _reportable_prediction(
+            snapshot,
+            listing,
+            generated_at=last.generated_at + timedelta(hours=reissue_index + 1),
+            target_date=last.target_date,
+            model_version=f"reissue-{reissue_index}",
+            method_version=method_version,
+            config_hash=config_hash,
+        )
+        _matured_decision_outcome(reissue, actual_return=Decimal("0.99"))
+
+    insufficient = authenticated_client.get(reverse("performance"))
+    assert insufficient.context["summary"]["sample_count"] == 29
+    assert insufficient.context["summary"]["sufficient_sample"] is False
+
+    # A genuinely new 30th observation (its own target_date) is not a
+    # reissue of any existing key, so it does cross the threshold.
+    thirtieth = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=date(2026, 1, 1) + timedelta(days=29),
+        model_version="genuine-30th",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(thirtieth)
+
+    sufficient = authenticated_client.get(reverse("performance"))
+    assert sufficient.context["summary"]["sample_count"] == 30
+    assert sufficient.context["summary"]["sufficient_sample"] is True
+
+
+@pytest.mark.django_db
+def test_performance_decision_and_advisory_groups_canonicalize_same_key_reissues(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    listing = persisted_analysis.listing
+    method_version = "us-price-baseline-v2"
+    config_hash = "2" * 64
+
+    decision_target = date(2026, 9, 8)
+    decision_earliest = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=decision_target,
+        model_version="decision-earliest",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(decision_earliest, actual_return=Decimal("0.05"))
+    decision_reissue = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 2, tzinfo=UTC),
+        target_date=decision_target,
+        model_version="decision-reissue",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(decision_reissue, actual_return=Decimal("0.95"))
+
+    advisory_target = date(2026, 9, 9)
+    advisory_earliest = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 9, 1, tzinfo=UTC),
+        target_date=advisory_target,
+        model_version="advisory-earliest",
+        method_version=method_version,
+        config_hash=config_hash,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+    )
+    PredictionOutcome.objects.create(
+        prediction=advisory_earliest,
+        evaluated_at=datetime(2027, 3, 10, 12, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.10"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=True,
+        interval_covered=True,
+        signed_error=Decimal("0.02"),
+        resolution="Observed advisory outcome",
+    )
+    advisory_reissue = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 9, 2, tzinfo=UTC),
+        target_date=advisory_target,
+        model_version="advisory-reissue",
+        method_version=method_version,
+        config_hash=config_hash,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+    )
+    PredictionOutcome.objects.create(
+        prediction=advisory_reissue,
+        evaluated_at=datetime(2027, 3, 10, 13, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.99"),
+        benchmark_return=Decimal("0.06"),
+        success=None,
+        direction_correct=False,
+        interval_covered=False,
+        signed_error=Decimal("0.90"),
+        resolution="Later reissued advisory outcome",
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    decision_groups = {
+        group["prediction__method_version"]: group for group in response.context["groups"]
+    }
+    decision_group = decision_groups[method_version]
+    assert decision_group["sample_count"] == 1
+    assert decision_group["mean_return"] == Decimal("0.0500")
+
+    advisory_groups = {
+        group["prediction__horizon"]: group for group in response.context["advisory_groups"]
+    }
+    advisory_group = advisory_groups[Prediction.Horizon.SIX_MONTH.value]
+    assert advisory_group["sample_count"] == 1
+    assert advisory_group["direction_sample_count"] == 1
+    assert response.context["advisory_matured_count"] == 1
+
+
+@pytest.mark.django_db
+def test_performance_canonicalizes_while_ledger_stays_per_version(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """Aggregate performance counts one canonical observation, but the
+    immutable prediction ledger keeps showing every version."""
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    listing = persisted_analysis.listing
+    method_version = "us-price-baseline-v2"
+    config_hash = "2" * 64
+    target = date(2026, 9, 8)
+
+    earliest = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="v-earliest",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(earliest, actual_return=Decimal("0.05"))
+    reissue = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 2, tzinfo=UTC),
+        target_date=target,
+        model_version="v-reissue",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(reissue, actual_return=Decimal("0.09"))
+
+    performance = authenticated_client.get(reverse("performance"))
+    assert performance.status_code == 200
+    assert performance.context["summary"]["sample_count"] == 1
+    # The matured reissue is a valid observed duplicate, not synthetic or
+    # reconstructed evidence: it must not inflate research_matured_count.
+    assert performance.context["summary"]["research_matured_count"] == 0
+
+    # Only a genuinely non-reportable (research-grade) matured decision row
+    # -- the fixture's own default-grade prediction -- should move this
+    # counter, proving it is not structurally zero.
+    research_grade_prediction = Prediction.objects.get(analysis=persisted_analysis)
+    _matured_decision_outcome(research_grade_prediction, actual_return=Decimal("0.01"))
+
+    performance_after = authenticated_client.get(reverse("performance"))
+    assert performance_after.status_code == 200
+    assert performance_after.context["summary"]["research_matured_count"] == 1
+
+    ledger = authenticated_client.get(reverse("predictions"))
+    assert ledger.status_code == 200
+    ledger_versions = {
+        card["prediction"].model_version for card in ledger.context["prediction_cards"]
+    }
+    assert {"v-earliest", "v-reissue"}.issubset(ledger_versions)
+    assert Prediction.objects.filter(model_version="v-reissue", issued_on_time=True).exists()
+    assert PredictionOutcome.objects.filter(
+        prediction__model_version="v-reissue",
+        status=PredictionOutcome.Status.MATURED,
+    ).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("earliest_status", "summary_field"),
+    [
+        (PredictionOutcome.Status.UNRESOLVED, "unresolved_count"),
+        (PredictionOutcome.Status.CORPORATE_EVENT, "corporate_event_count"),
+    ],
+)
+def test_performance_summary_keeps_earliest_state_over_later_matured_reissue(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    earliest_status: str,
+    summary_field: str,
+) -> None:
+    """A same-key reissue that matures must not promote past an earlier
+    unresolved/corporate-event canonical row: the summary still reports
+    exactly one row in the matching state field and zero matured samples."""
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    listing = persisted_analysis.listing
+    method_version = "us-price-baseline-v2"
+    config_hash = "2" * 64
+    target = date(2026, 9, 8)
+
+    earliest = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="earliest",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    PredictionOutcome.objects.create(
+        prediction=earliest,
+        evaluated_at=datetime(2026, 10, 1, tzinfo=UTC),
+        evaluation_date=date(2026, 10, 1),
+        status=earliest_status,
+        resolution="Earliest state",
+    )
+    reissue = _reportable_prediction(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 2, tzinfo=UTC),
+        target_date=target,
+        model_version="reissue",
+        method_version=method_version,
+        config_hash=config_hash,
+    )
+    _matured_decision_outcome(reissue)
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert response.context["summary"]["sample_count"] == 0
+    assert response.context["summary"][summary_field] == 1
 
 
 @pytest.mark.django_db

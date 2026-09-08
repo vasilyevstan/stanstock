@@ -53,6 +53,13 @@ def test_medium_forecast_config_is_versioned_and_stable() -> None:
     assert medium_forecast_config_hash(
         replace(first, minimum_dollar_volume=first.minimum_dollar_volume + 1)
     ) != medium_forecast_config_hash(first)
+    # Comparing two loads of the same current file (above) proves stability
+    # but is not a pin: pin the exact expected effective hash so an
+    # untracked or silently edited default config cannot change frozen
+    # `us-price-medium-v1` behavior.
+    assert medium_forecast_config_hash(first) == (
+        "3461e5228de325454a6b5a902bc4c6174ed7913eef697a86684cf5730dce4028"
+    )
 
 
 def test_medium_forecast_config_rejects_mutable_or_ambiguous_method_definitions() -> None:

@@ -35,7 +35,6 @@ from stanstock.data.models import (
     ProviderRecord,
     Region,
     Security,
-    UniverseSnapshot,
 )
 from stanstock.portfolio.models import Portfolio, PortfolioHolding
 from stanstock.portfolio.planner import (
@@ -81,6 +80,10 @@ from stanstock.research.provenance import (
     data_mode_label,
     latest_provider_backed_analysis_run,
     latest_serving_analysis_run,
+)
+from stanstock.research.reporting import (
+    canonical_reportable_prediction_filter,
+    reportable_prediction_filter,
 )
 from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
@@ -609,28 +612,35 @@ def performance_page(request: HttpRequest) -> HttpResponse:
         status=PredictionOutcome.Status.MATURED,
         actual_return__isnull=False,
     )
-    reportable_evidence = Q(
-        prediction__evidence_grade=UniverseSnapshot.Grade.OBSERVED,
-        prediction__source_mode=Prediction.SourceMode.PROVIDER,
-        prediction__analysis__run__issued_on_time=True,
-        prediction__issued_on_time=True,
-    ) & ~Q(prediction__price_provider="")
-    reportable_matured = matured.filter(reportable_evidence)
+    # Built once, before any status/maturity/application-specific filter, so
+    # every downstream decision/advisory cohort below counts each exact
+    # market observation -- (listing, target_date, horizon, evidence_role,
+    # method_version, config_hash, price_provider) -- exactly once, from its
+    # earliest reportable issuance. Later valid observed reissues for the
+    # same observation remain visible in the immutable prediction ledger and
+    # per-run status surfaces (prediction history, latest-run status) but are
+    # excluded from this canonical base.
+    canonical_reportable_outcomes = all_outcomes.filter(
+        canonical_reportable_prediction_filter("prediction__")
+    )
+    canonical_decision_outcomes = canonical_reportable_outcomes.filter(
+        prediction__evidence_role=Prediction.EvidenceRole.DECISION
+    )
+    reportable_matured = canonical_decision_outcomes.filter(
+        status=PredictionOutcome.Status.MATURED,
+        actual_return__isnull=False,
+    )
     latest_method_prediction = (
         Prediction.objects.filter(
-            evidence_grade=UniverseSnapshot.Grade.OBSERVED,
-            source_mode=Prediction.SourceMode.PROVIDER,
-            analysis__run__issued_on_time=True,
-            issued_on_time=True,
+            reportable_prediction_filter(""),
             evidence_role=Prediction.EvidenceRole.DECISION,
         )
-        .exclude(price_provider="")
         .select_related("analysis__run")
         .order_by("-generated_at", "-id")
         .first()
     )
     current_method_matured = reportable_matured.none()
-    current_method_outcomes = outcomes.none()
+    current_method_outcomes = canonical_decision_outcomes.none()
     current_config_version = ""
     current_method_version = ""
     current_config_hash = ""
@@ -646,7 +656,7 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             prediction__price_provider=current_price_provider,
         )
         current_method_matured = reportable_matured.filter(method_filter)
-        current_method_outcomes = outcomes.filter(method_filter)
+        current_method_outcomes = canonical_decision_outcomes.filter(method_filter)
 
     summary = current_method_matured.aggregate(
         sample_count=Count("prediction"),
@@ -672,14 +682,14 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             ),
             "sufficient_sample": sample_count >= 30,
             "unresolved_count": current_method_outcomes.filter(
-                reportable_evidence,
                 status=PredictionOutcome.Status.UNRESOLVED,
             ).count(),
             "corporate_event_count": current_method_outcomes.filter(
-                reportable_evidence,
                 status=PredictionOutcome.Status.CORPORATE_EVENT,
             ).count(),
-            "research_matured_count": matured.exclude(reportable_evidence).count(),
+            "research_matured_count": matured.exclude(
+                reportable_prediction_filter("prediction__")
+            ).count(),
             "method_count": reportable_matured.values(
                 "prediction__method_version",
                 "prediction__config_hash",
@@ -712,12 +722,12 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             "prediction__recommendation",
         )
     )
-    reportable_advisory_matured = all_outcomes.filter(
+    reportable_advisory_matured = canonical_reportable_outcomes.filter(
         status=PredictionOutcome.Status.MATURED,
         actual_return__isnull=False,
         prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
         prediction__base_return__isnull=False,
-    ).filter(reportable_evidence)
+    )
     raw_advisory_groups = reportable_advisory_matured.values(
         "prediction__method_version",
         "prediction__config_hash",

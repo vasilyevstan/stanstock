@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from stanstock.data.management.config_loader import default_us_scoring_config_path
 from stanstock.research.config import (
     HORIZONS,
     ScoringConfig,
@@ -210,6 +211,24 @@ def test_v2_config_uses_normalized_macd_and_dollar_liquidity() -> None:
     assert config.factor_policy.liquidity_score_high == 50_000_000
     assert config.factor_policy.strict_finite_inputs is True
     assert config.recommendation.buy_min_liquidity_20d == 5_000_000
+
+
+def test_v2_config_hash_and_production_default_path_remain_pinned() -> None:
+    """`us-price-baseline-v2` is the production default resolved by
+    `default_us_scoring_config_path()` (see `live_us.py`); pin its literal
+    effective hash so an untracked or silently edited default cannot change
+    frozen live/backfill behavior. Comparing two loads of the same current
+    file is not a pin -- the hash below is the exact expected value."""
+    path = Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v2.yml"
+    config = load_scoring_config(path)
+    expected_hash = "43cc0ee0e29f79dec4ad8d8a91e43e7b3df1d368dbc385a116fcc6ff05f18e9b"
+
+    assert config_hash(config) == expected_hash
+
+    default_path = default_us_scoring_config_path()
+    assert default_path == path
+    default_config = load_scoring_config(default_path)
+    assert config_hash(default_config) == expected_hash
 
 
 def test_v2_score_and_recommendation_are_split_invariant() -> None:

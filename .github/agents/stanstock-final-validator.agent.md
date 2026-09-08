@@ -52,6 +52,25 @@ Read:
   ledgers, exact qualification-bound plan hashes, portfolio-first locking,
   stale web/admin save protection, persistent split warnings, recoverable
   unavailable boundaries, and clear non-broker/simple-return labels.
+- For a frozen methodology/config version boundary, verify the exact
+  committed default config asset is present and hash-verified, CI evidence
+  ran on the exact reviewed SHA (not a stale or branch-name-only run), and
+  base/head differential reproduction proves the frozen version's config
+  hash, behavior, and both successful and withheld payloads are unchanged;
+  a same-revision v1/v2 fixture comparison does not substitute for that proof.
+- For a release that includes or follows an exceptional live reissue, verify
+  it was performed as a direct `analyze_snapshot(..., issued_on_time=True,
+  ...)` service-level call (never a `manage.py analyze` run, which explicitly
+  requests `issued_on_time=False` for every target),
+  that its proof explicitly names the bound production scoring config,
+  `provider='twelve_data'`, the reviewed benchmark, and exact committed
+  `STANSTOCK_CODE_REVISION`, and that the on-time deadline was independently
+  reproved before invocation rather than assumed from a generic default or a
+  prior version's status.
+- Verify aggregate performance counts the earliest reportable prediction once
+  per exact observation/method/config/provider cohort, selected before outcome
+  status, while later valid observed reissues remain visible and evaluated in
+  the immutable ledger.
 - Verify migrations are backward compatible or ship an explicit, tested
   rollback/backfill plan.
 - Verify CI (`.github/workflows/ci.yml`) evidence is real: a stale, skipped,

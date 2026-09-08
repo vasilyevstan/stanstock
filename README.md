@@ -186,7 +186,12 @@ evidence`; probability remains unavailable. Because there is no verified
 split-event feed, each prediction also records and discloses the bounded
 period after its latest SEC share evidence as residual post-period split risk.
 These advisory rows cannot change BUY/HOLD/AVOID, opportunity ranking, or
-decision hit rates. An explicit older `--target-date YYYY-MM-DD` is labeled
+decision hit rates. A withheld advisory forecast (all scenario returns null)
+stays unresolved when evaluated and is excluded from advisory reporting
+denominators rather than being counted as a matured call. A stricter
+eligibility gate ships as a new versioned configuration; the prior version's
+config hash, behavior, and output payloads remain unchanged and reproducible.
+An explicit older `--target-date YYYY-MM-DD` is labeled
 research-grade. A successful target is idempotent; another invocation creates
 a skipped job and makes no provider requests.
 
@@ -385,6 +390,12 @@ provider/synthetic labels.
 - Historical research reconstructions cap fact availability and price rows at
   the logical target while retaining their actual later generation/retrieval
   timestamps; only on-time observed runs count as live evidence.
+- No reissue of an immutable prediction inherits another version's on-time
+  status; each version independently proves its own next-market-session-open
+  deadline.
+- Within an exact method/configuration/provider cohort, performance counts each
+  listing/target/horizon/evidence-role observation once from its earliest
+  reportable issuance; later observed reissues remain in the immutable ledger.
 - Database constraints bound scores, confidence, probability, dates, and
   scenario ordering.
 - Prediction, asset-manifest, filing-fact, and FX-vintage updates/deletes are

@@ -64,11 +64,41 @@ Every task begins by reading, in order:
   Research reconstructions may be generated later, but fact availability and
   price rows must remain capped at the historical cutoff; observed backtests
   accept only calendar-proven on-time signals. Preserve
-  `Prediction.issued_on_time` separately: a later immutable reissue never
-  inherits the original version's live-evidence status.
+  `Prediction.issued_on_time` separately: no reissue inherits another
+  version's on-time status. Each immutable version, including a same-target
+  reissue, independently proves its own next-market-session-open deadline
+  from cutoff-safe evidence; a reissue created before that deadline may still
+  be observed. An unsafe explicit observed request fails closed; a separate
+  non-observed reconstruction is research-grade. Aggregate performance counts
+  the earliest reportable prediction once per exact listing/target/horizon/
+  evidence-role/method/config/provider observation, while later valid observed
+  reissues remain immutable ledger rows evaluated per version.
 - Persist predictions and reported horizon scores only for a scoring
   configuration's `supported_horizons`; an explicitly withheld scenario must
-  not enter outcome or performance denominators.
+  not enter outcome or performance denominators. An advisory prediction whose
+  scenario returns are all null is non-evaluable: evaluation resolves it as
+  unresolved before any price lookup, and reporting excludes it from advisory
+  denominators; this is independent of decision BUY/AVOID/HOLD semantics.
+- A frozen methodology/config version's contract covers its config bytes/
+  effective hash, eligibility, reason wording, and both successful and
+  withheld calculation/scenario payloads. A stricter eligibility gate is a
+  new version, proven with differential base/head reproduction tests showing
+  the frozen version's hash, behavior, and payloads are unchanged. Evidence
+  that disqualifies a prediction uses `assessed_through`/an explicit
+  incompatible-or-unverified status and cites the disqualifying source facts,
+  never `verified_through` or a claimed corporate action.
+- `manage.py analyze` is demo/research tooling, never the live US or
+  observed-reissue interface: it defaults to the generic demo provider, the
+  default scoring config, and `code_revision()`'s `"working-tree"` fallback,
+  and explicitly passes `issued_on_time=False` for every target. Provider,
+  config, benchmark, or revision flags cannot make the command observed. Only
+  an exceptional direct `analyze_snapshot(..., issued_on_time=True, ...)`
+  service-level call can request an observed same-target reissue, after it
+  independently reproves the next-session deadline and cutoff safety; that
+  call must explicitly bind the reviewed production scoring config,
+  `provider="twelve_data"`, the reviewed benchmark (currently SPY), and the
+  exact committed `STANSTOCK_CODE_REVISION`. An unsafe explicit request raises
+  rather than becoming observed or silently downgrading.
 - Update `LatestMarketData` only through the shared monotonic market-state
   writer. Compare market `session_date` first and retrieval time only within
   the same session; historical or ineligible series must not move current

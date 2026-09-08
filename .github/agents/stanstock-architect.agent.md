@@ -35,6 +35,22 @@ Never rely on stale conversation state or a branch name as current truth.
 - Identify score/recommendation/risk/scenario/outcome/simulation methodology
   impact and whether it is material (see `.github/agents/README.md` for the
   material-change trigger).
+- For any new methodology/config version boundary, state explicitly what
+  frozen success *and* failure/withheld payload shape the prior version must
+  keep byte-for-byte compatible, and what differential base/head evidence the
+  slice must produce.
+- Where activation, reissuance, or an exceptional direct/manual reissue is in
+  scope, state the explicit reissue contract: that only a direct
+  `analyze_snapshot(..., issued_on_time=True, ...)` service call against an
+  already-`OBSERVED` snapshot may claim observed status (never
+  `manage.py analyze`, which explicitly requests `issued_on_time=False` for
+  every target); which production config/provider/benchmark it must bind;
+  that `STANSTOCK_CODE_REVISION` must name the exact committed revision; and
+  that the deadline and cutoff safety are independently reproved before
+  invocation rather than inherited from a prior version or a generic default.
+  Separately define aggregate canonicality: the earliest reportable prediction
+  counts once per exact observation/method/config/provider cohort, selected
+  before outcome status so a later reissue cannot replace the original result.
 - Produce bounded slices with explicit inputs, outputs, acceptance criteria,
   dependencies, and out-of-scope work.
 - Route specialist questions to the correct downstream agent rather than

@@ -40,10 +40,29 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
 - [ ] `generated_at`, `data_cutoff`, and source `retrieved_at` remain
       distinguishable; observed-grade backtests reject late-generated signals,
       while research reconstructions remain explicitly labeled.
-- [ ] On-time status is recorded on each immutable prediction version. The
-      original issuance is bounded by the next market-session open, later
-      reissues remain research evidence, and simulation/reporting do not trust
-      an analysis-level flag alone.
+- [ ] On-time status is recorded on each immutable prediction version. No
+      reissue inherits another version's status; the original issuance and
+      every same-target reissue are each independently checked against the
+      next market-session open from cutoff-safe evidence, a reissue before
+      that deadline may still be observed, and simulation/reporting do not
+      trust an analysis-level flag alone.
+- [ ] Aggregate reporting selects the earliest reportable prediction before
+      outcome status and counts it once per exact listing/target/horizon/
+      evidence-role/method/config/provider observation. Later valid observed
+      reissues remain in the immutable ledger and are evaluated per version,
+      but cannot replace an unresolved/corporate-event original, inflate
+      sample sufficiency, or become a second market observation.
+- [ ] An exceptional direct/manual reissue is a direct
+      `analyze_snapshot(..., issued_on_time=True, ...)` service call, never
+      `manage.py analyze` (which explicitly requests `issued_on_time=False`
+      for every target); it explicitly binds the
+      production scoring config, provider, and benchmark and sets
+      `STANSTOCK_CODE_REVISION` to the exact committed revision rather than
+      relying on a generic demo default or `code_revision()`'s
+      `"working-tree"` fallback, and its on-time deadline is independently
+      reproved before invocation rather than assumed. An unsafe explicit
+      request raises; any separate non-observed reconstruction is
+      research-grade.
 - [ ] Predictions and persisted horizon scores exist only for the scoring
       configuration's `supported_horizons`; withheld horizons cannot enter
       outcomes, unresolved counts, or performance aggregates.
@@ -297,3 +316,19 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       selected metric branch, fact/accession lineage, and fixed formula inputs.
 - [ ] A methodology change is flagged as material and routed through the
       three-pass simplifier gate (see `.github/agents/README.md`).
+- [ ] A frozen version's full output contract -- config bytes/effective
+      hash, eligibility, reason wording, and both successful and withheld
+      calculation/scenario payloads -- is proven byte-for-byte unchanged by a
+      differential base/head reproduction test; a stricter eligibility gate
+      ships as a new version rather than mutating the frozen one, and its
+      default config asset is tracked and hash-pinned. Same-revision tests
+      comparing old/new versions do not substitute for base/head reproduction.
+- [ ] An advisory prediction whose scenario returns are all null is treated
+      as non-evaluable: evaluation resolves it before any price lookup, and
+      it (and any malformed legacy row in the same state) is defensively
+      excluded from advisory denominators/reporting, independent of decision
+      BUY/AVOID/HOLD success semantics.
+- [ ] Evidence that disqualifies or withholds a prediction is recorded as
+      assessed (`assessed_through`/an explicit incompatible-or-unverified
+      status naming the disqualifying source facts), never as
+      `verified_through` or a claimed corporate action.

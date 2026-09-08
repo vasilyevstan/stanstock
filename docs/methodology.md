@@ -258,10 +258,17 @@ recommendation, component scores, structured calculation provenance, source
 assets, configuration hash, and code revision.
 
 Predictions are append-only. A correction uses a new model/configuration
-version. Missed runs can be reconstructed for research but cannot be presented
-as calls issued on time. On-time status belongs to each immutable prediction,
-not only its parent analysis, so a later reissued version is excluded from live
-performance evidence.
+version; the frozen version's config hash, behavior, and output payloads
+(including withheld/failure payloads) stay reproducible, and a stricter gate
+ships as a separate version rather than rewriting the old one. Missed runs
+can be reconstructed for research but cannot be presented as calls issued on
+time. On-time status belongs to each immutable prediction, not only its
+parent analysis: no reissue inherits another version's status, and each
+version -- including a same-target reissue -- independently proves its own
+next-market-session-open deadline from cutoff-safe evidence. A reissue before
+that deadline may still be observed. An explicit observed request after the
+deadline or against cutoff-unsafe evidence raises rather than silently
+downgrading; a separate non-observed reconstruction remains research-grade.
 
 Scoring groups remain `short`, `medium`, and `long`; they are not forecast
 identities. Forecast identities are `short`, `6m`, `12m`, `3y`, and `5y`,
@@ -275,17 +282,28 @@ events in coverage counts. Aggregate return, hit-rate, or calibration metrics
 are withheld below the configured minimum sample. Decision predictions keep
 the existing BUY/HOLD/AVOID success semantics. Advisory predictions never
 receive a decision-success value; they record direction correctness, bear/bull
-interval coverage, signed base-case error, and benchmark return separately.
+interval coverage, signed base-case error, and benchmark return separately. A
+withheld advisory prediction (all scenario returns null) is non-evaluable:
+evaluation resolves it as unresolved before any price lookup, and reporting
+defensively excludes it from advisory denominators.
 
 The decision headline on the performance page aggregates only decision
 outcomes from observed universe snapshots whose individual predictions were
 issued before the next market session. Reportability uses the immutable
 evidence grade, source mode, and exact price provider copied onto each
 prediction at issuance; later edits to parent snapshot metadata cannot
-reclassify evidence. Advisory outcomes have separate exact
-method/configuration/provider/horizon cohorts and cannot enter the decision
-denominator. Matured synthetic, unsupported, or later-reissued outcomes remain
-visibly excluded from live, out-of-sample claims. The price-only baseline
+reclassify evidence. Within each exact listing/target/horizon/evidence-role/
+method/configuration/provider observation, aggregate reporting selects the
+earliest reportable issuance before looking at outcome status. A later valid
+observed reissue remains in the immutable ledger and is evaluated separately,
+but it cannot replace an unresolved or corporate-event original, recount the
+market observation, inflate a sufficiency threshold, or change the original
+aggregate result. Different methods, configurations, providers, horizons,
+listings, and target dates remain separate cohorts. Advisory outcomes cannot
+enter the decision denominator. Matured synthetic, unsupported, or
+research-grade outcomes remain visibly excluded from live, out-of-sample
+claims; a non-canonical observed reissue is not reclassified as research.
+The price-only baseline
 persists one short decision prediction plus separate `6m` and `12m` advisory
 predictions. Historical current-universe panel rows are survivorship-biased
 research evidence; only subsequently matured on-time predictions can
