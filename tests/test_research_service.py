@@ -25,7 +25,18 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
-from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
+from stanstock.research.models import (
+    AnalysisRun,
+    Prediction,
+    PredictionOutcome,
+    Recommendation,
+    RiskClass,
+    StockAnalysis,
+)
+from stanstock.research.reporting import (
+    canonical_reportable_prediction_filter,
+    reportable_prediction_filter,
+)
 from stanstock.research.service import (
     analyze_listing,
     analyze_snapshot,
@@ -647,6 +658,419 @@ def test_decision_prediction_service_rejects_advisory_horizons(tmp_path) -> None
             source_assets=persisted.computation.source_assets,
             code_revision_value="test",
         )
+
+
+@pytest.mark.django_db
+def test_analyze_listing_accepts_valid_explicit_issued_on_time_true(tmp_path) -> None:
+    """Direct/live explicit `issued_on_time=True` behavior stays unchanged: a
+    same-day, observed-snapshot call still succeeds and marks the run and
+    every appended prediction on-time."""
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        issued_on_time=True,
+        provider="synthetic",
+        store=store,
+    )
+
+    assert persisted.run.issued_on_time is True
+    assert all(prediction.issued_on_time for prediction in persisted.predictions)
+
+
+@pytest.mark.django_db
+def test_analyze_command_listing_path_forces_research_grade_on_same_day_observed_snapshot(
+    tmp_path,
+) -> None:
+    """`manage.py analyze --listing ...` explicitly requests
+    `issued_on_time=False` even when the snapshot is OBSERVED-grade and
+    generated the same calendar day as its target -- a combination that would
+    otherwise auto-infer an on-time (observed) issuance. Evidence grade still
+    follows the snapshot; the issuance flags are the exclusion guard, not a
+    relabeled evidence grade."""
+    listing, snapshot = _listing_and_snapshot()
+    assert snapshot.grade == UniverseSnapshot.Grade.OBSERVED
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+    stdout = StringIO()
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "analyze",
+            snapshot=str(snapshot.pk),
+            listing=str(listing.pk),
+            provider="synthetic",
+            stdout=stdout,
+        )
+
+    run = AnalysisRun.objects.get()
+    assert run.issued_on_time is False
+    predictions = Prediction.objects.filter(analysis__run=run)
+    assert predictions.exists()
+    assert all(not prediction.issued_on_time for prediction in predictions)
+    output = stdout.getvalue()
+    assert "research-grade" in output
+    assert "issued_on_time=False" in output
+
+
+@pytest.mark.django_db
+def test_analyze_command_snapshot_path_forces_research_grade_on_same_day_observed_snapshot(
+    tmp_path,
+) -> None:
+    """The snapshot-wide `manage.py analyze` path (no `--listing`) forces the
+    same research-grade `issued_on_time=False` guarantee."""
+    listing, snapshot = _listing_and_snapshot()
+    assert snapshot.grade == UniverseSnapshot.Grade.OBSERVED
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+    stdout = StringIO()
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "analyze",
+            snapshot=str(snapshot.pk),
+            provider="synthetic",
+            stdout=stdout,
+        )
+
+    run = AnalysisRun.objects.get()
+    assert run.issued_on_time is False
+    predictions = Prediction.objects.filter(analysis__run=run)
+    assert predictions.exists()
+    assert all(not prediction.issued_on_time for prediction in predictions)
+    output = stdout.getvalue()
+    assert "research-grade" in output
+    assert "issued_on_time=False" in output
+
+
+def _reportable_prediction_chain(
+    snapshot: UniverseSnapshot,
+    listing: Listing,
+    *,
+    generated_at: datetime,
+    target_date: date,
+    model_version: str,
+    method_version: str = "us-price-baseline-v2",
+    config_hash: str = "2" * 64,
+    price_provider: str = "twelve_data",
+    horizon: str = Prediction.Horizon.SHORT,
+    evidence_role: str = Prediction.EvidenceRole.DECISION,
+    issued_on_time: bool = True,
+    run_issued_on_time: bool = True,
+    evidence_grade: str = UniverseSnapshot.Grade.OBSERVED,
+    source_mode: str = Prediction.SourceMode.PROVIDER,
+) -> Prediction:
+    """Focused helper for canonical-reporting tests: one reportable-shaped
+    Prediction (with its own run/analysis) per call, parameterized on
+    exactly the fields relevant to the canonical observation key and
+    reportability -- avoids a Cartesian explosion of near-duplicate fixture
+    setup across the canonicality tests below."""
+    run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=generated_at,
+        target_date=target_date,
+        issued_on_time=run_issued_on_time,
+        universe_snapshot=snapshot,
+        config_version=method_version,
+        config_hash=config_hash,
+        code_revision="test-revision",
+    )
+    analysis = StockAnalysis.objects.create(
+        run=run,
+        listing=listing,
+        current_price=Decimal("100"),
+        overall_score=Decimal("70"),
+        recommendation=Recommendation.HOLD,
+        risk_score=Decimal("35"),
+        risk_class=RiskClass.MEDIUM,
+        confidence=Decimal("60"),
+    )
+    return Prediction.objects.create(
+        analysis=analysis,
+        listing=listing,
+        generated_at=generated_at,
+        target_date=target_date,
+        issued_on_time=issued_on_time,
+        horizon=horizon,
+        evidence_role=evidence_role,
+        evidence_grade=evidence_grade,
+        source_mode=source_mode,
+        price_provider=price_provider,
+        price_subject=listing.ticker,
+        price_at_prediction=Decimal("100"),
+        bear_return=Decimal("-0.03"),
+        base_return=Decimal("0.02"),
+        bull_return=Decimal("0.07"),
+        probability_positive=None,
+        confidence=Decimal("60"),
+        confidence_status="heuristic",
+        insufficiency_reason="",
+        recommendation=Recommendation.HOLD,
+        overall_score=Decimal("70"),
+        model_version=model_version,
+        method_version=method_version,
+        config_hash=config_hash,
+        data_cutoff=generated_at,
+        code_revision="test-revision",
+    )
+
+
+def _canonical_ids() -> set:
+    return set(
+        Prediction.objects.filter(canonical_reportable_prediction_filter()).values_list(
+            "id", flat=True
+        )
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "gate_override",
+    [
+        {"issued_on_time": False},
+        {"run_issued_on_time": False},
+        {"price_provider": ""},
+        {"evidence_grade": UniverseSnapshot.Grade.RESEARCH},
+        {"source_mode": Prediction.SourceMode.SYNTHETIC},
+    ],
+    ids=["off_time", "run_off_time", "no_provider", "non_observed_grade", "non_provider_source"],
+)
+def test_reportable_prediction_filter_requires_every_reportability_gate(
+    gate_override: dict[str, object],
+) -> None:
+    """The base (non-canonical) predicate requires every gate at once:
+    observed grade, provider-backed source, on-time prediction and parent
+    run, and a non-empty price_provider. No observation-key/sibling logic."""
+    listing, snapshot = _listing_and_snapshot()
+    reportable = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=date(2026, 9, 8),
+        model_version="v-reportable",
+    )
+    gate_failing = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=date(2026, 9, 9),
+        model_version="v-gate-failing",
+        **gate_override,
+    )
+
+    reportable_ids = set(
+        Prediction.objects.filter(reportable_prediction_filter()).values_list("id", flat=True)
+    )
+
+    assert reportable_ids == {reportable.id}
+    assert gate_failing.id not in reportable_ids
+
+
+@pytest.mark.django_db
+def test_canonical_reportable_filter_selects_earliest_generated_at() -> None:
+    listing, snapshot = _listing_and_snapshot()
+    target = date(2026, 9, 8)
+    earliest = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="v-earliest",
+    )
+    later = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 2, tzinfo=UTC),
+        target_date=target,
+        model_version="v-later-reissue",
+    )
+
+    assert _canonical_ids() == {earliest.id}
+    assert later.id not in _canonical_ids()
+
+
+@pytest.mark.django_db
+def test_canonical_reportable_filter_breaks_generated_at_tie_by_uuid() -> None:
+    listing, snapshot = _listing_and_snapshot()
+    target = date(2026, 9, 8)
+    same_time = datetime(2026, 9, 8, 1, tzinfo=UTC)
+    first = _reportable_prediction_chain(
+        snapshot, listing, generated_at=same_time, target_date=target, model_version="v-a"
+    )
+    second = _reportable_prediction_chain(
+        snapshot, listing, generated_at=same_time, target_date=target, model_version="v-b"
+    )
+
+    expected_winner = min(first.id, second.id)
+
+    assert _canonical_ids() == {expected_winner}
+
+
+@pytest.mark.django_db
+def test_canonical_reportable_filter_ignores_earlier_non_reportable_sibling() -> None:
+    """An earlier research-grade/off-time row must never suppress a later
+    genuinely reportable one for the same observation key."""
+    listing, snapshot = _listing_and_snapshot()
+    target = date(2026, 9, 8)
+    _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 7, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="v-research-grade",
+        run_issued_on_time=False,
+        issued_on_time=False,
+    )
+    later_reportable = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="v-observed",
+    )
+
+    assert _canonical_ids() == {later_reportable.id}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "earliest_status",
+    [None, PredictionOutcome.Status.UNRESOLVED, PredictionOutcome.Status.CORPORATE_EVENT],
+)
+def test_canonical_reportable_filter_keeps_earliest_state_over_later_matured_reissue(
+    earliest_status: str | None,
+) -> None:
+    """A later same-key reissue that matures never displaces an earlier
+    reportable row that has no outcome yet, is unresolved, or is a
+    corporate event: the canonical predicate looks only at reportability."""
+    listing, snapshot = _listing_and_snapshot()
+    target = date(2026, 9, 8)
+    earliest = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=target,
+        model_version="v-earliest",
+    )
+    if earliest_status is not None:
+        PredictionOutcome.objects.create(
+            prediction=earliest,
+            evaluated_at=datetime(2026, 10, 1, tzinfo=UTC),
+            evaluation_date=date(2026, 10, 1),
+            status=earliest_status,
+            resolution="Earliest state",
+        )
+    reissue = _reportable_prediction_chain(
+        snapshot,
+        listing,
+        generated_at=datetime(2026, 9, 8, 2, tzinfo=UTC),
+        target_date=target,
+        model_version="v-matured-reissue",
+    )
+    PredictionOutcome.objects.create(
+        prediction=reissue,
+        evaluated_at=datetime(2026, 10, 1, tzinfo=UTC),
+        evaluation_date=date(2026, 10, 1),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.05"),
+        success=True,
+        resolution="Matured reissue",
+    )
+
+    assert _canonical_ids() == {earliest.id}
+    canonical_matured_outcomes = PredictionOutcome.objects.filter(
+        canonical_reportable_prediction_filter("prediction__"),
+        status=PredictionOutcome.Status.MATURED,
+    )
+    assert canonical_matured_outcomes.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("overrides_a", "overrides_b"),
+    [
+        pytest.param({}, {"target_date": date(2026, 9, 9)}, id="target_date"),
+        pytest.param({}, {"horizon": Prediction.Horizon.MEDIUM}, id="horizon"),
+        pytest.param(
+            {},
+            {
+                "evidence_role": Prediction.EvidenceRole.ADVISORY,
+                "horizon": Prediction.Horizon.SIX_MONTH,
+            },
+            id="evidence_role_with_paired_valid_horizon",
+        ),
+        pytest.param({}, {"method_version": "us-price-baseline-v1"}, id="method_version"),
+        pytest.param({}, {"config_hash": "3" * 64}, id="config_hash"),
+        pytest.param({}, {"price_provider": "alpha_vantage"}, id="price_provider"),
+    ],
+)
+def test_canonical_reportable_filter_key_separates_each_dimension(
+    overrides_a: dict[str, object],
+    overrides_b: dict[str, object],
+) -> None:
+    """The observation key keeps distinct listing/target_date/horizon/
+    evidence_role/method_version/config_hash/price_provider observations
+    independently canonical; only an exact match on every field is treated
+    as a reissue of the same observation. `evidence_role` is only varied
+    paired with a model-valid horizon for that role."""
+    listing, snapshot = _listing_and_snapshot()
+    base = {
+        "generated_at": datetime(2026, 9, 8, 1, tzinfo=UTC),
+        "target_date": date(2026, 9, 8),
+    }
+    prediction_a = _reportable_prediction_chain(
+        snapshot, listing, model_version="v-a", **{**base, **overrides_a}
+    )
+    prediction_b = _reportable_prediction_chain(
+        snapshot, listing, model_version="v-b", **{**base, **overrides_b}
+    )
+
+    assert _canonical_ids() == {prediction_a.id, prediction_b.id}
+
+
+@pytest.mark.django_db
+def test_canonical_reportable_filter_key_separates_listing() -> None:
+    listing_a, snapshot = _listing_and_snapshot()
+    listing_b = _add_listing_to_snapshot(snapshot)
+    base = {
+        "generated_at": datetime(2026, 9, 8, 1, tzinfo=UTC),
+        "target_date": date(2026, 9, 8),
+    }
+    prediction_a = _reportable_prediction_chain(snapshot, listing_a, model_version="v-a", **base)
+    prediction_b = _reportable_prediction_chain(snapshot, listing_b, model_version="v-b", **base)
+
+    assert _canonical_ids() == {prediction_a.id, prediction_b.id}
+
+
+@pytest.mark.django_db
+def test_canonical_reportable_filter_is_lazy_and_compiles_to_not_exists(
+    django_assert_num_queries,
+) -> None:
+    """Building the shared predicate never executes a query itself (no
+    Python-side ID materialization), and the resulting SQL expresses "no
+    earlier reportable sibling" as a single correlated `NOT EXISTS`
+    subquery rather than a window annotation or `DISTINCT ON`."""
+    with django_assert_num_queries(0):
+        predicate = canonical_reportable_prediction_filter("prediction__")
+        queryset = PredictionOutcome.objects.filter(predicate)
+        prediction_predicate = canonical_reportable_prediction_filter()
+        prediction_queryset = Prediction.objects.filter(prediction_predicate)
+
+    sql = str(queryset.query).upper()
+    assert "NOT EXISTS" in sql
+    assert "DISTINCT ON" not in sql
+    prediction_sql = str(prediction_queryset.query).upper()
+    assert "NOT EXISTS" in prediction_sql
 
 
 def _listing_and_snapshot(

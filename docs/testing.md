@@ -40,8 +40,10 @@ This command validates settings; it does not prove the database is reachable.
   exclusions, snapshot rollback, and target-job idempotency;
 - prediction-level on-time evidence, next-session deadline enforcement,
   credential-free recovery of committed targets across retry-time grades,
-  supported-horizon-only prediction persistence, and monotonic current-market
-  session updates;
+  supported-horizon-only prediction persistence, generic `analyze` command
+  research-only behavior for both same-day snapshot and listing paths, direct
+  explicit observed-issuance rejection after the deadline, and monotonic
+  current-market session updates;
 - explicit security-type boundaries, one-fetch SPY benchmark/ETF reuse with
   unchanged credit accounting, zero-credit ETF reconstruction from immutable
   assets, exact completed-run benchmark-vintage recovery, cutoff-safe ETF
@@ -81,10 +83,21 @@ This command validates settings; it does not prove the database is reachable.
   observed/research-grade prediction issuance, method/config-hash cohort
   separation between long-v1 and long-v2, and recommendation/opportunity
   isolation;
+- committed/tracked production defaults with literal effective-hash pins for
+  `us-price-baseline-v2`,
+  `us-price-medium-v1`, and `us-sec-long-v2`; and template rendering that
+  distinguishes assessed
+  (`assessed_through`/incompatible-or-unverified) from verified
+  (`verified_through`) split-basis evidence without implying a confirmed
+  corporate action;
 - target-date job idempotency and failure recording;
 - observed-session outcome maturity, terminal outcome races, corporate-event
   detection, explicit 6m/12m/3y/5y maturity counts, withheld-scenario
-  fail-closed unresolved outcomes, provider-conflict
+  fail-closed unresolved outcomes not reaching a price lookup and excluded
+  from advisory reporting denominators, earliest-reportable canonical
+  observation selection before outcome status, duplicate reissues not
+  satisfying sample thresholds or replacing unresolved/corporate-event
+  originals, version-complete ledger/status transparency, provider-conflict
   rejection, batch price-frame reuse, unchanged-unresolved no-op behavior,
   decision/advisory outcome semantics, cross-table role-guard trigger
   persistence on SQLite and PostgreSQL, and reconstructed/live evidence
@@ -120,6 +133,24 @@ This command validates settings; it does not prove the database is reachable.
 - backup checksums, extraction safety, transactional PostgreSQL restore, and
   database/assets bundling;
 - architecture boundaries around raw provider modules.
+
+## Review-time evidence outside the automated suite
+
+The committed suite compares frozen and stricter methodology versions within
+one checkout and pins their effective hashes. Relevant regressions include
+`test_default_long_forecast_config_is_v2_with_distinct_hash_from_pinned_v1`,
+`test_explicit_v1_config_is_unchanged_and_pinned`,
+`test_v1_and_v2_long_forecast_cohorts_stay_separate_and_v1_prediction_unchanged`,
+`test_v2_config_hash_and_production_default_path_remain_pinned`, and
+`test_medium_forecast_config_is_versioned_and_stable`.
+
+Those same-revision tests do not prove that a frozen version stayed unchanged
+across a material edit. When a stricter methodology/configuration version is
+introduced, the reviewer must also run an explicit base-versus-head
+reproduction against the two checkouts and compare the frozen version's
+effective hash, eligibility, reason wording, and successful and withheld
+calculation payloads byte-for-byte. That review artifact is required release
+evidence; it is not currently an automated `pytest` or CI job.
 
 ## Browser checks
 

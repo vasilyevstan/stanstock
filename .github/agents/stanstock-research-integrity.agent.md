@@ -135,6 +135,49 @@ record; the summary below is not a substitute for reading it.
 - **Prospective methodology versioning**: price-scale or liquidity corrections
   use a new immutable configuration and preserve historical hashes,
   calculation paths, predictions, and version-separated performance.
+- **Frozen methodology contract and differential proof**: a frozen
+  version's contract covers its config bytes/effective hash, eligibility,
+  reason wording, and both successful and withheld calculation/scenario
+  payloads, not only its output values. A stricter eligibility gate
+  (default-config change, tightened tolerance, new required check) is a new
+  version; require differential base/head execution (same fixtures against
+  the old and new config) proving the frozen version's hash, behavior, and
+  every payload are byte-for-byte unchanged, and that the new version's
+  tracked default config asset is committed and hash-pinned rather than only
+  loaded from a mutable default path.
+- **Assessed vs. verified evidence**: evidence that disqualifies or withholds
+  a prediction (e.g. a failed share-basis continuity check) is recorded as
+  assessed -- `assessed_through`/an explicit incompatible-or-unverified
+  status citing the actual disqualifying source facts -- never as
+  `verified_through` or a claimed corporate action. Verify the UI/payload
+  wording cannot be read as confirming a split or other event that was never
+  observed.
+- **All-null advisory non-evaluability**: an advisory prediction whose
+  scenario returns (`bear_return`/`base_return`/`bull_return`) are all null
+  is non-evaluable. Verify evaluation resolves it as unresolved before any
+  price lookup and that reporting defensively excludes it (and any
+  malformed legacy row in the same state) from advisory denominators,
+  independent of decision BUY/AVOID/HOLD success semantics.
+- **Independently qualified reissues**: no reissue of an immutable
+  prediction inherits another version's on-time status. Each version,
+  including a same-target reissue, is checked independently against its own
+  next-market-session-open deadline from cutoff-safe evidence; a reissue
+  before that deadline may still be observed. An unsafe explicit observed
+  request raises; a separate non-observed reconstruction is research-grade.
+  `manage.py analyze` is demo/research tooling, not the observed-reissue
+  interface: it explicitly requests `issued_on_time=False` for every target,
+  regardless of its provider/config/benchmark flags or
+  `STANSTOCK_CODE_REVISION`. Only an exceptional direct
+  `analyze_snapshot(..., issued_on_time=True, ...)` service-level call
+  against an already-`OBSERVED` snapshot can request an observed reissue;
+  verify the production scoring config, `provider='twelve_data'`, the
+  reviewed benchmark, and exact committed `STANSTOCK_CODE_REVISION` were
+  explicitly bound and that the deadline was independently reproved before
+  the call rather than assumed. Verify aggregate performance selects the
+  earliest reportable prediction before outcome status and counts it once per
+  exact listing/target/horizon/evidence-role/method/config/provider
+  observation; later valid observed reissues remain observed ledger rows and
+  cannot replace or recount the original.
 - **Return/FX consistency**: return calculations use one price/currency
   basis; every conversion resolves the valued date against its own
   availability cutoff, through a recorded derivation path, so a later

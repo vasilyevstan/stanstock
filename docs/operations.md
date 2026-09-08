@@ -78,6 +78,34 @@ and provider jobs fail closed if another active account exists. Grow, Pro,
 Ultra, and reviewed custom agreements use
 `PERSONAL_INTERNAL_DISPLAY_AUTHORIZED` instead.
 
+**Maintainer warning, not a routine command.** `manage.py analyze` is
+demo/research tooling, not the live US operational interface and not an
+observed-reissue path: it defaults to the generic `synthetic_demo` provider,
+the default scoring config, and `code_revision()`'s `"working-tree"` fallback
+when `STANSTOCK_CODE_REVISION` is unset. The command explicitly passes
+`issued_on_time=False` for every target, including a same-day `OBSERVED`
+snapshot, and labels its result research-grade. No combination of `--config`,
+`--provider`, `--benchmark-subject`, or an exported
+`STANSTOCK_CODE_REVISION` changes that contract. `scheduled_refresh` is the
+supported unattended live path and binds the exact committed Git revision
+automatically. An exceptional same-target observed reissue that is still
+before its deadline is possible only through a direct
+`stanstock.research.service.analyze_snapshot(..., issued_on_time=True, ...)`
+Python invocation against an already-`OBSERVED` universe snapshot, and only
+after the caller has independently reconfirmed the next-market-session-open
+deadline for that target (e.g. via `stanstock.research.timing.
+is_observed_issuance_on_time`) -- the service itself raises rather than
+silently downgrading if the deadline or cutoff-safety proof fails. A later
+non-observed reconstruction is research-grade; it is not a recovered observed
+call. The exceptional invocation must run from a clean, already-committed
+revision; explicitly bind the reviewed production scoring config
+(`default_us_scoring_config_path()` or an equivalent explicit path),
+`provider="twelve_data"`, and the reviewed benchmark (currently SPY); set
+`STANSTOCK_CODE_REVISION` to the exact committed revision; and reuse
+already-persisted assets rather than refetching from the live provider. Do not
+copy a demo command into a live context or assume a reissue is on time because
+an earlier version was.
+
 ### SEC EDGAR fundamentals
 
 SEC EDGAR is unauthenticated and requires no API key. Put only an identifying

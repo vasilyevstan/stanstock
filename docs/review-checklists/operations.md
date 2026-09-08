@@ -13,6 +13,26 @@ Reviewer: `stanstock-critic-tester`.
 - [ ] A failed job leaves no partially written `DataAsset`, `Prediction`, or
       simulation row that a retry would treat as already complete.
 
+## Exceptional manual/direct reissue
+
+- [ ] An exceptional manual or direct reissue uses a direct
+      `analyze_snapshot(..., issued_on_time=True, ...)` service call, never
+      `manage.py analyze` (which explicitly requests `issued_on_time=False`
+      for every target regardless of its flags), runs from a clean, committed
+      revision, and explicitly binds the production scoring config,
+      `provider='twelve_data'`, and the reviewed benchmark rather than relying
+      on the generic demo/default-config path.
+- [ ] `STANSTOCK_CODE_REVISION` is set to the exact committed revision for
+      that reissue instead of falling back to `code_revision()`'s
+      `"working-tree"` default.
+- [ ] The reissue independently reproves the next-market-session-open
+      deadline before being marked observed; it is not assumed on-time from a
+      prior version or a stale flag, and an unsafe explicit request raises
+      rather than silently downgrading.
+- [ ] The reissue reuses existing immutable assets and does not refetch from
+      the live provider when already-committed evidence is sufficient to
+      reconstruct or verify the result.
+
 ## Local scheduling
 
 - [ ] The LaunchAgent records and rechecks the machine IANA timezone, and its

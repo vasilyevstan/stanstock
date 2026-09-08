@@ -50,10 +50,44 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
-- **On-time evidence belongs to each immutable prediction version.** The
-  original prediction may inherit a calendar-proven on-time analysis, but a
-  later reissue is research evidence; observed simulations independently
-  recompute the next-session deadline instead of trusting a stored flag.
+- **`manage.py analyze` is research-only for every target.** The command
+  explicitly requests `issued_on_time=False`; provider/config flags and
+  `STANSTOCK_CODE_REVISION` cannot make it an observed issuance path. An
+  exceptional observed reissue is a direct, independently qualified service
+  call that binds the production config/provider/benchmark and exact committed
+  revision; an unsafe request raises. See `docs/operations.md`.
+- **One market observation counts once in aggregate performance.** Within an
+  exact listing/target/horizon/evidence-role/method/config/provider cohort, the
+  earliest reportable issuance is canonical. Later valid observed reissues
+  remain immutable and are evaluated and shown in the ledger, but they neither
+  replace nor recount the original observation.
+- **Failed share-basis evidence is assessed, not verified.** A methodology
+  gate that disqualifies a prediction (e.g. `us-sec-long-v2`'s adjacent
+  annual diluted-share continuity check) records `assessment_status`/
+  `assessed_through` and the disqualifying source facts, never
+  `verified_through` or a claimed corporate action; the UI and payload never
+  imply a split was confirmed.
+- **An all-null advisory scenario is non-evaluable, not a decision signal.**
+  `evaluate_prediction` returns an explicit unresolved outcome before any
+  price lookup when `bear_return`/`base_return`/`bull_return` are all null,
+  and reporting defensively excludes such rows from advisory denominators
+  even if a malformed legacy row somehow matured. Decision BUY/AVOID/HOLD
+  success semantics are a separate contract and are unaffected.
+- **A frozen methodology contract covers config bytes and every payload
+  shape.** The effective config/hash, eligibility, reason wording, and both
+  successful and withheld calculation/scenario payloads are all part of a
+  frozen version's contract (e.g. `us-sec-long-v1`). A stricter eligibility
+  gate needs a new version (`us-sec-long-v2`) plus differential base/head
+  reproduction tests proving the frozen version's hash, behavior, and
+  payloads are byte-for-byte unchanged.
+- **On-time status is proven independently by each immutable prediction
+  version; no reissue inherits another version's status.** The original
+  issuance and any later reissue are each checked against their own
+  next-market-session-open deadline from cutoff-safe evidence instead of
+  trusting a stored flag. A same-target reissue may still be observed-grade
+  while it is issued before that deadline from cutoff-safe evidence. An
+  explicit observed request after the deadline or against unsafe evidence
+  raises; any later non-observed reconstruction is separately research-grade.
 - **Unsupported horizons must not enter the evidence ledger.** A price-only
   model can display explicit withheld scenarios, but it persists predictions
   and horizon scores only for configured supported horizons so outcomes and

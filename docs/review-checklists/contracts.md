@@ -30,7 +30,15 @@ consumed by another app/module or by an external caller. Reviewer:
       equivalent guard added elsewhere) are not weakened or bypassed.
 - [ ] JSON fields (`metadata`, `component_scores`, `quality_flags`, etc.)
       keep a stable, documented shape; a shape change is treated as a
-      schema change requiring the material-change simplifier gate.
+      schema change requiring the material-change simplifier gate. This
+      compatibility contract includes failure/withheld-scenario payload
+      shapes and exact reason/insufficiency wording, not only the successful
+      payload shape.
+- [ ] A new production-default versioned configuration file (e.g. under
+      `config/forecasts/`, `config/scoring/`) is committed and tracked in
+      Git, and its literal expected effective config hash is pinned by a test
+      so an untracked or silently edited default cannot change frozen
+      behavior; comparing two loads of the same current file is not a pin.
 - [ ] Ledger-managed cash and holding quantities are never persisted by an
       unrelated full-model save. Web and admin updates lock in portfolio-first
       order and use explicit `update_fields` allow-lists.

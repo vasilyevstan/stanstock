@@ -60,7 +60,25 @@ summary, not a substitute.
 - Regression risk: a retry-time evidence grade or missing credential causing
   already committed target work to be fetched and charged again.
 - Regression risk: analysis-level on-time flags leaking late prediction
-  reissues into performance, or unsupported horizons entering outcomes.
+  reissues into performance, independently valid same-key reissues counting
+  as multiple market observations or replacing an earlier unresolved/
+  corporate-event result, or unsupported horizons entering outcomes.
+- Regression risk: a frozen version's JSON failure/withheld payload shape
+  (e.g. `split_basis` assessed-vs-verified fields, reason wording) silently
+  changing, or a new default config asset shipping untracked/unpinned instead
+  of committed and hash-verified.
+- Regression risk: a template branching on assessed-vs-verified evidence
+  (e.g. `assessed_through` vs. `verified_through`) rendering the wrong wording
+  for a withheld/failed methodology check, or implying a confirmed event that
+  was never observed.
+- Regression risk: treating `manage.py analyze` as capable of an observed
+  reissue -- it must explicitly pass `issued_on_time=False` on both snapshot
+  and listing paths for every target, regardless of its flags. Only a direct
+  `analyze_snapshot(..., issued_on_time=True, ...)` service-level call,
+  against an already-`OBSERVED` snapshot with an independently reproved
+  deadline and cutoff-safe evidence, may request an observed reissue; it must
+  bind the production config, provider, benchmark, and committed
+  `STANSTOCK_CODE_REVISION`, and an unsafe request must raise.
 - Unrelated scope or path-ownership violations.
 
 Defer provider rights, as-of/look-ahead, methodology, and outcome correctness
