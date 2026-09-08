@@ -1,0 +1,85 @@
+schema_version: 1
+version: us-sec-long-v3
+enabled_scoring_versions:
+  - us-price-baseline-v2
+price_provider: twelve_data
+fundamentals_provider: sec
+return_basis: split_adjusted_price_return
+dividends_included: false
+probability_positive_enabled: false
+eligibility:
+  maximum_metric_age_days: 200
+  minimum_share_consistency_periods: 3
+  share_consistency_relative_tolerance: 0.15
+  balance_sheet_date_tolerance_days: 7
+  fcf_failure_blocks_eps: true
+  unsupported_sic_ranges:
+    - 6000-6799
+metric_families:
+  fcf_per_share:
+    source_metric: free_cash_flow
+    minimum_annual_periods: 3
+    minimum_current_value: 0.01
+    multiple_minimum: 3.0
+    multiple_maximum: 60.0
+  eps_per_share:
+    source_metric: net_income
+    minimum_annual_periods: 3
+    minimum_current_value: 0.01
+    multiple_minimum: 5.0
+    multiple_maximum: 50.0
+growth:
+  historical_recency_decay: 0.65
+  historical_minimum: -0.20
+  historical_maximum: 0.25
+  tax_rate_minimum: 0.10
+  tax_rate_maximum: 0.35
+  roic_minimum: -0.10
+  roic_maximum: 0.40
+  reinvestment_minimum: 0.00
+  reinvestment_maximum: 1.25
+  sustainable_minimum: -0.10
+  sustainable_maximum: 0.25
+  peer_minimum: -0.15
+  peer_maximum: 0.25
+  historical_weight: 0.45
+  sustainable_weight: 0.30
+  peer_weight: 0.25
+  initial_growth_minimum: -0.15
+  initial_growth_maximum: 0.25
+  terminal_growth: 0.025
+peer:
+  sic_prefix_levels: [4, 3, 2]
+  minimum_peers:
+    4: 3
+    3: 5
+    2: 8
+horizons:
+  3y:
+    years: 3
+    fade: [0.70, 0.40, 0.15]
+    multiple_reversion: 0.45
+  5y:
+    years: 5
+    fade: [0.80, 0.60, 0.40, 0.20, 0.00]
+    multiple_reversion: 0.70
+scenarios:
+  bear:
+    growth_delta: -0.04
+    reinvestment_multiplier: 0.75
+    peer_multiple_multiplier: 0.80
+  base:
+    growth_delta: 0.00
+    reinvestment_multiplier: 1.00
+    peer_multiple_multiplier: 1.00
+  bull:
+    growth_delta: 0.03
+    reinvestment_multiplier: 1.15
+    peer_multiple_multiplier: 1.15
+adjacent_selected_annual_diluted_share_continuity:
+  enabled: true
+newest_quarter_anchored_homogeneous_ttm_alias_selection:
+  enabled: true
+joint_compatible_invested_capital_pair_selection:
+  enabled: true
+fundamentals_config_version: us-sec-fundamentals-v1

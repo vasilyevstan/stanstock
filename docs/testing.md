@@ -83,6 +83,82 @@ This command validates settings; it does not prove the database is reachable.
   observed/research-grade prediction issuance, method/config-hash cohort
   separation between long-v1 and long-v2, and recommendation/opportunity
   isolation;
+- prospective, default-off `us-sec-long-v3` evidence selection: absent
+  optional capability keys removed from the effective hash so frozen v1/v2
+  hashes cannot move; newest-quarter alias anchoring with a single real
+  controlling source fact for direct and YTD-derived quarters (including
+  adversarial cases where availability and maximum revision belong to
+  different dependencies), homogeneous-tail withholding, and determinism
+  under reversed input order; same-date `(concept, alias, period identity)`
+  candidate recovery of an invested-capital pair the collapsed series hides,
+  with incompatible alternatives still withheld and no debt double counting;
+  assessed pair-selection provenance carried through missing beginning,
+  missing ending, zero compatible pairs, post-selection peer insufficiency,
+  and success, never labeling rejected evidence verified; and separate,
+  fail-closed audit boundaries (target date, data cutoff, decision time)
+  with immutable-listing-ID identity and explicit cross-exchange/reused-
+  ticker ambiguity;
+- `us-sec-long-v3` evidence-selection boundaries specifically: a directly
+  reported quarter and a year-to-date-derived quarter that tie on
+  availability are resolved by the full rank of one real controlling filing
+  (revision 5 derived beating revision 1 direct, against a competing
+  incomplete alias at revision 3) rather than by availability alone, with
+  opposing accession order and two distinct quarter period identities
+  sharing one period end both covered, stable under reversed input order and
+  under reassigned row UUIDs, while the frozen legacy quarter series keeps
+  its original collapse; a deduplicated `manifest_evidence_fact_ids` closure
+  proven for success, no compatible pair, a missing side, a
+  selected-pair-then-peer-withheld run, and an unselected TTM alias lineage,
+  with every alternative filed through its own source and filing assets so
+  the immutable `source_assets` manifest and the evidence payload must cover
+  them, TTM dependency closure included, and assessed evidence kept
+  structurally separate from the selected `input_facts` and never labelled
+  verified; failure-path classification proven independently by re-deriving
+  the rejected candidates from the invested-capital assessment itself and
+  asserting they are absent from `input_facts`/`selected_input_fact_ids`,
+  present in `assessed_evidence`, and provable through their own source and
+  filing assets, with a selected-pair-then-peer-withheld control showing the
+  selected pair staying a formula input while its unused alternatives stay
+  assessed; non-canonical or conflicting instant period identities producing
+  an explicit listing-level assessed-withheld forecast and audit entry while
+  the rest of the run still forecasts; and a 343-combination balance-sheet
+  date refused from per-axis counts *before* any Cartesian product is
+  materialized, recording each responsible axis (7 equity x 7 cash x 7
+  reported-long-term-debt aliases, each with distinct source and filing
+  assets) so all 21 responsible facts are assessed and manifest-covered
+  without being selected, keeping no pair selected and the 343 products
+  unenumerated, retaining an already-assessed opposite side when the refusal
+  happens on the second side, and withholding that one listing while another
+  listing still forecasts and both audit entries are returned, with the
+  ceiling held at 256;
+- a base-versus-worktree frozen differential: `tests/frozen_base.py` imports
+  the pre-change source of `sec_fundamentals`, `long_forecast_config`, and
+  `long_forecasts` straight from the git object database into an isolated
+  module namespace, and `tests/test_long_frozen_differential.py` runs v1 and
+  v2 through a fully deterministic fixture (UUID5 identities, fixed asset
+  paths and checksums) to compare complete successful and withheld scenario
+  and calculation payloads, insufficiency reasons, config hashes, and
+  eligibility. The same comparison always runs against the committed golden
+  in `tests/data/long_frozen_base_payloads.json`, generated from that exact
+  base revision; only the `auto_now_add` ingest clock is normalized.
+
+  **Regeneration contract.** The committed golden is base-produced evidence,
+  never a recording of current behavior. An ordinary run only reads it; no
+  comparison test rewrites it. Regeneration happens solely through
+  `regenerate_golden`, which reads the base sources out of the git object
+  database, executes *those* modules, and writes the result together with
+  the SHA-256 of each exact base source it ran and a
+  `generated_from: base_revision_execution` marker. If the base objects are
+  unavailable it raises `BaseRevisionUnavailableError` and writes nothing --
+  there is no working-tree fallback, so head behavior can never be committed
+  under a `BASE_SHA` label. Tests cover all three: regeneration refusing
+  without base objects, a poisoned head build being unable to influence a
+  regenerated file (byte-identical to the committed golden), and the pooled
+  representation expanding losslessly back to the complete base payloads.
+  When the base objects are present, the golden's recorded checksums are
+  verified against the real base bytes. Regenerate with
+  `STANSTOCK_WRITE_FROZEN_GOLDEN=1 uv run pytest
+  tests/test_long_frozen_differential.py`;
 - committed/tracked production defaults with literal effective-hash pins for
   `us-price-baseline-v2`,
   `us-price-medium-v1`, and `us-sec-long-v2`; and template rendering that
@@ -147,12 +223,24 @@ one checkout and pins their effective hashes. Relevant regressions include
 `test_medium_forecast_config_is_versioned_and_stable`.
 
 Those same-revision tests do not prove that a frozen version stayed unchanged
-across a material edit. When a stricter methodology/configuration version is
-introduced, the reviewer must also run an explicit base-versus-head
-reproduction against the two checkouts and compare the frozen version's
-effective hash, eligibility, reason wording, and successful and withheld
-calculation payloads byte-for-byte. That review artifact is required release
-evidence; it is not currently an automated `pytest` or CI job.
+across a material edit. `tests/test_long_frozen_differential.py` now automates
+that comparison for `us-sec-long-v1`/`v2` by executing the base revision's own
+sources, so the reviewer's byte-for-byte base-versus-head reproduction is a
+`pytest` job rather than a hand-run artifact for those versions. It is not yet
+automated for any other frozen methodology or configuration version; there the
+reviewer still runs the explicit base-versus-head reproduction against the two
+checkouts and compares the frozen version's effective hash, eligibility,
+reason wording, and successful and withheld calculation payloads byte-for-byte
+as required release evidence.
+
+The automated differential has one environment dependency: reading the base
+revision's sources needs that revision in the local git object database. A
+shallow clone -- including the default `actions/checkout` depth of 1 -- does
+not contain it, so the live base comparison skips and only the committed
+golden in `tests/data/long_frozen_base_payloads.json` is compared. Keeping the
+exact-base differential live in CI therefore requires the quality job to check
+out full history (`fetch-depth: 0`); without it, CI proves the golden but not
+the base execution that produced it.
 
 ## Browser checks
 

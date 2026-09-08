@@ -13,6 +13,40 @@ LONG_FORECAST_HORIZONS = ("3y", "5y")
 LONG_METRIC_FAMILIES = ("fcf_per_share", "eps_per_share")
 LONG_SCENARIOS = ("bear", "base", "bull")
 
+#: Optional, explicitly default-off capability fields.
+#:
+#: A config that does not declare one of these keys parses to ``None`` and the
+#: field is removed from the effective payload before hashing, so every
+#: already-frozen configuration (``us-sec-long-v1``, ``us-sec-long-v2``)
+#: keeps its exact historical effective hash when a later version adds a new
+#: capability here. An explicit ``{enabled: false}`` is a *different*
+#: configuration than an absent key and does change the hash.
+LONG_OPTIONAL_CAPABILITY_FIELDS = (
+    "adjacent_selected_annual_diluted_share_continuity",
+    "newest_quarter_anchored_homogeneous_ttm_alias_selection",
+    "joint_compatible_invested_capital_pair_selection",
+)
+
+#: Optional non-capability fields that are also omitted from the effective
+#: hash while absent, for the same freeze-preserving reason.
+LONG_OPTIONAL_BINDING_FIELDS = ("fundamentals_config_version",)
+
+
+class LongForecastConfigParseError(ValueError):
+    """The configuration file could not be parsed as YAML.
+
+    The PyYAML error is deliberately not carried forward. A parser error
+    quotes the offending source line, so an operator pointing the loader at
+    the wrong file (an ``.env``-shaped file, a credential fragment pasted
+    into a config) would otherwise have that line echoed into stderr and
+    logs. The path and the failure kind are enough to fix the file; the file
+    contents are not reproduced.
+
+    Semantic validation is unaffected: a well-formed YAML file that violates
+    the long-forecast contract still raises a plain `ValueError` whose
+    message names the offending key, never a configured value.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class LongEligibilityConfig:
@@ -93,6 +127,9 @@ class LongForecastConfig:
     horizons: dict[str, LongHorizonConfig]
     scenarios: dict[str, LongScenarioConfig]
     adjacent_selected_annual_diluted_share_continuity: bool | None
+    newest_quarter_anchored_homogeneous_ttm_alias_selection: bool | None
+    joint_compatible_invested_capital_pair_selection: bool | None
+    fundamentals_config_version: str | None
     raw: dict[str, Any]
 
     @classmethod
@@ -316,6 +353,15 @@ class LongForecastConfig:
             mapping,
             "adjacent_selected_annual_diluted_share_continuity",
         )
+        newest_quarter_ttm_alias_selection = _optional_capability_enabled(
+            mapping,
+            "newest_quarter_anchored_homogeneous_ttm_alias_selection",
+        )
+        joint_invested_capital_pair_selection = _optional_capability_enabled(
+            mapping,
+            "joint_compatible_invested_capital_pair_selection",
+        )
+        fundamentals_config_version = _optional_text(mapping, "fundamentals_config_version")
 
         return cls(
             schema_version=schema_version,
@@ -335,6 +381,13 @@ class LongForecastConfig:
             adjacent_selected_annual_diluted_share_continuity=(
                 adjacent_selected_annual_diluted_share_continuity
             ),
+            newest_quarter_anchored_homogeneous_ttm_alias_selection=(
+                newest_quarter_ttm_alias_selection
+            ),
+            joint_compatible_invested_capital_pair_selection=(
+                joint_invested_capital_pair_selection
+            ),
+            fundamentals_config_version=fundamentals_config_version,
             raw=mapping,
         )
 
@@ -343,9 +396,21 @@ def default_long_forecast_config_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "forecasts" / "us-sec-long-v2.yml"
 
 
+def long_forecast_config_path(version: str) -> Path:
+    """Resolve a pinned long forecast configuration file by version name."""
+    return Path(__file__).resolve().parents[3] / "config" / "forecasts" / f"{version}.yml"
+
+
 def load_long_forecast_config(path: Path | None = None) -> LongForecastConfig:
     config_path = path or default_long_forecast_config_path()
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        # ``from None`` suppresses the chained PyYAML error entirely, so the
+        # offending source line cannot reach a traceback either.
+        raise LongForecastConfigParseError(
+            f"Long forecast config is not valid YAML: {config_path}"
+        ) from None
     if not isinstance(data, dict):
         raise ValueError(f"Long forecast config must be a mapping: {config_path}")
     return LongForecastConfig.from_mapping(cast(dict[str, Any], data))
@@ -354,8 +419,9 @@ def load_long_forecast_config(path: Path | None = None) -> LongForecastConfig:
 def long_forecast_config_hash(config: LongForecastConfig) -> str:
     effective = asdict(config)
     effective.pop("raw")
-    if effective.get("adjacent_selected_annual_diluted_share_continuity") is None:
-        effective.pop("adjacent_selected_annual_diluted_share_continuity")
+    for key in (*LONG_OPTIONAL_CAPABILITY_FIELDS, *LONG_OPTIONAL_BINDING_FIELDS):
+        if effective.get(key) is None:
+            effective.pop(key, None)
     payload = json.dumps(
         effective,
         sort_keys=True,
@@ -412,6 +478,18 @@ def _optional_capability_enabled(mapping: dict[str, Any], key: str) -> bool | No
     if not isinstance(enabled, bool):
         raise ValueError(f"{key}.enabled must be boolean")
     return enabled
+
+
+def _optional_text(mapping: dict[str, Any], key: str) -> str | None:
+    """Return an optional pinned identifier, or ``None`` when absent.
+
+    An absent key is a distinct configuration from a present one and is
+    removed from the effective hash payload, so adding this field to a new
+    version cannot change an already-frozen version's hash.
+    """
+    if key not in mapping:
+        return None
+    return _required_text(mapping, key)
 
 
 def _positive_int(mapping: dict[str, Any], key: str) -> int:
