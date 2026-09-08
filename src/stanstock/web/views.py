@@ -200,6 +200,7 @@ def status_page(request: HttpRequest) -> HttpResponse:
                 prediction__analysis__run=latest_run,
                 prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
                 status=PredictionOutcome.Status.MATURED,
+                prediction__base_return__isnull=False,
             ).count()
             if latest_run
             else 0
@@ -715,6 +716,7 @@ def performance_page(request: HttpRequest) -> HttpResponse:
         status=PredictionOutcome.Status.MATURED,
         actual_return__isnull=False,
         prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
+        prediction__base_return__isnull=False,
     ).filter(reportable_evidence)
     raw_advisory_groups = reportable_advisory_matured.values(
         "prediction__method_version",

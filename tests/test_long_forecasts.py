@@ -73,7 +73,8 @@ def test_long_forecast_config_is_frozen_versioned_and_stable() -> None:
     first = load_long_forecast_config()
     second = load_long_forecast_config()
 
-    assert first.version == "us-sec-long-v1"
+    assert first.version == "us-sec-long-v2"
+    assert first.adjacent_selected_annual_diluted_share_continuity is True
     assert first.probability_positive_enabled is False
     assert first.return_basis == "split_adjusted_price_return"
     assert first.dividends_included is False
@@ -100,6 +101,74 @@ def test_long_forecast_config_is_frozen_versioned_and_stable() -> None:
             <= getattr(first.scenarios["base"], attribute)
             <= getattr(first.scenarios["bull"], attribute)
         )
+
+
+def test_default_long_forecast_config_is_v2_with_distinct_hash_from_pinned_v1() -> None:
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+    v2 = load_long_forecast_config()
+
+    assert v2.version == "us-sec-long-v2"
+    assert v2.adjacent_selected_annual_diluted_share_continuity is True
+    assert v1.version == "us-sec-long-v1"
+    assert v1.adjacent_selected_annual_diluted_share_continuity is None
+    assert long_forecast_config_hash(v2) != long_forecast_config_hash(v1)
+    assert (
+        long_forecast_config_hash(v2)
+        == "46a81d4bfe87d80ddcf2d62a7f05854eb36381027fb01bc40d637ef3294a5c36"
+    )
+
+
+def test_explicit_v1_config_is_unchanged_and_pinned() -> None:
+    v1_path = Path("config/forecasts/us-sec-long-v1.yml")
+    v1 = load_long_forecast_config(v1_path)
+
+    assert v1.version == "us-sec-long-v1"
+    assert v1.adjacent_selected_annual_diluted_share_continuity is None
+    assert (
+        long_forecast_config_hash(v1)
+        == "ef0e0478aebf53ab605ff47df1d4732ad7cb4e7f3c5d6559b89674ad6a0adeb1"
+    )
+    assert "adjacent_selected_annual_diluted_share_continuity" not in v1.raw
+
+
+def test_adjacent_share_continuity_capability_rejects_malformed_values() -> None:
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+
+    for bad_value in (
+        True,
+        "enabled",
+        [True],
+        {},
+        {"enabled": True, "extra": 1},
+        {"enabled": "yes"},
+    ):
+        mapping = deepcopy(v1.raw)
+        mapping["adjacent_selected_annual_diluted_share_continuity"] = bad_value
+        with pytest.raises(
+            ValueError,
+            match="adjacent_selected_annual_diluted_share_continuity",
+        ):
+            LongForecastConfig.from_mapping(mapping)
+
+    mapping = deepcopy(v1.raw)
+    mapping["adjacent_selected_annual_diluted_share_continuity"] = {"enabled": False}
+    explicit_false = LongForecastConfig.from_mapping(mapping)
+
+    assert explicit_false.adjacent_selected_annual_diluted_share_continuity is False
+    assert long_forecast_config_hash(explicit_false) != long_forecast_config_hash(v1)
+
+
+def test_display_version_label_is_behavior_derived_not_full_version_string() -> None:
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+    v2 = load_long_forecast_config()
+    mapping = deepcopy(v1.raw)
+    mapping["adjacent_selected_annual_diluted_share_continuity"] = {"enabled": False}
+    explicit_false = LongForecastConfig.from_mapping(mapping)
+
+    assert long_forecasts_module._display_version_label(v1) == "long-v1"
+    assert long_forecasts_module._display_version_label(v2) == "long-v2"
+    # Explicit False retains the frozen behavior-derived "long-v1" wording.
+    assert long_forecasts_module._display_version_label(explicit_false) == "long-v1"
 
 
 def test_long_forecast_config_rejects_probability_weight_and_horizon_drift() -> None:
@@ -188,6 +257,10 @@ def test_fcf_forecast_uses_exact_sic_fallback_and_complete_provenance() -> None:
         assert scenario.bull is not None
         assert scenario.bear <= scenario.base <= scenario.bull
         assert scenario.probability_positive is None
+        assert scenario.insufficiency_reason == (
+            "Positive-return probability is unavailable for deterministic long-v2 "
+            "until qualifying prospective outcomes exist"
+        )
         assert forecast.calculation["metric_family"] == "fcf_per_share"
         assert forecast.calculation["support"]["peer_count"] == 1
         assert forecast.calculation["support"]["sic_fallback_level"] == 3
@@ -308,7 +381,7 @@ def test_return_uses_the_actual_current_multiple_when_reversion_anchor_is_bounde
         config=config,
     )[str(target.pk)]["5y"]
     assert low_multiple.scenario.base is None
-    assert "below the supported long-v1 minimum" in (low_multiple.scenario.insufficiency_reason)
+    assert "below the supported long-v2 minimum" in (low_multiple.scenario.insufficiency_reason)
 
 
 @pytest.mark.django_db
@@ -459,6 +532,20 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
         net_income_multiplier=0.0001,
         reported_eps_multiplier=0.5,
     )
+    oldest_share_drift = _listing("OLDSHARES")
+    oldest_share_drift_price = _company_evidence(
+        oldest_share_drift,
+        family="fcf_per_share",
+        sic="3571",
+        annual_shares=(10.0, 20.0, 20.0),
+    )
+    annual_drift_ok = _listing("ANNUALDRIFT")
+    annual_drift_ok_price = _company_evidence(
+        annual_drift_ok,
+        family="fcf_per_share",
+        sic="3571",
+        annual_shares=(20.0, 21.6, 20.0),
+    )
 
     listings = [
         peer,
@@ -471,6 +558,8 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
         reverse_share_drift,
         minor_share_drift,
         tiny_eps_mismatch,
+        oldest_share_drift,
+        annual_drift_ok,
     ]
     prices = {str(listing.pk): 50.0 for listing in listings}
     price_assets = {
@@ -484,6 +573,8 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
         str(reverse_share_drift.pk): reverse_share_drift_price,
         str(minor_share_drift.pk): minor_share_drift_price,
         str(tiny_eps_mismatch.pk): tiny_eps_mismatch_price,
+        str(oldest_share_drift.pk): oldest_share_drift_price,
+        str(annual_drift_ok.pk): annual_drift_ok_price,
     }
     forecasts = build_long_forecasts(
         listings=listings,
@@ -499,7 +590,16 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
         forecasts[str(mismatch.pk)]["3y"].scenario.insufficiency_reason
     )
     assert forecasts[str(mismatch.pk)]["3y"].calculation["input_facts"]
-    assert "SEC SIC 6021 is outside" in (
+    for horizon in ("3y", "5y"):
+        mismatch_forecast = forecasts[str(mismatch.pk)][horizon]
+        mismatch_split_basis = mismatch_forecast.calculation["split_basis"]
+        assert mismatch_split_basis["assessment_status"] == "incompatible_or_unverified"
+        assert any(
+            check["check"] == "reported_diluted_eps"
+            for check in mismatch_split_basis["continuity_checks"]
+        )
+        assert mismatch_forecast.scenario_payload()["split_basis"] == mismatch_split_basis
+    assert "SEC SIC 6021 is outside the supported long-v2 industries" == (
         forecasts[str(financial.pk)]["3y"].scenario.insufficiency_reason
     )
     assert "No point-in-time SEC SIC classification" in (
@@ -515,6 +615,15 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
     assert "TTM diluted shares differ" in (
         forecasts[str(ttm_share_drift.pk)]["3y"].scenario.insufficiency_reason
     )
+    for horizon in ("3y", "5y"):
+        ttm_forecast = forecasts[str(ttm_share_drift.pk)][horizon]
+        ttm_split_basis = ttm_forecast.calculation["split_basis"]
+        assert ttm_split_basis["assessment_status"] == "incompatible_or_unverified"
+        assert any(
+            check["check"] == "ttm_to_latest_annual_diluted_shares"
+            for check in ttm_split_basis["continuity_checks"]
+        )
+        assert ttm_forecast.scenario_payload()["split_basis"] == ttm_split_basis
     assert "TTM diluted shares differ" in (
         forecasts[str(reverse_share_drift.pk)]["3y"].scenario.insufficiency_reason
     )
@@ -522,6 +631,200 @@ def test_share_basis_unsupported_sic_and_missing_terms_are_withheld() -> None:
     assert "Share basis differs from reported diluted EPS" in (
         forecasts[str(tiny_eps_mismatch.pk)]["3y"].scenario.insufficiency_reason
     )
+    oldest_reason = forecasts[str(oldest_share_drift.pk)]["3y"].scenario.insufficiency_reason
+    assert "diluted-share basis continuity is incompatible/unverified" in oldest_reason
+    assert "split" not in oldest_reason.lower()
+    for horizon in ("3y", "5y"):
+        oldest_forecast = forecasts[str(oldest_share_drift.pk)][horizon]
+        assert oldest_forecast.scenario.base is None
+        assert oldest_forecast.calculation["input_facts"]
+        oldest_split_basis = oldest_forecast.calculation["split_basis"]
+        oldest_adjacent_checks = [
+            check
+            for check in oldest_split_basis["continuity_checks"]
+            if check["check"] == "adjacent_annual_diluted_shares"
+        ]
+        assert len(oldest_adjacent_checks) == 1
+        failing_check = oldest_adjacent_checks[0]
+        assert failing_check["previous_period_end"] == "2023-12-31"
+        assert failing_check["current_period_end"] == "2024-12-31"
+        assert failing_check["previous_shares"] == pytest.approx(10.0)
+        assert failing_check["current_shares"] == pytest.approx(20.0)
+        assert failing_check["relative_difference"] == pytest.approx(1.0)
+        assert failing_check["tolerance"] == pytest.approx(0.15)
+        assert oldest_split_basis["basis"] == "as_filed_diluted_shares_vs_split_adjusted_price"
+        assert oldest_split_basis["assessment_status"] == "incompatible_or_unverified"
+        assert oldest_split_basis["assessed_through"] == "2025-12-31"
+        assert oldest_split_basis["post_period_exposure_days"] == 58
+        assert oldest_split_basis["maximum_exposure_days"] == 200
+        assert oldest_split_basis["continuity_tolerance"] == pytest.approx(0.15)
+        assert "verified_through" not in oldest_split_basis
+        assert "residual_risk" not in oldest_split_basis
+        assert oldest_forecast.scenario_payload()["split_basis"] == oldest_split_basis
+    annual_drift_forecast = forecasts[str(annual_drift_ok.pk)]["3y"]
+    assert annual_drift_forecast.scenario.base is not None
+    adjacent_checks = [
+        check
+        for check in annual_drift_forecast.calculation["split_basis"]["continuity_checks"]
+        if check["check"] == "adjacent_annual_diluted_shares"
+    ]
+    assert len(adjacent_checks) == 2
+    assert all(check["relative_difference"] <= 0.15 for check in adjacent_checks)
+
+
+@pytest.mark.django_db
+def test_v1_config_disables_adjacent_share_continuity_and_stays_reproducible() -> None:
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+    config = replace(v1, peer=replace(v1.peer, minimum_peers={4: 1, 3: 1, 2: 1}))
+    assert config.adjacent_selected_annual_diluted_share_continuity is None
+
+    peer = _listing("V1PEER")
+    peer_price = _company_evidence(peer, family="fcf_per_share", sic="3571")
+    drifting = _listing("V1DRIFT")
+    drifting_price = _company_evidence(
+        drifting,
+        family="fcf_per_share",
+        sic="3571",
+        annual_shares=(10.0, 20.0, 20.0),
+    )
+
+    listings = [peer, drifting]
+    prices = {str(listing.pk): 50.0 for listing in listings}
+    price_assets = {str(peer.pk): peer_price, str(drifting.pk): drifting_price}
+
+    forecasts = build_long_forecasts(
+        listings=listings,
+        current_prices=prices,
+        price_assets=price_assets,
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=config,
+    )
+
+    forecast = forecasts[str(drifting.pk)]["3y"]
+    # Old (v1) mismatch behavior still issues a forecast: the drifting annual
+    # share basis would have been withheld under v2's adjacent check, but v1
+    # never evaluates that continuity, so the pre-existing checks (reported
+    # diluted EPS and TTM-to-annual continuity) alone still allow the metric.
+    assert forecast.scenario.base is not None
+    assert "diluted-share basis continuity" not in forecast.scenario.insufficiency_reason
+    assert forecast.scenario.insufficiency_reason == (
+        "Positive-return probability is unavailable for deterministic long-v1 "
+        "until qualifying prospective outcomes exist"
+    )
+    for horizon in ("3y", "5y"):
+        checks = forecasts[str(drifting.pk)][horizon].calculation["split_basis"][
+            "continuity_checks"
+        ]
+        assert all(check["check"] != "adjacent_annual_diluted_shares" for check in checks)
+
+
+@pytest.mark.django_db
+def test_v1_reason_text_stays_exact_frozen_long_v1_wording() -> None:
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+    config = replace(v1, peer=replace(v1.peer, minimum_peers={4: 1, 3: 1, 2: 1}))
+
+    financial = _listing("V1BANK")
+    financial_price = _company_evidence(financial, family="fcf_per_share", sic="6021")
+    forecasts = build_long_forecasts(
+        listings=[financial],
+        current_prices={str(financial.pk): 50.0},
+        price_assets={str(financial.pk): financial_price},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=config,
+    )
+    assert forecasts[str(financial.pk)]["3y"].scenario.insufficiency_reason == (
+        "SEC SIC 6021 is outside the supported long-v1 industries"
+    )
+
+    tiny_price = _listing("V1TINY")
+    tiny_price_asset = _company_evidence(tiny_price, family="fcf_per_share", sic="3571")
+    tiny_forecasts = build_long_forecasts(
+        listings=[tiny_price],
+        current_prices={str(tiny_price.pk): 0.01},
+        price_assets={str(tiny_price.pk): tiny_price_asset},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=config,
+    )
+    assert "below the supported long-v1 minimum" in (
+        tiny_forecasts[str(tiny_price.pk)]["3y"].scenario.insufficiency_reason
+    )
+
+
+@pytest.mark.django_db
+def test_v1_pre_existing_share_mismatch_withholds_split_basis_payload() -> None:
+    """CT-1 regression: v1's frozen payload has no structured split_basis.
+
+    A pre-existing (v1-era) share-consistency failure -- a reported-diluted-
+    EPS mismatch or a TTM-to-annual share mismatch -- must still produce a
+    withheld forecast under the pinned `us-sec-long-v1` config, but its
+    `split_basis` must stay the original empty `{}` in both the calculation
+    payload and `scenario_payload()`. Only `us-sec-long-v2` (which enables
+    `adjacent_selected_annual_diluted_share_continuity`) may carry the
+    structured assessed-evidence payload for a failed metric.
+    """
+    v1 = load_long_forecast_config(Path("config/forecasts/us-sec-long-v1.yml"))
+    config = replace(v1, peer=replace(v1.peer, minimum_peers={4: 1, 3: 1, 2: 1}))
+    assert config.adjacent_selected_annual_diluted_share_continuity is None
+    assert (
+        long_forecast_config_hash(v1)
+        == "ef0e0478aebf53ab605ff47df1d4732ad7cb4e7f3c5d6559b89674ad6a0adeb1"
+    )
+
+    peer = _listing("V1SHAREPEER")
+    peer_price = _company_evidence(peer, family="fcf_per_share", sic="3571")
+    mismatch = _listing("V1SHAREMISMATCH")
+    mismatch_price = _company_evidence(
+        mismatch,
+        family="fcf_per_share",
+        sic="3571",
+        reported_eps_multiplier=0.5,
+    )
+    ttm_share_drift = _listing("V1TTMSHAREDRIFT")
+    ttm_share_drift_price = _company_evidence(
+        ttm_share_drift,
+        family="fcf_per_share",
+        sic="3571",
+        quarter_share_multiplier=2.0,
+    )
+
+    listings = [peer, mismatch, ttm_share_drift]
+    prices = {str(listing.pk): 50.0 for listing in listings}
+    price_assets = {
+        str(peer.pk): peer_price,
+        str(mismatch.pk): mismatch_price,
+        str(ttm_share_drift.pk): ttm_share_drift_price,
+    }
+    forecasts = build_long_forecasts(
+        listings=listings,
+        current_prices=prices,
+        price_assets=price_assets,
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=config,
+    )
+
+    for horizon in ("3y", "5y"):
+        mismatch_forecast = forecasts[str(mismatch.pk)][horizon]
+        assert mismatch_forecast.scenario.base is None
+        assert mismatch_forecast.scenario.insufficiency_reason == (
+            "FCF/share branch failed and cannot silently switch to EPS/share: "
+            "Share basis differs from reported diluted EPS by 50.0%, above 15.0%"
+        )
+        assert mismatch_forecast.calculation["split_basis"] == {}
+        assert mismatch_forecast.scenario_payload()["split_basis"] == {}
+
+        ttm_forecast = forecasts[str(ttm_share_drift.pk)][horizon]
+        assert ttm_forecast.scenario.base is None
+        assert "TTM diluted shares differ" in ttm_forecast.scenario.insufficiency_reason
+        assert ttm_forecast.calculation["split_basis"] == {}
+        assert ttm_forecast.scenario_payload()["split_basis"] == {}
 
 
 @pytest.mark.django_db
@@ -852,7 +1155,7 @@ def test_snapshot_analysis_issues_isolated_three_and_five_year_predictions(
     assert set(decision_predictions.values_list("horizon", flat=True)) == {"short"}
     assert set(long_predictions.values_list("horizon", flat=True)) == {"3y", "5y"}
     assert all(
-        prediction.method_version == "us-sec-long-v1"
+        prediction.method_version == config.version
         and prediction.probability_positive is None
         and prediction.price_provider == "twelve_data"
         and prediction.calculation["metric_family"] == "fcf_per_share"
@@ -910,6 +1213,98 @@ def test_snapshot_analysis_issues_isolated_three_and_five_year_predictions(
         == UniverseSnapshot.Grade.RESEARCH
         for result in late_results
     )
+
+
+@pytest.mark.django_db
+def test_v1_and_v2_long_forecast_cohorts_stay_separate_and_v1_prediction_unchanged(
+    tmp_path: Path,
+) -> None:
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    listing = _listing("COHORT")
+    _company_evidence(listing, family="fcf_per_share", sic="3571", create_price=False)
+    store = AssetStore(tmp_path)
+    _write_price_asset(store, listing, close=55.0)
+
+    def _snapshot() -> UniverseSnapshot:
+        universe = Universe.objects.create(
+            slug=f"cohort-{uuid4().hex}",
+            name="Cohort universe",
+            config_version="test-v1",
+        )
+        snapshot = UniverseSnapshot.objects.create(
+            universe=universe,
+            as_of_date=TARGET_DATE,
+            grade=UniverseSnapshot.Grade.OBSERVED,
+            config_hash="u" * 64,
+        )
+        UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
+        return snapshot
+
+    v1_results = analyze_snapshot(
+        universe_snapshot=_snapshot(),
+        decision_time=DECISION_TIME,
+        target_date=TARGET_DATE,
+        issued_on_time=True,
+        provider="twelve_data",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+        long_forecast_config_path=Path("config/forecasts/us-sec-long-v1.yml"),
+    )
+    v1_prediction = Prediction.objects.get(
+        analysis=v1_results[0].analysis,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        horizon="3y",
+    )
+    v1_config_hash = v1_prediction.config_hash
+    v1_method_version = v1_prediction.method_version
+    v1_model_version = v1_prediction.model_version
+    v1_calculation_snapshot = deepcopy(v1_prediction.calculation)
+
+    v2_results = analyze_snapshot(
+        universe_snapshot=_snapshot(),
+        decision_time=DECISION_TIME,
+        target_date=TARGET_DATE,
+        issued_on_time=True,
+        provider="twelve_data",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+    )
+    v2_prediction = Prediction.objects.get(
+        analysis=v2_results[0].analysis,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        horizon="3y",
+    )
+
+    assert v1_method_version == "us-sec-long-v1"
+    assert v2_prediction.method_version == "us-sec-long-v2"
+    assert v1_config_hash == "ef0e0478aebf53ab605ff47df1d4732ad7cb4e7f3c5d6559b89674ad6a0adeb1"
+    assert v2_prediction.config_hash != v1_config_hash
+    assert v2_prediction.model_version != v1_model_version
+
+    # Cohorts remain separate: distinct method_version/config_hash groups.
+    v2_long_predictions = Prediction.objects.filter(
+        analysis=v2_results[0].analysis,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        horizon__in=("3y", "5y"),
+    )
+    assert Prediction.objects.filter(config_hash=v1_config_hash).count() == 2
+    assert set(
+        Prediction.objects.filter(config_hash=v1_config_hash).values_list(
+            "method_version", flat=True
+        )
+    ) == {"us-sec-long-v1"}
+    assert v2_long_predictions.count() == 2
+    assert set(v2_long_predictions.values_list("config_hash", flat=True)) == {
+        v2_prediction.config_hash
+    }
+    assert set(v2_long_predictions.values_list("method_version", flat=True)) == {"us-sec-long-v2"}
+
+    # The v1 prediction is immutable and unaffected by the later v2 run.
+    v1_prediction.refresh_from_db()
+    assert v1_prediction.config_hash == v1_config_hash
+    assert v1_prediction.method_version == v1_method_version
+    assert v1_prediction.model_version == v1_model_version
+    assert v1_prediction.calculation == v1_calculation_snapshot
 
 
 def _small_peer_config() -> LongForecastConfig:

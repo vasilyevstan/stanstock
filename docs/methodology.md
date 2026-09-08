@@ -192,11 +192,15 @@ before the current forecast target.
 
 The long engine requires at least three contiguous annual per-share periods,
 compatible TTM metric and diluted-share periods, reported diluted-EPS
-share-basis checks for every selected annual period, TTM diluted shares within
-15% of the latest overlapping annual share basis, a bounded cash tax rate,
-beginning and ending invested capital using identical canonical and source
-concept definitions, and a same-family SIC peer set meeting frozen floors. Its
-base input is:
+share-basis checks for every selected annual period, TTM diluted shares
+within 15% of the latest overlapping annual share basis, a bounded cash tax
+rate, beginning and ending invested capital using identical canonical and
+source concept definitions, and a same-family SIC peer set meeting frozen
+floors. The default `us-sec-long-v2` configuration additionally checks
+diluted-share basis continuity between every adjacent pair of selected
+annual periods (same 15% tolerance); the frozen `us-sec-long-v1`
+configuration never evaluates that adjacent check and remains reproducible
+exactly as originally released. Its base input is:
 
 ```text
 g0 = cap(

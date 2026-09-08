@@ -92,6 +92,7 @@ class LongForecastConfig:
     peer: LongPeerConfig
     horizons: dict[str, LongHorizonConfig]
     scenarios: dict[str, LongScenarioConfig]
+    adjacent_selected_annual_diluted_share_continuity: bool | None
     raw: dict[str, Any]
 
     @classmethod
@@ -107,7 +108,7 @@ class LongForecastConfig:
             raise ValueError("Long forecasts must exclude dividends")
         probability_enabled = mapping.get("probability_positive_enabled")
         if probability_enabled is not False:
-            raise ValueError("Long forecast probability must remain disabled in v1")
+            raise ValueError("Long forecast probability must remain disabled")
 
         eligibility_raw = _mapping(mapping, "eligibility")
         unsupported_ranges = tuple(
@@ -311,6 +312,11 @@ class LongForecastConfig:
         ):
             raise ValueError("Long forecast scenario assumptions must increase bear/base/bull")
 
+        adjacent_selected_annual_diluted_share_continuity = _optional_capability_enabled(
+            mapping,
+            "adjacent_selected_annual_diluted_share_continuity",
+        )
+
         return cls(
             schema_version=schema_version,
             version=_required_text(mapping, "version"),
@@ -326,12 +332,15 @@ class LongForecastConfig:
             peer=peer,
             horizons=horizons,
             scenarios=scenarios,
+            adjacent_selected_annual_diluted_share_continuity=(
+                adjacent_selected_annual_diluted_share_continuity
+            ),
             raw=mapping,
         )
 
 
 def default_long_forecast_config_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "forecasts" / "us-sec-long-v1.yml"
+    return Path(__file__).resolve().parents[3] / "config" / "forecasts" / "us-sec-long-v2.yml"
 
 
 def load_long_forecast_config(path: Path | None = None) -> LongForecastConfig:
@@ -345,6 +354,8 @@ def load_long_forecast_config(path: Path | None = None) -> LongForecastConfig:
 def long_forecast_config_hash(config: LongForecastConfig) -> str:
     effective = asdict(config)
     effective.pop("raw")
+    if effective.get("adjacent_selected_annual_diluted_share_continuity") is None:
+        effective.pop("adjacent_selected_annual_diluted_share_continuity")
     payload = json.dumps(
         effective,
         sort_keys=True,
@@ -387,6 +398,20 @@ def _required_bool(mapping: dict[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be boolean")
     return value
+
+
+def _optional_capability_enabled(mapping: dict[str, Any], key: str) -> bool | None:
+    if key not in mapping:
+        return None
+    value = mapping[key]
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be a mapping with exactly an enabled boolean")
+    if set(value) != {"enabled"}:
+        raise ValueError(f"{key} must be a mapping with exactly an enabled boolean")
+    enabled = value["enabled"]
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{key}.enabled must be boolean")
+    return enabled
 
 
 def _positive_int(mapping: dict[str, Any], key: str) -> int:

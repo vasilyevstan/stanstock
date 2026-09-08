@@ -232,6 +232,108 @@ def test_advisory_prediction_matures_without_decision_success(tmp_path) -> None:
 
 
 @pytest.mark.django_db
+def test_withheld_advisory_forecast_stays_unresolved_without_price_lookup(tmp_path) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        price_provider="synthetic",
+        recommendation=Recommendation.HOLD,
+        bear=None,
+        base=None,
+        bull=None,
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=prediction.target_date + timedelta(days=200),
+        evaluation_time=_evaluation_time(),
+        store=AssetStore(tmp_path),
+    )
+
+    assert result.outcome.status == PredictionOutcome.Status.UNRESOLVED
+    assert result.outcome.resolution == "Withheld forecast has no scenario to evaluate"
+    assert result.outcome.actual_return is None
+    assert result.outcome.benchmark_return is None
+    assert result.outcome.success is None
+    assert result.outcome.direction_correct is None
+    assert result.outcome.interval_covered is None
+    assert result.outcome.error is None
+    assert result.outcome.signed_error is None
+
+
+@pytest.mark.django_db
+def test_withheld_decision_buy_still_matures_and_scores_from_actual_return(tmp_path) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        price_provider="synthetic",
+        recommendation=Recommendation.BUY,
+        bear=None,
+        base=None,
+        bull=None,
+    )
+    sessions = _business_dates_after(prediction.target_date, 10)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store, prediction.listing.ticker, _evaluation_time(), sessions, [150] * 10
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluation_time=_evaluation_time(),
+        store=store,
+    )
+
+    assert result.outcome.status == PredictionOutcome.Status.MATURED
+    assert result.outcome.actual_return == Decimal("0.5")
+    assert result.outcome.success is True
+    assert result.outcome.error is None
+    assert result.outcome.interval_covered is None
+
+
+@pytest.mark.django_db
+def test_withheld_decision_hold_stays_unresolved_without_bear_bull_range(tmp_path) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        price_provider="synthetic",
+        recommendation=Recommendation.HOLD,
+        bear=None,
+        base=None,
+        bull=None,
+    )
+    sessions = _business_dates_after(prediction.target_date, 10)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store, prediction.listing.ticker, _evaluation_time(), sessions, [150] * 10
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluation_time=_evaluation_time(),
+        store=store,
+    )
+
+    assert result.outcome.status == PredictionOutcome.Status.UNRESOLVED
+    assert (
+        result.outcome.resolution == "HOLD success requires non-null stored bear and bull returns"
+    )
+    assert result.outcome.success is None
+    assert result.outcome.actual_return is None
+
+
+@pytest.mark.django_db
 def test_batch_evaluation_reuses_identical_price_frame(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
