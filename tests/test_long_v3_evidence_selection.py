@@ -73,6 +73,9 @@ from stanstock.research.long_forecasts import (
     CORRECTION_POLICY_RECORDED_ONLY,
     LONG_FORECAST_CONCEPTS,
     MAX_SAME_DATE_SOURCE_COMBINATIONS,
+    _invested_capital_from_facts,
+    _pair_search_payload,
+    _RejectedInvestedCapital,
     audit_invested_capital_pairs,
     build_long_forecasts,
     correction_availability_policy,
@@ -3290,6 +3293,7 @@ def _wide_alias_balance_sheet(
     sec_config: Any,
     *,
     period_ends: tuple[date, ...] = (date(2024, 12, 31), date(2025, 12, 31)),
+    available_at: datetime | None = None,
 ) -> dict[date, list[FundamentalFact]]:
     """File every declared balance-sheet alias through its own assets.
 
@@ -3302,7 +3306,9 @@ def _wide_alias_balance_sheet(
     rules = {rule.canonical_concept: rule for rule in sec_config.concept_rules}
     filed: dict[date, list[FundamentalFact]] = {}
     for period_end in period_ends:
-        available_at = datetime(period_end.year + 1, 2, 15, tzinfo=UTC)
+        # A period ending early in a later calendar year would otherwise be
+        # dated available after the decision time and never be read at all.
+        filed_at = available_at or datetime(period_end.year + 1, 2, 15, tzinfo=UTC)
         for concept, base_value in (
             ("equity", 400.0),
             ("cash_and_equivalents", 50.0),
@@ -3320,7 +3326,7 @@ def _wide_alias_balance_sheet(
                         start=None,
                         end=period_end,
                         fiscal_period="FY",
-                        available_at=available_at,
+                        available_at=filed_at,
                         accession=(f"{listing.ticker}-{concept}-{index}-{period_end.isoformat()}"),
                         source_concept=f"us-gaap:{alias}",
                     )
@@ -4739,3 +4745,424 @@ def test_the_same_date_combination_ceiling_is_configured_and_not_tunable() -> No
     # A frozen version has no ceiling at all, and asking for one is explicit.
     with pytest.raises(ValueError, match="does not declare"):
         same_date_combination_ceiling(load_long_forecast_config(V2_PATH))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_reason"),
+    [
+        # Nonpositive equity, and a negative that also drives invested
+        # capital nonpositive -- both guards, one provenance mechanism.
+        (Decimal("0"), "Equity must be positive"),
+        (Decimal("-1"), "Equity must be positive"),
+    ],
+)
+@pytest.mark.django_db
+def test_a_value_rejected_alias_is_assessed_not_dropped(
+    value: Decimal,
+    expected_reason: str,
+) -> None:
+    """A combination refused by a value guard keeps its evidence visible.
+
+    The guard itself is the point and must stay: an unusable equity value
+    never enters the arithmetic, the candidate list, or any ranking. But the
+    alternate alias was still *read and considered*, so silently discarding
+    the combination erased a configured alias -- and its Companyfacts and
+    filing assets -- from the manifest entirely.
+
+    The alternate alias is filed through its own source and filing assets, so
+    if the assessment failed to carry it those two asset IDs would simply be
+    absent from the forecast's immutable `source_assets`.
+    """
+    target = _listing(f"VALGUARD{int(value)}")
+    peer = _listing(f"VALGUARD{int(value)}P")
+    balance_sheets = (
+        _balance_sheet(date(2024, 12, 31), debt_concept="reported_long_term_debt"),
+        _balance_sheet(date(2025, 12, 31), debt_concept="reported_long_term_debt"),
+    )
+    target_price = _company_evidence(target, sic="3571", balance_sheets=balance_sheets)
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1)
+
+    rejected_assets: set[str] = set()
+    rejected_fact_ids: set[str] = set()
+    for period_end, _debt_concept, available_at in balance_sheets:
+        before = set(
+            FundamentalFact.objects.filter(
+                company=target.security.company,
+                concept="equity",
+            ).values_list("id", flat=True)
+        )
+        companyfacts, filing = _alternate_balance_sheet_evidence(
+            target,
+            period_end=period_end,
+            available_at=available_at,
+            value=value,
+        )
+        after = set(
+            FundamentalFact.objects.filter(
+                company=target.security.company,
+                concept="equity",
+            ).values_list("id", flat=True)
+        )
+        rejected_assets.update({str(companyfacts.pk), str(filing.pk)})
+        rejected_fact_ids.update(str(item) for item in after - before)
+
+    forecast = build_long_forecasts(
+        listings=[target, peer],
+        current_prices={str(target.pk): 50.0, str(peer.pk): 55.0},
+        price_assets={str(target.pk): target_price, str(peer.pk): peer_price},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=_small_peer_config(load_long_forecast_config(V3_PATH)),
+    )[str(target.pk)]["3y"]
+    selection = _assert_manifest_closes(forecast)
+    assessment = selection["invested_capital_assessment"]
+
+    # The guard still holds: the forecast succeeds on the valid alias only.
+    assert forecast.scenario.base is not None
+    assert assessment["status"] == "selected_compatible_pair"
+
+    # The refusal is recorded explicitly, with its reason and its aliases.
+    rejections = assessment["value_rejected_candidates"]
+    assert rejections
+    assert {entry["reason"] for entry in rejections} == {expected_reason}
+    assert {entry["side"] for entry in rejections} == {"beginning", "ending"}
+    assert rejected_fact_ids <= {fact_id for entry in rejections for fact_id in entry["fact_ids"]}
+    assert EQUITY_ALTERNATE in {
+        basis["source_concept"] for entry in rejections for basis in entry["source_basis"]
+    }
+
+    # Assessed, never selected, and never in the arithmetic.
+    assessed = set(selection["assessed_evidence_fact_ids"])
+    selected = set(selection["selected_input_fact_ids"])
+    assert rejected_fact_ids <= assessed
+    assert not (rejected_fact_ids & selected)
+    assert not (rejected_fact_ids & {fact["id"] for fact in forecast.calculation["input_facts"]})
+    # No rejected combination reached a candidate list or a selected pair.
+    for side in ("beginning_candidates", "ending_candidates"):
+        for candidate in assessment[side]:
+            assert not (set(candidate["fact_ids"]) & rejected_fact_ids)
+    assert not (
+        set(assessment["selected_beginning_fact_ids"] + assessment["selected_ending_fact_ids"])
+        & rejected_fact_ids
+    )
+
+    # Both the source and the filing asset are provable from the manifest.
+    asset_ids = {str(asset.pk) for asset in forecast.source_assets}
+    assert rejected_assets <= asset_ids
+    described = {entry["id"]: entry for entry in selection["assessed_evidence"]}
+    for fact_id in rejected_fact_ids:
+        assert fact_id in described
+        assert described[fact_id]["source_asset_id"] in asset_ids
+        assert described[fact_id]["filing_evidence_asset_id"] in asset_ids
+
+
+def _value_rejected_balance_sheet(
+    listing: Listing,
+    *,
+    period_end: date,
+) -> tuple[set[str], set[str]]:
+    """File a usable snapshot plus an unusable equity alias at one date.
+
+    Returns the alternate alias's fact IDs and its two distinct assets, so a
+    caller can assert the refused combination stayed assessed and manifest
+    covered rather than being discarded with the combination.
+    """
+    available_at = datetime(period_end.year + 1, 2, 15, tzinfo=UTC)
+    companyfacts, filing = _sec_assets(listing)
+    for concept, value in (
+        ("equity", Decimal("400")),
+        ("cash_and_equivalents", Decimal("50")),
+        ("reported_long_term_debt", Decimal("100")),
+    ):
+        _fact(
+            listing,
+            companyfacts,
+            filing,
+            concept=concept,
+            value=value,
+            start=None,
+            end=period_end,
+            fiscal_period="FY",
+            available_at=available_at,
+            accession=f"{listing.ticker}-{concept}-{period_end.isoformat()}",
+        )
+    alternate_companyfacts, alternate_filing = _sec_assets(listing)
+    rejected = _fact(
+        listing,
+        alternate_companyfacts,
+        alternate_filing,
+        concept="equity",
+        value=Decimal("-1"),
+        start=None,
+        end=period_end,
+        fiscal_period="FY",
+        available_at=available_at,
+        accession=f"{listing.ticker}-alt-equity-{period_end.isoformat()}",
+        source_concept=EQUITY_ALTERNATE,
+    )
+    return {str(rejected.pk)}, {str(alternate_companyfacts.pk), str(alternate_filing.pk)}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("ticker", "kept_balance_sheet", "rejection_date", "overflow_date"),
+    [
+        # Ending side: the beginning side completes, then the ending side
+        # accumulates a refusal at its nearest date and overflows at a
+        # further in-tolerance one.
+        ("OVFENDREJ", date(2024, 12, 31), date(2025, 12, 31), date(2026, 1, 5)),
+        # Beginning side: the mirror image, so both `except` wirings are
+        # locked rather than only the one that happens to run first.
+        ("OVFBEGREJ", date(2025, 12, 31), date(2024, 12, 31), date(2025, 1, 5)),
+    ],
+)
+def test_value_rejections_survive_a_later_combination_ceiling_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    ticker: str,
+    kept_balance_sheet: date,
+    rejection_date: date,
+    overflow_date: date,
+) -> None:
+    """A refusal must not discard what the same side already assessed.
+
+    Dates are walked nearest-target first, so a value-guard refusal at the
+    nearest date is recorded *before* a further in-tolerance date blows the
+    combination ceiling. Those pre-overflow rejections travel out through the
+    exception and must still reach the assessment: dropping them would erase
+    a configured alias and both of its assets precisely when the run is
+    already withholding, which is when provenance matters most.
+    """
+    sec_config = _wide_alias_sec_config()
+    monkeypatch.setattr(
+        "stanstock.research.long_forecasts.load_sec_fundamentals_config",
+        lambda: sec_config,
+    )
+    target = _listing(ticker)
+    peer = _listing(f"{ticker}P")
+    target_price = _company_evidence(
+        target,
+        sic="3571",
+        balance_sheets=(
+            _balance_sheet(kept_balance_sheet, debt_concept="reported_long_term_debt"),
+        ),
+    )
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1)
+
+    rejected_fact_ids, rejected_assets = _value_rejected_balance_sheet(
+        target,
+        period_end=rejection_date,
+    )
+    overflow_facts = _wide_alias_balance_sheet(
+        target,
+        sec_config,
+        period_ends=(overflow_date,),
+        available_at=datetime(2026, 2, 15, tzinfo=UTC),
+    )
+
+    withheld = build_long_forecasts(
+        listings=[target, peer],
+        current_prices={str(target.pk): 50.0, str(peer.pk): 55.0},
+        price_assets={str(target.pk): target_price, str(peer.pk): peer_price},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=_small_peer_config(load_long_forecast_config(V3_PATH)),
+    )[str(target.pk)]["3y"]
+    selection = _assert_manifest_closes(withheld)
+    assessment = selection["invested_capital_assessment"]
+
+    # The run withheld on the ceiling, not on anything else.
+    assert withheld.scenario.base is None
+    assert assessment["status"] == "same_date_combination_ceiling_exceeded"
+    assert assessment["same_date_combination_overflow"]["period_end"] == overflow_date.isoformat()
+
+    # The pre-overflow refusal survived the exception path.
+    rejection_fact_ids = {
+        fact_id
+        for entry in assessment["value_rejected_candidates"]
+        for fact_id in entry["fact_ids"]
+    }
+    assert rejected_fact_ids <= rejection_fact_ids
+    assert "Equity must be positive" in {
+        entry["reason"] for entry in assessment["value_rejected_candidates"]
+    }
+    assert rejection_date.isoformat() in {
+        entry["period_end"] for entry in assessment["value_rejected_candidates"]
+    }
+
+    # Assessed and manifest-covered, through both of its own assets.
+    assessed = set(selection["assessed_evidence_fact_ids"])
+    asset_ids = {str(asset.pk) for asset in withheld.source_assets}
+    assert rejected_fact_ids <= assessed
+    assert rejected_assets <= asset_ids
+    # The facts responsible for the ceiling are still carried too.
+    assert {str(fact.pk) for fact in overflow_facts[overflow_date]} <= assessed
+
+    # Never selected, and never in the arithmetic.
+    assert not (rejected_fact_ids & set(selection["selected_input_fact_ids"]))
+    assert not (rejected_fact_ids & {fact["id"] for fact in withheld.calculation["input_facts"]})
+    assert assessment["selected_beginning_fact_ids"] == []
+    assert assessment["selected_ending_fact_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# CT-2: the assessment schema version and the value-guard reasons are contract
+# ---------------------------------------------------------------------------
+
+
+def test_pair_search_payload_declares_schema_version_two() -> None:
+    """Populated and empty rejection payloads both declare schema 2."""
+    empty = _pair_search_payload(
+        beginning_target=date(2024, 12, 31),
+        ending_target=date(2025, 12, 31),
+        tolerance_days=7,
+        beginnings=(),
+        endings=(),
+        pair_count=0,
+    )
+    assert empty["schema_version"] == 2
+    assert empty["value_rejected_candidates"] == []
+
+    rejection = _RejectedInvestedCapital(
+        period_end=date(2025, 12, 31),
+        reason="Equity must be positive",
+        fact_ids=("11111111-1111-4111-8111-111111111111",),
+        source_basis=(("equity", EQUITY_ALTERNATE),),
+    )
+    populated = _pair_search_payload(
+        beginning_target=date(2024, 12, 31),
+        ending_target=date(2025, 12, 31),
+        tolerance_days=7,
+        beginnings=(),
+        endings=(),
+        beginning_rejections=(rejection,),
+        ending_rejections=(rejection,),
+        pair_count=0,
+    )
+    assert populated["schema_version"] == 2
+    assert [entry["side"] for entry in populated["value_rejected_candidates"]] == [
+        "beginning",
+        "ending",
+    ]
+    assert populated["value_rejected_candidates"][0]["fact_ids"] == list(rejection.fact_ids)
+    assert populated["value_rejected_candidates"][0]["reason"] == "Equity must be positive"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("equity_value", "cash_value", "debt_value", "expected_reason"),
+    [
+        (Decimal("0"), Decimal("50"), Decimal("100"), "Equity must be positive"),
+        (
+            Decimal("400"),
+            Decimal("-1"),
+            Decimal("100"),
+            "Cash and equivalents must not be negative",
+        ),
+        (
+            Decimal("400"),
+            Decimal("50"),
+            Decimal("-1"),
+            "Debt basis must be present and non-negative",
+        ),
+        (
+            Decimal("1"),
+            Decimal("500"),
+            Decimal("1"),
+            "Invested capital must be finite and positive",
+        ),
+    ],
+)
+def test_each_value_guard_reports_its_own_fixed_reason(
+    equity_value: Decimal,
+    cash_value: Decimal,
+    debt_value: Decimal,
+    expected_reason: str,
+) -> None:
+    """Every guard funnels through one record and keeps a stable reason.
+
+    The strings are contract: they appear in persisted assessment payloads,
+    so a silent rewording would change immutable provenance.
+    """
+    listing = _listing("GUARDS")
+    companyfacts, filing = _sec_assets(listing)
+    period_end = date(2025, 12, 31)
+    facts = {}
+    for concept, value in (
+        ("equity", equity_value),
+        ("cash_and_equivalents", cash_value),
+        ("reported_long_term_debt", debt_value),
+    ):
+        facts[concept] = _fact(
+            listing,
+            companyfacts,
+            filing,
+            concept=concept,
+            value=value,
+            start=None,
+            end=period_end,
+            fiscal_period="FY",
+            available_at=datetime(2026, 2, 15, tzinfo=UTC),
+            accession=f"{listing.ticker}-{concept}",
+        )
+
+    result = _invested_capital_from_facts(
+        period_end=period_end,
+        equity=facts["equity"],
+        cash=facts["cash_and_equivalents"],
+        debt_facts=(facts["reported_long_term_debt"],),
+        debt_method="reported_long_term_plus_short_term_borrowings",
+        priority=source_concept_priority(load_sec_fundamentals_config()),
+    )
+
+    assert isinstance(result, _RejectedInvestedCapital)
+    assert result.reason == expected_reason
+    assert result.period_end == period_end
+    # Every participating fact is retained, whichever guard fired.
+    assert set(result.fact_ids) == {str(fact.pk) for fact in facts.values()}
+
+
+@pytest.mark.django_db
+def test_an_absent_debt_basis_reports_the_debt_reason() -> None:
+    """The empty-debt branch shares the negative-debt reason and record."""
+    listing = _listing("NODEBT")
+    companyfacts, filing = _sec_assets(listing)
+    period_end = date(2025, 12, 31)
+    equity = _fact(
+        listing,
+        companyfacts,
+        filing,
+        concept="equity",
+        value=Decimal("400"),
+        start=None,
+        end=period_end,
+        fiscal_period="FY",
+        available_at=datetime(2026, 2, 15, tzinfo=UTC),
+        accession=f"{listing.ticker}-equity",
+    )
+    cash = _fact(
+        listing,
+        companyfacts,
+        filing,
+        concept="cash_and_equivalents",
+        value=Decimal("50"),
+        start=None,
+        end=period_end,
+        fiscal_period="FY",
+        available_at=datetime(2026, 2, 15, tzinfo=UTC),
+        accession=f"{listing.ticker}-cash",
+    )
+
+    result = _invested_capital_from_facts(
+        period_end=period_end,
+        equity=equity,
+        cash=cash,
+        debt_facts=(),
+        debt_method="sum_non_overlapping_debt_components",
+        priority=source_concept_priority(load_sec_fundamentals_config()),
+    )
+
+    assert isinstance(result, _RejectedInvestedCapital)
+    assert result.reason == "Debt basis must be present and non-negative"
+    assert set(result.fact_ids) == {str(equity.pk), str(cash.pk)}

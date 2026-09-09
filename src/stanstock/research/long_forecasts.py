@@ -1596,6 +1596,23 @@ class _SameDateCombinationAxis:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _RejectedInvestedCapital:
+    """One same-date source-basis combination refused by a value guard.
+
+    It is assessed evidence and nothing more: the combination is never
+    ranked, paired, or used in any arithmetic. Recording it keeps the
+    configured aliases it consulted -- and therefore their Companyfacts and
+    filing assets -- inside the immutable manifest, instead of vanishing
+    because their values happened to be unusable.
+    """
+
+    period_end: date
+    reason: str
+    fact_ids: tuple[str, ...]
+    source_basis: tuple[tuple[str, str], ...]
+
+
 class SameDateSourceCombinationOverflow(ValueError):
     """One balance-sheet date declares more combinations than may be searched.
 
@@ -1623,6 +1640,7 @@ class SameDateSourceCombinationOverflow(ValueError):
         ceiling: int,
         axes: tuple[_SameDateCombinationAxis, ...],
         assessed_candidates: tuple[_InvestedCapital, ...] = (),
+        assessed_rejections: tuple[_RejectedInvestedCapital, ...] = (),
     ) -> None:
         self.period_end = period_end
         self.combination_count = combination_count
@@ -1632,6 +1650,10 @@ class SameDateSourceCombinationOverflow(ValueError):
         #: the refusal. They are assessed evidence, never eligible: the whole
         #: side is withheld and no pair is selected from them.
         self.assessed_candidates = assessed_candidates
+        #: Value-guard refusals already recorded at earlier dates on this
+        #: side. They are assessed evidence too, and the refusal must not
+        #: discard them.
+        self.assessed_rejections = assessed_rejections
         super().__init__(
             f"Balance-sheet date {period_end.isoformat()} declares {combination_count} "
             f"same-date source-basis combinations, above the reviewed ceiling of "
@@ -1662,8 +1684,12 @@ def _alias_invested_capital_candidates(
     tolerance_days: int,
     priority: dict[tuple[str, str], int],
     maximum_combinations: int,
-) -> tuple[_InvestedCapital, ...]:
+) -> tuple[tuple[_InvestedCapital, ...], tuple[_RejectedInvestedCapital, ...]]:
     """Every permitted same-date source-basis snapshot, nearest date first.
+
+    Returns the eligible candidates *and* the combinations a value guard
+    refused. The second tuple never participates in pairing or ranking; it
+    exists so refused evidence stays assessed and manifest-covered.
 
     The frozen path reads `series.instants`, which has already collapsed each
     canonical concept to one winning alias per period identity. A compatible
@@ -1700,6 +1726,7 @@ def _alias_invested_capital_candidates(
         key=lambda value: (abs((value - target_date).days), value),
     )
     candidates: list[_InvestedCapital] = []
+    rejected: list[_RejectedInvestedCapital] = []
     for period_end in dates:
         axes = _same_date_combination_axes(by_concept_date, period_end)
         if axes is None:
@@ -1715,6 +1742,7 @@ def _alias_invested_capital_candidates(
                 ceiling=maximum_combinations,
                 axes=axes,
                 assessed_candidates=tuple(candidates),
+                assessed_rejections=tuple(rejected),
             )
         equities = _alias_options(by_concept_date, "equity", period_end)
         cashes = _alias_options(by_concept_date, "cash_and_equivalents", period_end)
@@ -1730,19 +1758,24 @@ def _alias_invested_capital_candidates(
                         debt_method=debt_method,
                         priority=priority,
                     )
-                    if candidate is not None:
+                    if isinstance(candidate, _RejectedInvestedCapital):
+                        rejected.append(candidate)
+                    else:
                         candidates.append(candidate)
-    return tuple(
-        sorted(
-            candidates,
-            key=lambda candidate: (
-                abs((candidate.period_end - target_date).days),
-                candidate.period_end,
-                candidate.source_priority,
-                candidate.source_basis,
-                candidate.observation_identities,
-            ),
-        )
+    return (
+        tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    abs((candidate.period_end - target_date).days),
+                    candidate.period_end,
+                    candidate.source_priority,
+                    candidate.source_basis,
+                    candidate.observation_identities,
+                ),
+            )
+        ),
+        _dedupe_rejections(rejected),
     )
 
 
@@ -1854,6 +1887,29 @@ def _debt_basis_options(
     return [("sum_non_overlapping_debt_components", combination) for combination in combinations]
 
 
+def _value_guard_rejection(
+    *,
+    period_end: date,
+    reason: str,
+    facts: tuple[FundamentalFact, ...],
+) -> _RejectedInvestedCapital:
+    """Build the one record every value-guard branch produces.
+
+    All four guards -- nonpositive equity, negative cash, absent or negative
+    debt, and nonfinite or nonpositive invested capital -- funnel through
+    here, so there is exactly one provenance mechanism rather than one per
+    branch. Only the reason differs.
+    """
+    return _RejectedInvestedCapital(
+        period_end=period_end,
+        reason=reason,
+        fact_ids=_dedupe_text(tuple(str(fact.pk) for fact in facts)),
+        source_basis=tuple(
+            (fact.concept, fact.source_concept) for fact in facts if fact.source_concept
+        ),
+    )
+
+
 def _invested_capital_from_facts(
     *,
     period_end: date,
@@ -1862,18 +1918,44 @@ def _invested_capital_from_facts(
     debt_facts: tuple[FundamentalFact, ...],
     debt_method: str,
     priority: dict[tuple[str, str], int],
-) -> _InvestedCapital | None:
-    """Apply the frozen value guards to one explicit source-basis combination."""
-    if equity.value <= 0 or cash.value < 0:
-        return None
+) -> _InvestedCapital | _RejectedInvestedCapital:
+    """Apply the frozen value guards to one explicit source-basis combination.
+
+    The guards themselves are unchanged: a rejected combination never enters
+    the arithmetic, the candidate list, or any ranking. What changed is that
+    a rejection is now *returned* instead of discarded, so the configured
+    aliases it consulted stay visible as assessed evidence and their
+    Companyfacts and filing assets stay inside the manifest closure.
+    """
+    participating = (equity, cash, *debt_facts)
+    if equity.value <= 0:
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Equity must be positive",
+            facts=participating,
+        )
+    if cash.value < 0:
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Cash and equivalents must not be negative",
+            facts=participating,
+        )
     if not debt_facts or any(fact.value < 0 for fact in debt_facts):
-        return None
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Debt basis must be present and non-negative",
+            facts=participating,
+        )
     debt = float(sum((fact.value for fact in debt_facts), Decimal("0")))
     equity_value = float(equity.value)
     cash_value = float(cash.value)
     invested = debt + equity_value - cash_value
     if not math.isfinite(invested) or invested <= 0:
-        return None
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Invested capital must be finite and positive",
+            facts=participating,
+        )
     source_basis = (
         ("equity", equity.source_concept),
         ("cash_and_equivalents", cash.source_concept),
@@ -1960,7 +2042,7 @@ def _joint_invested_capital_pair(
     already assessed.
     """
     try:
-        beginnings = _alias_invested_capital_candidates(
+        beginnings, beginning_rejections = _alias_invested_capital_candidates(
             maximum_combinations=maximum_combinations,
             series=series,
             target_date=beginning_target,
@@ -1975,9 +2057,11 @@ def _joint_invested_capital_pair(
             tolerance_days=tolerance_days,
             beginnings=error.assessed_candidates,
             endings=(),
+            beginning_rejections=error.assessed_rejections,
+            ending_rejections=(),
         )
     try:
-        endings = _alias_invested_capital_candidates(
+        endings, ending_rejections = _alias_invested_capital_candidates(
             maximum_combinations=maximum_combinations,
             series=series,
             target_date=ending_target,
@@ -1992,6 +2076,8 @@ def _joint_invested_capital_pair(
             tolerance_days=tolerance_days,
             beginnings=beginnings,
             endings=error.assessed_candidates,
+            beginning_rejections=beginning_rejections,
+            ending_rejections=error.assessed_rejections,
         )
     payload = _pair_search_payload(
         beginning_target=beginning_target,
@@ -1999,6 +2085,8 @@ def _joint_invested_capital_pair(
         tolerance_days=tolerance_days,
         beginnings=beginnings,
         endings=endings,
+        beginning_rejections=beginning_rejections,
+        ending_rejections=ending_rejections,
         pair_count=0,
     )
     pairs = [
@@ -2095,11 +2183,18 @@ def _pair_search_payload(
     tolerance_days: int,
     beginnings: tuple[_InvestedCapital, ...],
     endings: tuple[_InvestedCapital, ...],
+    beginning_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    ending_rejections: tuple[_RejectedInvestedCapital, ...] = (),
     pair_count: int,
 ) -> dict[str, Any]:
-    """The complete, always-produced record of one invested-capital search."""
+    """The complete, always-produced record of one invested-capital search.
+
+    Schema 2 adds ``value_rejected_candidates``: combinations a value guard
+    refused. They are assessed evidence, never candidates, and are listed
+    here so the manifest closure covers the aliases they consulted.
+    """
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "policy": JOINT_INVESTED_CAPITAL_POLICY,
         "tolerance_days": tolerance_days,
         "beginning_target_date": beginning_target.isoformat(),
@@ -2118,6 +2213,23 @@ def _pair_search_payload(
         "ending_candidate_count": len(endings),
         "compatible_pair_count": pair_count,
         "eligible_pair_count": pair_count,
+        "value_rejected_candidates": [
+            {
+                "side": side,
+                "period_end": rejection.period_end.isoformat(),
+                "reason": rejection.reason,
+                "source_basis": [
+                    {"concept": concept, "source_concept": source_concept}
+                    for concept, source_concept in rejection.source_basis
+                ],
+                "fact_ids": list(rejection.fact_ids),
+            }
+            for side, rejections in (
+                ("beginning", beginning_rejections),
+                ("ending", ending_rejections),
+            )
+            for rejection in rejections
+        ],
     }
 
 
@@ -2129,6 +2241,8 @@ def _combination_overflow_assessment(
     tolerance_days: int,
     beginnings: tuple[_InvestedCapital, ...],
     endings: tuple[_InvestedCapital, ...],
+    beginning_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    ending_rejections: tuple[_RejectedInvestedCapital, ...] = (),
 ) -> _InvestedCapitalPairAssessment:
     """Refuse the search while keeping every disqualifying fact visible.
 
@@ -2136,8 +2250,9 @@ def _combination_overflow_assessment(
     produced the bound, their aliases and fact ids, the resulting count, and
     the unchanged ceiling are all recorded. Candidates already assessed on
     the other side -- or at an earlier date on the refused side -- are
-    retained as assessed evidence rather than dropped. None of it is
-    eligible: no pair is selected and no product is ever enumerated.
+    retained as assessed evidence rather than dropped, as are any value-guard
+    refusals recorded before the bound was hit. None of it is eligible: no
+    pair is selected and no product is ever enumerated.
     """
     payload = _pair_search_payload(
         beginning_target=beginning_target,
@@ -2145,6 +2260,8 @@ def _combination_overflow_assessment(
         tolerance_days=tolerance_days,
         beginnings=beginnings,
         endings=endings,
+        beginning_rejections=beginning_rejections,
+        ending_rejections=ending_rejections,
         pair_count=0,
     )
     payload["same_date_combination_overflow"] = error.detail()
@@ -3143,6 +3260,24 @@ def _price_basis_failure(
     if dividends_included is not config.dividends_included:
         return "Price asset dividend basis is missing or incompatible"
     return ""
+
+
+def _dedupe_rejections(
+    rejections: list[_RejectedInvestedCapital],
+) -> tuple[_RejectedInvestedCapital, ...]:
+    """Collapse repeats deterministically, keeping the first reason seen.
+
+    One unusable alias can be refused once per debt basis it was paired
+    with, and the manifest only needs each distinct (date, basis, reason)
+    once.
+    """
+    unique: dict[tuple[Any, ...], _RejectedInvestedCapital] = {}
+    for rejection in rejections:
+        key = (rejection.period_end, rejection.source_basis, rejection.reason)
+        unique.setdefault(key, rejection)
+    return tuple(
+        unique[key] for key in sorted(unique, key=lambda item: (item[0], item[1], item[2]))
+    )
 
 
 def _dedupe_text(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:
