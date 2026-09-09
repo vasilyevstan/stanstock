@@ -208,7 +208,174 @@ floors. The default `us-sec-long-v2` configuration additionally checks
 diluted-share basis continuity between every adjacent pair of selected
 annual periods (same 15% tolerance); the frozen `us-sec-long-v1`
 configuration never evaluates that adjacent check and remains reproducible
-exactly as originally released. Its base input is:
+exactly as originally released.
+
+**Scope note.** The SEC correction-availability integrity fix that this work
+also delivers is *active* in the shipped default `us-sec-long-v2`
+configuration: ingestion binds every same-accession correction to the
+retrieval that carried it, and every reader benefits. Only the long-v3
+*reader* below -- alias selection, joint pair selection, and read-time
+correction resolution -- is inactive. The change as a whole is therefore not
+wholly inactive.
+
+`us-sec-long-v3` is a prospective, evidence-selection-only version that is
+**not the default and not approved for activation**. It keeps every long-v2
+formula weight, bound, cap, fade path, multiple reversion, peer floor,
+metric-family rule, freshness limit, tax proxy, scenario constant,
+probability withholding, return basis, and unsupported-SIC policy
+byte-identical, and changes only *which* already-persisted SEC observations
+the same arithmetic reads:
+
+- **Newest-quarter-anchored homogeneous TTM alias selection.** For each
+  canonical TTM concept, long-v3 finds the newest eligible quarter end,
+  ranks the observations at exactly that quarter under the existing
+  availability/revision/source-priority/accession order, and then requires
+  the winning source alias to supply four contiguous compatible quarters
+  spanning 350-380 days. Aliases are never stitched across quarters, a stale
+  but complete alias never displaces a newer restated newest-quarter
+  observation, and there is no annual current-period fallback. Annual
+  history selection stays on the frozen legacy path, as does every
+  long-v1/long-v2 and generic consumer.
+
+  A quarter derived from the difference of two year-to-date filings is
+  ranked by the single *controlling* filing that gates its knowability, not
+  by taking the maximum availability from one dependency and the maximum
+  revision from another. That synthesis would report a vintage that was
+  never filed and could hand the anchor to the wrong alias. The chosen
+  alias, its controlling source fact, and the per-quarter lineage of the
+  selected window are recorded in the calculation provenance.
+- **Deterministic joint compatible invested-capital pair selection.**
+  Instead of choosing the beginning and ending balance-sheet snapshots
+  independently, long-v3 searches every candidate pair inside the unchanged
+  +/-7-day tolerance and accepts only pairs whose debt method, debt
+  components, and canonical/source concept bases match exactly. Pairs are
+  ranked purely on evidence: combined and per-side target-date distance,
+  then eligible-evidence recency, then declared alias priority, canonical
+  source basis, and stable date/fact-id tie-breaks -- never on the resulting
+  ROIC, reinvestment, growth, forecast, or scenario favorability. When no
+  compatible pair exists the forecast is withheld with an explicit reason.
+
+  Because the normalized instant series keeps only one winning alias per
+  canonical concept and period, long-v3 additionally reads a candidate
+  surface that retains the latest eligible vintage per `(canonical concept,
+  source alias, period identity)` and enumerates the permitted same-date
+  source-basis combinations before pairing. A reported long-term debt
+  roll-up still excludes the component basis at that date, so no component
+  is double counted, and superseded revisions are still discarded.
+
+Every invested-capital pair search is persisted as an assessment -- missing
+beginning side, missing ending side, zero compatible pairs, a pair selected
+and then withheld for an unrelated reason, and success alike -- with the
+targets, candidate snapshots and their source bases, compatible-pair count,
+status, and rejection reason. Rejected evidence is recorded as *assessed*,
+never as verified.
+
+Within one alias, a directly reported quarter and a year-to-date-derived
+quarter for the same period end -- and two direct observations whose period
+identities differ but whose ends coincide -- are all retained and resolved by
+the full rank of one real controlling filing, not by availability alone. No
+long-v3 ordering or tie-break reads a generated row identifier: alias
+ordering, latest-revision selection, and pair ranking fall through to the
+persisted observation identity instead. A balance-sheet date whose instant
+observations do not all carry the canonical `instant::<date>` identity, and a
+date whose permitted same-date source-basis combinations exceed the reviewed
+ceiling declared by the configuration (counted from per-axis alias counts before any product is
+built, with every alias, fact, and axis multiplier behind that count
+recorded), each withhold that one listing explicitly while the rest of the
+run continues.
+
+- **Prospective deferral of unproven corrections.** Long-v3 resolves each
+  same-accession correction against the observation that proves it, not
+  against a recorded availability that a legacy ingestion may have backdated
+  to the original filing acceptance. A correction whose timing is not proven
+  at the requested cutoff is withheld from the series, the revision it
+  superseded -- which *is* proven there -- stands in its place, and the
+  withheld row is recorded under `deferred_unproven_corrections` with its
+  recorded availability, its resolved availability, and the reason. A legacy
+  revision with no actual observation boundary -- a reversion whose bytes
+  deduplicated onto an earlier revision's asset, or a revision from an asset
+  retrieved before the revision it supersedes became knowable -- is deferred
+  at every boundary. A chain-ordering lower bound is reported as assessed
+  context and never admits a row. Nothing is
+  rewritten: resolution is a read-time decision over immutable rows, and no
+  persisted fact or prediction is mutated. See `docs/point-in-time.md` for
+  the three clocks involved.
+
+  This policy is configuration-gated by its own declared, hashed capability
+  `proven_observation_correction_availability`, so adopting alias or joint
+  pair selection never silently acquires it. Frozen long-v1/long-v2 declare
+  no such key, read recorded availability exactly as released, and defer
+  nothing; the offline evidence audit applies the identical gate, so a frozen
+  version is never reported against a selection it would not make. The
+  same-date combination ceiling is likewise a declared, hashed config value
+  (`maximum_same_date_source_combinations: 256`) accepted only at the one
+  reviewed number -- never tuned, defaulted, or truncated.
+
+Every fact any of these assessments referenced -- including rejected,
+unpaired, and later-withheld candidates, the facts responsible for a refused
+combination space, every trailing-twelve-month dependency, every deferred
+correction, and every fact an alias-tail assessment examined and rejected
+before any quarter candidate could be constructed (an annual-only alternate
+alias, or a year-to-date pair whose derivation was refused) -- has its source
+and filing-evidence assets in the immutable forecast `source_assets`
+manifest. The payload separates that evidence into explicit, disjoint lists:
+the selected formula inputs described in `input_facts`, the assessed
+candidates that were read but not selected, and the union the manifest closes
+over. A failing path -- no compatible pair, a missing side, a refused
+boundary, or an unusable metric branch -- selects nothing, so its candidates
+appear only as assessed evidence and never as verified inputs.
+
+**No eligibility improvement is claimed.** Long-v3 has not been measured
+against a historical panel, and stricter alias homogeneity can withhold a
+forecast that long-v2 produced. A single read-only cutoff-safe replay of one
+local 97-listing run moved 3y/5y eligibility from 2 to 5 listings with no
+losses (see `docs/forecast-roadmap.md`), but one snapshot on one target date
+says nothing about forecast accuracy and is not an activation basis. A
+cutoff-safe replay across a historical panel must establish whether the
+change is a net benefit before any activation decision.
+
+Long-v3 also binds the SEC fundamentals configuration identity it selects
+against (`us-sec-fundamentals-v1`, itself unchanged by this work).
+`us-sec-long-v2` remains the default configuration; long-v1 and long-v2
+config bytes, effective hashes, behavior, reason strings, payloads, and
+already-issued immutable predictions are unchanged, and that is proven by a
+differential test that executes the pre-change source against the same
+deterministic fixture and compares complete successful and withheld
+payloads.
+
+`manage.py audit_long_evidence` reports this selection read-only and offline
+from persisted evidence, without any provider call. It takes the forecast's
+three boundaries separately and explicitly -- `--target-date` for reporting
+period bounds, `--available-through` for the historical data cutoff, and
+`--decision-time` for as-of evidence visibility -- and rejects a naive
+timestamp, an incoherent ordering, or a reader whose decision boundary
+differs from the requested one. Listings are addressed by immutable listing
+ID; a ticker resolves only when exactly one listing matches, and a symbol
+shared across exchanges or reused after a delisting is an explicit ambiguity
+error.
+
+The audit reads through exactly the forecast's gates, including the
+correction-availability policy, and states which one it applied
+(`correction_availability_policy`). Audited against a frozen version it
+therefore reports that version's own recorded-availability selection and
+defers nothing; audited against long-v3 it reports the same deferrals the
+long-v3 forecast would make, listing each withheld correction. Auditing a
+frozen version against the prospective policy would describe a selection that
+version never makes, which is why one shared, configuration-gated function
+answers the question for both readers.
+
+Recovery of an interrupted or repeated ingestion is likewise fail-closed:
+one observation instant names one content, an upgraded database with a
+correction chain but no observation evidence refuses to replay rather than
+ordering stored assets by retrieval, and a fresh retrieval is the separately
+gated way to re-establish proven evidence. See `docs/point-in-time.md`.
+
+A malformed configuration fails closed and the YAML parser message is
+withheld, because a parse error quotes the offending source line and an
+operator who points `--long-config` at the wrong file would otherwise have
+that line echoed into stderr and the operator log.
+
+Its base input is:
 
 ```text
 g0 = cap(

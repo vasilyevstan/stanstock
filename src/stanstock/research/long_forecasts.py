@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -18,13 +19,22 @@ from stanstock.data.models import (
 )
 from stanstock.data.sec_config import SecFundamentalsConfig, load_sec_fundamentals_config
 from stanstock.data.sec_fundamentals import (
+    TTM_SELECTION_LEGACY,
+    TTM_SELECTION_NEWEST_QUARTER_ALIAS,
     FundamentalValue,
+    NoncanonicalInstantIdentityError,
+    ResolvedAvailability,
     SecFundamentalSeries,
     build_sec_fundamental_series,
+    deferred_correction_payload,
+    fact_selection_identity,
+    partition_unproven_corrections,
+    source_concept_priority,
 )
 from stanstock.research.long_forecast_config import (
     LONG_FORECAST_HORIZONS,
     LONG_SCENARIOS,
+    REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS,
     LongForecastConfig,
     LongHorizonConfig,
     LongMetricFamilyConfig,
@@ -35,6 +45,128 @@ from stanstock.research.types import Scenario
 
 METHOD_NAME = "sec_per_share_growth_multiple_reversion"
 MAX_SQL_IN_ITEMS = 500
+
+JOINT_INVESTED_CAPITAL_POLICY = "joint_compatible_pair"
+INDEPENDENT_INVESTED_CAPITAL_POLICY = "independent_nearest_compatible"
+
+#: Canonical SEC concepts every long forecast version reads. Shared with the
+#: read-only evidence audit so both see exactly the same evidence scope.
+LONG_FORECAST_CONCEPTS = (
+    "operating_income",
+    "pretax_income",
+    "income_tax_expense",
+    "net_income",
+    "diluted_eps",
+    "weighted_average_diluted_shares",
+    "operating_cash_flow",
+    "capital_expenditure",
+    "cash_and_equivalents",
+    "short_term_debt",
+    "current_long_term_debt",
+    "long_term_debt",
+    "reported_long_term_debt",
+    "equity",
+)
+
+
+def ttm_selection_policy(config: LongForecastConfig) -> str:
+    if config.newest_quarter_anchored_homogeneous_ttm_alias_selection is True:
+        return TTM_SELECTION_NEWEST_QUARTER_ALIAS
+    return TTM_SELECTION_LEGACY
+
+
+def _invested_capital_policy(config: LongForecastConfig) -> str:
+    if config.joint_compatible_invested_capital_pair_selection is True:
+        return JOINT_INVESTED_CAPITAL_POLICY
+    return INDEPENDENT_INVESTED_CAPITAL_POLICY
+
+
+def invested_capital_alias_candidates_enabled(config: LongForecastConfig) -> bool:
+    """Whether this config reads the same-date alias candidate surface.
+
+    Only the joint pair search consumes it. Frozen `us-sec-long-v1`/
+    `us-sec-long-v2` keep reading the collapsed `SecFundamentalSeries.instants`
+    exactly as released.
+    """
+    return config.joint_compatible_invested_capital_pair_selection is True
+
+
+def _evidence_selection_enabled(config: LongForecastConfig) -> bool:
+    """Whether this config opts into the explicit evidence-selection payload.
+
+    Frozen `us-sec-long-v1`/`us-sec-long-v2` configurations declare neither
+    capability, so they never gain the extra payload key and their persisted
+    calculation documents stay byte-for-byte unchanged.
+    """
+    return (
+        config.newest_quarter_anchored_homogeneous_ttm_alias_selection is True
+        or config.joint_compatible_invested_capital_pair_selection is True
+    )
+
+
+#: Correction policy that resolves a same-accession correction against the
+#: observation that proves it, deferring one whose timing is unproven at the
+#: requested cutoff.
+CORRECTION_POLICY_PROVEN_OBSERVATION = "proven_observation_availability"
+
+#: Frozen policy: read the recorded ``available_at`` and nothing else.
+CORRECTION_POLICY_RECORDED_ONLY = "recorded_availability_only"
+
+
+def same_date_combination_ceiling(config: LongForecastConfig) -> int:
+    """The reviewed same-date combination ceiling this configuration declares.
+
+    Only a configuration that enables joint invested-capital selection has
+    one, and the loader accepts exactly the reviewed value, so this never
+    returns a tuned or defaulted bound. A configuration without the joint
+    search never reaches the enumeration that uses it.
+    """
+    ceiling = config.maximum_same_date_source_combinations
+    if ceiling is None:
+        raise ValueError(
+            f"Long forecast config {config.version!r} does not declare "
+            "maximum_same_date_source_combinations, so the same-date alias "
+            "enumeration must not run"
+        )
+    return ceiling
+
+
+def correction_availability_policy(config: LongForecastConfig) -> str:
+    """The correction-timing policy this configuration selects.
+
+    Driven by its own declared capability rather than inferred from the other
+    two, so a future version can adopt one without silently acquiring this
+    one. Frozen `us-sec-long-v1`/`us-sec-long-v2` declare no such key and
+    therefore read recorded availability exactly as released.
+
+    The forecast and the offline audit must answer this question with the
+    same function. An audit that applied the prospective policy to a frozen
+    version would report a selection that version would never make, which is
+    worse than not auditing it at all.
+    """
+    if config.proven_observation_correction_availability is True:
+        return CORRECTION_POLICY_PROVEN_OBSERVATION
+    return CORRECTION_POLICY_RECORDED_ONLY
+
+
+def resolve_corrections(
+    facts: Sequence[FundamentalFact],
+    *,
+    data_cutoff: datetime,
+    config: LongForecastConfig,
+) -> tuple[list[FundamentalFact], tuple[ResolvedAvailability, ...]]:
+    """Split visible facts into series inputs and deferred corrections.
+
+    Only a configuration on `CORRECTION_POLICY_PROVEN_OBSERVATION` resolves
+    anything. A frozen version gets its original list object back and an
+    empty deferral tuple, so neither its selection nor its payloads can move.
+    """
+    if correction_availability_policy(config) != CORRECTION_POLICY_PROVEN_OBSERVATION:
+        return list(facts), ()
+    admitted, deferred = partition_unproven_corrections(facts, available_through=data_cutoff)
+    if not deferred:
+        return list(facts), ()
+    return list(admitted), deferred
 
 
 def _display_version_label(config: LongForecastConfig) -> str:
@@ -121,6 +253,17 @@ class _InvestedCapital:
     debt_components: tuple[str, ...]
     source_basis: tuple[tuple[str, str], ...]
     fact_ids: tuple[str, ...]
+    available_at: datetime
+    #: Declared alias priority for each entry of ``source_basis``. Populated
+    #: only by the `us-sec-long-v3` same-date alias enumeration, where two
+    #: candidates can otherwise differ only by generated fact UUIDs. It is
+    #: never persisted; `source_basis` already names the aliases.
+    source_priority: tuple[int, ...] = ()
+    #: Stable observation identities of the participating facts, in the same
+    #: order as ``fact_ids``. Ranking and ordering use these instead of the
+    #: generated primary keys, so reassigning row UUIDs cannot change which
+    #: snapshot a run selects. Never persisted.
+    observation_identities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +280,7 @@ class _SustainableGrowth:
     reinvestment: float
     sustainable_growth: float
     fact_ids: tuple[str, ...]
+    invested_capital_selection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +297,21 @@ class _CompanyState:
     failure_fact_ids: tuple[str, ...] = ()
     failure_share_consistency: tuple[dict[str, Any], ...] = ()
     failure_assessed_through: date | None = None
+    #: `us-sec-long-v3` only. When true, ``failure_fact_ids`` names candidate
+    #: evidence this run read and *rejected* -- an unpaired or incompatible
+    #: balance-sheet snapshot, an unusable metric branch -- so it is reported
+    #: as assessed evidence and never as a selected, verified formula input.
+    #: Frozen v1/v2 leave this false and keep their exact released
+    #: classification, in which the same tuple stays inside ``input_facts``.
+    assessed_failure_evidence: bool = False
+    evidence_selection: dict[str, Any] | None = None
+    #: Deduplicated closure of every fact the `us-sec-long-v3` evidence
+    #: assessment referenced -- alias-selection lineage, TTM dependencies,
+    #: every invested-capital candidate, every fact responsible for a refused
+    #: combination space, and every rejected ``failure_fact_ids`` candidate --
+    #: including facts that had no compatible partner or whose forecast was
+    #: later withheld for peer insufficiency. Empty for frozen v1/v2.
+    assessed_evidence_fact_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +334,15 @@ def build_long_forecasts(
     config: LongForecastConfig,
 ) -> dict[str, dict[str, LongForecast]]:
     sec_config = load_sec_fundamentals_config()
+    if (
+        config.fundamentals_config_version is not None
+        and config.fundamentals_config_version != sec_config.config_version
+    ):
+        raise ValueError(
+            f"Long forecast config {config.version!r} binds SEC fundamentals "
+            f"{config.fundamentals_config_version!r}, but the loaded fundamentals "
+            f"configuration is {sec_config.config_version!r}"
+        )
     company_ids = [listing.security.company_id for listing in listings]
     period_lookback = timedelta(
         days=(max(family.minimum_annual_periods for family in config.metric_families.values()) + 1)
@@ -184,22 +352,7 @@ def build_long_forecasts(
     for fact in (
         asof.fundamental_facts_for_companies(
             company_ids=company_ids,
-            concepts=[
-                "operating_income",
-                "pretax_income",
-                "income_tax_expense",
-                "net_income",
-                "diluted_eps",
-                "weighted_average_diluted_shares",
-                "operating_cash_flow",
-                "capital_expenditure",
-                "cash_and_equivalents",
-                "short_term_debt",
-                "current_long_term_debt",
-                "long_term_debt",
-                "reported_long_term_debt",
-                "equity",
-            ],
+            concepts=list(LONG_FORECAST_CONCEPTS),
             available_through=data_cutoff,
         )
         .filter(provider=config.fundamentals_provider)
@@ -224,6 +377,7 @@ def build_long_forecasts(
             price=current_prices[str(listing.pk)],
             price_asset=price_assets[str(listing.pk)],
             asof_decision_time=asof.decision_time,
+            data_cutoff=data_cutoff,
             target_date=target_date,
             config=config,
             sec_config=sec_config,
@@ -237,7 +391,7 @@ def build_long_forecasts(
         for listing in listings
     }
     relevant_fact_ids = sorted(
-        {fact_id for state in states.values() for fact_id in _state_fact_ids(state)}
+        {fact_id for state in states.values() for fact_id in _state_evidence_fact_ids(state)}
     )
     for offset in range(0, len(relevant_fact_ids), MAX_SQL_IN_ITEMS):
         for evidence in FundamentalFactEvidence.objects.filter(
@@ -265,10 +419,88 @@ def _company_state(
     price: float,
     price_asset: DataAsset,
     asof_decision_time: datetime,
+    data_cutoff: datetime,
     target_date: date,
     config: LongForecastConfig,
     sec_config: SecFundamentalsConfig,
     facts: list[FundamentalFact],
+    classifications: list[CompanyClassificationObservation],
+    filing_assets: dict[str, DataAsset],
+) -> _CompanyState:
+    """Resolve one listing's evidence and close its assessed-evidence manifest.
+
+    Every fact the `us-sec-long-v3` assessment referenced -- selected or
+    rejected -- is collected here so the forecast's immutable
+    ``source_assets`` manifest and evidence payload can cover all of it. That
+    closure includes the version's ``failure_fact_ids`` candidates, which
+    `us-sec-long-v3` classifies as assessed rather than selected. Frozen
+    v1/v2 carry no assessment payload, so the closure is empty and their
+    manifests and ``input_facts`` are unchanged.
+
+    `us-sec-long-v3` additionally resolves same-accession corrections against
+    their *proven* availability. A correction persisted before
+    `CORRECTION_AVAILABILITY_BASIS` existed carries the original acceptance
+    timestamp, so the recorded cutoff alone would admit a restated value at a
+    historical cutoff that predates the retrieval proving it. Such a
+    correction is withheld from the series -- leaving the original
+    observation, which *is* proven at that cutoff, in its place -- and
+    recorded as assessed evidence with its own reason. Frozen v1/v2 keep
+    reading exactly the facts they were handed.
+    """
+    admitted, deferred = resolve_corrections(
+        facts,
+        data_cutoff=data_cutoff,
+        config=config,
+    )
+    state = replace(
+        _resolve_company_state(
+            listing=listing,
+            price=price,
+            price_asset=price_asset,
+            asof_decision_time=asof_decision_time,
+            target_date=target_date,
+            config=config,
+            sec_config=sec_config,
+            facts=facts,
+            series_facts=admitted,
+            classifications=classifications,
+            filing_assets=filing_assets,
+        ),
+        assessed_failure_evidence=_evidence_selection_enabled(config),
+    )
+    if state.evidence_selection is None:
+        return state
+    evidence_selection = {
+        **state.evidence_selection,
+        "assessed_evidence_role": ASSESSED_EVIDENCE_ROLE,
+        "deferred_unproven_corrections": [
+            deferred_correction_payload(entry, available_through=data_cutoff) for entry in deferred
+        ],
+    }
+    candidates = _dedupe_text(
+        (
+            *_referenced_evidence_fact_ids(evidence_selection),
+            *(state.failure_fact_ids if state.assessed_failure_evidence else ()),
+        )
+    )
+    return replace(
+        state,
+        evidence_selection=evidence_selection,
+        assessed_evidence_fact_ids=candidates,
+    )
+
+
+def _resolve_company_state(
+    *,
+    listing: Listing,
+    price: float,
+    price_asset: DataAsset,
+    asof_decision_time: datetime,
+    target_date: date,
+    config: LongForecastConfig,
+    sec_config: SecFundamentalsConfig,
+    facts: list[FundamentalFact],
+    series_facts: list[FundamentalFact],
     classifications: list[CompanyClassificationObservation],
     filing_assets: dict[str, DataAsset],
 ) -> _CompanyState:
@@ -291,8 +523,48 @@ def _company_state(
             fact_map={},
             filing_assets=filing_assets,
         )
+    # ``fact_map`` deliberately covers *every* visible fact, including a
+    # correction deferred for unproven timing: the manifest and the assessed
+    # evidence payload must still be able to name and prove that row. Only
+    # ``series_facts`` -- the proven-available subset -- may build values.
     fact_map = {str(fact.pk): fact for fact in facts}
-    series = build_sec_fundamental_series(facts, config=sec_config)
+    try:
+        series = build_sec_fundamental_series(
+            series_facts,
+            config=sec_config,
+            ttm_selection=ttm_selection_policy(config),
+            alias_instant_candidates=(
+                config.joint_compatible_invested_capital_pair_selection is True
+            ),
+        )
+    except NoncanonicalInstantIdentityError as error:
+        # Only the `us-sec-long-v3` alias boundary validates instant identity,
+        # so this can never reach a frozen version. The whole listing is
+        # withheld with the conflicting rows named; other listings in the same
+        # run are unaffected.
+        return _CompanyState(
+            listing=listing,
+            price=price,
+            price_asset=price_asset,
+            sic=None,
+            metric=None,
+            sustainable=None,
+            insufficiency_reason=(
+                "Balance-sheet evidence is unusable: "
+                f"{error}. Same-date alias selection needs one canonical instant "
+                "identity per balance-sheet date and never resolves a conflict by "
+                "generated row identifier"
+            ),
+            fact_map=fact_map,
+            filing_assets=filing_assets,
+            evidence_selection=_boundary_failure_evidence_selection(
+                config=config,
+                status="noncanonical_instant_period_identity",
+                reason=str(error),
+                detail={"noncanonical_instant_facts": list(error.anomalies)},
+            ),
+        )
+    evidence_selection = _evidence_selection_payload(series=series, config=config)
     sic = classifications[-1] if classifications else None
     if sic is None:
         return _CompanyState(
@@ -305,6 +577,7 @@ def _company_state(
             insufficiency_reason="No point-in-time SEC SIC classification is available",
             fact_map=fact_map,
             filing_assets=filing_assets,
+            evidence_selection=evidence_selection,
         )
     normalized_sic = _normalized_sic(sic.code)
     if normalized_sic is None:
@@ -318,6 +591,7 @@ def _company_state(
             insufficiency_reason=f"SEC SIC code {sic.code!r} is not a four-digit classification",
             fact_map=fact_map,
             filing_assets=filing_assets,
+            evidence_selection=evidence_selection,
         )
     sic_number = int(normalized_sic)
     if any(start <= sic_number <= end for start, end in config.eligibility.unsupported_sic_ranges):
@@ -334,6 +608,7 @@ def _company_state(
             ),
             fact_map=fact_map,
             filing_assets=filing_assets,
+            evidence_selection=evidence_selection,
         )
 
     fcf = _metric_assessment(
@@ -367,6 +642,7 @@ def _company_state(
             ),
             fact_map=fact_map,
             filing_assets=filing_assets,
+            evidence_selection=evidence_selection,
             failure_fact_ids=fcf.fact_ids,
             failure_share_consistency=fcf.share_consistency,
             failure_assessed_through=fcf.assessed_through,
@@ -385,6 +661,7 @@ def _company_state(
             insufficiency_reason="; ".join(reasons) or "No supported per-share metric family",
             fact_map=fact_map,
             filing_assets=filing_assets,
+            evidence_selection=evidence_selection,
             failure_fact_ids=_dedupe_text((*fcf.fact_ids, *eps.fact_ids)),
             failure_share_consistency=(*fcf.share_consistency, *eps.share_consistency),
             failure_assessed_through=(
@@ -392,10 +669,11 @@ def _company_state(
             ),
         )
     assert metric is not None
-    sustainable, sustainable_reason = _sustainable_growth(
+    sustainable, sustainable_reason, invested_capital_assessment = _sustainable_growth(
         series=series,
         metric=metric,
         config=config,
+        sec_config=sec_config,
     )
     return _CompanyState(
         listing=listing,
@@ -407,10 +685,160 @@ def _company_state(
         insufficiency_reason=sustainable_reason,
         fact_map=fact_map,
         filing_assets=filing_assets,
+        evidence_selection=_with_invested_capital_assessment(
+            evidence_selection,
+            invested_capital_assessment,
+        ),
         failure_fact_ids=(
             () if sustainable is not None else _sustainable_candidate_fact_ids(series)
         ),
     )
+
+
+def _with_invested_capital_assessment(
+    evidence_selection: dict[str, Any] | None,
+    assessment: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Attach an assessed invested-capital pair search to v3 provenance.
+
+    A rejected search is recorded exactly like a successful one so a withheld
+    forecast still shows the targets, candidates, and the disqualifying
+    reason. Frozen v1/v2 carry no evidence-selection payload at all, so this
+    returns ``None`` for them and their documents stay byte-identical.
+    """
+    if evidence_selection is None:
+        return None
+    return {**evidence_selection, "invested_capital_assessment": assessment}
+
+
+def _evidence_selection_payload(
+    *,
+    series: SecFundamentalSeries,
+    config: LongForecastConfig,
+) -> dict[str, Any] | None:
+    """Describe how this version selected its SEC evidence, or ``None``.
+
+    Frozen `us-sec-long-v1`/`us-sec-long-v2` return ``None`` so their
+    persisted calculation payloads are unchanged.
+
+    ``ttm_dependencies`` records the facts every constructed TTM window
+    actually depends on, including windows this forecast did not go on to
+    use. Together with the alias-selection lineage and the invested-capital
+    candidate list it makes the assessed-evidence manifest a closure rather
+    than a sample.
+
+    Schema 3 adds ``deferred_unproven_corrections`` (written by
+    `_company_state`): same-accession corrections withheld because only a
+    retrieval after the data cutoff proves their timing.
+    """
+    if not _evidence_selection_enabled(config):
+        return None
+    return {
+        "schema_version": 3,
+        "ttm_selection_policy": series.ttm_selection,
+        "invested_capital_selection_policy": _invested_capital_policy(config),
+        "bound_fundamentals_config_version": config.fundamentals_config_version,
+        "ttm_alias_selection": {
+            concept: series.ttm_alias_selection[concept]
+            for concept in sorted(series.ttm_alias_selection)
+        },
+        "ttm_dependencies": {
+            concept: {
+                "period_start": value.period_start.isoformat(),
+                "period_end": value.period_end.isoformat(),
+                "unit": value.unit,
+                "derivation": value.derivation,
+                "source_concepts": list(value.source_concepts),
+                "source_fact_ids": list(value.source_fact_ids),
+            }
+            for concept, value in sorted(series.ttm.items())
+        },
+        # Replaced with the real assessment once the invested-capital pair
+        # search runs. ``None`` explicitly means "not assessed", never
+        # "assessed and fine".
+        "invested_capital_assessment": None,
+    }
+
+
+#: Label distinguishing candidate evidence that was merely *assessed* from the
+#: selected formula inputs recorded under ``input_facts``. Assessed evidence
+#: includes rejected, unpaired, and later-withheld candidates and is never a
+#: claim that anything about it was confirmed.
+ASSESSED_EVIDENCE_ROLE = "assessed_candidate_evidence"
+
+
+def _boundary_failure_evidence_selection(
+    *,
+    config: LongForecastConfig,
+    status: str,
+    reason: str,
+    detail: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Evidence-selection payload for a refused `us-sec-long-v3` boundary.
+
+    A boundary refusal (conflicting instant identities, or a same-date
+    combination space above the reviewed ceiling) produces no series to
+    describe, but it is still assessed evidence: the payload names the
+    disqualifying rows and never claims a selection.
+    """
+    if not _evidence_selection_enabled(config):
+        return None
+    return {
+        "schema_version": 3,
+        "ttm_selection_policy": ttm_selection_policy(config),
+        "invested_capital_selection_policy": _invested_capital_policy(config),
+        "bound_fundamentals_config_version": config.fundamentals_config_version,
+        "ttm_alias_selection": {},
+        "ttm_dependencies": {},
+        "invested_capital_assessment": {
+            "schema_version": 1,
+            "policy": _invested_capital_policy(config),
+            "status": status,
+            "assessment_status": "assessed_incompatible_or_unavailable",
+            "rejection_reason": reason,
+            "beginning_candidates": [],
+            "ending_candidates": [],
+            "compatible_pair_count": 0,
+            "eligible_pair_count": 0,
+            "selected_beginning_period_end": None,
+            "selected_ending_period_end": None,
+            "selected_debt_method": None,
+            "selected_debt_components": [],
+            "selected_source_basis": [],
+            "selected_beginning_fact_ids": [],
+            "selected_ending_fact_ids": [],
+            **detail,
+        },
+    }
+
+
+def _referenced_evidence_fact_ids(payload: Any) -> tuple[str, ...]:
+    """Deduplicated closure of every fact id an assessment payload cites.
+
+    Walking the payload -- rather than re-deriving a hand-maintained list --
+    is what makes the manifest a closure: any current or future
+    ``*_fact_id``/``*_fact_ids`` reference, in any nested candidate, lineage,
+    dependency, or rejection record, is covered automatically.
+    """
+    found: list[str] = []
+
+    def walk(node: Any, key: str | None) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                walk(value, name)
+            return
+        if isinstance(node, list):
+            if key is not None and key.endswith("fact_ids"):
+                found.extend(item for item in node if isinstance(item, str))
+                return
+            for item in node:
+                walk(item, None)
+            return
+        if isinstance(node, str) and key is not None and key.endswith("fact_id"):
+            found.append(node)
+
+    walk(payload, None)
+    return _dedupe_text(tuple(found))
 
 
 def _metric_assessment(
@@ -848,7 +1276,8 @@ def _sustainable_growth(
     series: SecFundamentalSeries,
     metric: _MetricEvidence,
     config: LongForecastConfig,
-) -> tuple[_SustainableGrowth | None, str]:
+    sec_config: SecFundamentalsConfig,
+) -> tuple[_SustainableGrowth | None, str, dict[str, Any] | None]:
     required = {
         concept: series.ttm.get(concept)
         for concept in (
@@ -859,7 +1288,7 @@ def _sustainable_growth(
     }
     missing = [concept for concept, value in required.items() if value is None]
     if missing:
-        return None, "Sustainable growth requires TTM " + ", ".join(missing)
+        return None, "Sustainable growth requires TTM " + ", ".join(missing), None
     operating = required["operating_income"]
     pretax = required["pretax_income"]
     tax = required["income_tax_expense"]
@@ -871,9 +1300,9 @@ def _sustainable_growth(
         (value.period_start, value.period_end) != expected_period
         for value in (operating, pretax, tax)
     ):
-        return None, "Sustainable-growth TTM inputs do not share the metric period"
+        return None, "Sustainable-growth TTM inputs do not share the metric period", None
     if pretax.value <= 0:
-        return None, "Sustainable growth requires positive TTM pretax income"
+        return None, "Sustainable growth requires positive TTM pretax income", None
     tax_rate_raw = float(tax.value / pretax.value)
     tax_rate = _clamp(
         tax_rate_raw,
@@ -882,30 +1311,54 @@ def _sustainable_growth(
     )
     nopat = float(operating.value) * (1.0 - tax_rate)
     if not math.isfinite(nopat) or nopat <= 0:
-        return None, "Sustainable growth requires positive TTM NOPAT"
-    beginning, beginning_reason = _invested_capital_near(
-        series=series,
-        target_date=metric.current_period_start - timedelta(days=1),
-        tolerance_days=config.eligibility.balance_sheet_date_tolerance_days,
-    )
-    if beginning is None:
-        return None, f"Beginning invested capital unavailable: {beginning_reason}"
-    ending, ending_reason = _invested_capital_near(
-        series=series,
-        target_date=metric.current_period_end,
-        tolerance_days=config.eligibility.balance_sheet_date_tolerance_days,
-    )
-    if ending is None:
-        return None, f"Ending invested capital unavailable: {ending_reason}"
-    if (
-        beginning.debt_method != ending.debt_method
-        or beginning.debt_components != ending.debt_components
-        or beginning.source_basis != ending.source_basis
-    ):
-        return None, "Beginning/end invested-capital evidence uses incompatible source definitions"
+        return None, "Sustainable growth requires positive TTM NOPAT", None
+    beginning_target = metric.current_period_start - timedelta(days=1)
+    ending_target = metric.current_period_end
+    tolerance_days = config.eligibility.balance_sheet_date_tolerance_days
+    invested_capital_selection: dict[str, Any] | None = None
+    assessment_payload: dict[str, Any] | None = None
+    if config.joint_compatible_invested_capital_pair_selection is True:
+        assessment = _joint_invested_capital_pair(
+            series=series,
+            beginning_target=beginning_target,
+            ending_target=ending_target,
+            tolerance_days=tolerance_days,
+            priority=source_concept_priority(sec_config),
+            maximum_combinations=same_date_combination_ceiling(config),
+        )
+        # The assessment is carried out of every branch below, including the
+        # ones that reject the pair, so a withheld forecast still shows what
+        # evidence was examined and why it was refused.
+        assessment_payload = assessment.payload
+        invested_capital_selection = assessment.selection
+        if assessment.pair is None:
+            return None, assessment.reason, assessment_payload
+        beginning, ending = assessment.pair
+    else:
+        nearest_beginning, beginning_reason = _invested_capital_near(
+            series=series,
+            target_date=beginning_target,
+            tolerance_days=tolerance_days,
+        )
+        if nearest_beginning is None:
+            return None, f"Beginning invested capital unavailable: {beginning_reason}", None
+        nearest_ending, ending_reason = _invested_capital_near(
+            series=series,
+            target_date=ending_target,
+            tolerance_days=tolerance_days,
+        )
+        if nearest_ending is None:
+            return None, f"Ending invested capital unavailable: {ending_reason}", None
+        if not _invested_capital_compatible(nearest_beginning, nearest_ending):
+            return (
+                None,
+                "Beginning/end invested-capital evidence uses incompatible source definitions",
+                None,
+            )
+        beginning, ending = nearest_beginning, nearest_ending
     average = (beginning.value + ending.value) / 2.0
     if average <= 0:
-        return None, "Average invested capital must be positive"
+        return None, "Average invested capital must be positive", assessment_payload
     roic_raw = nopat / average
     roic = _clamp(
         roic_raw,
@@ -945,8 +1398,10 @@ def _sustainable_growth(
                     *ending.fact_ids,
                 )
             ),
+            invested_capital_selection=invested_capital_selection,
         ),
         "",
+        assessment_payload,
     )
 
 
@@ -984,6 +1439,34 @@ def _invested_capital_near(
     target_date: date,
     tolerance_days: int,
 ) -> tuple[_InvestedCapital | None, str]:
+    """Frozen long-v1/long-v2 selection: the nearest viable snapshot alone.
+
+    Beginning and ending snapshots are chosen independently here, so a pair
+    that turns out to use incompatible debt/source bases is withheld by the
+    caller rather than searched around.
+    """
+    candidates = _invested_capital_candidates(
+        series=series,
+        target_date=target_date,
+        tolerance_days=tolerance_days,
+    )
+    if not candidates:
+        return None, f"no compatible balance sheet within {tolerance_days} days of {target_date}"
+    return candidates[0], ""
+
+
+def _invested_capital_candidates(
+    *,
+    series: SecFundamentalSeries,
+    target_date: date,
+    tolerance_days: int,
+) -> tuple[_InvestedCapital, ...]:
+    """Every viable snapshot within tolerance, nearest target date first.
+
+    The ordering and the per-date construction rules are exactly the frozen
+    ones; only the number of results returned differs from
+    `_invested_capital_near`.
+    """
     by_concept = {
         concept: {fact.period_end: fact for fact in facts}
         for concept, facts in series.instants.items()
@@ -1004,6 +1487,7 @@ def _invested_capital_near(
         },
         key=lambda value: (abs((value - target_date).days), value),
     )
+    candidates: list[_InvestedCapital] = []
     for period_end in dates:
         equity = by_concept.get("equity", {}).get(period_end)
         cash = by_concept.get("cash_and_equivalents", {}).get(period_end)
@@ -1035,7 +1519,7 @@ def _invested_capital_near(
         invested = debt + equity_value - cash_value
         if not math.isfinite(invested) or invested <= 0:
             continue
-        return (
+        candidates.append(
             _InvestedCapital(
                 value=invested,
                 period_end=period_end,
@@ -1056,10 +1540,893 @@ def _invested_capital_near(
                         *(str(fact.pk) for fact in debt_facts),
                     )
                 ),
-            ),
-            "",
+                available_at=max(fact.available_at for fact in (equity, cash, *debt_facts)),
+            )
         )
-    return None, f"no compatible balance sheet within {tolerance_days} days of {target_date}"
+    return tuple(candidates)
+
+
+DEBT_COMPONENT_CONCEPTS = (
+    "long_term_debt",
+    "current_long_term_debt",
+    "short_term_debt",
+)
+
+BALANCE_SHEET_CONCEPTS = (
+    "equity",
+    "cash_and_equivalents",
+    "reported_long_term_debt",
+    *DEBT_COMPONENT_CONCEPTS,
+)
+
+#: Hard ceiling on the same-date source-basis combinations `us-sec-long-v3`
+#: will enumerate for one balance-sheet date, declared by the configuration
+#: as `maximum_same_date_source_combinations`. The reviewed SEC fundamentals
+#: configuration declares at most two aliases per balance-sheet concept, so a
+#: real date stays far below it. Exceeding it is an explicit failure rather
+#: than a silent truncation that would hide an available compatible pair, and
+#: the loader accepts only the one reviewed value, so it is never tuned per
+#: run.
+MAX_SAME_DATE_SOURCE_COMBINATIONS = REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS
+
+
+@dataclass(frozen=True, slots=True)
+class _SameDateCombinationAxis:
+    """One independent alias axis of a same-date source-basis space.
+
+    An axis is a *factor* of the combination bound, never the product: the
+    count that triggers the ceiling is derived by multiplying these, so every
+    fact responsible for an oversized space is named without materializing a
+    single combination. ``multiplier`` is what this axis contributes to that
+    bound, which mirrors the debt rules exactly (an absent optional concept
+    contributes no axis at all rather than a phantom option).
+    """
+
+    concept: str
+    options: tuple[FundamentalFact, ...]
+    multiplier: int
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "concept": self.concept,
+            "option_count": len(self.options),
+            "combination_multiplier": self.multiplier,
+            "source_concepts": [fact.source_concept for fact in self.options],
+            "fact_ids": [str(fact.pk) for fact in self.options],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _RejectedInvestedCapital:
+    """One same-date source-basis combination refused by a value guard.
+
+    It is assessed evidence and nothing more: the combination is never
+    ranked, paired, or used in any arithmetic. Recording it keeps the
+    configured aliases it consulted -- and therefore their Companyfacts and
+    filing assets -- inside the immutable manifest, instead of vanishing
+    because their values happened to be unusable.
+    """
+
+    period_end: date
+    reason: str
+    fact_ids: tuple[str, ...]
+    source_basis: tuple[tuple[str, str], ...]
+
+
+class SameDateSourceCombinationOverflow(ValueError):
+    """One balance-sheet date declares more combinations than may be searched.
+
+    The ceiling exists so a malformed or unexpectedly wide alias surface
+    cannot turn one listing into an unbounded Cartesian product. It is
+    evaluated from *counts*, before any product is materialized, so the
+    refusal costs nothing even when the space is astronomically large.
+
+    Neither truncating the space nor raising the ceiling is acceptable: both
+    would silently decide which compatible pair the run is allowed to see.
+    The listing is withheld with an explicit assessment instead, and the rest
+    of the run continues.
+
+    The refusal carries the per-axis aliases, options, and fact ids that
+    produced the bound, so the disqualifying evidence is recorded rather than
+    discarded: a reader can see exactly which filings made the space too wide
+    without the run ever enumerating it.
+    """
+
+    def __init__(
+        self,
+        *,
+        period_end: date,
+        combination_count: int,
+        ceiling: int,
+        axes: tuple[_SameDateCombinationAxis, ...],
+        assessed_candidates: tuple[_InvestedCapital, ...] = (),
+        assessed_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    ) -> None:
+        self.period_end = period_end
+        self.combination_count = combination_count
+        self.ceiling = ceiling
+        self.axes = axes
+        #: Candidates already assessed at *earlier* dates on this side before
+        #: the refusal. They are assessed evidence, never eligible: the whole
+        #: side is withheld and no pair is selected from them.
+        self.assessed_candidates = assessed_candidates
+        #: Value-guard refusals already recorded at earlier dates on this
+        #: side. They are assessed evidence too, and the refusal must not
+        #: discard them.
+        self.assessed_rejections = assessed_rejections
+        super().__init__(
+            f"Balance-sheet date {period_end.isoformat()} declares {combination_count} "
+            f"same-date source-basis combinations, above the reviewed ceiling of "
+            f"{ceiling}; refusing to guess a subset"
+        )
+
+    def responsible_fact_ids(self) -> tuple[str, ...]:
+        """Every fact whose presence contributed to the refused bound."""
+        return _dedupe_text(
+            tuple(str(fact.pk) for axis in self.axes for fact in axis.options),
+        )
+
+    def detail(self) -> dict[str, Any]:
+        return {
+            "period_end": self.period_end.isoformat(),
+            "combination_count": self.combination_count,
+            "ceiling": self.ceiling,
+            "axis_count": len(self.axes),
+            "axes": [axis.payload() for axis in self.axes],
+            "responsible_fact_ids": list(self.responsible_fact_ids()),
+        }
+
+
+def _alias_invested_capital_candidates(
+    *,
+    series: SecFundamentalSeries,
+    target_date: date,
+    tolerance_days: int,
+    priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
+) -> tuple[tuple[_InvestedCapital, ...], tuple[_RejectedInvestedCapital, ...]]:
+    """Every permitted same-date source-basis snapshot, nearest date first.
+
+    Returns the eligible candidates *and* the combinations a value guard
+    refused. The second tuple never participates in pairing or ranking; it
+    exists so refused evidence stays assessed and manifest-covered.
+
+    The frozen path reads `series.instants`, which has already collapsed each
+    canonical concept to one winning alias per period identity. A compatible
+    beginning/end pair that exists only through a *non-winning* same-date
+    equity, cash, or debt alias is therefore undiscoverable there. This
+    `us-sec-long-v3`-only enumeration walks the retained
+    ``(concept, alias, period identity)`` surface instead and emits one
+    candidate per permitted combination.
+
+    The debt rules are exactly the frozen ones: a reported long-term debt
+    observation forbids the component basis at that date (so a component and
+    its reported roll-up can never be counted twice), and otherwise the
+    non-overlapping components present at the date are summed in their frozen
+    order. Only the *alias* of each participating concept is enumerated;
+    method, component set, and value guards are unchanged.
+    """
+    if not series.alias_instant_candidates:
+        raise ValueError(
+            "Same-date alias invested-capital candidates were requested, but the "
+            "SEC fundamental series was built without the alias candidate surface"
+        )
+    by_concept_date: dict[str, dict[date, list[FundamentalFact]]] = {}
+    for concept in BALANCE_SHEET_CONCEPTS:
+        for alias in sorted(series.alias_instants.get(concept, {})):
+            for fact in series.alias_instants[concept][alias]:
+                by_concept_date.setdefault(concept, {}).setdefault(fact.period_end, []).append(fact)
+    dates = sorted(
+        {
+            period_end
+            for concept in BALANCE_SHEET_CONCEPTS
+            for period_end in by_concept_date.get(concept, {})
+            if abs((period_end - target_date).days) <= tolerance_days
+        },
+        key=lambda value: (abs((value - target_date).days), value),
+    )
+    candidates: list[_InvestedCapital] = []
+    rejected: list[_RejectedInvestedCapital] = []
+    for period_end in dates:
+        axes = _same_date_combination_axes(by_concept_date, period_end)
+        if axes is None:
+            continue
+        # Bound the space from the per-axis counts *before* materializing any
+        # product, and keep those axes so a refusal can name every fact that
+        # produced the bound instead of discarding the disqualifying evidence.
+        combination_count = math.prod(axis.multiplier for axis in axes)
+        if combination_count > maximum_combinations:
+            raise SameDateSourceCombinationOverflow(
+                period_end=period_end,
+                combination_count=combination_count,
+                ceiling=maximum_combinations,
+                axes=axes,
+                assessed_candidates=tuple(candidates),
+                assessed_rejections=tuple(rejected),
+            )
+        equities = _alias_options(by_concept_date, "equity", period_end)
+        cashes = _alias_options(by_concept_date, "cash_and_equivalents", period_end)
+        debt_options = _debt_basis_options(by_concept_date, period_end)
+        for equity in equities:
+            for cash in cashes:
+                for debt_method, debt_facts in debt_options:
+                    candidate = _invested_capital_from_facts(
+                        period_end=period_end,
+                        equity=equity,
+                        cash=cash,
+                        debt_facts=debt_facts,
+                        debt_method=debt_method,
+                        priority=priority,
+                    )
+                    if isinstance(candidate, _RejectedInvestedCapital):
+                        rejected.append(candidate)
+                    else:
+                        candidates.append(candidate)
+    return (
+        tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    abs((candidate.period_end - target_date).days),
+                    candidate.period_end,
+                    candidate.source_priority,
+                    candidate.source_basis,
+                    candidate.observation_identities,
+                ),
+            )
+        ),
+        _dedupe_rejections(rejected),
+    )
+
+
+def _alias_options(
+    by_concept_date: dict[str, dict[date, list[FundamentalFact]]],
+    concept: str,
+    period_end: date,
+) -> list[FundamentalFact]:
+    return sorted(
+        by_concept_date.get(concept, {}).get(period_end, []),
+        key=lambda fact: (fact.source_concept, fact_selection_identity(fact)),
+    )
+
+
+def _same_date_combination_axes(
+    by_concept_date: dict[str, dict[date, list[FundamentalFact]]],
+    period_end: date,
+) -> tuple[_SameDateCombinationAxis, ...] | None:
+    """The independent alias axes at one balance-sheet date, or ``None``.
+
+    ``None`` means the date cannot form any candidate at all (no equity, no
+    cash, or no debt evidence) and is skipped exactly as before. Otherwise
+    the returned axes are the complete factorization of that date's
+    combination bound, so counting and refusing never require the product.
+    """
+    equities = _alias_options(by_concept_date, "equity", period_end)
+    cashes = _alias_options(by_concept_date, "cash_and_equivalents", period_end)
+    if not equities or not cashes:
+        return None
+    debt_axes = _debt_basis_axes(by_concept_date, period_end)
+    if debt_axes is None:
+        return None
+    return (
+        _combination_axis("equity", equities),
+        _combination_axis("cash_and_equivalents", cashes),
+        *debt_axes,
+    )
+
+
+def _combination_axis(
+    concept: str,
+    options: list[FundamentalFact],
+) -> _SameDateCombinationAxis:
+    return _SameDateCombinationAxis(
+        concept=concept,
+        options=tuple(options),
+        multiplier=len(options),
+    )
+
+
+def _debt_basis_axes(
+    by_concept_date: dict[str, dict[date, list[FundamentalFact]]],
+    period_end: date,
+) -> tuple[_SameDateCombinationAxis, ...] | None:
+    """Factor the permitted debt bases at one date without building them.
+
+    This mirrors `_debt_basis_options` exactly, axis by axis, so the ceiling
+    is enforced on a number and the refusal can still name the aliases behind
+    it. ``None`` means no debt basis exists at this date.
+    """
+    reported = _alias_options(by_concept_date, "reported_long_term_debt", period_end)
+    short_term = _alias_options(by_concept_date, "short_term_debt", period_end)
+    if reported:
+        # Frozen rule: the reported roll-up excludes the component basis, and
+        # an absent short-term alias leaves exactly one ("no short-term")
+        # option rather than multiplying the space.
+        axes = [_combination_axis("reported_long_term_debt", reported)]
+        if short_term:
+            axes.append(_combination_axis("short_term_debt", short_term))
+        return tuple(axes)
+    component_axes = [
+        _combination_axis(concept, options)
+        for concept in DEBT_COMPONENT_CONCEPTS
+        if (options := _alias_options(by_concept_date, concept, period_end))
+    ]
+    return tuple(component_axes) if component_axes else None
+
+
+def _debt_basis_options(
+    by_concept_date: dict[str, dict[date, list[FundamentalFact]]],
+    period_end: date,
+) -> list[tuple[str, tuple[FundamentalFact, ...]]]:
+    """Enumerate the permitted debt bases at one date, without double counting."""
+    reported = _alias_options(by_concept_date, "reported_long_term_debt", period_end)
+    short_term = _alias_options(by_concept_date, "short_term_debt", period_end)
+    if reported:
+        # Frozen rule: a reported long-term roll-up excludes the component
+        # basis entirely at this date, so no component can be added twice.
+        short_options: list[FundamentalFact | None] = list(short_term) if short_term else [None]
+        return [
+            (
+                "reported_long_term_plus_short_term_borrowings",
+                (reported_fact, *(() if short_fact is None else (short_fact,))),
+            )
+            for reported_fact in reported
+            for short_fact in short_options
+        ]
+    component_options = [
+        _alias_options(by_concept_date, concept, period_end) for concept in DEBT_COMPONENT_CONCEPTS
+    ]
+    present = [options for options in component_options if options]
+    if not present:
+        return []
+    combinations: list[tuple[FundamentalFact, ...]] = [()]
+    for options in present:
+        combinations = [
+            (*combination, option) for combination in combinations for option in options
+        ]
+    return [("sum_non_overlapping_debt_components", combination) for combination in combinations]
+
+
+def _value_guard_rejection(
+    *,
+    period_end: date,
+    reason: str,
+    facts: tuple[FundamentalFact, ...],
+) -> _RejectedInvestedCapital:
+    """Build the one record every value-guard branch produces.
+
+    All four guards -- nonpositive equity, negative cash, absent or negative
+    debt, and nonfinite or nonpositive invested capital -- funnel through
+    here, so there is exactly one provenance mechanism rather than one per
+    branch. Only the reason differs.
+    """
+    return _RejectedInvestedCapital(
+        period_end=period_end,
+        reason=reason,
+        fact_ids=_dedupe_text(tuple(str(fact.pk) for fact in facts)),
+        source_basis=tuple(
+            (fact.concept, fact.source_concept) for fact in facts if fact.source_concept
+        ),
+    )
+
+
+def _invested_capital_from_facts(
+    *,
+    period_end: date,
+    equity: FundamentalFact,
+    cash: FundamentalFact,
+    debt_facts: tuple[FundamentalFact, ...],
+    debt_method: str,
+    priority: dict[tuple[str, str], int],
+) -> _InvestedCapital | _RejectedInvestedCapital:
+    """Apply the frozen value guards to one explicit source-basis combination.
+
+    The guards themselves are unchanged: a rejected combination never enters
+    the arithmetic, the candidate list, or any ranking. What changed is that
+    a rejection is now *returned* instead of discarded, so the configured
+    aliases it consulted stay visible as assessed evidence and their
+    Companyfacts and filing assets stay inside the manifest closure.
+    """
+    participating = (equity, cash, *debt_facts)
+    if equity.value <= 0:
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Equity must be positive",
+            facts=participating,
+        )
+    if cash.value < 0:
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Cash and equivalents must not be negative",
+            facts=participating,
+        )
+    if not debt_facts or any(fact.value < 0 for fact in debt_facts):
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Debt basis must be present and non-negative",
+            facts=participating,
+        )
+    debt = float(sum((fact.value for fact in debt_facts), Decimal("0")))
+    equity_value = float(equity.value)
+    cash_value = float(cash.value)
+    invested = debt + equity_value - cash_value
+    if not math.isfinite(invested) or invested <= 0:
+        return _value_guard_rejection(
+            period_end=period_end,
+            reason="Invested capital must be finite and positive",
+            facts=participating,
+        )
+    source_basis = (
+        ("equity", equity.source_concept),
+        ("cash_and_equivalents", cash.source_concept),
+        *((fact.concept, fact.source_concept) for fact in debt_facts),
+    )
+    return _InvestedCapital(
+        value=invested,
+        period_end=period_end,
+        debt=debt,
+        equity=equity_value,
+        cash=cash_value,
+        debt_method=debt_method,
+        debt_components=tuple(fact.concept for fact in debt_facts),
+        source_basis=source_basis,
+        fact_ids=_dedupe_text(
+            (
+                str(equity.pk),
+                str(cash.pk),
+                *(str(fact.pk) for fact in debt_facts),
+            )
+        ),
+        available_at=max(fact.available_at for fact in (equity, cash, *debt_facts)),
+        source_priority=tuple(
+            priority.get((concept, source_concept), 10_000)
+            for concept, source_concept in source_basis
+        ),
+        observation_identities=tuple(
+            fact_selection_identity(fact) for fact in (equity, cash, *debt_facts)
+        ),
+    )
+
+
+def _invested_capital_compatible(
+    beginning: _InvestedCapital,
+    ending: _InvestedCapital,
+) -> bool:
+    return (
+        beginning.debt_method == ending.debt_method
+        and beginning.debt_components == ending.debt_components
+        and beginning.source_basis == ending.source_basis
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _InvestedCapitalPairAssessment:
+    """Complete, always-produced record of one joint pair search.
+
+    A failed search is evidence too: it names the targets, every candidate
+    snapshot with its facts and source basis, how many compatible pairs
+    existed, and why the search was rejected. The payload is `us-sec-long-v3`
+    only, so frozen v1/v2 documents are unaffected, and it never labels
+    rejected evidence verified.
+    """
+
+    status: str
+    reason: str
+    payload: dict[str, Any]
+    pair: tuple[_InvestedCapital, _InvestedCapital] | None
+    selection: dict[str, Any] | None
+
+
+def _joint_invested_capital_pair(
+    *,
+    series: SecFundamentalSeries,
+    beginning_target: date,
+    ending_target: date,
+    tolerance_days: int,
+    priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
+) -> _InvestedCapitalPairAssessment:
+    """Search every beginning/ending snapshot pair for a compatible one.
+
+    Ranking uses only deterministic evidence criteria -- combined and
+    per-side target-date distance, then eligible-evidence recency, then
+    declared alias priority and stable date/fact-id tie-breaks. It never
+    inspects the resulting ROIC, reinvestment, growth, forecast, or scenario
+    favorability.
+
+    Every outcome, including every failure, returns a complete assessment.
+    A same-date combination space above the reviewed ceiling is one of those
+    failures: it withholds this listing explicitly instead of propagating an
+    exception that would abort the whole analysis, and it keeps both the
+    facts responsible for the refused bound and whatever the other side had
+    already assessed.
+    """
+    try:
+        beginnings, beginning_rejections = _alias_invested_capital_candidates(
+            maximum_combinations=maximum_combinations,
+            series=series,
+            target_date=beginning_target,
+            tolerance_days=tolerance_days,
+            priority=priority,
+        )
+    except SameDateSourceCombinationOverflow as error:
+        return _combination_overflow_assessment(
+            error,
+            beginning_target=beginning_target,
+            ending_target=ending_target,
+            tolerance_days=tolerance_days,
+            beginnings=error.assessed_candidates,
+            endings=(),
+            beginning_rejections=error.assessed_rejections,
+            ending_rejections=(),
+        )
+    try:
+        endings, ending_rejections = _alias_invested_capital_candidates(
+            maximum_combinations=maximum_combinations,
+            series=series,
+            target_date=ending_target,
+            tolerance_days=tolerance_days,
+            priority=priority,
+        )
+    except SameDateSourceCombinationOverflow as error:
+        return _combination_overflow_assessment(
+            error,
+            beginning_target=beginning_target,
+            ending_target=ending_target,
+            tolerance_days=tolerance_days,
+            beginnings=beginnings,
+            endings=error.assessed_candidates,
+            beginning_rejections=beginning_rejections,
+            ending_rejections=error.assessed_rejections,
+        )
+    payload = _pair_search_payload(
+        beginning_target=beginning_target,
+        ending_target=ending_target,
+        tolerance_days=tolerance_days,
+        beginnings=beginnings,
+        endings=endings,
+        beginning_rejections=beginning_rejections,
+        ending_rejections=ending_rejections,
+        pair_count=0,
+    )
+    pairs = [
+        (beginning, ending)
+        for beginning in beginnings
+        for ending in endings
+        if _invested_capital_compatible(beginning, ending)
+    ]
+    payload["compatible_pair_count"] = len(pairs)
+    payload["eligible_pair_count"] = len(pairs)
+    if not beginnings:
+        return _rejected_pair_assessment(
+            payload,
+            status="missing_beginning_candidates",
+            reason=(
+                "Beginning invested capital unavailable: no compatible balance sheet "
+                f"within {tolerance_days} days of {beginning_target}"
+            ),
+        )
+    if not endings:
+        return _rejected_pair_assessment(
+            payload,
+            status="missing_ending_candidates",
+            reason=(
+                "Ending invested capital unavailable: no compatible balance sheet "
+                f"within {tolerance_days} days of {ending_target}"
+            ),
+        )
+    if not pairs:
+        return _rejected_pair_assessment(
+            payload,
+            status="no_compatible_pair",
+            reason=(
+                "No compatible beginning/end invested-capital pair within "
+                f"{tolerance_days} days of {beginning_target} and {ending_target}: "
+                "every candidate pair uses incompatible debt-method, debt-component, "
+                "or source-concept bases"
+            ),
+        )
+    beginning, ending = min(
+        pairs,
+        key=lambda pair: _invested_capital_pair_rank(
+            pair,
+            beginning_target=beginning_target,
+            ending_target=ending_target,
+        ),
+    )
+    selection: dict[str, Any] = {
+        "policy": JOINT_INVESTED_CAPITAL_POLICY,
+        "tolerance_days": tolerance_days,
+        "beginning_target_date": beginning_target.isoformat(),
+        "ending_target_date": ending_target.isoformat(),
+        "beginning_candidate_period_ends": payload["beginning_candidate_period_ends"],
+        "ending_candidate_period_ends": payload["ending_candidate_period_ends"],
+        "eligible_pair_count": len(pairs),
+        "selected_beginning_period_end": beginning.period_end.isoformat(),
+        "selected_ending_period_end": ending.period_end.isoformat(),
+        "selected_debt_method": beginning.debt_method,
+        "selected_debt_components": list(beginning.debt_components),
+        "selected_source_basis": [
+            {"concept": concept, "source_concept": source_concept}
+            for concept, source_concept in beginning.source_basis
+        ],
+        "selected_beginning_fact_ids": list(beginning.fact_ids),
+        "selected_ending_fact_ids": list(ending.fact_ids),
+    }
+    payload.update(
+        {
+            "status": "selected_compatible_pair",
+            "assessment_status": "selected_compatible_pair",
+            "rejection_reason": "",
+            "selected_beginning_period_end": beginning.period_end.isoformat(),
+            "selected_ending_period_end": ending.period_end.isoformat(),
+            "selected_debt_method": beginning.debt_method,
+            "selected_debt_components": list(beginning.debt_components),
+            "selected_source_basis": selection["selected_source_basis"],
+            "selected_beginning_fact_ids": list(beginning.fact_ids),
+            "selected_ending_fact_ids": list(ending.fact_ids),
+        }
+    )
+    return _InvestedCapitalPairAssessment(
+        status="selected_compatible_pair",
+        reason="",
+        payload=payload,
+        pair=(beginning, ending),
+        selection=selection,
+    )
+
+
+def _pair_search_payload(
+    *,
+    beginning_target: date,
+    ending_target: date,
+    tolerance_days: int,
+    beginnings: tuple[_InvestedCapital, ...],
+    endings: tuple[_InvestedCapital, ...],
+    beginning_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    ending_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    pair_count: int,
+) -> dict[str, Any]:
+    """The complete, always-produced record of one invested-capital search.
+
+    Schema 2 adds ``value_rejected_candidates``: combinations a value guard
+    refused. They are assessed evidence, never candidates, and are listed
+    here so the manifest closure covers the aliases they consulted.
+    """
+    return {
+        "schema_version": 2,
+        "policy": JOINT_INVESTED_CAPITAL_POLICY,
+        "tolerance_days": tolerance_days,
+        "beginning_target_date": beginning_target.isoformat(),
+        "ending_target_date": ending_target.isoformat(),
+        "beginning_candidates": [
+            _invested_capital_candidate_payload(candidate) for candidate in beginnings
+        ],
+        "ending_candidates": [
+            _invested_capital_candidate_payload(candidate) for candidate in endings
+        ],
+        "beginning_candidate_period_ends": [
+            candidate.period_end.isoformat() for candidate in beginnings
+        ],
+        "ending_candidate_period_ends": [candidate.period_end.isoformat() for candidate in endings],
+        "beginning_candidate_count": len(beginnings),
+        "ending_candidate_count": len(endings),
+        "compatible_pair_count": pair_count,
+        "eligible_pair_count": pair_count,
+        "value_rejected_candidates": [
+            {
+                "side": side,
+                "period_end": rejection.period_end.isoformat(),
+                "reason": rejection.reason,
+                "source_basis": [
+                    {"concept": concept, "source_concept": source_concept}
+                    for concept, source_concept in rejection.source_basis
+                ],
+                "fact_ids": list(rejection.fact_ids),
+            }
+            for side, rejections in (
+                ("beginning", beginning_rejections),
+                ("ending", ending_rejections),
+            )
+            for rejection in rejections
+        ],
+    }
+
+
+def _combination_overflow_assessment(
+    error: SameDateSourceCombinationOverflow,
+    *,
+    beginning_target: date,
+    ending_target: date,
+    tolerance_days: int,
+    beginnings: tuple[_InvestedCapital, ...],
+    endings: tuple[_InvestedCapital, ...],
+    beginning_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+    ending_rejections: tuple[_RejectedInvestedCapital, ...] = (),
+) -> _InvestedCapitalPairAssessment:
+    """Refuse the search while keeping every disqualifying fact visible.
+
+    The refusal is precisely what makes these facts matter, so the axes that
+    produced the bound, their aliases and fact ids, the resulting count, and
+    the unchanged ceiling are all recorded. Candidates already assessed on
+    the other side -- or at an earlier date on the refused side -- are
+    retained as assessed evidence rather than dropped, as are any value-guard
+    refusals recorded before the bound was hit. None of it is eligible: no
+    pair is selected and no product is ever enumerated.
+    """
+    payload = _pair_search_payload(
+        beginning_target=beginning_target,
+        ending_target=ending_target,
+        tolerance_days=tolerance_days,
+        beginnings=beginnings,
+        endings=endings,
+        beginning_rejections=beginning_rejections,
+        ending_rejections=ending_rejections,
+        pair_count=0,
+    )
+    payload["same_date_combination_overflow"] = error.detail()
+    return _rejected_pair_assessment(
+        payload,
+        status="same_date_combination_ceiling_exceeded",
+        reason=str(error),
+    )
+
+
+def _rejected_pair_assessment(
+    payload: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+) -> _InvestedCapitalPairAssessment:
+    payload.update(
+        {
+            "status": status,
+            # Rejected evidence is *assessed*, never verified: it disqualified
+            # the forecast and must never read as a confirmed selection.
+            "assessment_status": "assessed_incompatible_or_unavailable",
+            "rejection_reason": reason,
+            "selected_beginning_period_end": None,
+            "selected_ending_period_end": None,
+            "selected_debt_method": None,
+            "selected_debt_components": [],
+            "selected_source_basis": [],
+            "selected_beginning_fact_ids": [],
+            "selected_ending_fact_ids": [],
+        }
+    )
+    return _InvestedCapitalPairAssessment(
+        status=status,
+        reason=reason,
+        payload=payload,
+        pair=None,
+        selection=None,
+    )
+
+
+def _invested_capital_pair_rank(
+    pair: tuple[_InvestedCapital, _InvestedCapital],
+    *,
+    beginning_target: date,
+    ending_target: date,
+) -> tuple[
+    int,
+    int,
+    int,
+    float,
+    float,
+    str,
+    str,
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[tuple[str, str], ...],
+    tuple[tuple[str, str], ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Rank a candidate pair on evidence alone, never on the resulting numbers.
+
+    Same-date alias enumeration can produce two candidates that agree on
+    date and availability, so declared alias priority and the canonical
+    source basis are compared before anything else. The final terms are the
+    participating observations' stable identities, never their generated
+    fact UUIDs: reassigning row identifiers must not be able to change which
+    pair a run selects.
+    """
+    beginning, ending = pair
+    beginning_distance = abs((beginning.period_end - beginning_target).days)
+    ending_distance = abs((ending.period_end - ending_target).days)
+    return (
+        beginning_distance + ending_distance,
+        ending_distance,
+        beginning_distance,
+        -ending.available_at.timestamp(),
+        -beginning.available_at.timestamp(),
+        ending.period_end.isoformat(),
+        beginning.period_end.isoformat(),
+        ending.source_priority,
+        beginning.source_priority,
+        ending.source_basis,
+        beginning.source_basis,
+        ending.observation_identities,
+        beginning.observation_identities,
+    )
+
+
+def audit_invested_capital_pairs(
+    *,
+    series: SecFundamentalSeries,
+    beginning_target: date,
+    ending_target: date,
+    tolerance_days: int,
+    priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
+) -> dict[str, Any]:
+    """Report invested-capital pair availability without producing a forecast.
+
+    This is a read-only diagnostic over already-persisted evidence. It reuses
+    the exact candidate enumeration, compatibility rule, and joint ranking
+    used by the forecast path, so an operator sees what the engine would
+    actually select, including whether the frozen independent nearest-date
+    choices would have missed an available compatible pair.
+    """
+    legacy_beginnings = _invested_capital_candidates(
+        series=series,
+        target_date=beginning_target,
+        tolerance_days=tolerance_days,
+    )
+    legacy_endings = _invested_capital_candidates(
+        series=series,
+        target_date=ending_target,
+        tolerance_days=tolerance_days,
+    )
+    assessment = _joint_invested_capital_pair(
+        series=series,
+        beginning_target=beginning_target,
+        ending_target=ending_target,
+        tolerance_days=tolerance_days,
+        priority=priority,
+        maximum_combinations=maximum_combinations,
+    )
+    independent_compatible = bool(
+        legacy_beginnings
+        and legacy_endings
+        and _invested_capital_compatible(legacy_beginnings[0], legacy_endings[0])
+    )
+    report = dict(assessment.payload)
+    report.update(
+        {
+            "compatible_pair_available": assessment.pair is not None,
+            "independent_nearest_pair_compatible": independent_compatible,
+            "independent_nearest_beginning": (
+                _invested_capital_candidate_payload(legacy_beginnings[0])
+                if legacy_beginnings
+                else None
+            ),
+            "independent_nearest_ending": (
+                _invested_capital_candidate_payload(legacy_endings[0]) if legacy_endings else None
+            ),
+            "joint_selection_recovers_missed_pair": (
+                assessment.pair is not None and not independent_compatible
+            ),
+            "selection": assessment.selection,
+            "reason": assessment.reason,
+        }
+    )
+    return report
+
+
+def _invested_capital_candidate_payload(value: _InvestedCapital) -> dict[str, Any]:
+    return {
+        "period_end": value.period_end.isoformat(),
+        "debt_method": value.debt_method,
+        "debt_components": list(value.debt_components),
+        "source_basis": [
+            {"concept": concept, "source_concept": source_concept}
+            for concept, source_concept in value.source_basis
+        ],
+        "available_at": value.available_at.isoformat(),
+        "fact_ids": list(value.fact_ids),
+    }
 
 
 def _forecasts_for_state_split_basis(
@@ -1114,6 +2481,7 @@ def _forecasts_for_state(
             ),
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=split_basis,
+            evidence_selection=_state_evidence_selection_payload(state),
         )
     peers = _select_peers(state=state, states=states, config=config)
     if peers is None:
@@ -1127,6 +2495,7 @@ def _forecasts_for_state(
             target_classification=_classification_payload(state.sic),
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=split_basis,
+            evidence_selection=_state_evidence_selection_payload(state),
         )
     return {
         horizon: _forecast_horizon(
@@ -1249,6 +2618,7 @@ def _forecast_horizon(
                 target_date=target_date,
                 config=config,
             ),
+            evidence_selection=_state_evidence_selection_payload(state),
         )
     share_consistency_periods = sum(
         check.get("check") == "reported_diluted_eps" for check in state.metric.share_consistency
@@ -1277,7 +2647,7 @@ def _forecast_horizon(
     annualized = {name: scenario_outputs[name]["annualized_return"] for name in LONG_SCENARIOS}
     target_fact_ids = _dedupe_text((*state.metric.fact_ids, *state.sustainable.fact_ids))
     sic = state.sic
-    calculation = {
+    calculation: dict[str, Any] = {
         "schema_version": 1,
         "method": METHOD_NAME,
         "method_version": config.version,
@@ -1354,6 +2724,13 @@ def _forecast_horizon(
             name: output["growth_contributions"] for name, output in scenario_outputs.items()
         },
     }
+    if state.sustainable.invested_capital_selection is not None:
+        calculation["formula_inputs"]["invested_capital_selection"] = (
+            state.sustainable.invested_capital_selection
+        )
+    state_evidence_selection = _state_evidence_selection_payload(state)
+    if state_evidence_selection is not None:
+        calculation["evidence_selection"] = state_evidence_selection
     return LongForecast(
         scenario=scenario,
         calculation=calculation,
@@ -1456,6 +2833,7 @@ def _missing_forecasts(
     peer_set: list[dict[str, Any]] | None = None,
     target_price_asset_id: str | None = None,
     split_basis: dict[str, Any] | None = None,
+    evidence_selection: dict[str, Any] | None = None,
 ) -> dict[str, LongForecast]:
     return {
         horizon: _missing_forecast(
@@ -1470,6 +2848,7 @@ def _missing_forecasts(
             peer_set=peer_set,
             target_price_asset_id=target_price_asset_id,
             split_basis=split_basis,
+            evidence_selection=evidence_selection,
         )
         for horizon in LONG_FORECAST_HORIZONS
     }
@@ -1488,7 +2867,34 @@ def _missing_forecast(
     peer_set: list[dict[str, Any]] | None = None,
     target_price_asset_id: str | None = None,
     split_basis: dict[str, Any] | None = None,
+    evidence_selection: dict[str, Any] | None = None,
 ) -> LongForecast:
+    calculation: dict[str, Any] = {
+        "schema_version": 1,
+        "method": METHOD_NAME,
+        "method_version": config.version,
+        "config_hash": long_forecast_config_hash(config),
+        "fundamentals_config_version": sec_config.config_version,
+        "fundamentals_config_hash": sec_config.config_hash,
+        "forecast_horizon": horizon,
+        "years": config.horizons[horizon].years,
+        "metric_family": metric_family,
+        "target_price_asset_id": target_price_asset_id,
+        "return_basis": config.return_basis,
+        "dividends_included": config.dividends_included,
+        "probability_status": "withheld_unavailable",
+        "support": {},
+        "formula_inputs": {},
+        "split_basis": split_basis or {},
+        "scenario_paths": {},
+        "annualized_returns": {},
+        "input_facts": input_facts or [],
+        "target_classification": target_classification,
+        "peer_set": peer_set or [],
+        "insufficiency_reason": reason,
+    }
+    if evidence_selection is not None:
+        calculation["evidence_selection"] = evidence_selection
     return LongForecast(
         scenario=Scenario(
             bear=None,
@@ -1500,30 +2906,7 @@ def _missing_forecast(
             insufficiency_reason=reason,
             method=METHOD_NAME,
         ),
-        calculation={
-            "schema_version": 1,
-            "method": METHOD_NAME,
-            "method_version": config.version,
-            "config_hash": long_forecast_config_hash(config),
-            "fundamentals_config_version": sec_config.config_version,
-            "fundamentals_config_hash": sec_config.config_hash,
-            "forecast_horizon": horizon,
-            "years": config.horizons[horizon].years,
-            "metric_family": metric_family,
-            "target_price_asset_id": target_price_asset_id,
-            "return_basis": config.return_basis,
-            "dividends_included": config.dividends_included,
-            "probability_status": "withheld_unavailable",
-            "support": {},
-            "formula_inputs": {},
-            "split_basis": split_basis or {},
-            "scenario_paths": {},
-            "annualized_returns": {},
-            "input_facts": input_facts or [],
-            "target_classification": target_classification,
-            "peer_set": peer_set or [],
-            "insufficiency_reason": reason,
-        },
+        calculation=calculation,
         source_assets=source_assets,
     )
 
@@ -1536,26 +2919,106 @@ def _state_source_assets(state: _CompanyState) -> tuple[DataAsset, ...]:
         _fact_source_assets(
             state.fact_map,
             state.filing_assets,
-            _state_fact_ids(state),
+            _state_evidence_fact_ids(state),
         )
     )
     return _dedupe_assets(assets)
 
 
-def _state_fact_ids(state: _CompanyState) -> tuple[str, ...]:
+def _state_selected_fact_ids(state: _CompanyState) -> tuple[str, ...]:
+    """Facts that became selected, verified formula inputs for this listing.
+
+    "Selected" means the value actually entered this listing's metric,
+    share-consistency, or sustainable-growth arithmetic. Under
+    `us-sec-long-v3` (``assessed_failure_evidence``) a rejected candidate is
+    therefore excluded here and reported as assessed evidence instead: a
+    no-compatible-pair, missing-side, refused-boundary, or unusable-metric
+    result selects nothing at all. Frozen v1/v2 keep their released
+    classification, in which ``failure_fact_ids`` stays in ``input_facts``.
+    """
     fact_ids: tuple[str, ...] = ()
     if state.metric is not None:
         fact_ids = (*fact_ids, *state.metric.fact_ids)
     if state.sustainable is not None:
         fact_ids = (*fact_ids, *state.sustainable.fact_ids)
-    fact_ids = (*fact_ids, *state.failure_fact_ids)
+    if not state.assessed_failure_evidence:
+        fact_ids = (*fact_ids, *state.failure_fact_ids)
     return _dedupe_text(fact_ids)
+
+
+def _state_assessed_fact_ids(state: _CompanyState) -> tuple[str, ...]:
+    """Candidate facts this listing considered but did not select.
+
+    Rejected invested-capital candidates, facts responsible for a refused
+    combination space, unselected TTM alias lineages, dependencies of windows
+    that lost, and every `us-sec-long-v3` ``failure_fact_ids`` candidate. A
+    fact that did enter the arithmetic is never listed here, so the selected
+    and assessed sets are disjoint by construction.
+    """
+    assessed = state.assessed_evidence_fact_ids
+    if state.assessed_failure_evidence:
+        assessed = (*assessed, *state.failure_fact_ids)
+    selected = set(_state_selected_fact_ids(state))
+    return tuple(fact_id for fact_id in _dedupe_text(assessed) if fact_id not in selected)
+
+
+def _state_evidence_fact_ids(state: _CompanyState) -> tuple[str, ...]:
+    """Selected inputs plus every assessed candidate this listing referenced.
+
+    This union -- and nothing narrower -- is what the immutable source-asset
+    manifest closes over. A rejected invested-capital candidate, a fact that
+    forced a combination refusal, an unselected TTM alias lineage, and a
+    dependency of a window that lost are all evidence the run actually read,
+    so their companyfacts and filing assets must be provable from the
+    persisted forecast even though none of them is a selected input.
+    """
+    return _dedupe_text((*_state_selected_fact_ids(state), *_state_assessed_fact_ids(state)))
+
+
+def _state_evidence_selection_payload(state: _CompanyState) -> dict[str, Any] | None:
+    """Split this listing's evidence into selected, assessed, and manifest sets.
+
+    Three explicit, non-overlapping-by-construction lists replace any
+    inference from ``input_facts`` membership:
+
+    - ``selected_input_fact_ids`` -- exactly the facts described in
+      ``input_facts``; each one entered the metric, share-consistency, or
+      sustainable-growth arithmetic;
+    - ``assessed_evidence_fact_ids``/``assessed_evidence`` -- every candidate
+      that was read and considered but *not* selected: rejected
+      invested-capital candidates, the facts responsible for a refused
+      combination space, unselected alias lineages, and dependencies of
+      windows that lost. An entry here is never a verified input;
+    - ``manifest_evidence_fact_ids`` -- the union the immutable
+      ``source_assets`` manifest closes over.
+
+    Frozen v1/v2 carry no evidence-selection payload at all, so they gain
+    none of these keys.
+    """
+    if state.evidence_selection is None:
+        return None
+    selected = _state_selected_fact_ids(state)
+    assessed = _state_assessed_fact_ids(state)
+    return {
+        **state.evidence_selection,
+        # (a) selected: entered the metric/share/sustainable arithmetic.
+        "selected_input_fact_ids": [fact_id for fact_id in selected if fact_id in state.fact_map],
+        # (b) assessed: read and considered, never selected.
+        "assessed_evidence_fact_ids": list(assessed),
+        "assessed_evidence": [
+            _fact_reference(state.fact_map[fact_id], state.filing_assets)
+            for fact_id in assessed
+            if fact_id in state.fact_map
+        ],
+        # (c) the union the immutable source-asset manifest closes over.
+        "manifest_evidence_fact_ids": list(_state_evidence_fact_ids(state)),
+    }
 
 
 def _state_input_fact_payloads(state: _CompanyState) -> list[dict[str, Any]]:
     return [
         _fact_payload(state.fact_map[fact_id], state.filing_assets)
-        for fact_id in _state_fact_ids(state)
+        for fact_id in _state_selected_fact_ids(state)
         if fact_id in state.fact_map
     ]
 
@@ -1797,6 +3260,24 @@ def _price_basis_failure(
     if dividends_included is not config.dividends_included:
         return "Price asset dividend basis is missing or incompatible"
     return ""
+
+
+def _dedupe_rejections(
+    rejections: list[_RejectedInvestedCapital],
+) -> tuple[_RejectedInvestedCapital, ...]:
+    """Collapse repeats deterministically, keeping the first reason seen.
+
+    One unusable alias can be refused once per debt basis it was paired
+    with, and the manifest only needs each distinct (date, basis, reason)
+    once.
+    """
+    unique: dict[tuple[Any, ...], _RejectedInvestedCapital] = {}
+    for rejection in rejections:
+        key = (rejection.period_end, rejection.source_basis, rejection.reason)
+        unique.setdefault(key, rejection)
+    return tuple(
+        unique[key] for key in sorted(unique, key=lambda item: (item[0], item[1], item[2]))
+    )
 
 
 def _dedupe_text(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:

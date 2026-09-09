@@ -255,6 +255,219 @@ hashes, and performance cohorts from the two configurations never mix: v1
 predictions already recorded remain immutable and keep scoring under their
 original pinned configuration hash.
 
+### `us-sec-long-v3`: prospective evidence selection only
+
+**Not the default, and not approved for activation.** (Scope: the SEC
+correction-availability integrity fix shipped alongside it *is* active in the
+default configuration and benefits every reader; only the long-v3 reader
+below is inactive.) `us-sec-long-v3` exists
+as a prospective configuration for the replay phase. It changes evidence
+selection only; every formula weight, bound, cap, fade path, multiple
+reversion, peer floor, metric-family rule, freshness limit, tax proxy,
+scenario constant, probability withholding, return basis, and
+unsupported-SIC policy is identical to long-v2, and the pinned
+long-v1/long-v2 config bytes, effective hashes, behavior, reason strings, and
+persisted payloads stay frozen. New analyses continue to run on
+`us-sec-long-v2`.
+
+**No eligibility improvement is claimed.** Nothing here has been measured
+against a historical panel. Long-v3 changes *which* already-persisted
+observations the unchanged arithmetic reads, and it can just as easily
+withhold a forecast that long-v2 produced -- for example when the alias that
+legitimately anchors the newest quarter cannot supply a homogeneous
+four-quarter tail. Whether the change is a net benefit is an open question
+that a cutoff-safe replay must answer before any activation decision.
+
+Long-v3 declares three default-off capabilities. A configuration that does
+not declare them parses to "absent", which is removed from the effective
+hash, so adding them cannot change an already-frozen version's hash.
+
+- `newest_quarter_anchored_homogeneous_ttm_alias_selection`: for each
+  canonical TTM concept, anchor on the newest eligible quarter end, rank the
+  observations at exactly that quarter, and build the trailing twelve months
+  only from four contiguous compatible quarters supplied by that same source
+  alias (350-380 day span). No cross-alias stitching, no preference for a
+  stale-but-complete alias over a newer restated newest-quarter observation,
+  and no annual current-period fallback. Annual history selection, generic
+  consumers, and long-v1/long-v2 keep the frozen legacy path.
+
+  A quarter can be reported directly or derived from the difference of two
+  year-to-date filings. In the derived case the observation is ranked by the
+  single *controlling* source fact -- the dependency that actually gates its
+  knowability under the existing lexicographic availability/revision/source
+  priority/accession order -- never by independently maximizing availability,
+  revision, and accession across the two filings. That synthesis would
+  describe a vintage nobody ever filed and could hand the anchor to the wrong
+  alias. The selected alias, the controlling fact, and the per-quarter
+  lineage of the chosen window are recorded in the calculation provenance.
+- `joint_compatible_invested_capital_pair_selection`: jointly search all
+  viable beginning and ending balance-sheet snapshots within the unchanged
+  +/-7-day tolerance, accept only pairs whose debt method, debt components,
+  and canonical/source concept bases match exactly, and rank the eligible
+  pairs purely on deterministic evidence criteria (combined and per-side
+  target-date distance, eligible-evidence recency, then declared alias
+  priority, canonical source basis, and stable date/fact-id tie-breaks).
+  Ranking never consults the resulting forecast, ROIC, reinvestment, growth,
+  or scenario favorability. With no compatible pair the forecast is withheld
+  with an explicit reason.
+
+  The normalized instant series collapses every canonical concept to one
+  winning alias per period identity, so a pair that exists only through a
+  *non-winning same-date* equity, cash, or debt alias is invisible there.
+  Long-v3 therefore reads an additional candidate surface that retains the
+  latest eligible vintage per `(canonical concept, source alias, period
+  identity)` and enumerates the permitted same-date source-basis
+  combinations before pairing. A reported long-term debt roll-up still
+  forbids the component basis at that date, so no debt component is ever
+  counted twice, and superseded revisions are still discarded. Legacy
+  `instants`, long-v1, and long-v2 are untouched.
+- `proven_observation_correction_availability`: resolve each same-accession
+  correction against the observation that proves it rather than against a
+  recorded availability an earlier ingestion may have backdated to the
+  original filing acceptance. A correction whose timing is not proven at the
+  requested cutoff is withheld from the series, the revision it superseded
+  stands in its place, and the withheld row is reported as assessed evidence
+  with its resolved availability and reason. The capability is declared and
+  hashed on its own, so adopting either capability above never silently
+  acquires it; frozen long-v1 and long-v2 declare no such key and keep
+  reading recorded availability exactly as released.
+
+Every pair search is recorded as an assessment, including the ones that
+reject the evidence. A missing beginning side, a missing ending side, zero
+compatible pairs, a selected pair later withheld for an unrelated reason
+(such as an insufficient peer set), and a successful selection all persist
+the targets, the candidate snapshots with their facts and source bases, the
+compatible-pair count, the status, and the rejection reason. Rejected
+evidence is labeled *assessed*, never verified, and never implies a
+confirmed selection.
+
+Three boundaries are refused rather than resolved, because resolving them
+would silently decide the answer:
+
+- **Non-canonical instant identity.** The same-date alias join is only sound
+  while every instant observation for one balance-sheet date carries exactly
+  the canonical `instant::<date>` period identity. A conflicting or
+  mislabelled identity would either split one date into pseudo-dates or make
+  two different observations look interchangeable, so long-v3 withholds that
+  listing with the offending rows named. It never breaks such a tie by row
+  identifier.
+- **Generated row identifiers.** No long-v3 ordering, ranking, or tie-break
+  reads a fact's primary key. Alias ordering, latest-revision selection,
+  same-date candidate ordering, and pair ranking all fall through to the
+  persisted observation identity, so reassigning UUIDs cannot change a
+  selection.
+- **Same-date combination ceiling.** The number of permitted same-date
+  source-basis combinations is computed from the per-axis alias counts
+  *before* any Cartesian product is built, and a date above the reviewed
+  ceiling of 256 withholds that listing explicitly. The refusal keeps the
+  evidence that disqualified the date: each independent axis is recorded with
+  its concept, alias source concepts, fact ids, option count, and the factor
+  it contributes, so every fact responsible for the bound is named and
+  manifest-covered without the run ever enumerating a single combination.
+  Nothing is truncated, the ceiling is not raised, no product is listed, an
+  already-assessed opposite side is retained, and the surrounding analysis
+  run and audit continue for every other listing.
+
+Every fact these assessments referenced -- selected, rejected, unpaired,
+responsible for a refused combination space, or withheld later for an
+unrelated reason -- is covered by the immutable forecast `source_assets`
+manifest through its companyfacts and filing-evidence assets. The payload
+separates that evidence explicitly into three lists rather than leaving the
+classification to be inferred:
+
+- `selected_input_fact_ids` -- exactly the facts described in `input_facts`,
+  each one an input to the metric, share-consistency, or sustainable-growth
+  arithmetic;
+- `assessed_evidence_fact_ids` plus the described `assessed_evidence` --
+  candidates that were read and considered but not selected, including every
+  failure-path candidate. A no-compatible-pair, missing-side, refused-
+  boundary, or unusable-metric result selects nothing, so its candidates are
+  assessed only;
+- `manifest_evidence_fact_ids` -- the union the source-asset manifest closes
+  over.
+
+The first two are disjoint by construction, so a rejected filing can never
+read as a verified one. Frozen long-v1/long-v2 payloads gain none of this and
+keep their original `input_facts` classification unchanged.
+
+Long-v3 also explicitly binds the SEC fundamentals configuration identity it
+selects against (`us-sec-fundamentals-v1`, unchanged and unedited).
+
+#### Cutoff-safe replay observation (not an activation basis)
+
+A read-only, provider-free replay of the 97 listings analyzed in the most
+recent completed local run (target date 2026-09-08, that run's own
+`data_cutoff` and as-of boundary, no database write) reproduced the run's
+persisted long-v2 eligibility exactly and then re-ran the same inputs under
+long-v3:
+
+| | 3y | 5y |
+|---|---|---|
+| long-v2 eligible | 2 / 97 | 2 / 97 |
+| long-v3 eligible | 5 / 97 | 5 / 97 |
+| recovered by long-v3 | 3 | 3 |
+| lost under long-v3 | 0 | 0 |
+
+All three recoveries (ABT, ADI, LIN) were listings long-v2 withheld with
+"Beginning/end invested-capital evidence uses incompatible source
+definitions". Counting that snapshot's 19 listings in that family
+individually: 14 reached a later gate and failed the unchanged peer floor, 3
+became eligible, and 2 still report an explicit "no compatible beginning/end
+invested-capital pair", so the legacy reason falls from 19 listings to 0. One
+further listing that long-v2 withheld for a missing TTM pretax input now
+reaches the pair search and becomes the third no-compatible-pair result, so
+that family moves from 3 listings to 2. Every other withholding family
+(unsupported SIC, FCF-branch failure, the remaining missing-TTM-input cases)
+is unchanged. These are counts from one snapshot, independently re-derived
+from that replay's per-listing reasons; they describe where withholding moved,
+not whether the change is beneficial.
+
+**This is one local run on one target date and is not evidence of benefit.**
+Three recoveries out of 97 on a single snapshot cannot distinguish a genuine
+selection improvement from a fixture artifact, the sample says nothing about
+forecast accuracy, and the dominant constraint at this cutoff is the peer
+floor rather than evidence selection. Long-v3 remains prospective and
+inactive; `us-sec-long-v2` remains the default.
+
+`manage.py audit_long_evidence` reports newest-quarter alias selection with
+its controlling source fact, homogeneous four-quarter tail availability,
+alias collisions and stale-complete alternatives, and invested-capital pair
+assessment. It is read-only and offline: it reads persisted immutable rows
+through the point-in-time gate, makes no provider request, and writes no row,
+asset, or file.
+
+The audit mirrors the forecast's boundaries instead of collapsing them, and
+fails closed rather than guessing any of them:
+
+```text
+python manage.py audit_long_evidence \
+    --listing-ids <uuid>[,<uuid>...] \
+    --target-date 2026-02-27 \
+    --available-through 2026-03-01T12:00:00+00:00 \
+    --decision-time 2026-03-01T12:00:00+00:00 \
+    --json
+```
+
+- `--target-date` bounds which reporting periods may enter the window, so a
+  quarter ending between the target date and the audit run is excluded
+  exactly as a forecast would exclude it;
+- `--available-through` is the historical data cutoff applied to fact
+  availability, so a post-cutoff restatement stays out of a reconstruction
+  even when a later reader can see it;
+- `--decision-time` is the as-of boundary for evidence and source-asset
+  visibility, which is what admits a *later-retrieved* source asset into a
+  research-grade reconstruction.
+
+A naive timestamp, an `--available-through` after the decision time, a
+`--target-date` after the cutoff, or an `AsOfData` reader whose decision
+boundary differs from the requested one is rejected rather than reconciled.
+
+Listings are identified by their immutable listing ID. A ticker is accepted
+only as operator convenience and only when exactly one listing matches; the
+same symbol on two exchanges, or a symbol an exchange reused after a
+delisting, is an explicit ambiguity error naming the candidates, never a
+silently chosen winner.
+
 The scenario assumptions are mechanical:
 
 - **Bear:** fixed negative growth delta, lower reinvestment multiplier, and

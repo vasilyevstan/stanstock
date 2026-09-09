@@ -186,6 +186,99 @@ market job is failed visibly but a retry recovers the completed research and
 retries ETF synchronization without provider credentials or additional
 credits.
 
+#### Refused SEC ingestion: missing or ambiguous observation evidence
+
+Correction-availability integrity is **active in the shipped default
+configuration**: ingestion binds every same-accession correction to the
+retrieval that carried it, and the refusals below apply to every run. The
+prospective `us-sec-long-v3` *reader* is a separate, inactive layer on top of
+it and changes nothing about ingestion.
+
+Every Companyfacts retrieval appends an immutable `SourceObservationEvent`
+recording that exact bytes were observed at that time. Corrections bind their
+availability to that event rather than to `DataAsset.retrieved_at`, which is
+only the time those bytes were *first* stored. Two refusals protect that
+chain, and both stop the run instead of continuing on stale evidence.
+
+**"two different payloads observed at the same instant"** — two different
+Companyfacts bodies claim one observation timestamp. Nothing in the evidence
+says which is newer, and a local clock is not provider order. Recording the
+*same* payload again at that instant is idempotent and never raises, so this
+only fires on genuinely conflicting content.
+
+*Do:* confirm the provider timestamps, then re-run once a fresh retrieval is
+due so the newer body arrives with its own later timestamp.
+
+**"recovery ... is unproven: no observation event records which stored
+payload was committed last"** — the database predates observation events and
+the company already has a correction chain. Ordering stored assets by
+retrieval is exactly wrong here: after a 100 → 101 → 100 reversion the
+superseded 101 asset still has the newest retrieval, so a replay would
+re-append 101 as a brand-new correction the provider never sent. A database
+with no correction chain has nothing to mis-order and recovers normally.
+
+*Do:* let the next scheduled run reach a due Companyfacts fetch. That fetch
+is separately gated by `ProviderRecord`, the request budget, and the
+reconciliation window; it records the observation recovery needs, after which
+replay is proven again. Nothing needs to be repaired by hand.
+
+**A refused run blocks; it does not degrade.** The `JobRun` fails visibly and
+the scheduled refresh stops rather than continuing from stale content. That
+is the intended outcome: a blocked refresh is recoverable, whereas a
+fabricated correction silently contaminates every later as-of read.
+
+**Never** delete, backdate, or hand-write a `SourceObservationEvent`, and
+never edit a `FundamentalFact` to make a refusal go away. Events and facts are
+immutable at both the model and database layers, and a fabricated event would
+certify a knowability boundary no retrieval ever proved — the precise defect
+the events exist to prevent.
+
+That fetch also repairs the chain it unblocks: re-observing the same content
+appends a new, observation-bound vintage beside the unprovable revision
+(flagged `reobserved_unproven_correction`) so as-of reads stop selecting the
+superseded value. The old row is left exactly as persisted.
+
+#### Rolling back the observation-event migration
+
+`0008_source_observation_event` is **not safely reversible as a data
+operation.** Reversing it drops the table, which destroys every observation
+event; reapplying it creates an *empty* table, because nothing reconstructs
+evidence about when content was seen. The migration test exercises exactly
+this cycle so the loss is a documented property rather than a surprise.
+
+Prefer **rolling forward**. If application code must be rolled back:
+
+- **Leave the schema and the evidence in place.** Older code ignores the
+  table; it does not need to be removed, and removing it converts a
+  reversible code rollback into permanent evidence loss.
+- **Pause SEC ingestion for the rollback window** if the older writer would
+  return. That writer backdates same-accession corrections to filing
+  acceptance and records no observations, so what it appends carries no
+  proof of when it was seen. How a later reader treats that depends on the
+  reader: frozen long-v1 and long-v2 use recorded availability and will
+  simply read it as written, and the prospective long-v3 reader may still
+  admit a correction whose own asset retrievals are distinct and correctly
+  ordered. Only timing it cannot prove -- an unprovable legacy correction or
+  a content reversion -- is deferred.
+- If reversal is genuinely unavoidable, take a **database *and* asset backup
+  first** (`manage.py backup`), because the events and the assets they point
+  at are only meaningful together.
+- **Never** hand-write events or edit timestamps to "restore" what a reversal
+  destroyed. A fabricated event certifies a boundary no retrieval proved,
+  which is precisely the defect events exist to prevent.
+- After reapplying, a **fresh observation is not retrospective**. It proves
+  the content seen from that moment on; it says nothing about when earlier
+  corrections became knowable, and those stay deferred by the prospective
+  reader.
+
+**Restoring current ingestion is not proof of legacy history.** Once a fresh
+retrieval unblocks ingestion, only observations from that point forward are
+proven. Facts persisted before observation events existed keep whatever
+availability they were written with; the prospective long-forecast path
+resolves those conservatively at read time and defers what it cannot prove
+(see `docs/point-in-time.md`). Do not read a recovered pipeline as
+retroactive evidence about when older corrections became knowable.
+
 ### Daily macOS LaunchAgent
 
 The supported unattended local workflow is one user LaunchAgent at 02:00

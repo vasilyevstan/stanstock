@@ -225,6 +225,69 @@ class DataAsset(ImmutableEvidenceModel):
         return f"{self.provider}:{self.kind}:{self.subject}:{self.available_at.isoformat()}"
 
 
+#: Name of the uniqueness constraint that makes one observation instant
+#: name exactly one content. Referenced by ingestion so a racing insert
+#: can be told apart from an unrelated integrity fault.
+OBSERVATION_INSTANT_CONSTRAINT = "unique_source_observation_instant"
+
+
+class SourceObservationEvent(ImmutableEvidenceModel):
+    """Append-only record that exact provider bytes were observed at a time.
+
+    A `DataAsset` is content-addressed: when a provider serves bytes that are
+    identical to an earlier response, ingestion deliberately reuses the
+    existing asset row instead of storing a duplicate. That reuse makes
+    ``DataAsset.retrieved_at`` the time the content was *first* seen, which is
+    the wrong clock for a later observation of the same bytes.
+
+    The concrete failure this exists to prevent is a content reversion: a
+    value that goes 100 -> 101 -> 100 restates back to bytes already on file,
+    so the third revision would otherwise inherit the *first* retrieval time
+    and appear knowable months before it was actually observed.
+
+    Each retrieval therefore appends its own event. Events are immutable and
+    unique on ``(provider, kind, subject, observed_at)`` -- deliberately
+    *without* the digest -- so the database itself enforces that one
+    observation instant names exactly one content. Two concurrent writers
+    claiming the same instant cannot both succeed: the loser sees the
+    committed row and either succeeds idempotently (same digest) or fails
+    explicitly (different digest), before anything is normalized. A
+    sequential read-then-write check could not provide that, and a
+    ``select_for_update()`` on a row that does not exist yet locks nothing.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider = models.CharField(max_length=40)
+    kind = models.CharField(max_length=40)
+    subject = models.CharField(max_length=120)
+    content_sha256 = models.CharField(max_length=64)
+    source_asset = models.ForeignKey(
+        DataAsset,
+        on_delete=models.PROTECT,
+        related_name="observation_events",
+    )
+    observed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["provider", "kind", "subject", "observed_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "kind", "subject", "observed_at"],
+                name=OBSERVATION_INSTANT_CONSTRAINT,
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["source_asset", "observed_at"],
+                name="observation_asset_lookup",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider}:{self.kind}:{self.subject}:{self.observed_at.isoformat()}"
+
+
 class FundamentalFact(ImmutableEvidenceModel):
     class PeriodType(models.TextChoices):
         INSTANT = "instant", "Instant"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -15,6 +15,7 @@ from stanstock.data.models import (
     FundamentalFact,
     FundamentalFactEvidence,
     FxRate,
+    SourceObservationEvent,
 )
 
 
@@ -123,3 +124,48 @@ def test_fundamental_fact_evidence_is_immutable_at_model_and_database_layers(
     with pytest.raises(DatabaseError, match="immutable"):
         with transaction.atomic():
             FundamentalFactEvidence.objects.filter(pk=evidence.pk).delete()
+
+
+@pytest.mark.django_db
+def test_source_observation_event_is_immutable_at_model_and_database_layers(
+    evidence_records: tuple[DataAsset, FundamentalFact, FxRate],
+) -> None:
+    """Observation events are the clock corrections bind to, so they are fixed.
+
+    A mutable event would let a correction's proven availability be moved
+    after the fact, which is exactly the look-ahead the event exists to
+    close. The bulk paths are covered too, because `Model.save()` guards do
+    not run for queryset `update()`/`delete()`.
+    """
+    asset, _fact, _rate = evidence_records
+    event = SourceObservationEvent.objects.create(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject="0000320193",
+        content_sha256="a" * 64,
+        source_asset=asset,
+        observed_at=datetime(2026, 10, 18, 12, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValidationError, match="immutable"):
+        event.save()
+    with pytest.raises(DatabaseError, match="immutable"):
+        with transaction.atomic():
+            SourceObservationEvent.objects.filter(pk=event.pk).update(
+                observed_at=datetime(2026, 8, 15, 12, tzinfo=UTC)
+            )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with transaction.atomic():
+            SourceObservationEvent.objects.filter(pk=event.pk).delete()
+
+    # The same retrieval recorded again is one row, not a duplicate.
+    again, created = SourceObservationEvent.objects.get_or_create(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject="0000320193",
+        content_sha256="a" * 64,
+        observed_at=datetime(2026, 10, 18, 12, tzinfo=UTC),
+        defaults={"source_asset": asset},
+    )
+    assert created is False
+    assert again.pk == event.pk
