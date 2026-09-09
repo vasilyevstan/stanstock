@@ -93,6 +93,33 @@ not spawn a duplicate agent or a new gate to re-litigate the same finding;
 corrections stay inside the originating agent's context until resolved or the
 owner is genuinely unavailable.
 
+## Orchestrator stall detection
+
+The orchestrator remains accountable for the requested result across every
+handoff, wait, CI run, release gate, merge, and local verification. Waiting is
+not a terminal status.
+
+Treat each of these as an actionable stall signal:
+
+- an idle or completed agent has unread output;
+- a running agent stops making tool progress or repeatedly returns no usable
+  evidence;
+- the same finding survives another correction cycle;
+- an approval or test result names a stale SHA or worktree fingerprint;
+- CI, a deployment/environment gate, or a CLI-owned approval is pending
+  without inspection;
+- a dirty development worktree approaches an operational deadline such as
+  the next 02:00 scheduled refresh, which requires a clean committed revision.
+
+On a stall signal, inspect the current repository and task ledger, record the
+specific blocker, and take the smallest progress-making action: read the
+completed result, return the defect to its owning agent, send a focused
+follow-up, continue independent work, or take over directly. Start a
+replacement agent only when the original owner is unavailable or has failed;
+preserve the exact handoff and fingerprint when doing so. Never claim
+completion, abandon the chain, or poll a background agent repeatedly while
+there is independent work to do.
+
 ## Exact revision evidence
 
 Every handoff and every terminal status (`APPROVE_SLICE`,

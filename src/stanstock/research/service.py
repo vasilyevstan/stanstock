@@ -1,23 +1,34 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import polars as pl
 from django.db import transaction
 from django.utils import timezone
 
-from stanstock.data.asof import AsOfData
+from stanstock.data.asof import AsOfData, PriceFrameChecksumMismatchError
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import (
     DataAsset,
+    FundamentalFact,
     Listing,
     ProviderRecord,
     UniverseMembership,
     UniverseSnapshot,
+)
+from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER, normalized_provider_plan
+from stanstock.data.sec_config import SecFundamentalsConfig, load_sec_fundamentals_config
+from stanstock.research.affordability import (
+    DECISION_TARGET_DATE_BASIS,
+    UNDER_10_BAND,
+    classify_price_band,
 )
 from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
 from stanstock.research.eligibility import require_stock_research_listing
@@ -56,6 +67,17 @@ from stanstock.research.scoring import (
 )
 from stanstock.research.timing import is_observed_issuance_on_time
 from stanstock.research.types import AggregateScore, IndicatorResult, ResearchValues, Scenario
+from stanstock.research.under10 import (
+    UNDER10_CONCEPTS,
+    build_under10_assessment,
+    canonical_json,
+    qualify_under10_sec_facts,
+)
+
+#: `data_quality` key carrying the unactivated Under-$10 shadow assessment.
+#: It is written only when a *new* analysis qualifies; an absent key means
+#: "not assessed", never "assessed and failed". Nothing backfills it.
+UNDER10_ASSESSMENT_KEY = "under10_assessment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +121,15 @@ class LongForecastContext:
     config_hash: str
     model_version: str
     forecasts: dict[str, dict[str, LongForecast]]
+
+
+@dataclass(frozen=True, slots=True)
+class _Under10DecisionEvidence:
+    """Immutable decision-prediction provenance needed for shadow replay."""
+
+    price_provider: str
+    price_subject: str
+    price_entry: Mapping[str, Any]
 
 
 def compute_listing_analysis(
@@ -224,34 +255,35 @@ def _compute_listing_from_asof(
     provider: str,
     config: ScoringConfig,
     decision_time: datetime,
+    issued_on_time: bool,
+    provider_plan: str | None,
+    code_revision_value: str,
     subject: str | None = None,
     benchmark_subject: str | None = None,
     sample_support: dict[str, int] | None = None,
     target_date: date | None = None,
 ) -> AnalysisComputation:
     symbol = subject or listing.provider_symbol or listing.ticker
-    price_asset = asof.latest_asset(provider=provider, kind="price_history", subject=symbol)
-    price_frame = asof.price_frame(
+    price_read = asof.price_frame_with_diagnostics(
         provider=provider,
         subject=symbol,
         through_date=target_date,
     )
+    price_asset = price_read.asset
+    price_frame = price_read.frame
     benchmark_frame: pl.DataFrame | None = None
     source_assets = [price_asset]
     if benchmark_subject:
-        benchmark_asset = asof.latest_asset(
-            provider=provider,
-            kind="price_history",
-            subject=benchmark_subject,
-        )
-        benchmark_frame = asof.price_frame(
+        benchmark_read = asof.price_frame_with_diagnostics(
             provider=provider,
             subject=benchmark_subject,
             through_date=target_date,
         )
-        source_assets.append(benchmark_asset)
+        benchmark_frame = benchmark_read.frame
+        source_assets.append(benchmark_read.asset)
     facts: list[Any] = []
-    if config.analysis_mode != "price_only_baseline":
+    full_analysis_facts_loaded = config.analysis_mode != "price_only_baseline"
+    if full_analysis_facts_loaded:
         facts = list(
             asof.fundamental_facts(
                 company_id=listing.security.company_id,
@@ -259,7 +291,7 @@ def _compute_listing_from_asof(
             ).select_related("source_asset")
         )
         source_assets.extend(fact.source_asset for fact in facts)
-    return compute_listing_analysis(
+    computation = compute_listing_analysis(
         listing=listing,
         price_frame=price_frame,
         benchmark_frame=benchmark_frame,
@@ -269,6 +301,413 @@ def _compute_listing_from_asof(
         config=config,
         decision_time=decision_time,
         sample_support=sample_support,
+    )
+    return _with_under10_assessment(
+        computation,
+        listing=listing,
+        asof=asof,
+        provider=provider,
+        provider_plan=provider_plan,
+        loaded_facts=facts,
+        loaded_facts_cover_all_concepts=full_analysis_facts_loaded,
+        price_frame=price_frame,
+        price_asset=price_asset,
+        invalid_session_date_rows=price_read.invalid_session_date_rows,
+        decision_time=decision_time,
+        target_date=target_date or decision_time.date(),
+        issued_on_time=issued_on_time,
+        code_revision_value=code_revision_value,
+    )
+
+
+def _with_under10_assessment(
+    computation: AnalysisComputation,
+    *,
+    listing: Listing,
+    asof: AsOfData,
+    provider: str,
+    provider_plan: str | None,
+    loaded_facts: Sequence[FundamentalFact],
+    loaded_facts_cover_all_concepts: bool,
+    price_frame: pl.DataFrame,
+    price_asset: DataAsset | None,
+    invalid_session_date_rows: int,
+    decision_time: datetime,
+    target_date: date,
+    issued_on_time: bool,
+    code_revision_value: str,
+) -> AnalysisComputation:
+    """Attach the shadow Under-$10 diagnostic to a qualifying computation.
+
+    The scored computation above is already final: this only adds one nested
+    `data_quality` key. A listing whose decision-run reference close is not a
+    valid USD Under-$10 close is returned untouched and issues no additional
+    SEC query at all.
+
+    The reference close classified here is the *rounded* value
+    `_create_stock_analysis` persists, so the band recorded in the payload is
+    the same band sample construction later reads -- never an unrounded float
+    and never a mutable current market row.
+    """
+    reference_close = _decimal(computation.current_price, places=6)
+    band = classify_price_band(
+        close=reference_close,
+        price_date=target_date,
+        date_basis=DECISION_TARGET_DATE_BASIS,
+        currency=listing.currency,
+    )
+    if band is None or band.slug != UNDER_10_BAND:
+        return computation
+    if loaded_facts_cover_all_concepts:
+        # Full-analysis mode already read every visible fact for this
+        # company under the same cutoff; a second shadow query would be a
+        # duplicate read of the same evidence.
+        facts: Sequence[FundamentalFact] = loaded_facts
+    else:
+        facts = list(
+            asof.fundamental_facts(
+                company_id=listing.security.company_id,
+                concepts=list(UNDER10_CONCEPTS),
+                available_through=decision_time,
+            ).select_related("source_asset")
+        )
+    qualified_facts = qualify_under10_sec_facts(facts)
+    payload = build_under10_assessment(
+        facts=qualified_facts,
+        sec_config=_sec_fundamentals_config(),
+        price_frame=price_frame,
+        price_asset=price_asset,
+        price_source=_mapping_or_none(computation.data_quality.get("price_source")),
+        reference_close=reference_close,
+        target_date=target_date,
+        data_cutoff=decision_time,
+        code_revision_value=code_revision_value,
+        provider=provider,
+        provider_plan=provider_plan,
+        evidence_cutoff_safe=_shadow_evidence_cutoff_safe(
+            qualified_facts,
+            issued_on_time=issued_on_time,
+            data_cutoff=decision_time,
+        ),
+        company_identity_present=listing.security.company_id is not None,
+        invalid_session_date_rows=invalid_session_date_rows,
+        listing_id=str(listing.id),
+    )
+    # `replace` keeps every other computed field -- including the original
+    # `source_assets` list object -- identical. The shadow SEC evidence lives
+    # only under the new nested key and never joins the prediction manifest.
+    return replace(
+        computation,
+        data_quality={**computation.data_quality, UNDER10_ASSESSMENT_KEY: payload},
+    )
+
+
+@lru_cache(maxsize=1)
+def _sec_fundamentals_config() -> SecFundamentalsConfig:
+    """The reviewed SEC fundamentals configuration, loaded at most once.
+
+    Mirrors the cached opportunity-policy loader; the pure assessment builder
+    never loads configuration itself.
+    """
+    return load_sec_fundamentals_config()
+
+
+def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _shadow_evidence_cutoff_safe(
+    facts: Sequence[FundamentalFact],
+    *,
+    issued_on_time: bool,
+    data_cutoff: datetime,
+) -> bool:
+    """Whether qualified SEC shadow evidence satisfies the asset cutoff rule.
+
+    The strict asset-retrieval check belongs to on-time issuance only. A
+    research-grade reconstruction may legitimately read evidence retrieved
+    later than its historical cutoff, while `AsOfData` and the correction
+    resolution still require the *facts* themselves to be provably available
+    at that cutoff. The caller supplies the exact provider-qualified sequence
+    also passed to the defensive assessment builder, so foreign evidence
+    cannot make an SEC cutoff claim fail.
+    """
+    if not issued_on_time:
+        return True
+    for asset in _dedupe_assets([fact.source_asset for fact in facts]):
+        if _asset_cutoff_violation(_asset_payload(asset), data_cutoff=data_cutoff) is not None:
+            return False
+    return True
+
+
+def under10_assessment_matches_persisted_evidence(
+    *,
+    analysis: StockAnalysis,
+    recorded: Mapping[str, Any],
+    store: AssetStore | None = None,
+) -> bool:
+    """Whether a stored shadow assessment exactly replays from its evidence.
+
+    This is a read-only evidence-validation predicate, not an alternate producer:
+    it never repairs the payload, returns reconstructed values, or writes a
+    model. Price provenance comes from the immutable decision-prediction
+    cohort rather than the mutable parent JSON alone. The exact price asset
+    named there is read through :class:`AsOfData`, while SEC facts are
+    independently selected under the original run's generation and data
+    cutoffs. Only exact canonical equality of the resulting solvency and
+    liquidity blocks admits the recorded values for display.
+
+    Expected evidence failures return ``False``. Database failures and
+    programming errors are deliberately not hidden.
+    """
+    if analysis._state.adding:
+        return False
+    recorded_solvency = recorded.get("solvency")
+    recorded_liquidity = recorded.get("liquidity")
+    recorded_split = recorded.get("split_verification")
+    if (
+        not isinstance(recorded_solvency, Mapping)
+        or not isinstance(recorded_liquidity, Mapping)
+        or not isinstance(recorded_split, Mapping)
+    ):
+        return False
+
+    decision_evidence = _under10_decision_evidence(analysis)
+    if decision_evidence is None:
+        return False
+    price_entry = decision_evidence.price_entry
+    asset_id = price_entry.get("id")
+    asset_checksum = price_entry.get("sha256")
+    if not isinstance(asset_id, str) or not isinstance(asset_checksum, str):
+        return False
+    try:
+        asset_uuid = UUID(asset_id)
+    except ValueError:
+        return False
+    if str(asset_uuid) != asset_id:
+        return False
+    if not _under10_parent_price_anchor_matches(
+        analysis,
+        asset_id=asset_id,
+        asset_checksum=asset_checksum,
+        price_provider=decision_evidence.price_provider,
+        price_subject=decision_evidence.price_subject,
+    ):
+        return False
+    recorded_price_asset = recorded_liquidity.get("price_asset")
+    if (
+        not isinstance(recorded_price_asset, Mapping)
+        or recorded_price_asset.get("id") != asset_id
+        or recorded_price_asset.get("sha256") != asset_checksum
+    ):
+        return False
+
+    try:
+        price_asset = DataAsset.objects.get(pk=asset_uuid)
+    except DataAsset.DoesNotExist:
+        return False
+    if (
+        str(price_asset.pk) != asset_id
+        or price_asset.sha256 != asset_checksum
+        or price_asset.provider != decision_evidence.price_provider
+        or price_asset.kind != "price_history"
+        or price_asset.subject != decision_evidence.price_subject
+        or price_entry.get("provider") != price_asset.provider
+        or price_entry.get("kind") != price_asset.kind
+        or price_entry.get("subject") != price_asset.subject
+    ):
+        return False
+    if recorded_split.get("provider") != price_asset.provider:
+        return False
+
+    asset_store = store or AssetStore()
+    asof = AsOfData(analysis.run.generated_at, asset_store)
+    try:
+        price_read = asof.price_frame_for_asset_with_diagnostics(
+            asset=price_asset,
+            through_date=analysis.run.target_date,
+        )
+    except (
+        PriceFrameChecksumMismatchError,
+        FileNotFoundError,
+        pl.exceptions.PolarsError,
+        ValueError,
+    ):
+        return False
+
+    try:
+        facts = list(
+            asof.fundamental_facts(
+                company_id=analysis.listing.security.company_id,
+                concepts=list(UNDER10_CONCEPTS),
+                available_through=analysis.run.data_cutoff,
+            ).select_related("source_asset")
+        )
+    except ValueError:
+        return False
+    qualified_facts = qualify_under10_sec_facts(facts)
+    try:
+        replayed = build_under10_assessment(
+            facts=qualified_facts,
+            sec_config=_sec_fundamentals_config(),
+            price_frame=price_read.frame,
+            price_asset=price_asset,
+            price_source={
+                "asset_id": asset_id,
+                "provider": price_asset.provider,
+                "subject": price_asset.subject,
+            },
+            reference_close=analysis.current_price,
+            target_date=analysis.run.target_date,
+            data_cutoff=analysis.run.data_cutoff,
+            code_revision_value=analysis.run.code_revision,
+            provider=price_asset.provider,
+            # ProviderRecord is mutable capability context and is not
+            # decision evidence. The split block is therefore not replayed;
+            # only its recorded provider is bound above. Provider plan does
+            # not enter either evidence-derived block compared below.
+            provider_plan=None,
+            evidence_cutoff_safe=_shadow_evidence_cutoff_safe(
+                qualified_facts,
+                issued_on_time=analysis.run.issued_on_time,
+                data_cutoff=analysis.run.data_cutoff,
+            ),
+            company_identity_present=analysis.listing.security.company_id is not None,
+            invalid_session_date_rows=price_read.invalid_session_date_rows,
+            listing_id=str(analysis.listing_id),
+        )
+    except ValueError:
+        return False
+
+    replayed_solvency = replayed.get("solvency")
+    replayed_liquidity = replayed.get("liquidity")
+    if not isinstance(replayed_solvency, Mapping) or not isinstance(replayed_liquidity, Mapping):
+        return False
+    try:
+        return canonical_json(recorded_solvency) == canonical_json(
+            replayed_solvency
+        ) and canonical_json(recorded_liquidity) == canonical_json(replayed_liquidity)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _under10_decision_evidence(
+    analysis: StockAnalysis,
+) -> _Under10DecisionEvidence | None:
+    """Resolve one internally agreeing immutable decision-prediction cohort."""
+    run = analysis.run
+    predictions = list(
+        Prediction.objects.filter(
+            analysis_id=analysis.pk,
+            evidence_role=Prediction.EvidenceRole.DECISION,
+        )
+        .only(
+            "id",
+            "listing_id",
+            "generated_at",
+            "target_date",
+            "issued_on_time",
+            "price_at_prediction",
+            "price_provider",
+            "price_subject",
+            "data_cutoff",
+            "source_assets",
+            "code_revision",
+        )
+        .order_by("pk")
+    )
+    if not predictions:
+        return None
+
+    first = predictions[0]
+    price_provider = first.price_provider
+    price_subject = first.price_subject
+    if not price_provider or not price_subject:
+        return None
+    manifest = _canonical_under10_source_manifest(first.source_assets)
+    if manifest is None:
+        return None
+    manifest_json, manifest_entries = manifest
+    for prediction in predictions:
+        if (
+            prediction.listing_id != analysis.listing_id
+            or prediction.generated_at != run.generated_at
+            or prediction.target_date != run.target_date
+            or prediction.data_cutoff != run.data_cutoff
+            or prediction.code_revision != run.code_revision
+            or prediction.issued_on_time != run.issued_on_time
+            or prediction.price_at_prediction != analysis.current_price
+            or prediction.price_provider != price_provider
+            or prediction.price_subject != price_subject
+        ):
+            return None
+        candidate_manifest = _canonical_under10_source_manifest(prediction.source_assets)
+        if candidate_manifest is None or candidate_manifest[0] != manifest_json:
+            return None
+
+    price_entries = [
+        entry
+        for entry in manifest_entries
+        if entry.get("provider") == price_provider
+        and entry.get("kind") == "price_history"
+        and entry.get("subject") == price_subject
+    ]
+    if len(price_entries) != 1:
+        return None
+    return _Under10DecisionEvidence(
+        price_provider=price_provider,
+        price_subject=price_subject,
+        price_entry=price_entries[0],
+    )
+
+
+def _canonical_under10_source_manifest(
+    value: object,
+) -> tuple[str, tuple[Mapping[str, Any], ...]] | None:
+    if not isinstance(value, list) or not all(isinstance(entry, Mapping) for entry in value):
+        return None
+    entries = tuple(entry for entry in value if isinstance(entry, Mapping))
+    try:
+        serialized = canonical_json({"source_assets": list(entries)})
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return serialized, entries
+
+
+def _under10_parent_price_anchor_matches(
+    analysis: StockAnalysis,
+    *,
+    asset_id: str,
+    asset_checksum: str,
+    price_provider: str,
+    price_subject: str,
+) -> bool:
+    data_quality = analysis.data_quality
+    if not isinstance(data_quality, Mapping):
+        return False
+    price_source = data_quality.get("price_source")
+    source_assets = data_quality.get("source_assets")
+    if (
+        not isinstance(price_source, Mapping)
+        or price_source.get("asset_id") != asset_id
+        or price_source.get("provider") != price_provider
+        or price_source.get("subject") != price_subject
+        or not isinstance(source_assets, list)
+    ):
+        return False
+    matches = [
+        entry
+        for entry in source_assets
+        if isinstance(entry, Mapping) and entry.get("id") == asset_id
+    ]
+    if len(matches) != 1:
+        return False
+    matching = matches[0]
+    return bool(
+        matching.get("sha256") == asset_checksum
+        and matching.get("provider") == price_provider
+        and matching.get("kind") == "price_history"
+        and matching.get("subject") == price_subject
     )
 
 
@@ -375,12 +814,55 @@ def _validate_on_time_source_assets(
     data_cutoff: datetime,
 ) -> None:
     for asset in source_assets:
-        for field in ("available_at", "retrieved_at"):
-            timestamp = datetime.fromisoformat(str(asset[field]))
-            if timestamp > data_cutoff:
-                raise ValueError(
-                    f"On-time analysis source asset {asset['id']} has {field} after data cutoff"
-                )
+        field = _asset_cutoff_violation(asset, data_cutoff=data_cutoff)
+        if field is not None:
+            raise ValueError(
+                f"On-time analysis source asset {asset['id']} has {field} after data cutoff"
+            )
+
+
+def _asset_cutoff_violation(
+    asset: Mapping[str, Any],
+    *,
+    data_cutoff: datetime,
+) -> str | None:
+    """First cutoff-safety field this asset violates, or ``None``.
+
+    Fields are checked in the released order -- ``available_at`` before
+    ``retrieved_at`` -- so the core validator above keeps raising on exactly
+    the field and with exactly the wording it always did. The shadow
+    assessment reuses the same rule to *withhold* rather than to fail a run.
+    """
+    for field in ("available_at", "retrieved_at"):
+        timestamp = datetime.fromisoformat(str(asset[field]))
+        if timestamp > data_cutoff:
+            return field
+    return None
+
+
+def _resolve_provider_plan(provider: str) -> str | None:
+    """The normalized recorded provider plan, resolved once per analysis run.
+
+    Only Twelve Data records a plan whose value changes the split-capability
+    refusal, so no other provider issues a query. A missing record, a missing
+    leaf, a non-string leaf, and an empty label are all "no recorded plan";
+    none of them is treated as an unresolved value that a later per-listing
+    lookup could retry.
+
+    Only the plan leaf is read: the surrounding provider metadata document
+    carries entitlement and licensing detail this assessment has no reason to
+    touch.
+    """
+    if provider != TWELVE_DATA_PROVIDER:
+        return None
+    recorded = (
+        ProviderRecord.objects.filter(provider=provider)
+        .values_list("metadata__plan", flat=True)
+        .first()
+    )
+    if not isinstance(recorded, str):
+        return None
+    return normalized_provider_plan(recorded)
 
 
 @transaction.atomic
@@ -441,6 +923,9 @@ def analyze_listing(
         provider=provider,
         config=config,
         decision_time=data_cutoff,
+        issued_on_time=run_issued_on_time,
+        provider_plan=_resolve_provider_plan(provider),
+        code_revision_value=revision,
         subject=subject,
         benchmark_subject=benchmark_subject,
         sample_support=sample_support,
@@ -552,6 +1037,7 @@ def analyze_snapshot(
                 forecasts=build_medium_forecasts(panel.frame, medium_config),
             )
         computations: dict[str, AnalysisComputation] = {}
+        provider_plan = _resolve_provider_plan(provider)
         for membership in memberships:
             computation = _compute_listing_from_asof(
                 listing=membership.listing,
@@ -559,6 +1045,9 @@ def analyze_snapshot(
                 provider=provider,
                 config=config,
                 decision_time=data_cutoff,
+                issued_on_time=run_issued_on_time,
+                provider_plan=provider_plan,
+                code_revision_value=revision,
                 benchmark_subject=benchmark_subject,
                 sample_support=sample_support,
                 target_date=logical_target_date,

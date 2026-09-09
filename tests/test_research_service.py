@@ -1234,3 +1234,70 @@ def _create_extreme_facts(listing: Listing, source_asset: object, available_at) 
             available_at=available_at,
             source_asset=source_asset,
         )
+
+
+# ---------------------------------------------------------------------------
+# Under-$10 shadow assessment: enrichment stays additive on the existing paths.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_ordinary_priced_analysis_gains_no_shadow_key(tmp_path) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    price_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _create_facts(listing, price_asset, now - timedelta(minutes=4))
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=store,
+    )
+
+    assert persisted.analysis.current_price >= Decimal("10")
+    assert "under10_assessment" not in persisted.analysis.data_quality
+    assert "under10_assessment" not in persisted.computation.data_quality
+
+
+@pytest.mark.django_db
+def test_synthetic_under_ten_analysis_records_an_honest_withheld_assessment(tmp_path) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    dates = [timezone.localdate() - timedelta(days=index) for index in range(30)][::-1]
+    _register_explicit_price_asset(
+        store,
+        listing.ticker,
+        now - timedelta(minutes=5),
+        dates,
+        [4.25] * len(dates),
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=store,
+    )
+
+    payload = persisted.analysis.data_quality["under10_assessment"]
+    assert payload["policy_version"] == "us-under10-shadow-v1"
+    assert payload["evaluated_for"]["reference_close"] == "4.250000"
+    # A synthetic demo asset proves no reviewed daily split-only USD basis, so
+    # the liquidity diagnostic is withheld rather than invented.
+    assert payload["liquidity"]["status"] == "withheld"
+    assert payload["liquidity"]["reason"] == "basis_incompatible"
+    assert payload["liquidity"]["basis"]["interval"] is None
+    # No SEC evidence exists for a synthetic company.
+    assert payload["solvency"]["status"] == "insufficient_evidence"
+    assert payload["solvency"]["assessed_fact_ids"] == []
+    assert payload["split_verification"]["reason"] == "no_reviewed_corporate_actions_source"
+    assert payload["activation_eligible"] is False
+    assert payload["new_allocation_percent"] == 0
+    assert all(
+        "under10_assessment" not in prediction.calculation for prediction in persisted.predictions
+    )

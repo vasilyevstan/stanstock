@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -23,6 +25,8 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.research import medium_forecasts
+from stanstock.research.config import load_scoring_config
 from stanstock.research.forecast_config import (
     MediumForecastConfig,
     load_medium_forecast_config,
@@ -36,7 +40,7 @@ from stanstock.research.medium_forecasts import (
 )
 from stanstock.research.models import Prediction
 from stanstock.research.opportunities import assess_opportunity
-from stanstock.research.service import analyze_snapshot
+from stanstock.research.service import analyze_snapshot, compute_listing_analysis
 
 TARGET_DATE = date(2026, 9, 4)
 GENERATED_AT = datetime(2026, 9, 5, 1, tzinfo=UTC)
@@ -500,6 +504,346 @@ def test_panel_rejects_price_assets_without_required_return_basis(
             code_revision="test-revision",
             store=store,
         )
+
+
+@pytest.mark.django_db
+def test_snapshot_medium_panel_binds_frames_and_provenance_to_one_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production snapshot path cannot read B while attributing panel rows to A.
+
+    Snapshot decision scoring independently reads the same subjects after the
+    medium panel is built. It is replaced here with an A-derived computation
+    so the selector counts isolate the panel boundary under regression: one
+    selector call for the benchmark and one for the listing.
+    """
+    store = AssetStore(tmp_path)
+    universe = Universe.objects.create(
+        slug="medium-atomic-provenance",
+        name="Medium atomic provenance",
+        config_version="test-v1",
+    )
+    snapshot = UniverseSnapshot.objects.create(
+        universe=universe,
+        as_of_date=TARGET_DATE,
+        grade=UniverseSnapshot.Grade.OBSERVED,
+        config_hash="u" * 64,
+    )
+    listing = _listing("ATOMED")
+    UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
+    sessions = _sessions(1500)
+    volumes = [2_000_000 + index for index in range(len(sessions))]
+    benchmark_selected_closes = [
+        100 + index * 0.035 + ((index % 17) - 8) * 0.025 for index in range(len(sessions))
+    ]
+    listing_selected_closes = [
+        35 + index * 0.028 + ((index % 13) - 6) * 0.04 for index in range(len(sessions))
+    ]
+    benchmark_unselected_closes = [
+        800 - index * 0.08 + ((index % 11) - 5) * 0.4 for index in range(len(sessions))
+    ]
+    listing_unselected_closes = [
+        450 - index * 0.12 + ((index % 7) - 3) * 0.6 for index in range(len(sessions))
+    ]
+    benchmark_selected = _price_asset(
+        store,
+        subject="SPY",
+        sessions=sessions,
+        closes=benchmark_selected_closes,
+    )
+    benchmark_unselected = _price_asset(
+        store,
+        subject="SPY",
+        sessions=sessions,
+        closes=benchmark_unselected_closes,
+        metadata={
+            "return_definition": "unadjusted_price_return",
+            "dividends_included": True,
+        },
+    )
+    listing_selected = _price_asset(
+        store,
+        subject=listing.ticker,
+        sessions=sessions,
+        closes=listing_selected_closes,
+    )
+    listing_unselected = _price_asset(
+        store,
+        subject=listing.ticker,
+        sessions=sessions,
+        closes=listing_unselected_closes,
+        metadata={
+            "return_definition": "unadjusted_price_return",
+            "dividends_included": True,
+        },
+    )
+
+    scoring_config = load_scoring_config(default_us_scoring_config_path())
+    decision_computation = compute_listing_analysis(
+        listing=listing,
+        price_frame=store.read_frame(listing_selected.relative_path),
+        benchmark_frame=store.read_frame(benchmark_selected.relative_path),
+        source_assets=[listing_selected, benchmark_selected],
+        price_asset=listing_selected,
+        config=scoring_config,
+        decision_time=GENERATED_AT,
+    )
+    computation_calls: list[str] = []
+
+    def selected_decision_computation(
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        assert not args
+        assert kwargs["listing"] == listing
+        computation_calls.append(str(listing.pk))
+        return decision_computation
+
+    monkeypatch.setattr(
+        "stanstock.research.service._compute_listing_from_asof",
+        selected_decision_computation,
+    )
+
+    alternatives = {
+        "SPY": (benchmark_selected, benchmark_unselected),
+        listing.ticker: (listing_selected, listing_unselected),
+    }
+    selector_calls = {"SPY": 0, listing.ticker: 0}
+
+    def alternating_selector(
+        _asof: AsOfData,
+        *,
+        provider: str,
+        kind: str,
+        subject: str,
+    ) -> DataAsset:
+        assert provider == "synthetic"
+        assert kind == "price_history"
+        call_index = selector_calls[subject]
+        selector_calls[subject] += 1
+        return alternatives[subject][min(call_index, 1)]
+
+    read_paths: list[str] = []
+    original_read_frame = store.read_frame
+
+    def recording_read_frame(relative_path: str) -> pl.DataFrame:
+        read_paths.append(relative_path)
+        return original_read_frame(relative_path)
+
+    validated_asset_ids: list[str] = []
+    original_validate_price_basis = medium_forecasts._validate_price_basis
+
+    def recording_validate_price_basis(asset: DataAsset) -> None:
+        validated_asset_ids.append(str(asset.pk))
+        original_validate_price_basis(asset)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", alternating_selector)
+    monkeypatch.setattr(store, "read_frame", recording_read_frame)
+    monkeypatch.setattr(
+        medium_forecasts,
+        "_validate_price_basis",
+        recording_validate_price_basis,
+    )
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=GENERATED_AT,
+        target_date=TARGET_DATE,
+        issued_on_time=True,
+        provider="synthetic",
+        benchmark_subject="SPY",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+    )
+
+    assert selector_calls == {"SPY": 1, listing.ticker: 1}
+    assert read_paths == [
+        benchmark_selected.relative_path,
+        listing_selected.relative_path,
+    ]
+    assert validated_asset_ids == [
+        str(benchmark_selected.pk),
+        str(listing_selected.pk),
+    ]
+    assert computation_calls == [str(listing.pk)]
+    assert len(results) == 1
+    result = results[0]
+    assert float(result.analysis.current_price) == pytest.approx(listing_selected_closes[-1])
+
+    panel_asset = DataAsset.objects.get(
+        provider="stanstock",
+        kind="medium_forecast_panel",
+        subject=str(result.run.pk),
+    )
+    panel_frame = original_read_frame(panel_asset.relative_path)
+    assert panel_frame["price_asset_id"].unique().to_list() == [str(listing_selected.pk)]
+
+    current_rows = panel_frame.filter(pl.col("is_forecast")).to_dicts()
+    assert {row["horizon"] for row in current_rows} == {"6m", "12m"}
+    expected_relative_momentum = (
+        listing_selected_closes[-1] / listing_selected_closes[-253] - 1
+    ) - (benchmark_selected_closes[-1] / benchmark_selected_closes[-253] - 1)
+    expected_market_trend = (
+        benchmark_selected_closes[-1] / (sum(benchmark_selected_closes[-200:]) / 200) - 1
+    )
+    expected_short_trend = (
+        listing_selected_closes[-1] / (sum(listing_selected_closes[-50:]) / 50) - 1
+    )
+    expected_average_dollar_volume = (
+        sum(
+            close * volume
+            for close, volume in zip(
+                listing_selected_closes[-20:],
+                volumes[-20:],
+                strict=True,
+            )
+        )
+        / 20
+    )
+    unselected_relative_momentum = (
+        listing_unselected_closes[-1] / listing_unselected_closes[-253] - 1
+    ) - (benchmark_unselected_closes[-1] / benchmark_unselected_closes[-253] - 1)
+    for row in current_rows:
+        assert row["anchor_date"] == TARGET_DATE
+        assert row["relative_momentum"] == pytest.approx(expected_relative_momentum)
+        assert row["relative_momentum"] != pytest.approx(unselected_relative_momentum)
+        assert row["market_trend"] == pytest.approx(expected_market_trend)
+        assert row["close_vs_sma_50"] == pytest.approx(expected_short_trend)
+        assert row["average_dollar_volume"] == pytest.approx(expected_average_dollar_volume)
+
+    historical_row = (
+        panel_frame.filter(
+            (pl.col("horizon") == "6m") & ~pl.col("is_forecast") & pl.col("eligible")
+        )
+        .sort("anchor_date")
+        .tail(1)
+        .to_dicts()[0]
+    )
+    session_indexes = {session: index for index, session in enumerate(sessions)}
+    anchor_index = session_indexes[historical_row["anchor_date"]]
+    label_end_index = session_indexes[historical_row["label_end_date"]]
+    expected_forward_return = (
+        listing_selected_closes[label_end_index] / listing_selected_closes[anchor_index] - 1
+    )
+    expected_benchmark_forward_return = (
+        benchmark_selected_closes[label_end_index] / benchmark_selected_closes[anchor_index] - 1
+    )
+    unselected_forward_return = (
+        listing_unselected_closes[label_end_index] / listing_unselected_closes[anchor_index] - 1
+    )
+    assert historical_row["forward_return"] == pytest.approx(expected_forward_return)
+    assert historical_row["benchmark_forward_return"] == pytest.approx(
+        expected_benchmark_forward_return
+    )
+    assert historical_row["relative_forward_return"] == pytest.approx(
+        expected_forward_return - expected_benchmark_forward_return
+    )
+    assert historical_row["forward_return"] != pytest.approx(unselected_forward_return)
+
+    def asset_identity(asset: DataAsset) -> dict[str, object]:
+        return {
+            "id": str(asset.pk),
+            "provider": asset.provider,
+            "kind": asset.kind,
+            "subject": asset.subject,
+            "relative_path": asset.relative_path,
+            "sha256": asset.sha256,
+            "retrieved_at": asset.retrieved_at.isoformat(),
+            "available_at": asset.available_at.isoformat(),
+        }
+
+    def canonical_hash(value: object) -> str:
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    selected_manifest = [
+        asset_identity(asset)
+        for asset in sorted(
+            (benchmark_selected, listing_selected),
+            key=lambda asset: str(asset.pk),
+        )
+    ]
+    unselected_manifest = [
+        asset_identity(asset)
+        for asset in sorted(
+            (benchmark_unselected, listing_unselected),
+            key=lambda asset: str(asset.pk),
+        )
+    ]
+    metadata = panel_asset.metadata
+    selected_manifest_hash = canonical_hash(selected_manifest)
+    assert metadata["source_assets"] == selected_manifest
+    assert metadata["source_manifest_hash"] == selected_manifest_hash
+    assert metadata["source_manifest_hash"] != canonical_hash(unselected_manifest)
+    assert metadata["content_sha256"] == panel_asset.sha256
+    assert hashlib.sha256(store.read_bytes(panel_asset.relative_path)).hexdigest() == (
+        panel_asset.sha256
+    )
+    expected_evidence_bundle_hash = canonical_hash(
+        {
+            "calendar_hash": metadata["calendar_hash"],
+            "code_revision": metadata["code_revision"],
+            "content_sha256": panel_asset.sha256,
+            "forecast_config_hash": metadata["config_hash"],
+            "scoring_config_hash": metadata["scoring_config_hash"],
+            "source_manifest_hash": selected_manifest_hash,
+            "universe_config_hash": snapshot.config_hash,
+        }
+    )
+    assert metadata["evidence_bundle_hash"] == expected_evidence_bundle_hash
+
+    advisory_predictions = [
+        prediction
+        for prediction in result.predictions
+        if prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
+    ]
+    assert {prediction.horizon for prediction in advisory_predictions} == {"6m", "12m"}
+    current_by_horizon = {str(row["horizon"]): row for row in current_rows}
+    expected_prediction_source_ids = {
+        str(listing_selected.pk),
+        str(benchmark_selected.pk),
+        str(panel_asset.pk),
+    }
+    for prediction in advisory_predictions:
+        assert prediction.calculation["panel_asset_id"] == str(panel_asset.pk)
+        assert prediction.calculation["panel_sha256"] == panel_asset.sha256
+        assert {entry["id"] for entry in prediction.source_assets} == (
+            expected_prediction_source_ids
+        )
+        panel_current = current_by_horizon[prediction.horizon]
+        assert prediction.calculation["current_state"]["relative_momentum"] == pytest.approx(
+            panel_current["relative_momentum"]
+        )
+        assert prediction.calculation["current_state"]["average_dollar_volume"] == (
+            pytest.approx(panel_current["average_dollar_volume"])
+        )
+
+    forbidden_tokens = {
+        str(benchmark_unselected.pk),
+        benchmark_unselected.sha256,
+        benchmark_unselected.relative_path,
+        str(listing_unselected.pk),
+        listing_unselected.sha256,
+        listing_unselected.relative_path,
+    }
+    persisted_provenance = json.dumps(
+        {
+            "panel_metadata": metadata,
+            "panel_rows": panel_frame.to_dicts(),
+            "analysis_data_quality": result.analysis.data_quality,
+            "predictions": [
+                {
+                    "source_assets": prediction.source_assets,
+                    "calculation": prediction.calculation,
+                }
+                for prediction in result.predictions
+            ],
+        },
+        sort_keys=True,
+        default=str,
+    )
+    assert all(token not in persisted_provenance for token in forbidden_tokens)
 
 
 @pytest.mark.django_db

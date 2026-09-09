@@ -34,10 +34,25 @@ UNDER_10_AVAILABLE_FOUNDATIONS = (
     "Deterministic 3-year/5-year formula engine with missing-input withholding "
     "(released foundation; candidate qualification still required)",
 )
-UNDER_10_UNRELEASED_ACTIVATION_CONTROLS = (
-    "Dedicated solvency and cash-runway policy",
-    "Versioned Under-$10-specific dollar-liquidity policy",
-    "Verified split and reverse-split event source",
+
+#: Released, but deliberately unactivated: these produce a recorded
+#: diagnostic on newly created qualifying analyses and nothing else. They are
+#: not candidate approvals and cannot pass an activation gate.
+UNDER_10_RELEASED_SHADOW_DIAGNOSTICS = (
+    "Shadow solvency/obligation assessment with negative-FCF cash runway",
+    "Shadow 252-observed-session median dollar-volume diagnostic",
+)
+
+UNDER_10_UNRELEASED_ACTIVATION_CONTROLS = ("Verified split and reverse-split event source",)
+
+#: Stated alongside the three capability groups so a released capability is
+#: never read as historical coverage or as an activation approval.
+UNDER_10_SHADOW_DISCLOSURE = (
+    "These capabilities are recorded only on newly created qualifying "
+    "analyses. Existing analyses were not backfilled; an absent assessment "
+    "means not assessed. Diagnostics are not candidate approvals. Under-$10 "
+    "policy remains 0% new allocation; verified split/reverse-split evidence "
+    "is unavailable, and joint review remains required."
 )
 
 

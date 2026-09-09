@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import io
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
@@ -34,6 +37,33 @@ class PriceFrameSchemaError(ValueError):
     """
 
 
+class PriceFrameChecksumMismatchError(RuntimeError):
+    """Raised when price-frame bytes do not match their registered checksum."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriceFrameRead:
+    """One selected immutable asset, its clipped frame, and date diagnostics.
+
+    ``asset`` is the exact `DataAsset` selected before the Parquet read. It is
+    returned with the frame so a caller cannot independently re-select a
+    newer eligible immutable vintage and accidentally attribute one asset's
+    frame to another asset's UUID/checksum.
+
+    ``frame`` is byte-for-byte the same frame `AsOfData.price_frame` returns:
+    normalized to a `pl.Date` `date` column, clipped to `date <= through_date`,
+    and sorted. ``invalid_session_date_rows`` counts rows whose normalized
+    ``date`` is null -- a session identity that could never be established --
+    and is computed *before* the cutoff filter runs, so a row that is simply
+    in the future (a valid date, just later than ``through_date``) is clipped
+    without being counted here.
+    """
+
+    asset: DataAsset
+    frame: pl.DataFrame
+    invalid_session_date_rows: int
+
+
 class AsOfData:
     def __init__(self, decision_time: datetime, store: AssetStore | None = None) -> None:
         self.decision_time = decision_time
@@ -63,16 +93,96 @@ class AsOfData:
         this cutoff -- e.g. a multi-row bundle retrieved partway through its
         own period -- so every row with ``date > through_date`` is filtered
         out here rather than trusting asset-level eligibility alone.
+
+        Delegates to `price_frame_with_diagnostics` and returns only its
+        frame: this method's signature and return type stay exactly as they
+        were, including for a frame that silently dropped a null-dated row
+        long before this diagnostic existed.
+        """
+        return self.price_frame_with_diagnostics(
+            provider=provider,
+            subject=subject,
+            through_date=through_date,
+        ).frame
+
+    def price_frame_with_diagnostics(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        through_date: date | None = None,
+    ) -> PriceFrameRead:
+        """`price_frame`, its exact selected asset, and unusable-date count.
+
+        The eligible asset is selected exactly once. Its immutable row is
+        returned beside the frame read from that row's ``relative_path``;
+        callers must use this returned asset for provenance rather than issue
+        a second selection. Every other behavior -- the
+        `date <= through_date` cutoff, sorting, and every raised error -- is
+        identical to `price_frame`; this is the same read, not a second
+        Parquet read.
         """
         asset = self.latest_asset(provider=provider, kind="price_history", subject=subject)
-        frame = self.store.read_frame(asset.relative_path)
         cutoff = through_date if through_date is not None else self.decision_time.date()
         if cutoff > self.decision_time.date():
             raise ValueError(
                 f"through_date ({cutoff.isoformat()}) cannot be after the as-of "
                 f"decision date ({self.decision_time.date().isoformat()})"
             )
-        return _clip_to_through_date(frame, cutoff, relative_path=asset.relative_path)
+        frame = self.store.read_frame(asset.relative_path)
+        return _clip_to_through_date(
+            frame,
+            cutoff,
+            asset=asset,
+            relative_path=asset.relative_path,
+        )
+
+    def price_frame_for_asset_with_diagnostics(
+        self,
+        *,
+        asset: DataAsset,
+        through_date: date | None = None,
+    ) -> PriceFrameRead:
+        """Read one explicitly supplied immutable price asset.
+
+        Unlike :meth:`price_frame_with_diagnostics`, this method performs no
+        asset selection and no ORM query. It validates the supplied row
+        against this instance's decision boundary, then reads that row's
+        exact path through :class:`AssetStore`. The confined payload is read
+        once, verified against the row's checksum, and parsed from those same
+        in-memory bytes. This is the replay boundary for a manifest that
+        already names a specific immutable vintage: a newer eligible asset
+        for the same provider/subject can never replace the supplied one.
+        """
+        if asset.kind != "price_history":
+            raise ValueError(
+                f"Data asset {asset.pk} has kind {asset.kind!r}; expected 'price_history'"
+            )
+        for field in ("available_at", "retrieved_at"):
+            timestamp = getattr(asset, field)
+            if timestamp > self.decision_time:
+                raise ValueError(
+                    f"Price asset {asset.pk} has {field} after the as-of decision time"
+                )
+        cutoff = through_date if through_date is not None else self.decision_time.date()
+        if cutoff > self.decision_time.date():
+            raise ValueError(
+                f"through_date ({cutoff.isoformat()}) cannot be after the as-of "
+                f"decision date ({self.decision_time.date().isoformat()})"
+            )
+        payload = self.store.read_bytes(asset.relative_path)
+        physical_sha256 = hashlib.sha256(payload).hexdigest()
+        if physical_sha256 != asset.sha256:
+            raise PriceFrameChecksumMismatchError(
+                "Stored asset bytes do not match the registered SHA-256 checksum"
+            )
+        frame = pl.read_parquet(io.BytesIO(payload))
+        return _clip_to_through_date(
+            frame,
+            cutoff,
+            asset=asset,
+            relative_path=asset.relative_path,
+        )
 
     def fundamental_facts(
         self,
@@ -225,8 +335,12 @@ class AsOfData:
 
 
 def _clip_to_through_date(
-    frame: pl.DataFrame, through_date: date, *, relative_path: str
-) -> pl.DataFrame:
+    frame: pl.DataFrame,
+    through_date: date,
+    *,
+    asset: DataAsset,
+    relative_path: str,
+) -> PriceFrameRead:
     """Filter ``frame`` to rows whose ``date`` column is ``<= through_date``.
 
     Fails explicitly -- instead of returning the frame unfiltered -- when
@@ -271,4 +385,14 @@ def _clip_to_through_date(
     # safely compare it against plain Python `date` values without
     # re-parsing.
     normalized_frame = frame.with_columns(date_column.alias(DATE_COLUMN))
-    return normalized_frame.filter(pl.col(DATE_COLUMN) <= through_date).sort(DATE_COLUMN)
+    # Counted here, before the cutoff filter: a null session identity can
+    # never be a "future" row, so clipping must not be the thing that makes
+    # it disappear uncounted. A row that is merely dated after `through_date`
+    # is a normal, valid clip and is not counted.
+    invalid_session_date_rows = normalized_frame[DATE_COLUMN].null_count()
+    clipped = normalized_frame.filter(pl.col(DATE_COLUMN) <= through_date).sort(DATE_COLUMN)
+    return PriceFrameRead(
+        asset=asset,
+        frame=clipped,
+        invalid_session_date_rows=invalid_session_date_rows,
+    )

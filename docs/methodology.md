@@ -132,13 +132,123 @@ foundations are point-in-time SEC facts with adverse-versus-missing branch
 behavior; the long-v2 diluted-share/per-share continuity assessment with
 withholding (which does not verify post-period corporate actions); and the
 deterministic 3-year/5-year formula engine with missing-input withholding.
-These foundations do not establish candidate qualification. Unreleased
-activation controls are a dedicated solvency/cash-runway policy, a versioned
-Under-$10-specific dollar-liquidity policy, and a verified split/reverse-split
-event source. Previously issued immutable long-horizon ledger evidence remains
+These foundations do not establish candidate qualification. The only
+still-unreleased activation control is a verified split/reverse-split event
+source. Previously issued immutable long-horizon ledger evidence remains
 visible, with its original horizon and evidence role preserved, and is labeled
 with the current activation context. The configured stock universe is not
 expanded merely to populate a price band.
+
+## Under-$10 shadow diagnostics (`us-under10-shadow-v1`)
+
+The solvency/cash-runway and Under-$10 dollar-liquidity capabilities are
+released as **shadow diagnostics**. They are recorded, never acted on:
+`UNDER10_ACTIVATED` is `false`, `activation_eligible` is `false` in every
+branch, and the assessment changes no score, confidence, recommendation,
+gate, scenario, forecast, prediction, outcome, performance denominator,
+opportunity qualification, sample basket, or contribution plan. New allocation
+stays 0%.
+
+An assessment is written as an additive `data_quality["under10_assessment"]`
+key on a **newly created** analysis whose *decision-run* USD reference close --
+the same six-decimal close `StockAnalysis.current_price` persists -- falls in
+the Under-$10 band. Nothing is backfilled and no historical row is rewritten,
+so an absent key means *not assessed*, never *assessed and failed*. The policy
+constants, required concepts, selection and availability rules, basis
+requirements, refusal behavior, serialization rules, listing-identity binding,
+and the reviewed SEC fundamentals configuration's own effective hash are
+hashed into one pinned `policy_hash`; `assessment_hash` is a recomputation
+checksum over the complete payload. Neither hash is tamper protection: both
+are corruption-detection checksums for an otherwise-trusted canonical
+payload, never proof storage was never modified.
+
+The stock-detail reader renders a stored assessment only after binding it
+exactly to its parent decision: the permanent `Listing.id` recorded in
+`evaluated_for.listing_id`, the parent `AnalysisRun`'s own exact target date
+and data cutoff, its persisted decision-run reference close and currency
+(cross-checked against the immutable original decision predictions), and the
+exact immutable price-asset UUID *and* content checksum recorded alongside
+it. A matching checksum alone -- even across every one of those fields but
+one -- never substitutes for this: two genuine, unrelated candidates can
+otherwise share the same target date, cutoff, reference close, and currency,
+and copying an entire genuine `data_quality` blob (the payload plus its own
+internal anchors) from one analysis onto another moves every other internal
+anchor along with it, so only the permanent listing id closes that
+transplant.
+
+`StockAnalysis.data_quality` is mutable storage, so the reader independently
+replays the accepted builder before displaying the stored values. It resolves
+the original decision-prediction cohort, reads the exact immutable price asset
+named by that cohort through the original target-date cutoff, and reselects
+the exact cutoff-qualified SEC fact lineage. The stored and replayed solvency
+and liquidity blocks must be canonically identical. Missing, unreadable, or
+mismatched evidence fails closed; replayed values are never substituted into
+the response or written back.
+
+**Solvency and obligation.** Facts are read through `AsOfData` at the run's
+`data_cutoff`. Only fixed canonical-concept rows whose fact provider and source
+asset provider both identify SEC enter the SEC calculation, assessed lineage,
+or on-time SEC asset cutoff check; foreign and provider-mismatched rows are not
+SEC evidence. Same-accession corrections whose timing is not provable at that
+cutoff are then deferred, leaving the proven prior vintage in place. The
+canonical SEC series is built on the frozen legacy TTM path with no alias
+candidate surface. Five balance-sheet inputs (cash, short-term debt, current
+long-term debt, current assets, current liabilities) must share exactly one
+`period_end`; free cash flow comes from compatible TTM evidence, otherwise the
+latest compatible annual value, derived as operating cash flow minus absolute
+capital expenditure. Every selected date must satisfy `0 <= target_date -
+period_end <= 200` days. A missing debt component is missing, never zero, and a
+non-positive current-liabilities figure withholds the ratio. The state is one
+of four, in strict first-match order:
+
+1. `insufficient_evidence` -- any required input missing, unusable,
+   incompatible, stale, future-dated, or not cutoff-safe. Never read as
+   adverse.
+2. `adverse_near_term_obligation` -- near-term debt above cash *and* either
+   current assets below current liabilities or a negative free cash flow with
+   under four quarters of cash runway.
+3. `elevated_obligation_risk` -- any one of negative free cash flow,
+   near-term debt above cash, or current assets below current liabilities.
+4. `no_adverse_evidence_observed` -- every remaining complete-input case.
+
+All comparisons use exact Decimal operands; the reported current ratio and
+runway are quantized separately to four places and never participate in a
+decision. The four-quarter boundary is applied as a cross-multiplication, so a
+displayed `4.0000` cannot override an exact below-four classification. A
+non-negative free cash flow gives runway status `not_applicable_positive_fcf`
+with a null value -- not zero and not infinity. Runway is reportable from cash
+and free cash flow alone even when another obligation input is missing.
+
+**Dollar liquidity.** The median of `close x volume` over the latest 252
+*observed* sessions, computed from the already cutoff-clipped price frame. The
+raw window is validated before preparation, so an unparseable, null,
+non-finite, or non-positive close (or a negative volume) is an explicit
+invalid-input refusal rather than "insufficient history"; duplicate session
+dates are refused outright; calendar gaps are never padded and an invalid row
+is never replaced by reaching further back. Zero reported volume is valid data,
+and a computed zero median is displayed as zero. The diagnostic requires the
+same price asset the analysis manifest recorded, with observed `interval=1day`,
+`adjustment=splits`, `return_definition=split_adjusted_price_return`, and
+`currency=USD` metadata, and a last session no later than the target date and
+no more than seven calendar days old. There is **no liquidity threshold**: the
+figure carries no pass/fail conclusion. Split-only adjustment is proven for
+prices but not for the provider's reported volume, so the basis stays labeled
+`provider_reported_unverified_split_basis` even when the number is computed.
+
+**Split verification.** No reviewed corporate-actions source is integrated for
+any provider, so `split_verification.status` is always `unavailable`. A
+recorded Twelve Data Basic plan reports `provider_plan_not_entitled`; every
+other provider or plan -- absent, empty, malformed, or unknown -- reports
+`no_reviewed_corporate_actions_source`. A split is never inferred from adjusted
+prices, share-count discontinuities, or SEC facts, and no branch can return a
+verified state. This is why candidate activation cannot pass.
+
+An on-time issuance additionally proves that each referenced SEC asset
+satisfies the same `available_at`/`retrieved_at` cutoff rule the core source
+manifest uses; a violation withholds the diagnostic with
+`evidence_not_cutoff_safe` rather than failing the run. A research-grade
+reconstruction may read later-retrieved evidence, while fact availability
+still has to qualify at the historical cutoff.
 
 ## ETF evidence boundary
 

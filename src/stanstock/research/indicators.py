@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -11,6 +13,23 @@ from stanstock.research.types import IndicatorResult
 
 SUPPORTED_WINDOWS = (1, 5, 10, 20, 63, 126, 252, 756, 1260)
 TRADING_DAYS = 252.0
+
+#: `median_dollar_volume` statuses.
+DOLLAR_VOLUME_COMPUTED = "computed"
+DOLLAR_VOLUME_WITHHELD = "withheld"
+
+#: Explicit refusal reasons. Each names the condition that was actually
+#: observed: a malformed row is never described as missing history, and a
+#: short window is never described as invalid.
+DOLLAR_VOLUME_MISSING_COLUMNS = "missing_price_columns"
+DOLLAR_VOLUME_INVALID_SESSION_DATES = "invalid_session_dates"
+DOLLAR_VOLUME_DUPLICATE_SESSIONS = "duplicate_sessions"
+DOLLAR_VOLUME_INVALID_CLOSE = "invalid_close_values"
+DOLLAR_VOLUME_INVALID_VOLUME = "invalid_volume_values"
+DOLLAR_VOLUME_NONFINITE_PRODUCT = "nonfinite_dollar_volume_product"
+DOLLAR_VOLUME_DROPPED_ROWS = "invalid_rows_dropped_during_preparation"
+DOLLAR_VOLUME_INSUFFICIENT_SESSIONS = "insufficient_sessions"
+DOLLAR_VOLUME_NONFINITE_MEDIAN = "nonfinite_median"
 
 
 def calculate_indicators(
@@ -171,6 +190,166 @@ def _prepare_price_frame(frame: pl.DataFrame) -> pl.DataFrame:
 
 def _series(frame: pl.DataFrame, column: str) -> np.ndarray[Any, np.dtype[np.float64]]:
     return np.asarray(frame[column].to_numpy(), dtype=np.float64)
+
+
+@dataclass(frozen=True, slots=True)
+class DollarVolumeResult:
+    """Outcome of one median dollar-volume observation window.
+
+    ``value`` is a finite number only when ``status`` is
+    `DOLLAR_VOLUME_COMPUTED`; every other case carries an explicit
+    ``reason``. The window descriptors stay populated whenever a
+    date-validated observation window existed, because "251 observed
+    sessions ending 2026-02-27" is a fact about the evidence, not an
+    invented metric. They are ``None`` when no trustworthy window could be
+    identified at all.
+    """
+
+    status: str
+    value: float | None = None
+    sessions_used: int | None = None
+    first_session: date | None = None
+    last_session: date | None = None
+    reason: str | None = None
+
+
+def median_dollar_volume(
+    frame: pl.DataFrame,
+    *,
+    sessions: int = 252,
+) -> DollarVolumeResult:
+    """Median ``close * volume`` over the latest ``sessions`` observed sessions.
+
+    The caller supplies the already date-normalized, cutoff-clipped frame
+    from `AsOfData.price_frame`, so this helper never widens availability.
+
+    The raw observation window is validated *before* `_prepare_price_frame`
+    can silently drop a row: an unparseable, null, non-finite, non-positive
+    close (or a negative/non-finite volume) is an explicit invalid-input
+    refusal, never `DOLLAR_VOLUME_INSUFFICIENT_SESSIONS`. Reaching further
+    back to replace an invalid row, padding calendar gaps, or resolving a
+    duplicate session date would each turn bad evidence into a plausible
+    number, so all three are refused instead.
+
+    A reported volume of zero is valid data. A computed zero median is
+    returned as zero and carries no pass/fail conclusion; this helper
+    implements no threshold.
+    """
+    if sessions < 1:
+        raise ValueError(f"median_dollar_volume needs a positive session count, got {sessions!r}")
+    missing_columns = [
+        column for column in ("date", "close", "volume") if column not in frame.columns
+    ]
+    if missing_columns:
+        return DollarVolumeResult(
+            status=DOLLAR_VOLUME_WITHHELD,
+            reason=DOLLAR_VOLUME_MISSING_COLUMNS,
+        )
+    if frame.height == 0:
+        # No session identity exists to validate; this is an empty history,
+        # not a malformed one.
+        return DollarVolumeResult(
+            status=DOLLAR_VOLUME_WITHHELD,
+            sessions_used=0,
+            reason=DOLLAR_VOLUME_INSUFFICIENT_SESSIONS,
+        )
+    session_dates = _session_dates(frame)
+    if session_dates is None:
+        return DollarVolumeResult(
+            status=DOLLAR_VOLUME_WITHHELD,
+            reason=DOLLAR_VOLUME_INVALID_SESSION_DATES,
+        )
+    # Duplicate session identities are detected across the whole eligible
+    # frame, before any ordering or preparation, because "the latest 252
+    # sessions" is undefined while one date names two rows.
+    if len(set(session_dates)) != len(session_dates):
+        return DollarVolumeResult(
+            status=DOLLAR_VOLUME_WITHHELD,
+            reason=DOLLAR_VOLUME_DUPLICATE_SESSIONS,
+        )
+    ordered = frame.with_columns(pl.Series("date", session_dates, dtype=pl.Date)).sort("date")
+    window = ordered.tail(sessions) if ordered.height > sessions else ordered
+    window_dates = list(window["date"].to_list())
+    observed = DollarVolumeResult(
+        status=DOLLAR_VOLUME_WITHHELD,
+        sessions_used=window.height,
+        first_session=window_dates[0],
+        last_session=window_dates[-1],
+    )
+    closes = _finite_column(window, "close")
+    if closes is None or not bool((closes > 0.0).all()):
+        return _withheld(observed, DOLLAR_VOLUME_INVALID_CLOSE)
+    volumes = _finite_column(window, "volume")
+    if volumes is None or not bool((volumes >= 0.0).all()):
+        return _withheld(observed, DOLLAR_VOLUME_INVALID_VOLUME)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not bool(np.isfinite(closes * volumes).all()):
+            return _withheld(observed, DOLLAR_VOLUME_NONFINITE_PRODUCT)
+        prepared = _prepare_price_frame(window)
+        if prepared.height != window.height:
+            return _withheld(observed, DOLLAR_VOLUME_DROPPED_ROWS)
+        if window.height < sessions:
+            return _withheld(observed, DOLLAR_VOLUME_INSUFFICIENT_SESSIONS)
+        products = _series(prepared, "close") * _series(prepared, "volume")
+        if not bool(np.isfinite(products).all()):
+            return _withheld(observed, DOLLAR_VOLUME_NONFINITE_PRODUCT)
+        median = float(np.median(products))
+    if not math.isfinite(median):
+        return _withheld(observed, DOLLAR_VOLUME_NONFINITE_MEDIAN)
+    return DollarVolumeResult(
+        status=DOLLAR_VOLUME_COMPUTED,
+        value=median,
+        sessions_used=observed.sessions_used,
+        first_session=observed.first_session,
+        last_session=observed.last_session,
+    )
+
+
+def _withheld(observed: DollarVolumeResult, reason: str) -> DollarVolumeResult:
+    return DollarVolumeResult(
+        status=DOLLAR_VOLUME_WITHHELD,
+        sessions_used=observed.sessions_used,
+        first_session=observed.first_session,
+        last_session=observed.last_session,
+        reason=reason,
+    )
+
+
+def _session_dates(frame: pl.DataFrame) -> list[date] | None:
+    """Session identities as plain dates, or ``None`` when unusable.
+
+    Only the dtypes `AsOfData.price_frame` can produce are accepted. A
+    string, integer, or otherwise ambiguous column is refused rather than
+    guessed at, and a null identity is never treated as a session.
+    """
+    column = frame["date"]
+    dtype = frame.schema["date"]
+    if isinstance(dtype, pl.Datetime):
+        column = column.dt.date()
+    elif dtype != pl.Date:
+        return None
+    values = column.to_list()
+    if any(value is None for value in values):
+        return None
+    return [value for value in values if value is not None]
+
+
+def _finite_column(
+    frame: pl.DataFrame, column: str
+) -> np.ndarray[Any, np.dtype[np.float64]] | None:
+    """Cast one column to float, refusing any null, cast failure, or non-finite value.
+
+    A non-strict cast turns an unparseable cell into a null, so counting
+    nulls after the cast catches both an originally missing observation and
+    a value that could not be read. Neither may be silently dropped.
+    """
+    casted = frame[column].cast(pl.Float64, strict=False)
+    if casted.null_count() > 0:
+        return None
+    values = np.asarray(casted.to_numpy(), dtype=np.float64)
+    if not bool(np.isfinite(values).all()):
+        return None
+    return values
 
 
 def _optional_series(

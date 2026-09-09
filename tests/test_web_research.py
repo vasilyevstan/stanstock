@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -19,12 +22,13 @@ from stanstock.data.models import (
     Listing,
     Region,
     Security,
-    Universe,
-    UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.research.affordability import (
     UNDER_10_AVAILABLE_FOUNDATIONS,
+    UNDER_10_RELEASED_SHADOW_DIAGNOSTICS,
+    UNDER_10_SHADOW_DISCLOSURE,
     UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
 )
 from stanstock.research.models import (
@@ -35,6 +39,7 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
+from stanstock.research.under10 import under10_assessment_hash, under10_policy_hash
 from stanstock.simulation.models import (
     SimulationDefinition,
     SimulationHolding,
@@ -43,131 +48,29 @@ from stanstock.simulation.models import (
 )
 from stanstock.web.views import STOCK_DETAIL_PREDICTIONS_PER_PAGE
 
-
-@pytest.fixture
-def authenticated_client(client):
-    user_model = get_user_model()
-    user = user_model.objects.create_user(username="owner", password="correct-password")
-    client.force_login(user)
-    return client
+# `authenticated_client`, `scheduler_status`, and `persisted_analysis` are
+# shared pytest fixtures defined in `tests/conftest.py` (used by this file
+# and `test_web_under10_reader_matrix.py`); no import is required or
+# possible for autouse/conftest-provided fixtures -- pytest resolves them by
+# name alone.
 
 
 @pytest.fixture(autouse=True)
-def scheduler_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def _preverified_under10_evidence_for_structural_web_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep this module focused on cheap schema/binding and presentation.
+
+    Its historical Under-$10 fixtures intentionally hand-assemble
+    ``StockAnalysis.data_quality`` and do not persist the immutable files and
+    SEC rows needed for authoritative replay. Evidence replay itself is
+    exercised with real ``analyze_listing`` output in
+    ``test_research_under10_pipeline.py``.
+    """
     monkeypatch.setattr(
-        "stanstock.web.views.launch_agent_status",
-        lambda: {
-            "installed": True,
-            "loaded": True,
-            "timezone_matches": True,
-            "expected_timezone": "America/New_York",
-        },
+        "stanstock.web.views.under10_assessment_matches_persisted_evidence",
+        lambda **_kwargs: True,
     )
-
-
-@pytest.fixture
-def persisted_analysis() -> StockAnalysis:
-    company = Company.objects.create(
-        name="Synthetic Alpha",
-        country="US",
-        sector="Technology",
-    )
-    security = Security.objects.create(company=company, name="Synthetic Alpha Common")
-    listing = Listing.objects.create(
-        security=security,
-        ticker="SYN-A",
-        exchange_mic="XNAS",
-        currency="USD",
-        region=Region.US,
-    )
-    universe = Universe.objects.create(
-        slug="synthetic",
-        name="Synthetic universe",
-        config_version="demo-v1",
-    )
-    snapshot = UniverseSnapshot.objects.create(
-        universe=universe,
-        as_of_date=timezone.localdate(),
-        grade=UniverseSnapshot.Grade.RESEARCH,
-        config_hash="a" * 64,
-    )
-    UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
-    now = timezone.now()
-    source_asset = DataAsset.objects.create(
-        provider="synthetic_demo",
-        kind="price_history",
-        subject="SYN-A",
-        relative_path="tests/syn-a.parquet",
-        sha256="c" * 64,
-        retrieved_at=now,
-        available_at=now,
-    )
-    LatestMarketData.objects.create(
-        listing=listing,
-        observed_at=now,
-        session_date=timezone.localdate(),
-        close=Decimal("101.25"),
-        previous_close=Decimal("100.00"),
-        volume=1_000_000,
-        source_asset=source_asset,
-    )
-    run = AnalysisRun.objects.create(
-        generated_at=now,
-        data_cutoff=now,
-        target_date=timezone.localdate(),
-        universe_snapshot=snapshot,
-        config_version="rules-v1",
-        config_hash="b" * 64,
-        code_revision="test-revision",
-    )
-    analysis = StockAnalysis.objects.create(
-        run=run,
-        listing=listing,
-        current_price=Decimal("101.25"),
-        daily_change=Decimal("0.012"),
-        overall_score=Decimal("78.50"),
-        recommendation=Recommendation.BUY,
-        risk_score=Decimal("31.00"),
-        risk_class=RiskClass.MEDIUM,
-        confidence=Decimal("64.00"),
-        short_scenario={"bear": -0.04, "base": 0.03, "bull": 0.09},
-        medium_scenario={"bear": -0.16, "base": 0.12, "bull": 0.31},
-        long_scenario={"bear": -0.25, "base": 0.34, "bull": 0.82},
-        component_scores={"quality": 82, "momentum": 74},
-        reasons=["Quality is above the configured threshold."],
-        risks=["Volatility remains material."],
-        data_quality={
-            "source_assets": [
-                {
-                    "provider": "synthetic_demo",
-                    "kind": "price_history",
-                    "subject": "SYN-A",
-                }
-            ]
-        },
-    )
-    Prediction.objects.create(
-        analysis=analysis,
-        listing=listing,
-        generated_at=now,
-        target_date=timezone.localdate(),
-        horizon=Prediction.Horizon.SHORT,
-        price_at_prediction=Decimal("101.25"),
-        bear_return=Decimal("-0.04"),
-        base_return=Decimal("0.03"),
-        bull_return=Decimal("0.09"),
-        probability_positive=None,
-        confidence=Decimal("64"),
-        confidence_status="heuristic",
-        insufficiency_reason="Insufficient comparable observations",
-        recommendation=Recommendation.BUY,
-        overall_score=Decimal("78.5"),
-        model_version="baseline-v1",
-        config_hash="b" * 64,
-        data_cutoff=now,
-        code_revision="test-revision",
-    )
-    return analysis
 
 
 def _create_prediction(
@@ -521,19 +424,26 @@ def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
     assert "9.99 USD" in opportunity_content
     assert "<strong>Long-horizon (3y/5y) forecast unavailable.</strong>" in opportunity_content
     assert "<p>Available foundations:</p>" in opportunity_content
-    assert "<p>Unreleased activation controls:</p>" in opportunity_content
+    assert (
+        "<p>Released shadow diagnostic capabilities &mdash; unactivated:</p>" in opportunity_content
+    )
+    assert "<p>Still-unreleased activation control:</p>" in opportunity_content
     assert normalized_opportunity_content.count("Forecast unavailable") == 2
     price_band_groups = opportunities.context["price_band_groups"]
     under_10_card = price_band_groups[0]["cards"][0]
     assert under_10_card["price_band"].price_date == date(2026, 9, 5)
     assert len(under_10_card["long_horizon_available_foundations"]) == 3
-    assert len(under_10_card["long_horizon_unreleased_activation_controls"]) == 3
+    assert len(under_10_card["long_horizon_unreleased_activation_controls"]) == 1
+    assert len(opportunities.context["under_10_released_shadow_diagnostics"]) == 2
     assert "Strong short-term setup" not in opportunity_content
     assert persisted_analysis.listing.ticker not in excluded_band.content.decode()
     assert (
         "Point-in-time SEC facts with adverse-versus-missing branch behavior" in opportunity_content
     )
-    assert "Dedicated solvency and cash-runway policy" in opportunity_content
+    assert "Shadow solvency/obligation assessment with negative-FCF cash runway" in (
+        opportunity_content
+    )
+    assert UNDER_10_SHADOW_DISCLOSURE in normalized_opportunity_content
     assert "Joint Under-$10 review and candidate-specific eligibility remain" in opportunity_content
 
     detail_content = detail.content.decode()
@@ -541,7 +451,13 @@ def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
     assert detail.status_code == 200
     assert normalized_detail_content.count("<strong>Forecast unavailable</strong>") == 2
     assert normalized_detail_content.count("<p>Available foundations:</p>") == 1
-    assert normalized_detail_content.count("<p>Unreleased activation controls:</p>") == 1
+    assert (
+        normalized_detail_content.count(
+            "<p>Released shadow diagnostic capabilities &mdash; unactivated:</p>"
+        )
+        == 1
+    )
+    assert normalized_detail_content.count("<p>Still-unreleased activation control:</p>") == 1
     assert "Released foundations are not candidate approvals." in detail_content
     assert (
         "Joint Under-$10 review and candidate-specific eligibility remain"
@@ -549,10 +465,12 @@ def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
     )
     for disclosure_item in (
         *UNDER_10_AVAILABLE_FOUNDATIONS,
+        *UNDER_10_RELEASED_SHADOW_DIAGNOSTICS,
         *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
     ):
         assert opportunity_content.count(disclosure_item) == 1
         assert detail_content.count(disclosure_item) == 1
+    assert UNDER_10_SHADOW_DISCLOSURE in normalized_detail_content
     assert (
         "Point-in-time SEC facts with adverse-versus-missing branch behavior "
         "(released foundation; candidate qualification still required)" in detail_content
@@ -566,9 +484,11 @@ def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
         "Deterministic 3-year/5-year formula engine with missing-input withholding "
         "(released foundation; candidate qualification still required)" in detail_content
     )
-    assert "Dedicated solvency and cash-runway policy" in detail_content
-    assert "Versioned Under-$10-specific dollar-liquidity policy" in detail_content
+    assert "Shadow solvency/obligation assessment with negative-FCF cash runway" in detail_content
+    assert "Shadow 252-observed-session median dollar-volume diagnostic" in detail_content
     assert "Verified split and reverse-split event source" in detail_content
+    assert "Dedicated solvency and cash-runway policy" not in detail_content
+    assert "Versioned Under-$10-specific dollar-liquidity policy" not in detail_content
     assert "-12.0% / +45.0% / +92.0%" not in detail_content
     assert "-20.0% / +80.0% / +160.0%" not in detail_content
     assert normalized_detail_content.count("-11.0% / +41.0% / +91.0%") == 1
@@ -842,6 +762,7 @@ def test_stock_detail_keeps_complete_prediction_history_and_current_context_labe
         assert "current activation context" not in unblocked_content
         for disclosure_item in (
             *UNDER_10_AVAILABLE_FOUNDATIONS,
+            *UNDER_10_RELEASED_SHADOW_DIAGNOSTICS,
             *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
         ):
             assert disclosure_item not in unblocked_content
@@ -906,9 +827,10 @@ def test_missing_current_usd_price_band_fails_closed(
     assert "No valid latest persisted USD close is available" in detail_content
     assert "Under-$10 long-horizon policy disclosure." not in detail_content
     assert "<p>Available foundations:</p>" not in detail_content
-    assert "<p>Unreleased activation controls:</p>" not in detail_content
+    assert "<p>Still-unreleased activation control:</p>" not in detail_content
     for disclosure_item in (
         *UNDER_10_AVAILABLE_FOUNDATIONS,
+        *UNDER_10_RELEASED_SHADOW_DIAGNOSTICS,
         *UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
     ):
         assert disclosure_item not in detail_content
@@ -2319,3 +2241,1572 @@ def test_simulation_detail_exposes_grade_metrics_and_trade_side(
     assert "Synthetic top five" in content
     assert "Research-grade reconstruction" in content
     assert "Buy" in content
+
+
+# ---------------------------------------------------------------------------
+# Under-$10 shadow diagnostic panel (stock detail only).
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _shadow_policy_hash() -> str:
+    """The authoritative ``us-under10-shadow-v1`` policy hash, computed the
+    same way the reader's own C3 check does (`_expected_under10_policy_hash`
+    in `stanstock.web.views`), so a hand-built `_shadow_payload()` literal
+    (never run through the real generator) carries a genuinely matching
+    policy hash rather than a placeholder the checksum gate would now
+    correctly reject on its own, before any of the semantic branch a given
+    test actually means to exercise is ever reached."""
+    return under10_policy_hash(load_sec_fundamentals_config())
+
+
+def _shadow_payload(**overrides: object) -> dict:
+    # `evaluated_for.target_date` must equal the persisted `AnalysisRun`'s
+    # own `target_date` -- `persisted_analysis` (in `conftest.py`) always
+    # uses "today" (`timezone.localdate()`), so this payload's dates are
+    # derived from the same call rather than a fixed calendar date, or the
+    # reader's own target-date cross-check would reject every one of these
+    # otherwise-legitimate fixtures on any day but one.
+    target_date = timezone.localdate()
+    first_session = target_date - timedelta(days=364)
+    # C1: `data_cutoff` must never be *after* `persisted_analysis.run.
+    # data_cutoff` (itself set to `timezone.now()` at fixture creation,
+    # strictly before this payload is built) -- midnight UTC of the same
+    # `target_date` (TIME_ZONE is UTC) is the latest moment guaranteed to
+    # be at or before "now" on that same calendar day, unlike a fixed
+    # wall-clock hour that could fall after the fixture's own capture time.
+    data_cutoff = datetime.combine(target_date, datetime.min.time(), tzinfo=UTC)
+    # The solvency `periods` dates must likewise stay within the reader's
+    # own freshness window relative to `target_date` (0..200 days for the
+    # shared instant date, same for the flow window's own end) -- these
+    # preserve the exact original offsets from the date this fixture used
+    # before both became "today"-relative.
+    instant_date = target_date - timedelta(days=61)
+    duration_start = target_date - timedelta(days=425)
+    duration_end = target_date - timedelta(days=61)
+    payload = {
+        "schema_version": 1,
+        "policy_version": "us-under10-shadow-v1",
+        "policy_hash": _shadow_policy_hash(),
+        "assessment_hash": "1" * 64,
+        "activated": False,
+        "shadow_only": True,
+        "activation_eligible": False,
+        "code_revision": "test-revision",
+        "evaluated_for": {
+            "target_date": target_date.isoformat(),
+            "data_cutoff": data_cutoff.isoformat(),
+            "price_band": "under_10",
+            "reference_close": "4.250000",
+            "date_basis": "decision_target",
+            "currency": "USD",
+        },
+        "solvency": {
+            "status": "no_adverse_evidence_observed",
+            "reasons": [],
+            "inputs": {
+                "cash_and_equivalents": "0.00000000",
+                "near_term_debt": "0.00000000",
+                "current_assets": "2000.00000000",
+                "current_liabilities": "1000.00000000",
+                "current_ratio": "2.0000",
+                "free_cash_flow": "0.00000000",
+            },
+            "periods": {
+                "instant_date": instant_date.isoformat(),
+                "duration_start": duration_start.isoformat(),
+                "duration_end": duration_end.isoformat(),
+                "duration_basis": "annual",
+            },
+            "runway": {
+                "status": "not_applicable_positive_fcf",
+                "quarters": None,
+                "reason": None,
+            },
+            "assessed_fact_ids": ["11111111-1111-4111-8111-111111111111"],
+            "assessed_assets": [
+                {
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "sha256": "3" * 64,
+                }
+            ],
+        },
+        "liquidity": {
+            "status": "computed",
+            "metric": "median_dollar_volume_252_sessions",
+            "value": 0.0,
+            "currency": "USD",
+            "sessions_used": 252,
+            "first_session": first_session.isoformat(),
+            "last_session": target_date.isoformat(),
+            "basis": {
+                "interval": "1day",
+                "adjustment": "splits",
+                "return_definition": "split_adjusted_price_return",
+                "volume_basis": "provider_reported_unverified_split_basis",
+            },
+            "price_asset": {"id": "44444444-4444-4444-8444-444444444444", "sha256": "5" * 64},
+            "reason": None,
+        },
+        "split_verification": {
+            "status": "unavailable",
+            "reason": "provider_plan_not_entitled",
+            "provider": "twelve_data",
+            "plan_recorded": True,
+            "capability": "corporate_actions_splits",
+            "inference_prohibited": True,
+        },
+        "gates": {
+            "solvency_obligation": False,
+            "dollar_liquidity_252": False,
+            "verified_split_evidence": False,
+        },
+        "blocking_reasons": ["provider_plan_not_entitled"],
+        "new_allocation_percent": 0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _make_under_ten(
+    analysis: StockAnalysis,
+    *,
+    assessment: dict | None,
+    recompute_hash: bool = True,
+    align_code_revision: bool = True,
+) -> None:
+    """Persist ``assessment`` as the analysis's Under-$10 payload.
+
+    ``recompute_hash=True`` (the default) keeps ``assessment_hash`` in sync
+    with whatever content the caller built or mutated, so every existing
+    corruption test here continues to exercise the *semantic* branch
+    validators added for the root-hardening pass -- not merely the
+    accidental-corruption checksum gate, which would otherwise reject a
+    mutated payload for the wrong reason and silently stop testing what it
+    claims to test. Pass ``recompute_hash=False`` only for a test that is
+    deliberately proving the checksum gate itself (a stale/mismatched hash
+    on an otherwise well-formed payload).
+
+    C1: a genuinely persisted assessment's parent `data_quality["price_
+    source"]["asset_id"]` plus the matching `data_quality["source_assets"]`
+    entry (both id *and* checksum) are, by construction, the same
+    `DataAsset` as the assessment's own recorded `liquidity.price_asset`
+    (see `_is_valid_under10_payload`'s C1 note), and its parent
+    `AnalysisRun.data_cutoff` is, by construction, the exact same
+    `decision_time` the assessment's own `evaluated_for.data_cutoff`
+    records -- so this fixture derives/aligns all three from ``assessment``
+    itself, exactly as `_align_run_target_date` already aligns
+    `target_date`, rather than leaving every one of this helper's call
+    sites to reconstruct that binding by hand. Aligning `run.data_cutoff`
+    to an *earlier* value (as every payload builder here always uses) is
+    always safe against the DB's own `data_cutoff <= generated_at`
+    ordering check. A test that deliberately wants a *mismatching* price
+    asset (to exercise the C1 transplant guard) overrides
+    ``analysis.data_quality["price_source"]``/``["source_assets"]``
+    itself, after calling this helper.
+
+    F2: unlike the fields above, `AnalysisRun.data_cutoff` can be freely
+    realigned to the payload's own claim, but `StockAnalysis.listing_id`
+    is an existing foreign key into an already-persisted `Listing` row --
+    it cannot be reassigned to an arbitrary value without that row
+    existing. So this fixture aligns in the other direction: the
+    assessment's own `evaluated_for.listing_id` is overridden to match
+    ``analysis``'s own already-persisted listing (with the checksum
+    recomputed to match, when ``recompute_hash`` is set) rather than the
+    other way around. A test that deliberately wants a *mismatching*
+    listing id (to exercise the F2 whole-blob-transplant guard) overrides
+    ``assessment["evaluated_for"]["listing_id"]`` again after this helper
+    returns, or calls it with ``recompute_hash=False``.
+
+    The payload's fixed ``code_revision`` is likewise generated from the
+    same value persisted on its parent run. By default this fixture aligns
+    that field to ``analysis.run.code_revision``; a corruption test for the
+    revision binding passes ``align_code_revision=False``.
+    """
+    analysis.current_price = Decimal("4.250000")
+    quality = dict(analysis.data_quality)
+    if assessment is not None:
+        evaluated_for = assessment.get("evaluated_for")
+        if isinstance(evaluated_for, dict):
+            assessment = {
+                **assessment,
+                "evaluated_for": {**evaluated_for, "listing_id": str(analysis.listing_id)},
+            }
+        if align_code_revision:
+            assessment = {
+                **assessment,
+                "code_revision": analysis.run.code_revision,
+            }
+        if recompute_hash:
+            assessment = {**assessment, "assessment_hash": under10_assessment_hash(assessment)}
+        quality["under10_assessment"] = assessment
+        liquidity = assessment.get("liquidity")
+        price_asset = liquidity.get("price_asset") if isinstance(liquidity, dict) else None
+        asset_id = price_asset.get("id") if isinstance(price_asset, dict) else None
+        asset_sha256 = price_asset.get("sha256") if isinstance(price_asset, dict) else None
+        if isinstance(asset_id, str):
+            quality["price_source"] = {"asset_id": asset_id}
+            if isinstance(asset_sha256, str):
+                quality["source_assets"] = [{"id": asset_id, "sha256": asset_sha256}]
+        evaluated_for = assessment.get("evaluated_for")
+        raw_cutoff = evaluated_for.get("data_cutoff") if isinstance(evaluated_for, dict) else None
+        if isinstance(raw_cutoff, str):
+            try:
+                data_cutoff = datetime.fromisoformat(raw_cutoff)
+            except ValueError:
+                data_cutoff = None
+            if data_cutoff is not None:
+                analysis.run.data_cutoff = data_cutoff
+                analysis.run.save(update_fields=["data_cutoff"])
+    analysis.data_quality = quality
+    analysis.save(update_fields=["current_price", "data_quality"])
+    market_data = LatestMarketData.objects.get(listing=analysis.listing)
+    market_data.close = Decimal("4.25")
+    market_data.save(update_fields=["close"])
+
+
+def _insufficient_evidence_payload(*reasons: str) -> dict:
+    """A legitimately shaped `insufficient_evidence` payload naming ``reasons``.
+
+    `insufficient_evidence`'s own reason vocabulary is architecturally
+    unbounded (it spans multiple modules and dynamically concept-named
+    strings, and cannot itself misrepresent a favorable claim), so this is
+    the correct, non-contradictory status/input combination for tests that
+    need an arbitrary (long, or HTML-shaped) reason string to legitimately
+    reach the "recorded" panel -- unlike `no_adverse_evidence_observed`/
+    `elevated_obligation_risk`/`adverse_near_term_obligation`, which are now
+    held to the generator's own closed reason vocabulary for that state.
+    """
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "status": "insufficient_evidence",
+        "reasons": list(reasons),
+        "inputs": dict.fromkeys(payload["solvency"]["inputs"]),
+        "runway": {
+            "status": "withheld",
+            "quarters": None,
+            "reason": "cash_and_equivalents_missing",
+        },
+    }
+    return payload
+
+
+def _make_under_ten_raw(analysis: StockAnalysis, *, raw_value: object) -> None:
+    """Like `_make_under_ten`, but the key is always set -- even to ``None``.
+
+    `_make_under_ten(assessment=None)` deliberately never sets the key at
+    all (the "absent" case). This helper constructs the distinct "key
+    present but the stored value itself is malformed" case.
+    """
+    analysis.current_price = Decimal("4.250000")
+    quality = dict(analysis.data_quality)
+    quality["under10_assessment"] = raw_value
+    analysis.data_quality = quality
+    analysis.save(update_fields=["current_price", "data_quality"])
+    market_data = LatestMarketData.objects.get(listing=analysis.listing)
+    market_data.close = Decimal("4.25")
+    market_data.save(update_fields=["close"])
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_reports_assessed_state_and_renders_zero_explicitly(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    assert panel["state"] == "recorded"
+    assert panel["solvency"]["state"] == "assessed"
+    assert "Assessed - no adverse evidence observed" in content
+    assert "Not applicable - FCF is non-negative." in content
+    # Zero renders as an explicit value, never as a blank or a default.
+    assert "0.00000000" in content
+    assert "Assessed - median dollar volume over 252 observed sessions" in content
+    assert "0.0 USD over 252 observed sessions" in content
+    assert "Withheld - verified split evidence is unavailable." in content
+    assert "recorded Twelve Data Basic plan is not entitled" in content
+    assert "A different plan alone would not supply a reviewed split source" in content
+    assert "New allocation remains 0%" in content
+    # No badge, ranking, or scorecard is introduced by the panel.
+    assert "opportunity-badge" not in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_reports_withheld_solvency_with_reasons(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "status": "insufficient_evidence",
+        "reasons": ["near_term_debt_components_missing", "stale_metric"],
+        "inputs": {key: None for key in payload["solvency"]["inputs"]},
+        "runway": {
+            "status": "withheld",
+            "quarters": None,
+            "reason": "cash_and_equivalents_missing",
+        },
+    }
+    payload["liquidity"] = {
+        **payload["liquidity"],
+        "status": "withheld",
+        "value": None,
+        "reason": "basis_incompatible",
+        "sessions_used": None,
+        "first_session": None,
+        "last_session": None,
+        "basis": {
+            "interval": None,
+            "adjustment": None,
+            "return_definition": None,
+            "volume_basis": "provider_reported_unverified_split_basis",
+        },
+    }
+    payload["split_verification"] = {
+        **payload["split_verification"],
+        "reason": "no_reviewed_corporate_actions_source",
+        "plan_recorded": False,
+    }
+    payload["blocking_reasons"] = ["no_reviewed_corporate_actions_source"]
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    assert panel["solvency"]["state"] == "withheld"
+    assert panel["liquidity"]["state"] == "withheld"
+    assert "Withheld - insufficient evidence" in content
+    assert "near_term_debt_components_missing" in content
+    assert "stale_metric" in content
+    assert "Withheld - basis_incompatible" in content
+    assert "Withheld - cash_and_equivalents_missing" in content
+    assert "No reviewed corporate-actions source is integrated" in content
+    assert "0.00000000" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_renders_the_elevated_obligation_risk_state(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """Regression: hardening the reader must not reject a genuinely valid, complete,
+    non-favorable-but-not-worst-case state -- only the two states this file
+    already covers (`no_adverse_evidence_observed`, `insufficient_evidence`).
+    """
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "status": "elevated_obligation_risk",
+        "reasons": ["near_term_debt_exceeds_cash"],
+        "inputs": {
+            **payload["solvency"]["inputs"],
+            "near_term_debt": "2000.00000000",
+        },
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    assert panel["state"] == "recorded"
+    assert panel["solvency"]["state"] == "assessed"
+    assert "Assessed - elevated obligation risk" in content
+    assert "near_term_debt_exceeds_cash" in content
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_renders_the_adverse_near_term_obligation_state(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "status": "adverse_near_term_obligation",
+        "reasons": [
+            "near_term_debt_exceeds_cash",
+            "negative_free_cash_flow",
+            "cash_runway_below_minimum_quarters",
+        ],
+        "inputs": {
+            **payload["solvency"]["inputs"],
+            "near_term_debt": "2000.00000000",
+            "free_cash_flow": "-100.00000000",
+        },
+        "runway": {
+            "status": "computed",
+            "quarters": "0.0000",
+            "reason": None,
+        },
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    assert panel["state"] == "recorded"
+    assert panel["solvency"]["state"] == "assessed"
+    assert "Assessed - adverse near-term obligation" in content
+    assert "Cash runway - 0.0000 quarters at the reported burn" in content
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_says_not_assessed_when_the_key_is_absent(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    _make_under_ten(persisted_analysis, assessment=None)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "not_assessed"
+    assert "Not assessed for this analysis." in content
+    assert "existing analyses were not backfilled" in content
+    assert "Assessed -" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_withholds_an_unreadable_payload(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    _make_under_ten(
+        persisted_analysis,
+        assessment=_shadow_payload(policy_version="us-under10-shadow-v9"),
+    )
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "unsupported"
+    assert "this build cannot read" in content
+    assert "Assessed -" not in content
+    assert "Not assessed for this analysis." not in content
+
+
+# ---------------------------------------------------------------------------
+# RI-3: the reader must not accept a malformed/incomplete/forged payload.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_distinguishes_key_absent_from_key_present_but_null(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """A present ``None`` is "unsupported", never conflated with "not assessed"."""
+    _make_under_ten_raw(persisted_analysis, raw_value=None)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "unsupported"
+    assert "Not assessed for this analysis." not in content
+    assert "this build cannot read" in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("raw_value", [[], "under10_assessment", 4.25, True])
+def test_under_ten_panel_rejects_a_present_non_dict_value(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    raw_value: object,
+) -> None:
+    _make_under_ten_raw(persisted_analysis, raw_value=raw_value)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("forged_schema_version", [99, 0, -1, True, "1", 1.0, None])
+def test_under_ten_panel_rejects_an_unrecognized_or_non_integer_schema_version(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    forged_schema_version: object,
+) -> None:
+    """Schema 99 (or any non-genuine-int) is withheld, not silently accepted.
+
+    ``True`` is included because ``bool`` is an ``int`` subclass in Python
+    (``True == 1``); a forged boolean schema version must still be rejected
+    as the wrong *type*, not accepted because it compares equal to ``1``.
+    """
+    _make_under_ten(
+        persisted_analysis,
+        assessment=_shadow_payload(schema_version=forged_schema_version),
+    )
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_minimal_solvency_instead_of_rendering_favorable(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """An incomplete payload must never be able to render favorable evidence.
+
+    Only ``status`` is present; every other required solvency field
+    (``reasons``, ``inputs``, ``periods``, ``runway``, ``assessed_fact_ids``)
+    is missing. The favorable-looking status alone must not be enough to
+    render "Assessed - no adverse evidence observed".
+    """
+    payload = _shadow_payload()
+    payload["solvency"] = {"status": "no_adverse_evidence_observed"}
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "unsupported"
+    assert "Assessed - no adverse evidence observed" not in content
+    assert "No adverse evidence observed" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "unhashable_status",
+    [[], {}, ["no_adverse_evidence_observed"]],
+    ids=["empty-list", "empty-dict", "single-item-list"],
+)
+def test_under_ten_panel_rejects_an_unhashable_solvency_status_without_raising(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    unhashable_status: object,
+) -> None:
+    """A malformed unhashable stored ``status`` must render ``unsupported``, never raise.
+
+    `status in UNDER10_SOLVENCY_LABELS` (a ``dict``) hashes its left operand;
+    an unhashable stored value (``list``/``dict``) would raise ``TypeError``
+    without a ``str`` type guard ahead of the membership test, turning a
+    malformed nested payload into an uncaught 500 instead of the intended
+    read-only "unsupported" render. ``list``/``dict`` are used here (rather
+    than e.g. a ``set``) because both are genuine JSON types that can
+    actually round-trip through the persisted `data_quality` JSON column.
+    """
+    payload = _shadow_payload()
+    payload["solvency"] = {**payload["solvency"], "status": unhashable_status}
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "unhashable_status",
+    [[], {}, set()],
+    ids=["list", "dict", "set"],
+)
+def test_is_valid_under10_solvency_rejects_unhashable_status_values(
+    unhashable_status: object,
+) -> None:
+    """Direct validator-function coverage, including a ``set`` (JSON cannot represent one).
+
+    A ``set`` can never survive a JSON round trip (it would raise at
+    persistence time, never at read time), so this exercises the reader's
+    own defense directly rather than through an HTTP round trip that could
+    never construct the row in the first place -- matching the existing
+    NaN/Infinity liquidity precedent above.
+    """
+    from stanstock.web.views import _is_valid_under10_solvency
+
+    payload = {**_shadow_payload()["solvency"], "status": unhashable_status}
+
+    assert _is_valid_under10_solvency(payload, target_date=timezone.localdate()) is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_inputs",
+    [
+        {"cash_and_equivalents": True},
+        {"near_term_debt": -5.0},
+        {"current_assets": 2000.0},
+    ],
+)
+def test_under_ten_panel_rejects_non_string_solvency_input_values(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    malformed_inputs: dict[str, object],
+) -> None:
+    """Every solvency input is a Decimal-compatible string or ``None``, never a raw number/bool."""
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "inputs": {**payload["solvency"]["inputs"], **malformed_inputs},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_liquidity",
+    [
+        {"value": True},
+        {"value": -1_000_000.0},
+        {"status": "withheld", "value": 500.0},
+        {"status": "computed", "value": None},
+        {"currency": "EUR"},
+        {"sessions_used": True},
+        {"sessions_used": -1},
+        {"status": "withheld", "value": None, "reason": None},
+        {"status": "withheld", "value": None, "reason": ""},
+        {"status": "computed", "reason": "insufficient_sessions"},
+    ],
+)
+def test_under_ten_panel_rejects_malformed_liquidity_combinations(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    malformed_liquidity: dict[str, object],
+) -> None:
+    """Booleans, negatives, and invalid status combinations never render as computed.
+
+    NaN/Infinity liquidity values are covered separately, at the validator
+    function, in `test_is_valid_under10_liquidity_rejects_nan_and_infinite_values`:
+    SQLite's own `JSON_VALID` column constraint (and PostgreSQL's `json`/
+    `jsonb` types) already refuse to persist a non-finite JSON number
+    through a normal `.save()`, so this HTTP-level test cannot construct
+    that row -- the reader's own defense is still exercised directly.
+    """
+    payload = _shadow_payload()
+    payload["liquidity"] = {**payload["liquidity"], **malformed_liquidity}
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "unsupported"
+    assert "median dollar volume over 252 observed sessions" not in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_never_renders_withheld_none_for_a_missing_liquidity_reason(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """A withheld liquidity result always names why; a null reason is withheld, not rendered.
+
+    Every generated withholding carries a non-empty reason string, so a
+    stored `status=withheld` with a null/absent `reason` is a malformed
+    payload, not merely an incomplete but legitimate one -- it must never
+    surface a bare "Withheld - None" (or similarly blank) label.
+    """
+    payload = _shadow_payload()
+    payload["liquidity"] = {**payload["liquidity"], "status": "withheld", "value": None}
+    del payload["liquidity"]["reason"]
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "unsupported"
+    assert "Withheld - None" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_withheld_liquidity_with_a_real_reason_still_renders(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """The tightened reason check does not regress a genuinely withheld result."""
+    payload = _shadow_payload()
+    payload["liquidity"] = {
+        **payload["liquidity"],
+        "status": "withheld",
+        "value": None,
+        "reason": "insufficient_sessions",
+        "sessions_used": 0,
+        "first_session": None,
+        "last_session": None,
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = detail.content.decode()
+    assert panel["state"] == "recorded"
+    assert panel["liquidity"]["state"] == "withheld"
+    assert "Withheld - insufficient_sessions" in content
+
+
+@pytest.mark.parametrize("nonfinite_value", [float("nan"), float("inf"), float("-inf")])
+def test_is_valid_under10_liquidity_rejects_nan_and_infinite_values(nonfinite_value: float) -> None:
+    """Direct validator-function coverage for NaN/Infinity liquidity values.
+
+    A non-finite JSON number cannot actually reach a persisted
+    `StockAnalysis` row (SQLite's `JSON_VALID` column constraint, and
+    PostgreSQL's `json`/`jsonb` types, both refuse it), so this exercises
+    the reader's own defense directly rather than through an HTTP round
+    trip that could never construct the row in the first place.
+    """
+    from datetime import date
+
+    from stanstock.web.views import _ExpectedPriceAssetReference, _is_valid_under10_liquidity
+
+    full_payload = _shadow_payload()
+    payload = full_payload["liquidity"]
+    payload["value"] = nonfinite_value
+    target_date = date.fromisoformat(full_payload["evaluated_for"]["target_date"])
+    price_asset = payload.get("price_asset")
+    expected_price_asset = (
+        _ExpectedPriceAssetReference(id=price_asset["id"], sha256=price_asset["sha256"])
+        if isinstance(price_asset, dict)
+        else None
+    )
+
+    assert (
+        _is_valid_under10_liquidity(
+            payload, target_date=target_date, expected_price_asset=expected_price_asset
+        )
+        is False
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_runway",
+    [
+        {"status": "computed", "quarters": None},
+        {"status": "withheld", "quarters": "1.0000"},
+        {"status": "not_applicable_positive_fcf", "quarters": "1.0000"},
+        {"status": "favorable-forged-status"},
+    ],
+)
+def test_under_ten_panel_rejects_invalid_runway_status_combinations(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    malformed_runway: dict[str, object],
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "runway": {**payload["solvency"]["runway"], **malformed_runway},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_a_non_boolean_plan_recorded(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    payload = _shadow_payload()
+    payload["split_verification"] = {**payload["split_verification"], "plan_recorded": "true"}
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_preserves_valid_zero_values(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """A genuine zero must survive validation and render explicitly, not as absent."""
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "inputs": {
+            **payload["solvency"]["inputs"],
+            "cash_and_equivalents": "0.00000000",
+        },
+    }
+    payload["liquidity"] = {**payload["liquidity"], "value": 0.0}
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "recorded"
+    assert panel["liquidity"]["state"] == "assessed"
+    assert "0.00000000" in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_a_forged_allocation_percent(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """A noncanonical stored allocation mirror invalidates the payload."""
+    _make_under_ten(
+        persisted_analysis,
+        assessment=_shadow_payload(new_allocation_percent=100),
+    )
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    assert panel["state"] == "unsupported"
+    assert "New allocation remains 0%" in content
+    assert "New allocation remains 100%" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("forged_field", "forged_value"),
+    [("activated", True), ("activation_eligible", True)],
+)
+def test_under_ten_panel_rejects_a_forged_activation_flag(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    forged_field: str,
+    forged_value: object,
+) -> None:
+    """A forged fixed policy flag is unsupported, never merely hidden."""
+    _make_under_ten(
+        persisted_analysis,
+        assessment=_shadow_payload(**{forged_field: forged_value}),
+    )
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_activation_flags_are_authoritative_for_a_valid_payload(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """Future-safe: even a genuinely-generated payload's flags are never read from storage.
+
+    The template does not currently render `activated`/`activation_eligible`
+    at all, so this asserts the returned *context* directly: the values are
+    correct today and stay correct if a future template starts rendering
+    them, because the view never reads them from the stored payload in the
+    first place.
+    """
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "recorded"
+    assert panel["activated"] is False
+    assert panel["activation_eligible"] is False
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_still_renders_a_valid_persisted_assessment_after_hardening(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """The stricter reader is not stricter than the actual generated contract."""
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "recorded"
+    assert panel["solvency"]["state"] == "assessed"
+    assert panel["liquidity"]["state"] == "assessed"
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_detail_get_stays_query_bounded_for_malformed_payloads(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+) -> None:
+    """Rejecting a malformed payload must not add unbounded queries to the GET."""
+    _make_under_ten(
+        persisted_analysis,
+        assessment=_shadow_payload(schema_version=99),
+    )
+
+    with django_assert_max_num_queries(60):
+        detail = authenticated_client.get(
+            reverse("stock-detail", args=[persisted_analysis.listing_id])
+        )
+
+    assert detail.status_code == 200
+    assert detail.context["under10_panel"]["state"] == "unsupported"
+
+
+@pytest.mark.django_db
+def test_a_recorded_assessment_survives_a_later_price_band_change(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+    market_data = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    market_data.close = Decimal("42.00")
+    market_data.save(update_fields=["close"])
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert detail.context["current_price_band"].slug == "10_to_50"
+    assert panel["state"] == "recorded"
+    assert panel["reference_close"] == "4.250000"
+
+
+@pytest.mark.django_db
+def test_a_later_under_ten_band_never_manufactures_an_old_assessment(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    # The decision-run close stays above $10 while the current market row
+    # falls into the Under-$10 band.
+    market_data = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    market_data.close = Decimal("4.25")
+    market_data.save(update_fields=["close"])
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    assert persisted_analysis.current_price == Decimal("101.25")
+    assert detail.context["current_price_band"].slug == "under_10"
+    assert panel["state"] == "not_assessed"
+    assert "Not assessed for this analysis." in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_an_ordinary_priced_analysis_shows_no_under_ten_panel(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.context["under10_panel"] is None
+    assert "Under-$10 shadow diagnostics" not in detail.content.decode()
+
+
+@pytest.mark.django_db
+def test_detail_get_performs_no_assessment_write_or_provider_access(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stanstock.research.under10 as under10_module
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("stock detail must not compute an assessment on GET")
+
+    monkeypatch.setattr(under10_module, "build_under10_assessment", _forbidden)
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+    before = StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    assert StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality == before
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_never_appears_on_the_opportunities_page(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+
+    opportunities = authenticated_client.get(reverse("opportunities"))
+
+    content = opportunities.content.decode()
+    assert "Under-$10 shadow diagnostics" not in content
+    assert "Assessed - no adverse evidence observed" not in content
+    assert "median dollar volume over 252 observed sessions" not in content
+    for card in opportunities.context["analysis_cards"]:
+        assert "under10_panel" not in card
+
+
+# ---------------------------------------------------------------------------
+# F1: the numeric validator must be total (never raise) for any JSON scalar.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (10**400, False),
+        (-(10**400), False),
+        (float("nan"), False),
+        (float("inf"), False),
+        (float("-inf"), False),
+        (True, False),
+        (False, False),
+        ("4250000.0", False),
+        (None, False),
+        ([], False),
+        ({}, False),
+        (0, True),
+        (0.0, True),
+        (-5.5, True),
+        (4_250_000.0, True),
+        (sys.float_info.max, True),
+        (-sys.float_info.max, True),
+    ],
+)
+def test_is_finite_number_never_raises_for_any_json_scalar(value: object, expected: bool) -> None:
+    """`10**400` (and its negation) must not raise `OverflowError` inside `math.isfinite`."""
+    from stanstock.web.views import _is_finite_number
+
+    assert _is_finite_number(value) is expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("oversized_value", [10**400, -(10**400)])
+def test_under_ten_panel_rejects_an_oversized_stored_liquidity_value_without_raising(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+    oversized_value: int,
+) -> None:
+    """A persisted `10**400` liquidity value must render `unsupported`, not crash."""
+    payload = _shadow_payload()
+    payload["liquidity"] = {**payload["liquidity"], "value": oversized_value}
+    _make_under_ten(persisted_analysis, assessment=payload)
+    before = StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality
+
+    with django_assert_max_num_queries(60):
+        detail = authenticated_client.get(
+            reverse("stock-detail", args=[persisted_analysis.listing_id])
+        )
+
+    assert detail.status_code == 200
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "unsupported"
+    content = " ".join(detail.content.decode().split())
+    assert "New allocation remains 0%" in content
+    assert str(oversized_value) not in content
+    assert StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality == before
+
+
+# ---------------------------------------------------------------------------
+# F2: malformed/contradictory evidence must never render assessed/favorable.
+# ---------------------------------------------------------------------------
+
+
+def _assert_rejected(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    payload: dict,
+    django_assert_max_num_queries,
+) -> None:
+    before = StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality
+    with django_assert_max_num_queries(60):
+        detail = authenticated_client.get(
+            reverse("stock-detail", args=[persisted_analysis.listing_id])
+        )
+    assert detail.status_code == 200
+    panel = detail.context["under10_panel"]
+    assert panel["state"] == "unsupported"
+    content = " ".join(detail.content.decode().split())
+    assert "Assessed -" not in content
+    assert "New allocation remains 0%" in content
+    assert StockAnalysis.objects.get(pk=persisted_analysis.pk).data_quality == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("cash_and_equivalents", "NaN"),
+        ("free_cash_flow", "Infinity"),
+        ("free_cash_flow", "-Infinity"),
+        ("current_ratio", "1e100000000"),
+        ("near_term_debt", "-1e100000000"),
+        ("current_assets", True),
+    ],
+)
+def test_under_ten_panel_rejects_nonfinite_or_extreme_solvency_inputs(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+    field: str,
+    bad_value: object,
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "inputs": {**payload["solvency"]["inputs"], field: bad_value},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+def test_is_valid_under10_solvency_rejects_a_raw_nan_input_value() -> None:
+    """A raw (non-string) NaN can never be persisted (SQLite's `JSON_VALID` refuses it),
+
+    so this exercises the reader's own defense directly, matching the
+    existing NaN/Infinity liquidity precedent above.
+    """
+    from stanstock.web.views import _is_valid_under10_solvency
+
+    payload = _shadow_payload()["solvency"]
+    payload["inputs"] = {**payload["inputs"], "current_liabilities": float("nan")}
+
+    assert _is_valid_under10_solvency(payload, target_date=timezone.localdate()) is False
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_a_null_input_while_solvency_claims_no_adverse_evidence(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+) -> None:
+    """A favorable status requires the complete input set; a null cash is not complete."""
+    payload = _shadow_payload()
+    assert payload["solvency"]["status"] == "no_adverse_evidence_observed"
+    payload["solvency"] = {
+        **payload["solvency"],
+        "inputs": {**payload["solvency"]["inputs"], "cash_and_equivalents": None},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_a_null_period_while_solvency_claims_no_adverse_evidence(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+) -> None:
+    """A favorable status requires the shared instant/flow period claims too."""
+    payload = _shadow_payload()
+    assert payload["solvency"]["status"] == "no_adverse_evidence_observed"
+    payload["solvency"] = {
+        **payload["solvency"],
+        "periods": {**payload["solvency"]["periods"], "instant_date": None},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_periods",
+    [
+        {"instant_date": "not-a-date"},
+        {"duration_start": "2025-13-45"},
+        {"duration_basis": "quarterly"},
+        {"duration_start": "2025-12-31", "duration_end": "2025-01-01"},
+    ],
+)
+def test_under_ten_panel_rejects_malformed_period_claims(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+    malformed_periods: dict[str, object],
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "periods": {**payload["solvency"]["periods"], **malformed_periods},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_liquidity",
+    [
+        {"sessions_used": 0},
+        {"sessions_used": 251},
+        {
+            "basis": {
+                "interval": "1day",
+                "adjustment": "none",
+                "return_definition": "split_adjusted_price_return",
+                "volume_basis": "provider_reported_unverified_split_basis",
+            }
+        },
+        {"metric": "average_dollar_volume_30_sessions"},
+        {"first_session": "2026-03-02", "last_session": "2025-06-24"},
+        {"first_session": "not-a-date"},
+    ],
+)
+def test_under_ten_panel_rejects_malformed_computed_liquidity_claims(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+    malformed_liquidity: dict[str, object],
+) -> None:
+    payload = _shadow_payload()
+    assert payload["liquidity"]["status"] == "computed"
+    payload["liquidity"] = {**payload["liquidity"], **malformed_liquidity}
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_an_unknown_liquidity_metric_even_when_withheld(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+) -> None:
+    payload = _shadow_payload()
+    payload["liquidity"] = {
+        "status": "withheld",
+        "metric": "average_dollar_volume_30_sessions",
+        "value": None,
+        "currency": "USD",
+        "sessions_used": None,
+        "first_session": None,
+        "last_session": None,
+        "basis": {
+            "interval": None,
+            "adjustment": None,
+            "return_definition": None,
+            "volume_basis": "provider_reported_unverified_split_basis",
+        },
+        "reason": "price_provenance_unavailable",
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "malformed_runway",
+    [
+        {"status": "computed", "quarters": "NaN", "reason": None},
+        {"status": "computed", "quarters": "-1.0000", "reason": None},
+        {"status": "computed", "quarters": 4.0, "reason": None},
+        {"status": "computed", "quarters": "4.0000", "reason": "unexpected_reason"},
+        {"status": "withheld", "quarters": "4.0000", "reason": "free_cash_flow_missing"},
+    ],
+)
+def test_under_ten_panel_rejects_malformed_computed_runway_strings(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+    malformed_runway: dict[str, object],
+) -> None:
+    payload = _shadow_payload()
+    payload["solvency"] = {
+        **payload["solvency"],
+        "runway": {**payload["solvency"]["runway"], **malformed_runway},
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_rejects_an_extreme_reference_close(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    django_assert_max_num_queries,
+) -> None:
+    payload = _shadow_payload()
+    payload["evaluated_for"] = {**payload["evaluated_for"], "reference_close": "1e100000000"}
+    _make_under_ten(persisted_analysis, assessment=payload)
+    _assert_rejected(
+        authenticated_client, persisted_analysis, payload, django_assert_max_num_queries
+    )
+
+
+# ---------------------------------------------------------------------------
+# F3: the split-only price-basis "proven" claim must be conditional on what
+# was actually validated compatible, never unconditional.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_under_ten_liquidity_panel_confirms_price_basis_when_computed(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    payload = _shadow_payload()
+    assert payload["liquidity"]["status"] == "computed"
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    content = " ".join(detail.content.decode().split())
+    assert "Split-only price basis is confirmed for this evidence." in content
+    assert "not for the provider's reported volume" not in content
+    assert "Price/volume split basis was not established" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_liquidity_panel_confirms_price_basis_when_withheld_for_an_unrelated_reason(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """Withheld for insufficient sessions, but the price basis itself was still established."""
+    payload = _shadow_payload()
+    payload["liquidity"] = {
+        **payload["liquidity"],
+        "status": "withheld",
+        "value": None,
+        "sessions_used": 200,
+        "reason": "insufficient_sessions",
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    content = " ".join(detail.content.decode().split())
+    assert "Split-only price basis is confirmed for this evidence." in content
+    assert "Price/volume split basis was not established" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_liquidity_panel_denies_the_proof_claim_for_a_missing_anchor(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    payload = _shadow_payload()
+    payload["liquidity"] = {
+        **payload["liquidity"],
+        "status": "withheld",
+        "value": None,
+        "sessions_used": None,
+        "first_session": None,
+        "last_session": None,
+        "reason": "price_provenance_unavailable",
+        "basis": {
+            "interval": None,
+            "adjustment": None,
+            "return_definition": None,
+            "volume_basis": "provider_reported_unverified_split_basis",
+        },
+        "price_asset": None,
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    content = " ".join(detail.content.decode().split())
+    assert "Price/volume split basis was not established for this evidence" in content
+    assert "Split-only price basis is confirmed" not in content
+
+
+@pytest.mark.django_db
+def test_under_ten_liquidity_panel_denies_the_proof_claim_for_incompatible_present_metadata(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    """P3-1: the observed-but-incompatible basis is preserved (not nulled), and the
+    proof claim must still be denied for it -- present-but-wrong is not proof.
+    """
+    payload = _shadow_payload()
+    payload["liquidity"] = {
+        **payload["liquidity"],
+        "status": "withheld",
+        "value": None,
+        "sessions_used": None,
+        "first_session": None,
+        "last_session": None,
+        "reason": "basis_incompatible",
+        "basis": {
+            "interval": "1week",
+            "adjustment": "splits",
+            "return_definition": "split_adjusted_price_return",
+            "volume_basis": "provider_reported_unverified_split_basis",
+        },
+    }
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    panel = detail.context["under10_panel"]
+    content = " ".join(detail.content.decode().split())
+    # The observed (incompatible) metadata is still visibly preserved, not nulled.
+    assert panel["liquidity"]["basis"]["interval"] == "1week"
+    assert "Price/volume split basis was not established for this evidence" in content
+    assert "Split-only price basis is confirmed" not in content
+
+
+# ---------------------------------------------------------------------------
+# F4: long/malicious stored text must never cause horizontal page overflow,
+# and must remain autoescaped. Uses the repo's existing Playwright dependency
+# (already declared, no new dependency) when its Chromium browser is
+# installed in this environment; otherwise these regressions skip cleanly
+# and only the CSS-contract assertion below still runs unconditionally.
+# ---------------------------------------------------------------------------
+
+_STANSTOCK_CSS_PATH = Path(__file__).resolve().parent.parent / "static" / "css" / "stanstock.css"
+_LONG_UNBROKEN_REASON = "x" * 1000
+
+
+def _chromium_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as playwright:
+            return Path(playwright.chromium.executable_path).exists()
+    except Exception:
+        return False
+
+
+def _viewport_overflow(html: str, *, viewport_width: int) -> tuple[int, int]:
+    """``(scrollWidth, clientWidth)`` for ``html`` styled with the real project CSS."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": viewport_width, "height": 900})
+            page.set_content(html)
+            page.add_style_tag(path=str(_STANSTOCK_CSS_PATH))
+            scroll_width = page.evaluate("document.documentElement.scrollWidth")
+            client_width = page.evaluate("document.documentElement.clientWidth")
+        finally:
+            browser.close()
+    return scroll_width, client_width
+
+
+def test_under10_panel_css_rule_exists_and_contains_overflow_wrap() -> None:
+    """Applied CSS contract, checked unconditionally (no browser required)."""
+    css = _STANSTOCK_CSS_PATH.read_text()
+    assert ".under10-panel" in css
+    rule_start = css.index(".under10-panel")
+    rule_end = css.index("}", rule_start)
+    rule_body = css[rule_start:rule_end]
+    assert "overflow-wrap: anywhere" in rule_body
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium is not installed")
+@pytest.mark.parametrize("viewport_width", [320, 375, 768, 1280])
+def test_under_ten_panel_never_overflows_for_a_long_unbroken_stored_reason(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    viewport_width: int,
+) -> None:
+    payload = _insufficient_evidence_payload(_LONG_UNBROKEN_REASON)
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+    assert detail.status_code == 200
+    html = detail.content.decode()
+    # Required: audit text is not hidden or truncated -- it still renders in full.
+    assert _LONG_UNBROKEN_REASON in html
+
+    scroll_width, client_width = _viewport_overflow(html, viewport_width=viewport_width)
+    assert scroll_width <= client_width, (
+        f"horizontal overflow at {viewport_width}px: "
+        f"scrollWidth={scroll_width} clientWidth={client_width}"
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium is not installed")
+@pytest.mark.parametrize("viewport_width", [320, 375, 768, 1280])
+def test_under_ten_panel_ordinary_valid_payload_never_overflows(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    viewport_width: int,
+) -> None:
+    """Baseline: the CSS containment fix must not disturb an ordinary rendered panel."""
+    _make_under_ten(persisted_analysis, assessment=_shadow_payload())
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+    assert detail.status_code == 200
+    html = detail.content.decode()
+
+    scroll_width, client_width = _viewport_overflow(html, viewport_width=viewport_width)
+    assert scroll_width <= client_width
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium is not installed")
+def test_opportunities_page_ordinary_layout_never_overflows(authenticated_client) -> None:
+    """Baseline: an unrelated ordinary page's layout is unaffected by the panel-scoped rule."""
+    detail = authenticated_client.get(reverse("opportunities"))
+    assert detail.status_code == 200
+    html = detail.content.decode()
+
+    scroll_width, client_width = _viewport_overflow(html, viewport_width=375)
+    assert scroll_width <= client_width
+
+
+@pytest.mark.django_db
+def test_under_ten_panel_escapes_html_in_a_stored_reason(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    malicious = "<script>window.__stanstock_xss__=true</script>"
+    payload = _insufficient_evidence_payload(malicious)
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    html = detail.content.decode()
+    assert malicious not in html
+    assert "&lt;script&gt;" in html
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium is not installed")
+def test_under_ten_panel_never_executes_a_stored_script_in_the_dom(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    malicious = "<script>window.__stanstock_xss__=true</script>"
+    payload = _insufficient_evidence_payload(malicious)
+    _make_under_ten(persisted_analysis, assessment=payload)
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+    html = detail.content.decode()
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.set_content(html)
+            executed = page.evaluate("window.__stanstock_xss__ === true")
+            script_count = page.evaluate(
+                "document.querySelectorAll('.under10-panel script').length"
+            )
+        finally:
+            browser.close()
+
+    assert executed is False
+    assert script_count == 0

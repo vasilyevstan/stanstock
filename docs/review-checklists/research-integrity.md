@@ -221,9 +221,11 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       Point-in-time SEC adverse-versus-missing behavior, long-v2
       diluted-share/per-share continuity assessment, and the deterministic
       3y/5y engine are foundations only, not candidate approvals. Dedicated
-      solvency/cash-runway, Under-$10 dollar-liquidity, and verified
-      split/reverse-split controls remain unreleased; joint review and
-      candidate-specific eligibility remain required.
+      solvency/cash-runway and 252-session dollar-liquidity diagnostics are
+      released only as candidate-specific, unactivated shadow evidence:
+      allocation remains 0%, every activation gate remains false, and joint
+      review plus candidate-specific eligibility remain required. A reviewed
+      verified split/reverse-split source remains unreleased.
 
 ## Tracked contributions and allocation plans
 
