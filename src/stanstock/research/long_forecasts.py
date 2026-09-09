@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -22,14 +23,18 @@ from stanstock.data.sec_fundamentals import (
     TTM_SELECTION_NEWEST_QUARTER_ALIAS,
     FundamentalValue,
     NoncanonicalInstantIdentityError,
+    ResolvedAvailability,
     SecFundamentalSeries,
     build_sec_fundamental_series,
+    deferred_correction_payload,
     fact_selection_identity,
+    partition_unproven_corrections,
     source_concept_priority,
 )
 from stanstock.research.long_forecast_config import (
     LONG_FORECAST_HORIZONS,
     LONG_SCENARIOS,
+    REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS,
     LongForecastConfig,
     LongHorizonConfig,
     LongMetricFamilyConfig,
@@ -97,6 +102,71 @@ def _evidence_selection_enabled(config: LongForecastConfig) -> bool:
         config.newest_quarter_anchored_homogeneous_ttm_alias_selection is True
         or config.joint_compatible_invested_capital_pair_selection is True
     )
+
+
+#: Correction policy that resolves a same-accession correction against the
+#: observation that proves it, deferring one whose timing is unproven at the
+#: requested cutoff.
+CORRECTION_POLICY_PROVEN_OBSERVATION = "proven_observation_availability"
+
+#: Frozen policy: read the recorded ``available_at`` and nothing else.
+CORRECTION_POLICY_RECORDED_ONLY = "recorded_availability_only"
+
+
+def same_date_combination_ceiling(config: LongForecastConfig) -> int:
+    """The reviewed same-date combination ceiling this configuration declares.
+
+    Only a configuration that enables joint invested-capital selection has
+    one, and the loader accepts exactly the reviewed value, so this never
+    returns a tuned or defaulted bound. A configuration without the joint
+    search never reaches the enumeration that uses it.
+    """
+    ceiling = config.maximum_same_date_source_combinations
+    if ceiling is None:
+        raise ValueError(
+            f"Long forecast config {config.version!r} does not declare "
+            "maximum_same_date_source_combinations, so the same-date alias "
+            "enumeration must not run"
+        )
+    return ceiling
+
+
+def correction_availability_policy(config: LongForecastConfig) -> str:
+    """The correction-timing policy this configuration selects.
+
+    Driven by its own declared capability rather than inferred from the other
+    two, so a future version can adopt one without silently acquiring this
+    one. Frozen `us-sec-long-v1`/`us-sec-long-v2` declare no such key and
+    therefore read recorded availability exactly as released.
+
+    The forecast and the offline audit must answer this question with the
+    same function. An audit that applied the prospective policy to a frozen
+    version would report a selection that version would never make, which is
+    worse than not auditing it at all.
+    """
+    if config.proven_observation_correction_availability is True:
+        return CORRECTION_POLICY_PROVEN_OBSERVATION
+    return CORRECTION_POLICY_RECORDED_ONLY
+
+
+def resolve_corrections(
+    facts: Sequence[FundamentalFact],
+    *,
+    data_cutoff: datetime,
+    config: LongForecastConfig,
+) -> tuple[list[FundamentalFact], tuple[ResolvedAvailability, ...]]:
+    """Split visible facts into series inputs and deferred corrections.
+
+    Only a configuration on `CORRECTION_POLICY_PROVEN_OBSERVATION` resolves
+    anything. A frozen version gets its original list object back and an
+    empty deferral tuple, so neither its selection nor its payloads can move.
+    """
+    if correction_availability_policy(config) != CORRECTION_POLICY_PROVEN_OBSERVATION:
+        return list(facts), ()
+    admitted, deferred = partition_unproven_corrections(facts, available_through=data_cutoff)
+    if not deferred:
+        return list(facts), ()
+    return list(admitted), deferred
 
 
 def _display_version_label(config: LongForecastConfig) -> str:
@@ -307,6 +377,7 @@ def build_long_forecasts(
             price=current_prices[str(listing.pk)],
             price_asset=price_assets[str(listing.pk)],
             asof_decision_time=asof.decision_time,
+            data_cutoff=data_cutoff,
             target_date=target_date,
             config=config,
             sec_config=sec_config,
@@ -348,6 +419,7 @@ def _company_state(
     price: float,
     price_asset: DataAsset,
     asof_decision_time: datetime,
+    data_cutoff: datetime,
     target_date: date,
     config: LongForecastConfig,
     sec_config: SecFundamentalsConfig,
@@ -364,7 +436,22 @@ def _company_state(
     `us-sec-long-v3` classifies as assessed rather than selected. Frozen
     v1/v2 carry no assessment payload, so the closure is empty and their
     manifests and ``input_facts`` are unchanged.
+
+    `us-sec-long-v3` additionally resolves same-accession corrections against
+    their *proven* availability. A correction persisted before
+    `CORRECTION_AVAILABILITY_BASIS` existed carries the original acceptance
+    timestamp, so the recorded cutoff alone would admit a restated value at a
+    historical cutoff that predates the retrieval proving it. Such a
+    correction is withheld from the series -- leaving the original
+    observation, which *is* proven at that cutoff, in its place -- and
+    recorded as assessed evidence with its own reason. Frozen v1/v2 keep
+    reading exactly the facts they were handed.
     """
+    admitted, deferred = resolve_corrections(
+        facts,
+        data_cutoff=data_cutoff,
+        config=config,
+    )
     state = replace(
         _resolve_company_state(
             listing=listing,
@@ -375,6 +462,7 @@ def _company_state(
             config=config,
             sec_config=sec_config,
             facts=facts,
+            series_facts=admitted,
             classifications=classifications,
             filing_assets=filing_assets,
         ),
@@ -382,18 +470,22 @@ def _company_state(
     )
     if state.evidence_selection is None:
         return state
+    evidence_selection = {
+        **state.evidence_selection,
+        "assessed_evidence_role": ASSESSED_EVIDENCE_ROLE,
+        "deferred_unproven_corrections": [
+            deferred_correction_payload(entry, available_through=data_cutoff) for entry in deferred
+        ],
+    }
     candidates = _dedupe_text(
         (
-            *_referenced_evidence_fact_ids(state.evidence_selection),
+            *_referenced_evidence_fact_ids(evidence_selection),
             *(state.failure_fact_ids if state.assessed_failure_evidence else ()),
         )
     )
     return replace(
         state,
-        evidence_selection={
-            **state.evidence_selection,
-            "assessed_evidence_role": ASSESSED_EVIDENCE_ROLE,
-        },
+        evidence_selection=evidence_selection,
         assessed_evidence_fact_ids=candidates,
     )
 
@@ -408,6 +500,7 @@ def _resolve_company_state(
     config: LongForecastConfig,
     sec_config: SecFundamentalsConfig,
     facts: list[FundamentalFact],
+    series_facts: list[FundamentalFact],
     classifications: list[CompanyClassificationObservation],
     filing_assets: dict[str, DataAsset],
 ) -> _CompanyState:
@@ -430,10 +523,14 @@ def _resolve_company_state(
             fact_map={},
             filing_assets=filing_assets,
         )
+    # ``fact_map`` deliberately covers *every* visible fact, including a
+    # correction deferred for unproven timing: the manifest and the assessed
+    # evidence payload must still be able to name and prove that row. Only
+    # ``series_facts`` -- the proven-available subset -- may build values.
     fact_map = {str(fact.pk): fact for fact in facts}
     try:
         series = build_sec_fundamental_series(
-            facts,
+            series_facts,
             config=sec_config,
             ttm_selection=ttm_selection_policy(config),
             alias_instant_candidates=(
@@ -629,11 +726,15 @@ def _evidence_selection_payload(
     use. Together with the alias-selection lineage and the invested-capital
     candidate list it makes the assessed-evidence manifest a closure rather
     than a sample.
+
+    Schema 3 adds ``deferred_unproven_corrections`` (written by
+    `_company_state`): same-accession corrections withheld because only a
+    retrieval after the data cutoff proves their timing.
     """
     if not _evidence_selection_enabled(config):
         return None
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "ttm_selection_policy": series.ttm_selection,
         "invested_capital_selection_policy": _invested_capital_policy(config),
         "bound_fundamentals_config_version": config.fundamentals_config_version,
@@ -683,7 +784,7 @@ def _boundary_failure_evidence_selection(
     if not _evidence_selection_enabled(config):
         return None
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "ttm_selection_policy": ttm_selection_policy(config),
         "invested_capital_selection_policy": _invested_capital_policy(config),
         "bound_fundamentals_config_version": config.fundamentals_config_version,
@@ -1223,6 +1324,7 @@ def _sustainable_growth(
             ending_target=ending_target,
             tolerance_days=tolerance_days,
             priority=source_concept_priority(sec_config),
+            maximum_combinations=same_date_combination_ceiling(config),
         )
         # The assessment is carried out of every branch below, including the
         # ones that reject the pair, so a withheld forecast still shows what
@@ -1458,11 +1560,14 @@ BALANCE_SHEET_CONCEPTS = (
 )
 
 #: Hard ceiling on the same-date source-basis combinations `us-sec-long-v3`
-#: will enumerate for one balance-sheet date. The reviewed SEC fundamentals
+#: will enumerate for one balance-sheet date, declared by the configuration
+#: as `maximum_same_date_source_combinations`. The reviewed SEC fundamentals
 #: configuration declares at most two aliases per balance-sheet concept, so a
-#: real date stays far below this. Exceeding it is an explicit failure rather
-#: than a silent truncation that would hide an available compatible pair.
-MAX_SAME_DATE_SOURCE_COMBINATIONS = 256
+#: real date stays far below it. Exceeding it is an explicit failure rather
+#: than a silent truncation that would hide an available compatible pair, and
+#: the loader accepts only the one reviewed value, so it is never tuned per
+#: run.
+MAX_SAME_DATE_SOURCE_COMBINATIONS = REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -1556,6 +1661,7 @@ def _alias_invested_capital_candidates(
     target_date: date,
     tolerance_days: int,
     priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
 ) -> tuple[_InvestedCapital, ...]:
     """Every permitted same-date source-basis snapshot, nearest date first.
 
@@ -1602,11 +1708,11 @@ def _alias_invested_capital_candidates(
         # product, and keep those axes so a refusal can name every fact that
         # produced the bound instead of discarding the disqualifying evidence.
         combination_count = math.prod(axis.multiplier for axis in axes)
-        if combination_count > MAX_SAME_DATE_SOURCE_COMBINATIONS:
+        if combination_count > maximum_combinations:
             raise SameDateSourceCombinationOverflow(
                 period_end=period_end,
                 combination_count=combination_count,
-                ceiling=MAX_SAME_DATE_SOURCE_COMBINATIONS,
+                ceiling=maximum_combinations,
                 axes=axes,
                 assessed_candidates=tuple(candidates),
             )
@@ -1836,6 +1942,7 @@ def _joint_invested_capital_pair(
     ending_target: date,
     tolerance_days: int,
     priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
 ) -> _InvestedCapitalPairAssessment:
     """Search every beginning/ending snapshot pair for a compatible one.
 
@@ -1854,6 +1961,7 @@ def _joint_invested_capital_pair(
     """
     try:
         beginnings = _alias_invested_capital_candidates(
+            maximum_combinations=maximum_combinations,
             series=series,
             target_date=beginning_target,
             tolerance_days=tolerance_days,
@@ -1870,6 +1978,7 @@ def _joint_invested_capital_pair(
         )
     try:
         endings = _alias_invested_capital_candidates(
+            maximum_combinations=maximum_combinations,
             series=series,
             target_date=ending_target,
             tolerance_days=tolerance_days,
@@ -2133,6 +2242,7 @@ def audit_invested_capital_pairs(
     ending_target: date,
     tolerance_days: int,
     priority: dict[tuple[str, str], int],
+    maximum_combinations: int,
 ) -> dict[str, Any]:
     """Report invested-capital pair availability without producing a forecast.
 
@@ -2158,6 +2268,7 @@ def audit_invested_capital_pairs(
         ending_target=ending_target,
         tolerance_days=tolerance_days,
         priority=priority,
+        maximum_combinations=maximum_combinations,
     )
     independent_compatible = bool(
         legacy_beginnings

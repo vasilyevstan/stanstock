@@ -82,4 +82,7 @@ newest_quarter_anchored_homogeneous_ttm_alias_selection:
   enabled: true
 joint_compatible_invested_capital_pair_selection:
   enabled: true
+proven_observation_correction_availability:
+  enabled: true
+maximum_same_date_source_combinations: 256
 fundamentals_config_version: us-sec-fundamentals-v1

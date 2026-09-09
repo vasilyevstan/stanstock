@@ -107,6 +107,13 @@ jobs:
             tests/test_research_outcomes.py::test_outcome_role_integrity_triggers_are_installed \
             tests/test_data_immutability.py::test_company_classification_is_immutable_at_model_and_database_layers \
             tests/test_data_immutability.py::test_fundamental_fact_evidence_is_immutable_at_model_and_database_layers \
+            tests/test_data_immutability.py::test_source_observation_event_is_immutable_at_model_and_database_layers \
+            tests/test_data_sec_ingestion.py::test_concurrent_conflicting_observations_at_one_instant_leave_exactly_one \
+            tests/test_data_sec_ingestion.py::test_concurrent_identical_observations_are_idempotent \
+            tests/test_data_sec_ingestion.py::test_an_unrelated_integrity_error_is_never_swallowed \
+            tests/test_data_sec_ingestion.py::test_a_real_instant_collision_is_still_handled \
+            tests/test_data_sec_ingestion.py::test_a_corrupt_event_fails_on_idempotent_collision_and_on_recovery \
+            tests/test_immutability_migrations.py::test_postgresql_immutability_sql_escapes_psycopg_placeholders \
             --ds=stanstock.settings.dev
 
   container:

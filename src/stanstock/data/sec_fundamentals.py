@@ -31,6 +31,281 @@ TTM_SELECTION_NEWEST_QUARTER_ALIAS = "newest_quarter_anchored_homogeneous_alias"
 
 TTM_SELECTION_POLICIES = (TTM_SELECTION_LEGACY, TTM_SELECTION_NEWEST_QUARTER_ALIAS)
 
+#: `FundamentalFact.availability_basis` for a same-accession correction.
+#:
+#: The SEC can restate a value *under the accession it already filed*. The
+#: original acceptance timestamp still describes when the filing was
+#: accepted, but it does not describe when the corrected value became
+#: knowable: nothing before the retrieval that first carried that value
+#: proves it existed. A correction ingested under this basis therefore
+#: records the retrieval boundary in ``available_at`` while ``acceptance_at``
+#: and ``filed_at`` keep the original, unmodified acceptance.
+CORRECTION_AVAILABILITY_BASIS = "same_accession_correction_retrieval"
+
+#: Quality flag carried by every fact ingested under that basis.
+CORRECTION_QUALITY_FLAG = "same_accession_correction"
+
+#: Additional flag for a vintage appended because a *fresh* retrieval
+#: re-observed content whose newest persisted revision was a legacy
+#: correction with no provable timing. The value is unchanged; the new row
+#: exists solely to carry an availability boundary that real evidence
+#: supports. The unprovable row it follows is never mutated.
+REBOUND_QUALITY_FLAG = "reobserved_unproven_correction"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAvailability:
+    """Chain-resolution outcome for one persisted observation.
+
+    ``proven_at`` is ``None`` when the row's timing cannot be proven at all.
+    Such a row is never admitted at any cutoff, because no persisted evidence
+    justifies one.
+
+    ``earliest_possible_at`` is *assessed context*, never an admission
+    boundary. It records the earliest moment a chain's ordering allows -- for
+    example, that a revision cannot predate the revision it supersedes -- so
+    an operator can see how far the uncertainty reaches. A lower bound is not
+    proof, so it is deliberately kept out of every admission decision.
+    """
+
+    fact: FundamentalFact
+    proven_at: datetime | None
+    basis: str
+    reason: str
+    earliest_possible_at: datetime | None = None
+
+
+#: A correction ingested with its own bound observation event.
+RESOLUTION_BOUND_OBSERVATION = "bound_observation_event"
+#: An original (revision 1) observation: acceptance is the honest boundary.
+RESOLUTION_ORIGINAL_ACCEPTANCE = "original_acceptance"
+#: A legacy correction bounded by the retrieval of the asset it came from.
+RESOLUTION_LEGACY_ASSET_RETRIEVAL = "legacy_asset_retrieval"
+#: A legacy content reversion: its bytes deduplicated onto the asset of an
+#: earlier revision, so it has no distinct observation to point at.
+RESOLUTION_UNPROVABLE_LEGACY_REVERSION = "unprovable_legacy_reversion"
+#: A legacy revision whose own asset was retrieved *before* the boundary of
+#: the revision it supersedes. Its asset retrieval cannot be the moment this
+#: revision became knowable, and nothing else records it.
+RESOLUTION_UNPROVABLE_LEGACY_ORDERING = "unprovable_legacy_ordering"
+
+
+def _correction_chain_key(fact: FundamentalFact) -> tuple[str, ...]:
+    """Identity of the revision chain one observation belongs to.
+
+    Exactly the `unique_fundamental_vintage` key minus ``source_revision``,
+    so every revision of one filed observation resolves together.
+    """
+    return (
+        str(fact.company_id),
+        fact.provider,
+        fact.source_concept,
+        fact.period_identity,
+        fact.accession,
+        fact.unit,
+    )
+
+
+def resolve_availability(
+    facts: Iterable[FundamentalFact],
+) -> dict[str, ResolvedAvailability]:
+    """Resolve every observation's provable availability, chain by chain.
+
+    An original observation is proven by its filing acceptance. A correction
+    ingested under `CORRECTION_AVAILABILITY_BASIS` already recorded the
+    observation event that established it, so its stored ``available_at`` is
+    authoritative.
+
+    A *legacy* correction -- persisted before that basis existed -- carries
+    the original acceptance instead. It is admitted only when its own source
+    asset's retrieval is a real observation *of that revision*: the asset is
+    not shared with an earlier revision, and it was retrieved no earlier than
+    the boundary of the revision it supersedes.
+
+    Two legacy shapes fail that test and resolve to ``None``:
+
+    - a *reversion*, whose content repeats an earlier revision's so ingestion
+      reused that earlier asset, leaving no distinct retrieval to cite; and
+    - a *decreasing ordering*, where the asset was retrieved before the
+      superseded revision became knowable, so that retrieval cannot be an
+      observation of this revision even though the content differs.
+
+    Neither is given a numeric admission boundary. The chain ordering does
+    imply a lower bound, but a lower bound is not proof of when a row was
+    seen, so it is recorded as ``earliest_possible_at`` assessed context and
+    never used to admit anything.
+
+    Nothing here writes: resolution is derived from immutable rows on every
+    read.
+    """
+    resolved: dict[str, ResolvedAvailability] = {}
+    chains: dict[tuple[str, ...], list[FundamentalFact]] = {}
+    for fact in facts:
+        chains.setdefault(_correction_chain_key(fact), []).append(fact)
+    for chain in chains.values():
+        running: datetime | None = None
+        seen_hashes: set[str] = set()
+        for fact in sorted(chain, key=lambda item: item.source_revision):
+            entry = _resolve_one(fact, running=running, seen_hashes=seen_hashes)
+            resolved[str(fact.pk)] = entry
+            if fact.observation_hash:
+                seen_hashes.add(fact.observation_hash)
+            if entry.proven_at is not None:
+                running = entry.proven_at if running is None else max(running, entry.proven_at)
+    return resolved
+
+
+def _resolve_one(
+    fact: FundamentalFact,
+    *,
+    running: datetime | None,
+    seen_hashes: set[str],
+) -> ResolvedAvailability:
+    if fact.source_revision <= 1:
+        return ResolvedAvailability(
+            fact=fact,
+            proven_at=fact.available_at,
+            basis=RESOLUTION_ORIGINAL_ACCEPTANCE,
+            reason="",
+        )
+    if fact.availability_basis == CORRECTION_AVAILABILITY_BASIS:
+        return ResolvedAvailability(
+            fact=fact,
+            proven_at=fact.available_at,
+            basis=RESOLUTION_BOUND_OBSERVATION,
+            reason="",
+        )
+    if fact.observation_hash and fact.observation_hash in seen_hashes:
+        return ResolvedAvailability(
+            fact=fact,
+            proven_at=None,
+            basis=RESOLUTION_UNPROVABLE_LEGACY_REVERSION,
+            reason=(
+                f"Revision {fact.source_revision} of accession {fact.accession} restates "
+                "an earlier revision's exact content, so its raw evidence deduplicated "
+                "onto that earlier retrieval and no persisted observation proves when "
+                "this revision was actually seen"
+            ),
+        )
+    own = max(fact.available_at, fact.source_asset.retrieved_at)
+    if running is not None and running > own:
+        # The asset this revision came from was retrieved *before* the
+        # revision it supersedes became knowable, so that retrieval is not
+        # an observation of this revision at all. A monotonic lower bound
+        # ("no earlier than its predecessor") is not proof of when this row
+        # was actually seen, and admitting it at that bound would still be a
+        # guess. The bound is kept as assessed context only.
+        return ResolvedAvailability(
+            fact=fact,
+            proven_at=None,
+            basis=RESOLUTION_UNPROVABLE_LEGACY_ORDERING,
+            reason=(
+                f"Revision {fact.source_revision} of accession {fact.accession} comes "
+                f"from an asset retrieved at {fact.source_asset.retrieved_at.isoformat()}, "
+                f"before the revision it supersedes became knowable at "
+                f"{running.isoformat()}, so no persisted observation proves when this "
+                "revision was actually seen"
+            ),
+            earliest_possible_at=running,
+        )
+    return ResolvedAvailability(
+        fact=fact,
+        proven_at=own,
+        basis=RESOLUTION_LEGACY_ASSET_RETRIEVAL,
+        reason="",
+    )
+
+
+def proven_availability(fact: FundamentalFact) -> datetime | None:
+    """Provable availability of one observation, resolved in isolation.
+
+    Convenience wrapper for a single row. Prefer `resolve_availability` when
+    a whole chain is in hand: only chain context can lift a legacy revision
+    to the boundary of the revision it supersedes.
+    """
+    return resolve_availability([fact])[str(fact.pk)].proven_at
+
+
+def partition_unproven_corrections(
+    facts: Iterable[FundamentalFact],
+    *,
+    available_through: datetime,
+) -> tuple[tuple[FundamentalFact, ...], tuple[ResolvedAvailability, ...]]:
+    """Split facts into those proven available by ``available_through``, and not.
+
+    The caller has already applied the recorded ``available_at`` cutoff. This
+    re-applies the same cutoff against the resolved availability, which
+    differs only for a correction. The result is conservative in exactly one
+    direction: a correction whose timing is not proven is deferred, and the
+    revision it superseded -- which *is* proven at that cutoff -- remains
+    available in its place.
+
+    Rows are never mutated; deferral is a read-time decision.
+    """
+    ordered = list(facts)
+    resolved = resolve_availability(ordered)
+    admitted: list[FundamentalFact] = []
+    deferred: list[ResolvedAvailability] = []
+    for fact in ordered:
+        entry = resolved[str(fact.pk)]
+        if entry.proven_at is not None and entry.proven_at <= available_through:
+            admitted.append(fact)
+        else:
+            deferred.append(entry)
+    return tuple(admitted), tuple(deferred)
+
+
+def deferred_correction_payload(
+    entry: ResolvedAvailability,
+    *,
+    available_through: datetime,
+) -> dict[str, Any]:
+    """Explicit record of one correction withheld for unproven timing.
+
+    ``fact_id`` is deliberately named so the assessed-evidence closure picks
+    the row up automatically: a deferred correction is evidence the run read
+    and rejected, never a selected input and never silently dropped.
+    """
+    fact = entry.fact
+    if entry.proven_at is None:
+        reason = entry.reason
+    else:
+        reason = (
+            f"Revision {fact.source_revision} restates accession {fact.accession} under "
+            "the original acceptance timestamp, but no evidence proves the corrected "
+            f"value existed before {entry.proven_at.isoformat()}, which is after the "
+            f"data cutoff {available_through.isoformat()}"
+        )
+    return {
+        "fact_id": str(fact.pk),
+        "concept": fact.concept,
+        "source_concept": fact.source_concept,
+        "period_identity": fact.period_identity,
+        "period_end": fact.period_end.isoformat(),
+        "accession": fact.accession,
+        "source_revision": fact.source_revision,
+        "availability_basis": fact.availability_basis,
+        "resolution_basis": entry.basis,
+        "recorded_available_at": fact.available_at.isoformat(),
+        "acceptance_at": (fact.acceptance_at.isoformat() if fact.acceptance_at else None),
+        "proven_available_at": (
+            entry.proven_at.isoformat() if entry.proven_at is not None else None
+        ),
+        # Assessed context only. A chain-ordering lower bound says this row
+        # cannot have been knowable *earlier* than this; it never says it was
+        # knowable *by* then, so it admits nothing.
+        "earliest_possible_available_at": (
+            entry.earliest_possible_at.isoformat()
+            if entry.earliest_possible_at is not None
+            else None
+        ),
+        "source_asset_id": str(fact.source_asset_id),
+        "source_asset_retrieved_at": fact.source_asset.retrieved_at.isoformat(),
+        "available_through": available_through.isoformat(),
+        "reason": reason,
+    }
+
+
 ADDITIVE_FLOW_CONCEPTS = frozenset(
     {
         "revenue",
@@ -672,13 +947,29 @@ def _v3_select_quarter_observation(
 def _v3_alias_quarter_series(
     selected: tuple[FundamentalFact, ...],
     *,
+    examined: Iterable[FundamentalFact],
     concept: str,
     fact_map: dict[str, FundamentalFact],
     priority: dict[tuple[str, str], int],
-) -> list[FundamentalValue]:
-    """One selected observation per quarter end for a single source alias."""
+) -> _AliasQuarterAssessment:
+    """Assess one source alias's quarter series, keeping its full lineage.
+
+    The returned ``values`` are the selected observation per quarter end, as
+    before. ``assessed_fact_ids`` is the complete set of facts that
+    established the assessment: every fact ``examined`` for this alias, the
+    same-quarter candidates that lost the controlling-fact ranking, and every
+    quarter of an alias that goes on to lose the newest-quarter anchor or to
+    be found incomplete. An alias whose facts never produced a candidate at
+    all still names them.
+
+    Without that set, a payload could state that an alias is "stale but
+    complete" or that its tail is incomplete while naming none of the
+    evidence that decided it. Those facts are assessed, never selected: they
+    do not enter any arithmetic, but the manifest must still be able to prove
+    every one of them.
+    """
     candidates = _v3_alias_quarter_candidates(selected, concept=concept)
-    return [
+    values = [
         _v3_select_quarter_observation(
             candidates[period_end],
             fact_map=fact_map,
@@ -686,6 +977,45 @@ def _v3_alias_quarter_series(
         )
         for period_end in sorted(candidates)
     ]
+    assessed_fact_ids = _dedupe_fact_ids(
+        (
+            # Every fact this alias's assessment read, including the ones
+            # rejected before any candidate could be constructed. Collecting
+            # only from constructed candidates left an alias that yields no
+            # usable quarter -- an annual-only alternate alias, or a pair
+            # whose derivation was refused -- described with empty lineage.
+            *(str(fact.pk) for fact in examined),
+            *(
+                fact_id
+                for period_end in sorted(candidates)
+                for candidate in candidates[period_end]
+                for fact_id in candidate.source_fact_ids
+            ),
+        )
+    )
+    return _AliasQuarterAssessment(
+        values=values,
+        assessed_fact_ids=assessed_fact_ids,
+        assessed_quarter_period_ends=tuple(sorted(candidates)),
+    )
+
+
+def _dedupe_fact_ids(fact_ids: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(fact_ids))
+
+
+@dataclass(frozen=True, slots=True)
+class _AliasQuarterAssessment:
+    """One source alias's quarter series plus the evidence that assessed it.
+
+    `us-sec-long-v3` only. ``values`` drives selection; the other two fields
+    exist so a losing, stale-but-complete, or incomplete alias can be
+    described together with every fact that established that description.
+    """
+
+    values: list[FundamentalValue]
+    assessed_fact_ids: tuple[str, ...]
+    assessed_quarter_period_ends: tuple[date, ...]
 
 
 def _newest_quarter_anchored_ttm_series(
@@ -728,20 +1058,41 @@ def _newest_quarter_anchored_ttm_series(
     provenance: dict[str, dict[str, Any]] = {}
     for concept in sorted(by_concept_alias):
         alias_quarters: dict[str, list[FundamentalValue]] = {}
+        alias_assessments: dict[str, _AliasQuarterAssessment] = {}
         for alias, alias_facts in sorted(by_concept_alias[concept].items()):
             selected = select_latest_fact_vintages(alias_facts, config=config)
-            values = _v3_alias_quarter_series(
+            assessment = _v3_alias_quarter_series(
                 selected,
+                examined=alias_facts,
                 concept=concept,
                 fact_map=fact_map,
                 priority=priority,
             )
-            if values:
-                alias_quarters[alias] = values
+            # Retained even when the alias yields no usable quarter: the
+            # facts that proved it unusable are still assessed evidence.
+            alias_assessments[alias] = assessment
+            if assessment.values:
+                alias_quarters[alias] = assessment.values
         entry: dict[str, Any] = {
             "policy": TTM_SELECTION_NEWEST_QUARTER_ALIAS,
             "concept": concept,
         }
+        # Every fact any alias-tail assessment for this concept read, whether
+        # its alias won, lost, was stale-but-complete, was incomplete, or
+        # produced nothing at all.
+        # Aliases that produced no usable quarter at all never reach
+        # ``alias_candidates`` below, so their facts are recorded here.
+        # Aliases that *do* appear carry their own complete lineage on their
+        # candidate entry; repeating it at concept level would only duplicate
+        # identifiers.
+        entry["unusable_alias_source_fact_ids"] = list(
+            _dedupe_fact_ids(
+                fact_id
+                for alias in sorted(alias_assessments)
+                if alias not in alias_quarters
+                for fact_id in alias_assessments[alias].assessed_fact_ids
+            )
+        )
         if not alias_quarters:
             entry.update(
                 {
@@ -769,6 +1120,7 @@ def _newest_quarter_anchored_ttm_series(
             values = alias_quarters[alias]
             tail = _homogeneous_four_quarter_tail(values, through=values[-1].period_end)
             at_newest = [value for value in values if value.period_end == newest_quarter_end]
+            assessment = alias_assessments[alias]
             candidate: dict[str, Any] = {
                 "source_concept": alias,
                 "newest_quarter_end": values[-1].period_end.isoformat(),
@@ -779,6 +1131,19 @@ def _newest_quarter_anchored_ttm_series(
                 "controlling_source_fact": None,
                 "newest_quarter_derivation": None,
                 "newest_quarter_source_fact_ids": [],
+                # Complete lineage of this alias's own tail assessment. It is
+                # recorded for every alias, not only the anchor, so a stale
+                # complete alternative or an incomplete losing tail can never
+                # be described without the facts that established it. The
+                # tail is identified by its period ends rather than by a
+                # second copy of the same identifiers.
+                "assessed_quarter_period_ends": [
+                    period_end.isoformat() for period_end in assessment.assessed_quarter_period_ends
+                ],
+                "assessed_source_fact_ids": list(assessment.assessed_fact_ids),
+                "assessed_tail_period_ends": (
+                    [value.period_end.isoformat() for value in tail] if tail is not None else []
+                ),
             }
             if at_newest:
                 observation = at_newest[-1]

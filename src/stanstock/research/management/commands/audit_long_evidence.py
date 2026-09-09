@@ -200,6 +200,15 @@ def _summary_lines(report: dict[str, Any]) -> list[str]:
     for entry in report["listings"]:
         label = entry["listing_id"] or entry["requested_listing_id"] or entry["requested_symbol"]
         lines.append(f"{label} ({entry['symbol']}): {entry['status']}")
+        for correction in entry.get("deferred_unproven_corrections") or ():
+            lines.append(
+                "  deferred correction: "
+                f"fact={correction['fact_id']} {correction['concept']} "
+                f"{correction['period_end']} accession={correction['accession']} "
+                f"revision={correction['source_revision']} "
+                f"recorded_available_at={correction['recorded_available_at']} "
+                f"proven_available_at={correction['proven_available_at']}"
+            )
         if entry["status"] != "audited":
             lines.append(f"  reason: {entry['reason']}")
             continue

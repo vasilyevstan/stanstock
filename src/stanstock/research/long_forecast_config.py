@@ -25,11 +25,24 @@ LONG_OPTIONAL_CAPABILITY_FIELDS = (
     "adjacent_selected_annual_diluted_share_continuity",
     "newest_quarter_anchored_homogeneous_ttm_alias_selection",
     "joint_compatible_invested_capital_pair_selection",
+    "proven_observation_correction_availability",
 )
 
 #: Optional non-capability fields that are also omitted from the effective
 #: hash while absent, for the same freeze-preserving reason.
-LONG_OPTIONAL_BINDING_FIELDS = ("fundamentals_config_version",)
+LONG_OPTIONAL_BINDING_FIELDS = (
+    "fundamentals_config_version",
+    "maximum_same_date_source_combinations",
+)
+
+#: The one reviewed value for `maximum_same_date_source_combinations`.
+#:
+#: It is a reviewed safety bound, not a tuning knob: a configuration that
+#: enables joint invested-capital selection must declare exactly this number.
+#: Any other value is rejected outright rather than silently accepted,
+#: truncated, or defaulted, because a different ceiling would change which
+#: balance-sheet dates are refused.
+REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS = 256
 
 
 class LongForecastConfigParseError(ValueError):
@@ -129,7 +142,9 @@ class LongForecastConfig:
     adjacent_selected_annual_diluted_share_continuity: bool | None
     newest_quarter_anchored_homogeneous_ttm_alias_selection: bool | None
     joint_compatible_invested_capital_pair_selection: bool | None
+    proven_observation_correction_availability: bool | None
     fundamentals_config_version: str | None
+    maximum_same_date_source_combinations: int | None
     raw: dict[str, Any]
 
     @classmethod
@@ -361,7 +376,32 @@ class LongForecastConfig:
             mapping,
             "joint_compatible_invested_capital_pair_selection",
         )
+        proven_observation_correction_availability = _optional_capability_enabled(
+            mapping,
+            "proven_observation_correction_availability",
+        )
         fundamentals_config_version = _optional_text(mapping, "fundamentals_config_version")
+        maximum_same_date_source_combinations = _optional_positive_int(
+            mapping,
+            "maximum_same_date_source_combinations",
+        )
+        if (
+            joint_invested_capital_pair_selection is True
+            and maximum_same_date_source_combinations != REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS
+        ):
+            raise ValueError(
+                "maximum_same_date_source_combinations must be declared as exactly "
+                f"{REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS} when "
+                "joint_compatible_invested_capital_pair_selection is enabled"
+            )
+        if (
+            maximum_same_date_source_combinations is not None
+            and joint_invested_capital_pair_selection is not True
+        ):
+            raise ValueError(
+                "maximum_same_date_source_combinations only applies when "
+                "joint_compatible_invested_capital_pair_selection is enabled"
+            )
 
         return cls(
             schema_version=schema_version,
@@ -387,7 +427,9 @@ class LongForecastConfig:
             joint_compatible_invested_capital_pair_selection=(
                 joint_invested_capital_pair_selection
             ),
+            proven_observation_correction_availability=(proven_observation_correction_availability),
             fundamentals_config_version=fundamentals_config_version,
+            maximum_same_date_source_combinations=maximum_same_date_source_combinations,
             raw=mapping,
         )
 
@@ -490,6 +532,18 @@ def _optional_text(mapping: dict[str, Any], key: str) -> str | None:
     if key not in mapping:
         return None
     return _required_text(mapping, key)
+
+
+def _optional_positive_int(mapping: dict[str, Any], key: str) -> int | None:
+    """Return an optional positive integer, or ``None`` when absent.
+
+    Absent is a distinct configuration from present and is removed from the
+    effective hash payload, so adding this field to a new version cannot move
+    an already-frozen version's hash.
+    """
+    if key not in mapping:
+        return None
+    return _positive_int(mapping, key)
 
 
 def _positive_int(mapping: dict[str, Any], key: str) -> int:

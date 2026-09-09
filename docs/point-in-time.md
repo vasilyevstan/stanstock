@@ -9,6 +9,10 @@ available to the system.
 - `published_at` or `filed_at`: when the source says it was published.
 - `available_at`: the earliest defensible time StanStock may use it.
 - `retrieved_at`: when StanStock actually obtained the immutable source asset.
+  Raw assets are content-addressed, so this is when those exact bytes were
+  *first* stored -- not necessarily when a later response repeated them.
+- `observed_at`: when a specific retrieval actually carried given bytes,
+  recorded as an append-only `SourceObservationEvent` on every retrieval.
 - `generated_at`: when an analysis or prediction was created.
 - `data_cutoff`: the latest information-availability time permitted for the
   analysis.
@@ -45,6 +49,133 @@ date therefore cannot collide. A changed observation under the same accession
 appends another source revision, including a value that reverts to an older
 number; a later amendment or restatement never overwrites the value visible to
 an earlier decision.
+
+### Acceptance, correction availability, and content reuse
+
+Three distinct clocks apply to one filed observation, and conflating any two
+of them creates look-ahead:
+
+1. **Filing acceptance** (`acceptance_at`/`filed_at`) -- when the SEC accepted
+   the accession. It describes the *filing* and never changes, not even when
+   the numbers inside that accession are later restated.
+2. **Correction observation availability** (`available_at` under
+   `availability_basis="same_accession_correction_retrieval"`) -- when a
+   *corrected* value under an accession StanStock already held first became
+   knowable. The original acceptance cannot serve here: nothing before the
+   retrieval that carried the corrected number proves that number existed.
+   The original revision keeps its acceptance-based availability; only later
+   revisions in the chain use this basis, and every such row also carries the
+   `same_accession_correction` quality flag.
+3. **Content reuse** -- a `DataAsset` is content-addressed, so a response
+   identical to an earlier one deliberately reuses the stored asset rather
+   than duplicating it. `DataAsset.retrieved_at` then still points at the
+   first sighting of those bytes. A value that goes 100 -> 101 -> 100
+   restates back to bytes already on file, so the third revision would
+   inherit the *first* retrieval time and appear knowable months early.
+
+Every retrieval therefore appends an immutable `SourceObservationEvent`
+recording `(provider, kind, subject, content_sha256, observed_at)`. It is
+unique on `(provider, kind, subject, observed_at)` -- **without** the digest
+-- so the database itself enforces that one observation instant names exactly
+one content, and a retried or replayed ingestion records one event rather
+than a duplicate. The recorded digest must equal the linked asset's own
+`sha256`, checked on write and again before any recovery, so an event can
+never certify bytes its asset does not hold. A correction binds its
+availability to that event, never to the reused asset's `retrieved_at`.
+
+Binding corrections to observations is **active behaviour in the default
+configuration**. The prospective `us-sec-long-v3` reader adds only the
+read-time resolution described below; it is not what makes ingestion
+correct.
+
+An ordinary **late retrieval is not a correction**. Re-downloading unchanged
+content appends no revision at all: the existing fact row is reused, keeps its
+original availability, and stays readable at every cutoff it was already
+readable at. Only a *changed* observation under an accession already held
+creates a new revision, and only those rows take the correction basis.
+
+Rows persisted before this basis existed carry the original acceptance in
+`available_at`. They are never rewritten. Instead, a reader may resolve them
+conservatively at read time:
+
+- an original observation is proven by its acceptance;
+- a legacy correction is admitted only when its own source asset's retrieval
+  is a real observation *of that revision*: the asset is not shared with an
+  earlier revision, and it was retrieved no earlier than the boundary of the
+  revision it supersedes;
+- a legacy *reversion*, whose content repeats an earlier revision's and whose
+  asset is therefore shared with it, has no distinct retrieval to cite;
+- a legacy *decreasing ordering*, whose asset was retrieved before the
+  superseded revision became knowable, has a retrieval that cannot be an
+  observation of it even though the content differs.
+
+The last two resolve to unknown and are deferred at every cutoff. Chain
+ordering does imply a lower bound -- a revision cannot predate the one it
+supersedes -- but **a lower bound is not proof**: it says a row was not
+knowable *earlier* than some moment, never that it was knowable *by* that
+moment. Admitting a row at such a bound would still be a guess, so the bound
+is recorded only as assessed context (`earliest_possible_available_at`) and
+takes no part in any admission decision.
+
+This resolution is configuration-gated and is applied by the prospective
+`us-sec-long-v3` path only. Frozen `us-sec-long-v1`/`us-sec-long-v2` read
+recorded availability exactly as released, and the offline audit applies the
+same gate so a frozen version is never reported against a policy it does not
+have.
+
+### Recovering a retry
+
+An interrupted or repeated ingestion recovers the exact **observed** asset,
+identified by its `SourceObservationEvent`, not the asset with the newest
+`retrieved_at`. After a reversion those differ: the newest observation
+carries the *older* asset (the bytes already on file), while the superseded
+payload still holds the newest asset retrieval. Recovering by asset retrieval
+would replay stale content and append it as a fresh correction the provider
+never sent.
+
+Recovery never infers an order it cannot prove. Three rules keep it honest,
+and all three fail closed:
+
+1. **One observation instant names one content.** Recording different bytes
+   at a timestamp already recorded for the same provider/kind/subject is
+   refused *before* anything is normalized. Two payloads at one instant carry
+   no evidence of which came later, and a local commit clock is not evidence
+   of provider order -- an A -> B -> A reversion at one timestamp reuses A's
+   original event and would leave the superseded B looking newest. Recording
+   the *same* retrieval again stays idempotent, so ordinary retries are
+   unaffected; a genuinely later retrieval simply carries a later timestamp.
+2. **No observation evidence for a corrected chain is not recoverable.** A
+   database upgraded from before observation events has assets but no events,
+   so the only ordering left is `DataAsset.retrieved_at` -- the wrong clock
+   exactly when it matters, since after a reversion the superseded payload
+   still holds the newest retrieval. Where such a database already has a
+   correction chain, the replay refuses rather than re-appending a superseded
+   value as a brand-new, event-bound revision. Where there is no correction
+   chain there is nothing to mis-order, and recovery proceeds normally.
+3. **Content older than a committed correction is not replayed.** If the only
+   recoverable observation predates a correction already on file, replaying
+   it would restore the superseded value as a new revision.
+
+None of these is a dead end. A fresh retrieval is separately gated, records
+its own observation, and re-establishes proven recovery.
+
+A fresh retrieval also *repairs* what it re-observes. Normally a later
+retrieval of unchanged content appends nothing -- the existing fact row is
+reused, which is what keeps ordinary late retrieval distinct from a
+correction. The one exception is a newest revision that is a legacy
+correction with no provable timing: returning it unchanged would discard the
+proof that just arrived, leaving every as-of reader deferring that row and
+selecting the superseded value forever. So a new revision is appended,
+carrying the same economic value and observation hash but an availability
+bound to the fresh observation, flagged `reobserved_unproven_correction`. The
+unprovable row is never mutated or backdated; it remains deferred and
+assessed, and the new vintage stands beside it. Reads before the fresh
+observation are unchanged.
+
+Staleness for re-request decisions is likewise measured from the last
+observation rather than the stored asset's retrieval, so a reversion does not
+report months of staleness that never happened and spend a request rebuilding
+evidence already on file.
 
 Companyfacts does not carry acceptance time on each observation. StanStock
 joins `accn` to current and historical submissions. Explicit offsets are

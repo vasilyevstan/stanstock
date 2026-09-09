@@ -45,9 +45,15 @@ from stanstock.data.models import (
 )
 from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.data.sec_fundamentals import (
+    CORRECTION_AVAILABILITY_BASIS,
+    RESOLUTION_BOUND_OBSERVATION,
+    RESOLUTION_LEGACY_ASSET_RETRIEVAL,
+    RESOLUTION_UNPROVABLE_LEGACY_ORDERING,
+    RESOLUTION_UNPROVABLE_LEGACY_REVERSION,
     TTM_SELECTION_LEGACY,
     TTM_SELECTION_NEWEST_QUARTER_ALIAS,
     build_sec_fundamental_series,
+    resolve_availability,
     source_concept_priority,
 )
 from stanstock.research.evidence_audit import (
@@ -55,6 +61,7 @@ from stanstock.research.evidence_audit import (
     audit_long_evidence,
 )
 from stanstock.research.long_forecast_config import (
+    REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS,
     LongForecastConfig,
     LongForecastConfigParseError,
     load_long_forecast_config,
@@ -62,10 +69,14 @@ from stanstock.research.long_forecast_config import (
     long_forecast_config_path,
 )
 from stanstock.research.long_forecasts import (
+    CORRECTION_POLICY_PROVEN_OBSERVATION,
+    CORRECTION_POLICY_RECORDED_ONLY,
     LONG_FORECAST_CONCEPTS,
     MAX_SAME_DATE_SOURCE_COMBINATIONS,
     audit_invested_capital_pairs,
     build_long_forecasts,
+    correction_availability_policy,
+    same_date_combination_ceiling,
 )
 
 TARGET_DATE = date(2026, 2, 27)
@@ -77,7 +88,7 @@ V3_PATH = Path("config/forecasts/us-sec-long-v3.yml")
 
 V1_CONFIG_HASH = "ef0e0478aebf53ab605ff47df1d4732ad7cb4e7f3c5d6559b89674ad6a0adeb1"
 V2_CONFIG_HASH = "46a81d4bfe87d80ddcf2d62a7f05854eb36381027fb01bc40d637ef3294a5c36"
-V3_CONFIG_HASH = "fc3222ba5e6f24128af9653307f04416ff55845b101dffc44d7b0d9c424c1ad1"
+V3_CONFIG_HASH = "073ac542195b0c67c8ab654aeec61266548ca2758a98ad432f91e48ee5154e57"
 
 REVENUE_PRIMARY = "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
 REVENUE_SECONDARY = "us-gaap:Revenues"
@@ -122,10 +133,17 @@ def test_frozen_v1_and_v2_config_hashes_and_capability_absence() -> None:
     for config in (v1, v2):
         assert config.newest_quarter_anchored_homogeneous_ttm_alias_selection is None
         assert config.joint_compatible_invested_capital_pair_selection is None
+        assert config.proven_observation_correction_availability is None
         assert config.fundamentals_config_version is None
-        assert "newest_quarter_anchored_homogeneous_ttm_alias_selection" not in config.raw
-        assert "joint_compatible_invested_capital_pair_selection" not in config.raw
-        assert "fundamentals_config_version" not in config.raw
+        assert config.maximum_same_date_source_combinations is None
+        for key in (
+            "newest_quarter_anchored_homogeneous_ttm_alias_selection",
+            "joint_compatible_invested_capital_pair_selection",
+            "proven_observation_correction_availability",
+            "fundamentals_config_version",
+            "maximum_same_date_source_combinations",
+        ):
+            assert key not in config.raw
 
 
 def test_v3_is_v2_plus_evidence_selection_only() -> None:
@@ -135,7 +153,9 @@ def test_v3_is_v2_plus_evidence_selection_only() -> None:
     assert v3.version == "us-sec-long-v3"
     assert v3.newest_quarter_anchored_homogeneous_ttm_alias_selection is True
     assert v3.joint_compatible_invested_capital_pair_selection is True
+    assert v3.proven_observation_correction_availability is True
     assert v3.fundamentals_config_version == "us-sec-fundamentals-v1"
+    assert v3.maximum_same_date_source_combinations == 256
     assert v3.adjacent_selected_annual_diluted_share_continuity is True
     assert long_forecast_config_hash(v3) == V3_CONFIG_HASH
     assert long_forecast_config_hash(v3) != long_forecast_config_hash(v2)
@@ -148,7 +168,9 @@ def test_v3_is_v2_plus_evidence_selection_only() -> None:
         "version",
         "newest_quarter_anchored_homogeneous_ttm_alias_selection",
         "joint_compatible_invested_capital_pair_selection",
+        "proven_observation_correction_availability",
         "fundamentals_config_version",
+        "maximum_same_date_source_combinations",
     ):
         frozen_v2.pop(key, None)
         frozen_v3.pop(key, None)
@@ -1681,6 +1703,8 @@ def _fact(
     source_revision: int = 1,
     source_concept: str | None = None,
     unit: str | None = None,
+    acceptance_at: datetime | None = None,
+    availability_basis: str = "acceptance_datetime",
 ) -> FundamentalFact:
     fact = FundamentalFact.objects.create(
         company=listing.security.company,
@@ -1702,11 +1726,11 @@ def _fact(
         fiscal_period=fiscal_period,
         accession=accession,
         filing_form="10-K" if fiscal_period in {"FY", "Q4"} else "10-Q",
-        filing_date=available_at.date(),
-        filed_at=available_at,
-        acceptance_at=available_at,
+        filing_date=(acceptance_at or available_at).date(),
+        filed_at=acceptance_at or available_at,
+        acceptance_at=acceptance_at or available_at,
         available_at=available_at,
-        availability_basis="acceptance_datetime",
+        availability_basis=availability_basis,
         source_revision=source_revision,
         source_asset=companyfacts,
     )
@@ -2096,6 +2120,7 @@ def test_alias_candidate_surface_is_required_before_a_joint_search() -> None:
             ending_target=date(2025, 12, 31),
             tolerance_days=7,
             priority=source_concept_priority(load_sec_fundamentals_config()),
+            maximum_combinations=REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS,
         )
 
 
@@ -3083,6 +3108,7 @@ def test_reassigning_row_uuids_alone_cannot_change_the_selected_pair() -> None:
             ending_target=date(2025, 12, 31),
             tolerance_days=45,
             priority=priority,
+            maximum_combinations=REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS,
         )
         return {
             key: report[key]
@@ -3467,3 +3493,1249 @@ def test_combination_overflow_still_returns_both_audit_entries() -> None:
     )
     assert overflow_entry["compatible_pair_available"] is False
     assert entries[str(valid.pk)]["invested_capital"]["compatible_pair_available"] is True
+
+
+# ---------------------------------------------------------------------------
+# RI-1: a backdated same-accession correction is resolved conservatively
+# ---------------------------------------------------------------------------
+
+
+HISTORICAL_CUTOFF = DECISION_TIME
+CORRECTION_RETRIEVAL = datetime(2026, 4, 1, 12, tzinfo=UTC)
+LATER_DECISION_TIME = datetime(2026, 5, 1, 12, tzinfo=UTC)
+
+
+def _backdated_correction(
+    listing: Listing,
+    *,
+    concept: str,
+    quarter: tuple[date, date],
+    fiscal_period: str,
+    value: Decimal,
+    backdated_available_at: datetime,
+    retrieved_at: datetime,
+) -> tuple[FundamentalFact, DataAsset, DataAsset]:
+    """A legacy-shaped correction: revision 2, but dated at acceptance.
+
+    This is what rows persisted before the correction availability basis
+    existed look like. The restating retrieval happened at ``retrieved_at``,
+    yet ``available_at`` claims the original filing's acceptance, so any
+    cutoff after acceptance would read it.
+    """
+    companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{listing.ticker}-correction-companyfacts",
+        retrieved_at=retrieved_at,
+    )
+    filing = _asset(
+        provider="sec",
+        kind="sec_submissions",
+        subject=f"{listing.ticker}-correction-filing",
+        retrieved_at=retrieved_at,
+    )
+    fact = _fact(
+        listing,
+        companyfacts,
+        filing,
+        concept=concept,
+        value=value,
+        start=quarter[0],
+        end=quarter[1],
+        fiscal_period=fiscal_period,
+        available_at=backdated_available_at,
+        accession=f"{listing.ticker}-{concept}-{fiscal_period}",
+        source_revision=2,
+    )
+    return fact, companyfacts, filing
+
+
+def _backdated_correction_fixture(ticker: str) -> tuple[Listing, Listing, Any, Any, Any]:
+    target = _listing(ticker)
+    peer = _listing(f"{ticker}P")
+    target_price = _company_evidence(target, sic="3571")
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1)
+    correction, companyfacts, filing = _backdated_correction(
+        target,
+        concept="operating_cash_flow",
+        quarter=(date(2025, 10, 1), date(2025, 12, 31)),
+        fiscal_period="Q4",
+        value=Decimal("35"),
+        # Exactly the original quarter observation's availability.
+        backdated_available_at=datetime(2026, 2, 14, tzinfo=UTC),
+        retrieved_at=CORRECTION_RETRIEVAL,
+    )
+    return target, peer, (target_price, peer_price), correction, (companyfacts, filing)
+
+
+def _forecast_at(
+    *,
+    target: Listing,
+    peer: Listing,
+    prices: Any,
+    config_path: Path,
+    data_cutoff: datetime,
+    decision_time: datetime = LATER_DECISION_TIME,
+) -> Any:
+    target_price, peer_price = prices
+    return build_long_forecasts(
+        listings=[target, peer],
+        current_prices={str(target.pk): 50.0, str(peer.pk): 55.0},
+        price_assets={str(target.pk): target_price, str(peer.pk): peer_price},
+        asof=AsOfData(decision_time),
+        data_cutoff=data_cutoff,
+        target_date=TARGET_DATE,
+        config=_small_peer_config(load_long_forecast_config(config_path)),
+    )[str(target.pk)]["3y"]
+
+
+@pytest.mark.django_db
+def test_v3_defers_a_backdated_correction_and_keeps_the_proven_original() -> None:
+    """An unproven correction cannot enter a historical reconstruction.
+
+    The correction is visible (its asset was retrieved before the decision
+    time) and its recorded ``available_at`` passes the historical cutoff --
+    but only because a legacy ingestion backdated it to the acceptance of the
+    accession it restates. Nothing before `CORRECTION_RETRIEVAL` proves the
+    corrected value existed, so long-v3 defers it, keeps the original
+    revision that *is* proven at that cutoff, and records the deferral as
+    assessed evidence with its own reason.
+    """
+    target, peer, prices, correction, (late_companyfacts, late_filing) = (
+        _backdated_correction_fixture("BACKDATE")
+    )
+
+    # The exposure this closes: recorded availability admits it at the
+    # historical cutoff, while the retrieval that proved it does not.
+    assert correction.source_revision == 2
+    assert correction.available_at <= HISTORICAL_CUTOFF
+    assert correction.source_asset.retrieved_at > HISTORICAL_CUTOFF
+    assert correction.source_asset.retrieved_at <= LATER_DECISION_TIME
+    assert correction.availability_basis == "acceptance_datetime"
+
+    original = FundamentalFact.objects.get(
+        company=target.security.company,
+        concept="operating_cash_flow",
+        period_start=date(2025, 10, 1),
+        period_end=date(2025, 12, 31),
+        source_revision=1,
+    )
+
+    v3 = _forecast_at(
+        target=target,
+        peer=peer,
+        prices=prices,
+        config_path=V3_PATH,
+        data_cutoff=HISTORICAL_CUTOFF,
+    )
+    selection = _assert_manifest_closes(v3)
+
+    assert v3.scenario.base is not None
+    deferred = selection["deferred_unproven_corrections"]
+    assert [entry["fact_id"] for entry in deferred] == [str(correction.pk)]
+    entry = deferred[0]
+    assert entry["source_revision"] == 2
+    assert entry["accession"] == correction.accession
+    assert entry["recorded_available_at"] == correction.available_at.isoformat()
+    assert entry["proven_available_at"] == CORRECTION_RETRIEVAL.isoformat()
+    assert entry["source_asset_retrieved_at"] == CORRECTION_RETRIEVAL.isoformat()
+    assert entry["available_through"] == HISTORICAL_CUTOFF.isoformat()
+    assert "after the data cutoff" in entry["reason"]
+
+    # Assessed, never selected -- and the proven original took its place.
+    assert str(correction.pk) in selection["assessed_evidence_fact_ids"]
+    assert str(correction.pk) not in selection["selected_input_fact_ids"]
+    assert str(correction.pk) not in {fact["id"] for fact in v3.calculation["input_facts"]}
+    assert str(original.pk) in selection["selected_input_fact_ids"]
+
+    # The deferred row is still fully provable from the immutable manifest.
+    asset_ids = {str(asset.pk) for asset in v3.source_assets}
+    assert {str(late_companyfacts.pk), str(late_filing.pk)} <= asset_ids
+
+    # No TTM window may cite the deferred correction.
+    for dependency in selection["ttm_dependencies"].values():
+        assert str(correction.pk) not in dependency["source_fact_ids"]
+
+    # Read-time resolution only: neither immutable row was rewritten.
+    correction.refresh_from_db()
+    original.refresh_from_db()
+    assert correction.available_at == datetime(2026, 2, 14, tzinfo=UTC)
+    assert correction.availability_basis == "acceptance_datetime"
+    assert original.source_revision == 1
+
+
+@pytest.mark.django_db
+def test_v3_admits_the_same_correction_once_its_retrieval_is_proven() -> None:
+    """Past the correction's own retrieval boundary it is ordinary evidence.
+
+    The deferral is a point-in-time statement, not a permanent rejection of
+    corrections, so the identical row is selected at a cutoff that its
+    retrieval precedes.
+    """
+    target, peer, prices, correction, _assets = _backdated_correction_fixture("BACKDATEOK")
+    proven_cutoff = datetime(2026, 4, 15, 12, tzinfo=UTC)
+    assert correction.source_asset.retrieved_at < proven_cutoff
+
+    v3 = _forecast_at(
+        target=target,
+        peer=peer,
+        prices=prices,
+        config_path=V3_PATH,
+        data_cutoff=proven_cutoff,
+    )
+    selection = v3.calculation["evidence_selection"]
+
+    assert selection["deferred_unproven_corrections"] == []
+    assert str(correction.pk) in selection["selected_input_fact_ids"]
+
+
+@pytest.mark.django_db
+def test_frozen_v2_reading_of_the_same_correction_is_unchanged() -> None:
+    """long-v2 keeps its released behavior; the new gate is v3-only.
+
+    This is the frozen-contract half of the finding: the deferral must not
+    silently re-date, re-select, or withhold anything for an already-released
+    version, whose payload has no evidence-selection section at all.
+    """
+    target, peer, prices, correction, _assets = _backdated_correction_fixture("BACKDATEV2")
+
+    v2 = _forecast_at(
+        target=target,
+        peer=peer,
+        prices=prices,
+        config_path=V2_PATH,
+        data_cutoff=HISTORICAL_CUTOFF,
+    )
+
+    assert v2.calculation["method_version"] == "us-sec-long-v2"
+    assert "evidence_selection" not in v2.calculation
+    # v2 reads recorded availability only, exactly as released.
+    assert str(correction.pk) in {fact["id"] for fact in v2.calculation["input_facts"]}
+
+
+# ---------------------------------------------------------------------------
+# RI-2: every alias-tail assessment carries the facts that established it
+# ---------------------------------------------------------------------------
+
+
+PRETAX_ALTERNATE = (
+    "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterest"
+    "AndIncomeLossFromEquityMethodInvestments"
+)
+
+
+def _alias_quarters(
+    listing: Listing,
+    *,
+    label: str,
+    concept: str,
+    source_concept: str,
+    quarters: list[tuple[date, date]],
+    value: Decimal,
+) -> tuple[DataAsset, DataAsset, set[str]]:
+    """File one alias's quarters through its own companyfacts/filing pair.
+
+    Independent assets are what make manifest closure observable: if the
+    assessment describes this alias but never carries its evidence, the
+    assets simply will not be in the forecast's immutable manifest.
+    """
+    companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{listing.ticker}-{label}-companyfacts",
+        retrieved_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    filing = _asset(
+        provider="sec",
+        kind="sec_submissions",
+        subject=f"{listing.ticker}-{label}-filing",
+        retrieved_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    created: set[str] = set()
+    for index, (start, end) in enumerate(quarters, start=1):
+        fact = _fact(
+            listing,
+            companyfacts,
+            filing,
+            concept=concept,
+            value=value + Decimal(index),
+            start=start,
+            end=end,
+            fiscal_period=f"Q{index}",
+            available_at=datetime(2026, 2, 1, tzinfo=UTC) + timedelta(days=index),
+            accession=f"{listing.ticker}-{label}-{index}",
+            source_concept=source_concept,
+        )
+        created.add(str(fact.pk))
+    return companyfacts, filing, created
+
+
+@pytest.mark.django_db
+def test_every_alias_tail_assessment_names_its_own_evidence() -> None:
+    """A losing alias may not be described without its own facts and assets.
+
+    The successful forecast states three separate alias-tail outcomes: a
+    winner anchored on the newest quarter with a complete tail, a stale but
+    complete alternative, and an alias whose tail is incomplete. Each is
+    filed through its own companyfacts/filing pair, so all three lineages
+    must be carried as assessed evidence -- never as selected inputs -- and
+    every one of their source *and* filing assets must be provable from the
+    immutable forecast manifest.
+    """
+    target = _listing("ALIASLIN")
+    peer = _listing("ALIASLINP")
+    target_price = _company_evidence(target, sic="3571")
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1)
+
+    winner_assets = _alias_quarters(
+        target,
+        label="winner",
+        concept="net_income",
+        source_concept=NET_INCOME_PRIMARY,
+        quarters=_quarter_windows(date(2025, 1, 1), 4),
+        value=Decimal("30"),
+    )
+    stale_assets = _alias_quarters(
+        target,
+        label="stale",
+        concept="net_income",
+        source_concept=NET_INCOME_ALTERNATE,
+        quarters=_quarter_windows(date(2024, 10, 1), 4),
+        value=Decimal("20"),
+    )
+    # A losing tail that is incomplete rather than merely stale: the frozen
+    # primary alias already supplies this concept's four quarters.
+    incomplete_assets = _alias_quarters(
+        target,
+        label="incomplete",
+        concept="pretax_income",
+        source_concept=PRETAX_ALTERNATE,
+        quarters=_quarter_windows(date(2025, 1, 1), 2),
+        value=Decimal("10"),
+    )
+
+    forecast = build_long_forecasts(
+        listings=[target, peer],
+        current_prices={str(target.pk): 50.0, str(peer.pk): 55.0},
+        price_assets={str(target.pk): target_price, str(peer.pk): peer_price},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=_small_peer_config(load_long_forecast_config(V3_PATH)),
+    )[str(target.pk)]["3y"]
+    selection = _assert_manifest_closes(forecast)
+
+    assert forecast.scenario.base is not None
+
+    net_income = selection["ttm_alias_selection"]["net_income"]
+    net_candidates = {entry["source_concept"]: entry for entry in net_income["alias_candidates"]}
+    pretax = selection["ttm_alias_selection"]["pretax_income"]
+    pretax_candidates = {entry["source_concept"]: entry for entry in pretax["alias_candidates"]}
+
+    # 1. The three assessed outcomes the payload actually states.
+    assert net_income["selected_source_concept"] == NET_INCOME_PRIMARY
+    assert net_income["stale_complete_alternatives"] == [NET_INCOME_ALTERNATE]
+    assert net_candidates[NET_INCOME_PRIMARY]["has_homogeneous_four_quarter_tail"] is True
+    assert net_candidates[NET_INCOME_ALTERNATE]["has_homogeneous_four_quarter_tail"] is True
+    assert pretax["selected_source_concept"] == SOURCE_CONCEPTS["pretax_income"]
+    assert pretax_candidates[PRETAX_ALTERNATE]["has_homogeneous_four_quarter_tail"] is False
+    assert pretax_candidates[PRETAX_ALTERNATE]["quarter_count"] == 2
+
+    # 2. Each alias names the facts its own tail assessment read. The two
+    #    alternates are filed entirely by this test, so their lineage is
+    #    exact; the primary alias also carries the fixture's annual facts.
+    assert set(net_candidates[NET_INCOME_PRIMARY]["assessed_source_fact_ids"]) >= winner_assets[2]
+    assert set(net_candidates[NET_INCOME_ALTERNATE]["assessed_source_fact_ids"]) == stale_assets[2]
+    assert (
+        set(pretax_candidates[PRETAX_ALTERNATE]["assessed_source_fact_ids"]) == incomplete_assets[2]
+    )
+    for candidate in (
+        net_candidates[NET_INCOME_PRIMARY],
+        net_candidates[NET_INCOME_ALTERNATE],
+        pretax_candidates[PRETAX_ALTERNATE],
+    ):
+        assert candidate["assessed_quarter_period_ends"]
+    assert net_candidates[NET_INCOME_ALTERNATE]["assessed_tail_period_ends"] == [
+        "2024-12-31",
+        "2025-03-31",
+        "2025-06-30",
+        "2025-09-30",
+    ]
+    assert pretax_candidates[PRETAX_ALTERNATE]["assessed_tail_period_ends"] == []
+
+    # 3. Losing lineages are assessed evidence, never selected formula inputs.
+    losing = stale_assets[2] | incomplete_assets[2]
+    assessed = set(selection["assessed_evidence_fact_ids"])
+    selected = set(selection["selected_input_fact_ids"])
+    described = {entry["id"] for entry in selection["assessed_evidence"]}
+    assert losing <= assessed
+    assert not (losing & selected)
+    assert losing <= described
+
+    # 4. Both the companyfacts and the filing asset of every assessed alias
+    #    are provable from the immutable manifest.
+    asset_ids = {str(asset.pk) for asset in forecast.source_assets}
+    for label, (companyfacts, filing, _facts) in (
+        ("winner", winner_assets),
+        ("stale", stale_assets),
+        ("incomplete", incomplete_assets),
+    ):
+        assert str(companyfacts.pk) in asset_ids, label
+        assert str(filing.pk) in asset_ids, label
+
+
+@pytest.mark.django_db
+def test_an_alias_with_no_usable_quarter_still_names_its_rejected_evidence() -> None:
+    """Facts rejected *before* any candidate exists are still assessed.
+
+    Lineage collected only from constructed quarter candidates leaves an
+    alias that never produces one described with an empty list. Two shapes
+    reach that state and both are filed here on their own assets:
+
+    - an annual-only alternate alias, whose single 365-day duration is not a
+      quarter and cannot chain with anything; and
+    - a year-to-date pair whose implied quarter spans 184 days, so the
+      derivation is refused outright.
+
+    All three facts were read and rejected, so all three must be assessed,
+    manifest-provable through both their companyfacts and filing assets, and
+    never selected.
+    """
+    target = _listing("NOCAND")
+    peer = _listing("NOCANDP")
+    target_price = _company_evidence(target, sic="3571")
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1)
+
+    companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{target.ticker}-nocand-companyfacts",
+        retrieved_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    filing = _asset(
+        provider="sec",
+        kind="sec_submissions",
+        subject=f"{target.ticker}-nocand-filing",
+        retrieved_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    rejected: dict[str, str] = {}
+    for label, start, end in (
+        # Annual-only: a 365-day duration is never a quarter observation.
+        ("annual_only", date(2025, 1, 1), date(2025, 12, 31)),
+        # A YTD pair sharing one period start. 182 and 366 days are both
+        # outside the quarter bounds, and the quarter their difference
+        # implies spans 2024-07-01..2024-12-31 (184 days), so the derivation
+        # is rejected and no candidate is ever constructed.
+        ("ytd_half", date(2024, 1, 1), date(2024, 6, 30)),
+        ("ytd_full", date(2024, 1, 1), date(2024, 12, 31)),
+    ):
+        fact = _fact(
+            target,
+            companyfacts,
+            filing,
+            concept="pretax_income",
+            value=Decimal("40"),
+            start=start,
+            end=end,
+            fiscal_period="FY",
+            available_at=datetime(2026, 2, 5, tzinfo=UTC),
+            accession=f"{target.ticker}-nocand-{label}",
+            source_concept=PRETAX_ALTERNATE,
+        )
+        rejected[label] = str(fact.pk)
+
+    forecast = build_long_forecasts(
+        listings=[target, peer],
+        current_prices={str(target.pk): 50.0, str(peer.pk): 55.0},
+        price_assets={str(target.pk): target_price, str(peer.pk): peer_price},
+        asof=AsOfData(DECISION_TIME),
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        config=_small_peer_config(load_long_forecast_config(V3_PATH)),
+    )[str(target.pk)]["3y"]
+    selection = _assert_manifest_closes(forecast)
+
+    assert forecast.scenario.base is not None
+
+    pretax = selection["ttm_alias_selection"]["pretax_income"]
+    rejected_ids = set(rejected.values())
+
+    # The alias produced nothing, so it is not among the ranked candidates.
+    assert PRETAX_ALTERNATE not in {entry["source_concept"] for entry in pretax["alias_candidates"]}
+    # ...but every fact it examined and rejected is still named.
+    assert rejected_ids <= set(pretax["unusable_alias_source_fact_ids"])
+
+    assessed = set(selection["assessed_evidence_fact_ids"])
+    selected = set(selection["selected_input_fact_ids"])
+    described = {entry["id"]: entry for entry in selection["assessed_evidence"]}
+    asset_ids = {str(asset.pk) for asset in forecast.source_assets}
+
+    assert rejected_ids <= assessed
+    assert not (rejected_ids & selected)
+    assert rejected_ids <= set(described)
+    # Both the companyfacts and the filing asset are provable.
+    assert str(companyfacts.pk) in asset_ids
+    assert str(filing.pk) in asset_ids
+    for fact_id in rejected_ids:
+        assert described[fact_id]["source_asset_id"] == str(companyfacts.pk)
+        assert described[fact_id]["filing_evidence_asset_id"] == str(filing.pk)
+
+
+# ---------------------------------------------------------------------------
+# RI-1: a content reversion is selected by its own observation, end to end
+# ---------------------------------------------------------------------------
+
+
+AUGUST = datetime(2026, 8, 15, 12, tzinfo=UTC)
+SEPTEMBER = datetime(2026, 9, 20, 12, tzinfo=UTC)
+OCTOBER = datetime(2026, 10, 18, 12, tzinfo=UTC)
+REVERSION_DECISION_TIME = datetime(2026, 12, 1, 12, tzinfo=UTC)
+AUDIT_ARGS_TARGET = TARGET_DATE
+
+#: The quarter `_company_evidence` files last, and the one this chain
+#: restates. Its original acceptance is the fixture's own Q4 availability.
+Q4_2025 = (date(2025, 10, 1), date(2025, 12, 31))
+Q4_ACCEPTANCE = datetime(2026, 2, 14, tzinfo=UTC)
+
+
+def _reversion_chain(ticker: str) -> tuple[Listing, Listing, Any, dict[str, FundamentalFact]]:
+    """Build the persisted shape a 100 -> 101 -> 100 ingestion produces.
+
+    Revision 3 is a *content reversion*: its bytes deduplicated onto the
+    original August asset, so it shares that asset and repeats revision 1's
+    observation identity, while its availability is bound to the October
+    observation event that actually carried it.
+    """
+    target = _listing(ticker)
+    peer = _listing(f"{ticker}P")
+    target_price = _company_evidence(target, sic="3571", sec_asset_retrieved_at=AUGUST)
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1, sec_asset_retrieved_at=AUGUST)
+
+    original = FundamentalFact.objects.get(
+        company=target.security.company,
+        concept="operating_cash_flow",
+        period_start=Q4_2025[0],
+        period_end=Q4_2025[1],
+    )
+    august_companyfacts = original.source_asset
+    august_filing = original.evidence_links.get(
+        role=FundamentalFactEvidence.Role.FILING
+    ).source_asset
+
+    september_companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{ticker}-september-companyfacts",
+        retrieved_at=SEPTEMBER,
+    )
+    corrected = _fact(
+        target,
+        september_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("35"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=SEPTEMBER,
+        accession=f"{ticker}-operating_cash_flow-Q4",
+        source_revision=2,
+        acceptance_at=Q4_ACCEPTANCE,
+        availability_basis=CORRECTION_AVAILABILITY_BASIS,
+    )
+    # Exact raw-content reuse: the same August asset, and therefore the same
+    # observation identity as revision 1. The literal matches the fixture's
+    # own Q4 operating cash flow so the persisted observation hash -- which
+    # is computed from the pre-save value -- really does repeat.
+    reverted = _fact(
+        target,
+        august_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("32.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=OCTOBER,
+        accession=f"{ticker}-operating_cash_flow-Q4",
+        source_revision=3,
+        acceptance_at=Q4_ACCEPTANCE,
+        availability_basis=CORRECTION_AVAILABILITY_BASIS,
+    )
+    assert original.value == Decimal("32.0")
+    assert reverted.observation_hash == original.observation_hash
+    assert reverted.source_asset_id == original.source_asset_id
+    return (
+        target,
+        peer,
+        (target_price, peer_price),
+        {
+            "original": original,
+            "corrected": corrected,
+            "reverted": reverted,
+        },
+    )
+
+
+def _audit_selection(report: dict[str, Any], *, concept: str) -> dict[str, Any] | None:
+    entry = report["listings"][0]
+    for concept_entry in entry["ttm_alias_selection"]:
+        if concept_entry["concept"] == concept:
+            selection: dict[str, Any] | None = concept_entry["selection"]
+            return selection
+    raise AssertionError(f"{concept} missing from the audit report")
+
+
+def _audit_referenced_fact_ids(report: dict[str, Any], *, concept: str) -> set[str]:
+    selection = _audit_selection(report, concept=concept)
+    assert selection is not None, f"{concept} has no alias selection in this report"
+    return _referenced_fact_ids(selection)
+
+
+def _audit_selected_fact_ids(report: dict[str, Any], *, concept: str) -> set[str]:
+    """Only the lineage the audited TTM window actually selected.
+
+    Deliberately narrower than `_audit_referenced_fact_ids`: a superseded
+    revision is still legitimately *referenced* as assessed evidence, so the
+    reference set cannot show which revision won.
+    """
+    selection = _audit_selection(report, concept=concept)
+    assert selection is not None, f"{concept} has no alias selection in this report"
+    return _referenced_fact_ids(
+        {
+            "selected_quarter_lineage": selection.get("selected_quarter_lineage", []),
+            "controlling_source_fact": selection.get("controlling_source_fact"),
+        }
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("cutoff", "expected"),
+    [
+        # Between the September and October observations the correction stands.
+        (datetime(2026, 10, 1, 12, tzinfo=UTC), "corrected"),
+        # Only after the October observation does the reversion apply.
+        (datetime(2026, 10, 19, 12, tzinfo=UTC), "reverted"),
+    ],
+)
+def test_reversion_selection_follows_the_observation_in_forecast_and_audit(
+    cutoff: datetime,
+    expected: str,
+) -> None:
+    """The forecast and the audit agree, and both follow the observation.
+
+    Revision 3 shares revision 1's asset and content identity, so anything
+    reading `DataAsset.retrieved_at` would date it to August and select it a
+    month early. Both readers must instead honour the October observation
+    bound into its availability.
+    """
+    target, peer, prices, chain = _reversion_chain(f"REV{cutoff.day:02d}")
+    expected_fact = chain[expected]
+    other = chain["reverted" if expected == "corrected" else "corrected"]
+
+    forecast = _forecast_at(
+        target=target,
+        peer=peer,
+        prices=prices,
+        config_path=V3_PATH,
+        data_cutoff=cutoff,
+        decision_time=REVERSION_DECISION_TIME,
+    )
+    selection = _assert_manifest_closes(forecast)
+
+    assert forecast.scenario.base is not None
+    assert str(expected_fact.pk) in selection["selected_input_fact_ids"]
+    assert str(other.pk) not in selection["selected_input_fact_ids"]
+    # Nothing here is a deferral: each revision is bound to a real event.
+    assert selection["deferred_unproven_corrections"] == []
+
+    report = audit_long_evidence(
+        listing_ids=[str(target.pk)],
+        target_date=AUDIT_ARGS_TARGET,
+        available_through=cutoff,
+        decision_time=REVERSION_DECISION_TIME,
+        config=load_long_forecast_config(V3_PATH),
+    )
+    audited = report["listings"][0]
+
+    assert audited["status"] == "audited"
+    assert audited["deferred_unproven_corrections"] == []
+    selected = _audit_selected_fact_ids(report, concept="operating_cash_flow")
+    assert str(expected_fact.pk) in selected
+    assert str(other.pk) not in selected
+    # A superseded revision that is visible stays assessed, never selected.
+    if str(other.pk) in audited["visible_fact_ids"]:
+        assert str(other.pk) in _audit_referenced_fact_ids(
+            report,
+            concept="operating_cash_flow",
+        )
+
+    # Immutable rows are untouched by either reader.
+    for fact in chain.values():
+        before = (fact.value, fact.available_at, fact.availability_basis)
+        fact.refresh_from_db()
+        assert (fact.value, fact.available_at, fact.availability_basis) == before
+
+
+# ---------------------------------------------------------------------------
+# RI-3: the correction policy is config-gated in the audit exactly as in the
+# forecast, so a frozen version is never audited against a policy it lacks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("config_path", [V1_PATH, V2_PATH, V3_PATH])
+def test_audit_and_forecast_share_one_config_gated_correction_policy(
+    config_path: Path,
+) -> None:
+    """Frozen versions must be audited against their own frozen selection.
+
+    A legacy backdated correction is visible at the cutoff by recorded
+    availability alone. long-v1 and long-v2 read exactly that, so both their
+    forecast and their audit must still select it and must report no
+    deferral. Only long-v3 resolves it against the retrieval that proved it.
+    """
+    label = config_path.stem.rsplit("-", maxsplit=1)[-1]
+    target, peer, prices, correction, _assets = _backdated_correction_fixture(f"POLICY{label}")
+    config = _small_peer_config(load_long_forecast_config(config_path))
+    frozen = config.version in {"us-sec-long-v1", "us-sec-long-v2"}
+
+    forecast = _forecast_at(
+        target=target,
+        peer=peer,
+        prices=prices,
+        config_path=config_path,
+        data_cutoff=HISTORICAL_CUTOFF,
+    )
+    report = audit_long_evidence(
+        listing_ids=[str(target.pk)],
+        target_date=TARGET_DATE,
+        available_through=HISTORICAL_CUTOFF,
+        decision_time=LATER_DECISION_TIME,
+        config=config,
+    )
+    audited = report["listings"][0]
+    input_fact_ids = {fact["id"] for fact in forecast.calculation["input_facts"]}
+
+    assert report["correction_availability_policy"] == audited["correction_availability_policy"]
+
+    if frozen:
+        assert report["correction_availability_policy"] == CORRECTION_POLICY_RECORDED_ONLY
+        assert audited["deferred_unproven_corrections"] == []
+        assert "evidence_selection" not in forecast.calculation
+        # The frozen selection reads recorded availability, so it keeps the
+        # backdated correction -- in the forecast and in the audit alike.
+        assert str(correction.pk) in input_fact_ids
+        assert str(correction.pk) in audited["visible_fact_ids"]
+        # Nothing was withheld from the audited series either.
+        assert audited["assessed_fact_count"] == len(audited["visible_fact_ids"])
+        # Alias selection is a long-v3 capability, so the frozen audit
+        # reports no alias lineage rather than inventing one.
+        assert _audit_selection(report, concept="operating_cash_flow") is None
+        return
+
+    assert report["correction_availability_policy"] == CORRECTION_POLICY_PROVEN_OBSERVATION
+    assert [entry["fact_id"] for entry in audited["deferred_unproven_corrections"]] == [
+        str(correction.pk)
+    ]
+    assert str(correction.pk) not in input_fact_ids
+    assert str(correction.pk) not in _audit_referenced_fact_ids(
+        report,
+        concept="operating_cash_flow",
+    )
+
+
+@pytest.mark.django_db
+def test_v3_audit_admits_the_correction_once_its_retrieval_is_proven() -> None:
+    """The audit's deferral is point-in-time, exactly like the forecast's."""
+    target, _peer, _prices, correction, _assets = _backdated_correction_fixture("POLICYOK")
+    proven_cutoff = datetime(2026, 4, 15, 12, tzinfo=UTC)
+
+    report = audit_long_evidence(
+        listing_ids=[str(target.pk)],
+        target_date=TARGET_DATE,
+        available_through=proven_cutoff,
+        decision_time=LATER_DECISION_TIME,
+        config=load_long_forecast_config(V3_PATH),
+    )
+    audited = report["listings"][0]
+
+    assert audited["deferred_unproven_corrections"] == []
+    assert str(correction.pk) in _audit_referenced_fact_ids(
+        report,
+        concept="operating_cash_flow",
+    )
+
+
+@pytest.mark.django_db
+def test_a_legacy_reversion_chain_is_unprovable_and_never_admitted() -> None:
+    """Legacy rows predate the observation event, so a reversion has no clock.
+
+    Before `CORRECTION_AVAILABILITY_BASIS` existed, a 100 -> 101 -> 100 chain
+    persisted revision 3 against the *reused* original asset and the original
+    acceptance. Nothing in those rows records when revision 3 was actually
+    seen, so no cutoff can justify it. It is deferred at every boundary --
+    conservatively, and without rewriting any row -- while revision 2, whose
+    own retrieval is provable, is admitted once its cutoff passes.
+    """
+    target = _listing("LEGREV")
+    peer = _listing("LEGREVP")
+    target_price = _company_evidence(target, sic="3571", sec_asset_retrieved_at=AUGUST)
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1, sec_asset_retrieved_at=AUGUST)
+
+    original = FundamentalFact.objects.get(
+        company=target.security.company,
+        concept="operating_cash_flow",
+        period_start=Q4_2025[0],
+        period_end=Q4_2025[1],
+    )
+    august_companyfacts = original.source_asset
+    august_filing = original.evidence_links.get(
+        role=FundamentalFactEvidence.Role.FILING
+    ).source_asset
+    september_companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{target.ticker}-legacy-september",
+        retrieved_at=SEPTEMBER,
+    )
+
+    # Legacy shape: acceptance-dated availability, no correction basis.
+    corrected = _fact(
+        target,
+        september_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("35.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=f"{target.ticker}-operating_cash_flow-Q4",
+        source_revision=2,
+    )
+    reverted = _fact(
+        target,
+        august_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("32.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=f"{target.ticker}-operating_cash_flow-Q4",
+        source_revision=3,
+    )
+    assert reverted.observation_hash == original.observation_hash
+
+    resolved = resolve_availability([original, corrected, reverted])
+    assert resolved[str(original.pk)].proven_at == Q4_ACCEPTANCE
+    # Revision 2 is bounded by the retrieval of the asset it came from.
+    assert resolved[str(corrected.pk)].proven_at == SEPTEMBER
+    assert resolved[str(corrected.pk)].basis == RESOLUTION_LEGACY_ASSET_RETRIEVAL
+    # Revision 3 shares revision 1's asset, so it has no clock at all.
+    assert resolved[str(reverted.pk)].proven_at is None
+    assert resolved[str(reverted.pk)].basis == RESOLUTION_UNPROVABLE_LEGACY_REVERSION
+
+    # Deferred at every boundary, including one long after every retrieval.
+    for cutoff in (
+        datetime(2026, 10, 1, 12, tzinfo=UTC),
+        datetime(2027, 6, 1, 12, tzinfo=UTC),
+    ):
+        forecast = _forecast_at(
+            target=target,
+            peer=peer,
+            prices=(target_price, peer_price),
+            config_path=V3_PATH,
+            data_cutoff=cutoff,
+            decision_time=datetime(2027, 7, 1, 12, tzinfo=UTC),
+        )
+        selection = _assert_manifest_closes(forecast)
+        deferred = {entry["fact_id"]: entry for entry in selection["deferred_unproven_corrections"]}
+
+        assert str(reverted.pk) in deferred
+        assert deferred[str(reverted.pk)]["proven_available_at"] is None
+        assert (
+            deferred[str(reverted.pk)]["resolution_basis"] == RESOLUTION_UNPROVABLE_LEGACY_REVERSION
+        )
+        assert "no persisted observation proves" in deferred[str(reverted.pk)]["reason"]
+        # Assessed evidence, never a selected input.
+        assert str(reverted.pk) in selection["assessed_evidence_fact_ids"]
+        assert str(reverted.pk) not in selection["selected_input_fact_ids"]
+        # Revision 2 is provable and stands in its place.
+        assert str(corrected.pk) not in deferred
+        assert str(corrected.pk) in selection["selected_input_fact_ids"]
+
+    # No row was mutated by any resolution.
+    for fact, expected in ((corrected, Decimal("35.0")), (reverted, Decimal("32.0"))):
+        fact.refresh_from_db()
+        assert fact.value == expected
+        assert fact.available_at == Q4_ACCEPTANCE
+        assert fact.availability_basis == "acceptance_datetime"
+
+
+@pytest.mark.django_db
+def test_a_legacy_revision_from_an_earlier_asset_is_unresolved_not_lower_bounded() -> None:
+    """A chain-ordering lower bound is context, never an admission boundary.
+
+    Revision 3 carries *distinct* content -- so it is not a reversion -- but
+    the asset it came from was retrieved in August, before revision 2 became
+    knowable in September. That retrieval therefore cannot be an observation
+    of revision 3. Ordering only proves revision 3 is no earlier than
+    September; it never proves revision 3 existed *by* September, so revision
+    3 stays deferred at every cutoff, including ones long after its
+    predecessor's boundary.
+    """
+    target = _listing("LEGORD")
+    peer = _listing("LEGORDP")
+    target_price = _company_evidence(target, sic="3571", sec_asset_retrieved_at=AUGUST)
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1, sec_asset_retrieved_at=AUGUST)
+
+    original = FundamentalFact.objects.get(
+        company=target.security.company,
+        concept="operating_cash_flow",
+        period_start=Q4_2025[0],
+        period_end=Q4_2025[1],
+    )
+    august_companyfacts = original.source_asset
+    august_filing = original.evidence_links.get(
+        role=FundamentalFactEvidence.Role.FILING
+    ).source_asset
+    september_companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{target.ticker}-legacy-ordering-september",
+        retrieved_at=SEPTEMBER,
+    )
+
+    corrected = _fact(
+        target,
+        september_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("35.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=f"{target.ticker}-operating_cash_flow-Q4",
+        source_revision=2,
+    )
+    # Distinct content, so no hash repeats -- but an *earlier* asset.
+    out_of_order = _fact(
+        target,
+        august_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("33.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=f"{target.ticker}-operating_cash_flow-Q4",
+        source_revision=3,
+    )
+    assert out_of_order.observation_hash != corrected.observation_hash
+    assert out_of_order.observation_hash != original.observation_hash
+    assert out_of_order.source_asset.retrieved_at < corrected.source_asset.retrieved_at
+
+    resolved = resolve_availability([original, corrected, out_of_order])
+    assert resolved[str(corrected.pk)].proven_at == SEPTEMBER
+    assert resolved[str(corrected.pk)].basis == RESOLUTION_LEGACY_ASSET_RETRIEVAL
+    entry = resolved[str(out_of_order.pk)]
+    assert entry.proven_at is None
+    assert entry.basis == RESOLUTION_UNPROVABLE_LEGACY_ORDERING
+    # The ordering bound is retained, but only as context.
+    assert entry.earliest_possible_at == SEPTEMBER
+
+    for cutoff in (
+        # Exactly the predecessor's boundary...
+        SEPTEMBER,
+        # ...and long after it. Neither proves revision 3.
+        datetime(2027, 6, 1, 12, tzinfo=UTC),
+    ):
+        forecast = _forecast_at(
+            target=target,
+            peer=peer,
+            prices=(target_price, peer_price),
+            config_path=V3_PATH,
+            data_cutoff=cutoff,
+            decision_time=datetime(2027, 7, 1, 12, tzinfo=UTC),
+        )
+        selection = _assert_manifest_closes(forecast)
+        deferred = {entry["fact_id"]: entry for entry in selection["deferred_unproven_corrections"]}
+
+        assert str(out_of_order.pk) in deferred
+        assert deferred[str(out_of_order.pk)]["proven_available_at"] is None
+        assert (
+            deferred[str(out_of_order.pk)]["resolution_basis"]
+            == RESOLUTION_UNPROVABLE_LEGACY_ORDERING
+        )
+        # The lower bound is reported as context and admits nothing.
+        assert (
+            deferred[str(out_of_order.pk)]["earliest_possible_available_at"]
+            == SEPTEMBER.isoformat()
+        )
+        assert "before the revision it supersedes" in deferred[str(out_of_order.pk)]["reason"]
+        # Assessed and manifest-covered, never selected.
+        assert str(out_of_order.pk) in selection["assessed_evidence_fact_ids"]
+        assert str(out_of_order.pk) in selection["manifest_evidence_fact_ids"]
+        assert str(out_of_order.pk) not in selection["selected_input_fact_ids"]
+        assert str(out_of_order.pk) in {entry["id"] for entry in selection["assessed_evidence"]}
+        # The provable predecessor stands in its place.
+        assert str(corrected.pk) in selection["selected_input_fact_ids"]
+
+    # Frozen versions are untouched by any of this.
+    for config_path in (V1_PATH, V2_PATH):
+        frozen = _forecast_at(
+            target=target,
+            peer=peer,
+            prices=(target_price, peer_price),
+            config_path=config_path,
+            data_cutoff=datetime(2027, 6, 1, 12, tzinfo=UTC),
+            decision_time=datetime(2027, 7, 1, 12, tzinfo=UTC),
+        )
+        assert "evidence_selection" not in frozen.calculation
+        # Recorded availability alone, so the highest revision still wins.
+        assert str(out_of_order.pk) in {fact["id"] for fact in frozen.calculation["input_facts"]}
+
+    for fact, expected in ((corrected, Decimal("35.0")), (out_of_order, Decimal("33.0"))):
+        fact.refresh_from_db()
+        assert fact.value == expected
+        assert fact.available_at == Q4_ACCEPTANCE
+        assert fact.availability_basis == "acceptance_datetime"
+
+
+REBOUND_OBSERVATION = datetime(2027, 1, 20, 12, tzinfo=UTC)
+
+
+@pytest.mark.django_db
+def test_a_rebound_vintage_restores_selection_after_fresh_proof() -> None:
+    """Fresh proof of an unprovable legacy reversion changes what v3 selects.
+
+    Before the fresh observation, revision 3 has no provable timing, so v3
+    defers it and selects the superseded revision 2. Ingestion then appends
+    revision 4 -- identical value and observation hash, but bound to a real
+    October/January observation -- and from that boundary onward v3 selects
+    the reverted value again. Revision 3 stays deferred and assessed
+    throughout; nothing about it is rewritten.
+    """
+    target = _listing("REBIND")
+    peer = _listing("REBINDP")
+    target_price = _company_evidence(target, sic="3571", sec_asset_retrieved_at=AUGUST)
+    peer_price = _company_evidence(peer, sic="3571", scale=1.1, sec_asset_retrieved_at=AUGUST)
+
+    original = FundamentalFact.objects.get(
+        company=target.security.company,
+        concept="operating_cash_flow",
+        period_start=Q4_2025[0],
+        period_end=Q4_2025[1],
+    )
+    august_companyfacts = original.source_asset
+    august_filing = original.evidence_links.get(
+        role=FundamentalFactEvidence.Role.FILING
+    ).source_asset
+    september_companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{target.ticker}-rebind-september",
+        retrieved_at=SEPTEMBER,
+    )
+    fresh_companyfacts = _asset(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=f"{target.ticker}-rebind-fresh",
+        retrieved_at=REBOUND_OBSERVATION,
+    )
+    accession = f"{target.ticker}-operating_cash_flow-Q4"
+
+    # Legacy chain: revision 2 provable, revision 3 an unprovable reversion.
+    corrected = _fact(
+        target,
+        september_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("35.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=accession,
+        source_revision=2,
+    )
+    reverted = _fact(
+        target,
+        august_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("32.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=Q4_ACCEPTANCE,
+        accession=accession,
+        source_revision=3,
+    )
+    assert reverted.observation_hash == original.observation_hash
+
+    before_cutoff = datetime(2026, 12, 1, 12, tzinfo=UTC)
+    decision_time = datetime(2027, 3, 1, 12, tzinfo=UTC)
+
+    def _selection(cutoff: datetime) -> dict[str, Any]:
+        forecast = _forecast_at(
+            target=target,
+            peer=peer,
+            prices=(target_price, peer_price),
+            config_path=V3_PATH,
+            data_cutoff=cutoff,
+            decision_time=decision_time,
+        )
+        return _assert_manifest_closes(forecast)
+
+    # Before fresh proof: revision 3 deferred, superseded revision 2 selected.
+    stale = _selection(before_cutoff)
+    assert str(reverted.pk) in {
+        entry["fact_id"] for entry in stale["deferred_unproven_corrections"]
+    }
+    assert str(corrected.pk) in stale["selected_input_fact_ids"]
+
+    # Ingestion appends the observation-bound vintage: same value and hash.
+    rebound = _fact(
+        target,
+        fresh_companyfacts,
+        august_filing,
+        concept="operating_cash_flow",
+        value=Decimal("32.0"),
+        start=Q4_2025[0],
+        end=Q4_2025[1],
+        fiscal_period="Q4",
+        available_at=REBOUND_OBSERVATION,
+        accession=accession,
+        source_revision=4,
+        acceptance_at=Q4_ACCEPTANCE,
+        availability_basis=CORRECTION_AVAILABILITY_BASIS,
+    )
+    assert rebound.observation_hash == reverted.observation_hash
+
+    resolved = resolve_availability([original, corrected, reverted, rebound])
+    assert resolved[str(reverted.pk)].proven_at is None
+    assert resolved[str(rebound.pk)].proven_at == REBOUND_OBSERVATION
+    assert resolved[str(rebound.pk)].basis == RESOLUTION_BOUND_OBSERVATION
+
+    # The earlier cutoff is completely unchanged by the new vintage.
+    unchanged = _selection(before_cutoff)
+    assert unchanged["selected_input_fact_ids"] == stale["selected_input_fact_ids"]
+    assert str(rebound.pk) not in unchanged["manifest_evidence_fact_ids"]
+
+    # From the fresh boundary onward the reverted value is selected again.
+    after_cutoff = REBOUND_OBSERVATION + timedelta(days=1)
+    proven = _selection(after_cutoff)
+    assert str(rebound.pk) in proven["selected_input_fact_ids"]
+    assert str(corrected.pk) not in proven["selected_input_fact_ids"]
+    # Revision 3 remains deferred and assessed, never selected.
+    assert str(reverted.pk) in {
+        entry["fact_id"] for entry in proven["deferred_unproven_corrections"]
+    }
+    assert str(reverted.pk) in proven["assessed_evidence_fact_ids"]
+    assert str(reverted.pk) not in proven["selected_input_fact_ids"]
+
+    # The audit agrees with the forecast at both boundaries.
+    for cutoff, expected in ((before_cutoff, corrected), (after_cutoff, rebound)):
+        report = audit_long_evidence(
+            listing_ids=[str(target.pk)],
+            target_date=TARGET_DATE,
+            available_through=cutoff,
+            decision_time=decision_time,
+            config=load_long_forecast_config(V3_PATH),
+        )
+        selected = _audit_selected_fact_ids(report, concept="operating_cash_flow")
+        assert str(expected.pk) in selected
+        assert str(reverted.pk) not in selected
+
+    # Frozen versions read recorded availability and are unaffected.
+    for config_path in (V1_PATH, V2_PATH):
+        frozen = _forecast_at(
+            target=target,
+            peer=peer,
+            prices=(target_price, peer_price),
+            config_path=config_path,
+            data_cutoff=after_cutoff,
+            decision_time=decision_time,
+        )
+        assert "evidence_selection" not in frozen.calculation
+        assert str(rebound.pk) in {fact["id"] for fact in frozen.calculation["input_facts"]}
+
+    # Nothing persisted was rewritten.
+    for fact, expected_value, expected_available in (
+        (corrected, Decimal("35.0"), Q4_ACCEPTANCE),
+        (reverted, Decimal("32.0"), Q4_ACCEPTANCE),
+        (rebound, Decimal("32.0"), REBOUND_OBSERVATION),
+    ):
+        fact.refresh_from_db()
+        assert fact.value == expected_value
+        assert fact.available_at == expected_available
+
+
+def test_correction_policy_is_driven_by_its_own_declared_capability() -> None:
+    """The policy reads one explicit key, never an inference from the others.
+
+    A future version must be able to adopt alias selection or joint pair
+    selection *without* silently acquiring correction-availability
+    resolution, so the capability is declared and hashed on its own.
+    """
+    v3 = load_long_forecast_config(V3_PATH)
+
+    assert correction_availability_policy(v3) == CORRECTION_POLICY_PROVEN_OBSERVATION
+    for config_path in (V1_PATH, V2_PATH):
+        frozen = load_long_forecast_config(config_path)
+        assert frozen.proven_observation_correction_availability is None
+        assert correction_availability_policy(frozen) == CORRECTION_POLICY_RECORDED_ONLY
+
+    # The other two capabilities alone do not turn it on.
+    without = deepcopy(v3.raw)
+    without.pop("proven_observation_correction_availability")
+    partial = LongForecastConfig.from_mapping(without)
+    assert partial.newest_quarter_anchored_homogeneous_ttm_alias_selection is True
+    assert partial.joint_compatible_invested_capital_pair_selection is True
+    assert correction_availability_policy(partial) == CORRECTION_POLICY_RECORDED_ONLY
+
+    # Declaring it explicitly off is a distinct configuration and a distinct hash.
+    explicit_off = deepcopy(v3.raw)
+    explicit_off["proven_observation_correction_availability"] = {"enabled": False}
+    disabled = LongForecastConfig.from_mapping(explicit_off)
+    assert disabled.proven_observation_correction_availability is False
+    assert correction_availability_policy(disabled) == CORRECTION_POLICY_RECORDED_ONLY
+    assert long_forecast_config_hash(disabled) != V3_CONFIG_HASH
+
+
+def test_the_same_date_combination_ceiling_is_configured_and_not_tunable() -> None:
+    """256 is a reviewed bound declared by the config, accepted only as 256."""
+    v3 = load_long_forecast_config(V3_PATH)
+
+    assert v3.maximum_same_date_source_combinations == 256
+    assert same_date_combination_ceiling(v3) == 256
+
+    for bad in (255, 257, 1, 512):
+        mapping = deepcopy(v3.raw)
+        mapping["maximum_same_date_source_combinations"] = bad
+        with pytest.raises(ValueError, match="exactly 256"):
+            LongForecastConfig.from_mapping(mapping)
+
+    # Enabling the joint search without declaring the ceiling is refused, so
+    # the enumeration can never fall back to an implicit default.
+    missing = deepcopy(v3.raw)
+    missing.pop("maximum_same_date_source_combinations")
+    with pytest.raises(ValueError, match="maximum_same_date_source_combinations"):
+        LongForecastConfig.from_mapping(missing)
+
+    # Declaring it without the joint search is equally refused.
+    unused = deepcopy(load_long_forecast_config(V2_PATH).raw)
+    unused["maximum_same_date_source_combinations"] = 256
+    with pytest.raises(ValueError, match="only applies when"):
+        LongForecastConfig.from_mapping(unused)
+
+    # A frozen version has no ceiling at all, and asking for one is explicit.
+    with pytest.raises(ValueError, match="does not declare"):
+        same_date_combination_ceiling(load_long_forecast_config(V2_PATH))

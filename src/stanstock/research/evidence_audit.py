@@ -38,21 +38,28 @@ from stanstock.data.sec_fundamentals import (
     NoncanonicalInstantIdentityError,
     SecFundamentalSeries,
     build_sec_fundamental_series,
+    deferred_correction_payload,
     source_concept_priority,
 )
 from stanstock.research.long_forecast_config import LongForecastConfig
 from stanstock.research.long_forecasts import (
     LONG_FORECAST_CONCEPTS,
     audit_invested_capital_pairs,
+    correction_availability_policy,
     invested_capital_alias_candidates_enabled,
+    resolve_corrections,
+    same_date_combination_ceiling,
     ttm_selection_policy,
 )
 
+#: 4 adds ``deferred_unproven_corrections``: same-accession corrections whose
+#: availability is proven only by a retrieval after the requested data
+#: cutoff, and which the audited series therefore excludes.
 #: 3 adds the explicit ``assessed_withheld`` listing status for conflicting
 #: instant period identities and the invested-capital combination-ceiling
 #: assessment. The audit is read-only diagnostic output, not persisted
 #: evidence, so the version simply tells an operator which fields to expect.
-AUDIT_SCHEMA_VERSION = 3
+AUDIT_SCHEMA_VERSION = 4
 
 #: Canonical TTM concepts an operator needs to reason about before a long
 #: forecast can be produced at all.
@@ -142,6 +149,7 @@ def audit_long_evidence(
         "fundamentals_config_version": fundamentals.config_version,
         "fundamentals_config_hash": fundamentals.config_hash,
         "ttm_selection_policy": ttm_selection,
+        "correction_availability_policy": correction_availability_policy(config),
         "invested_capital_alias_candidates": alias_candidates,
         "balance_sheet_date_tolerance_days": (config.eligibility.balance_sheet_date_tolerance_days),
         "listings": [
@@ -289,6 +297,17 @@ def _listing_report(
         available_through=available_through,
         config=config,
     )
+    # Exactly the forecast's own gate: a frozen version is audited against
+    # the selection it actually makes, never against the prospective policy.
+    admitted, deferred = resolve_corrections(
+        facts,
+        data_cutoff=available_through,
+        config=config,
+    )
+    deferred_report = [
+        deferred_correction_payload(entry, available_through=available_through)
+        for entry in deferred
+    ]
     if not facts:
         return {
             **identity,
@@ -299,10 +318,15 @@ def _listing_report(
             ),
             "visible_fact_count": 0,
             "visible_fact_ids": [],
+            "correction_availability_policy": correction_availability_policy(config),
+            "deferred_unproven_corrections": deferred_report,
         }
     try:
+        # The audit reports exactly what a forecast at these boundaries would
+        # read, so it builds its series from the proven-available subset and
+        # reports the deferred corrections separately rather than silently.
         series = build_sec_fundamental_series(
-            facts,
+            list(admitted),
             config=sec_config,
             ttm_selection=ttm_selection,
             alias_instant_candidates=alias_candidates,
@@ -321,13 +345,18 @@ def _listing_report(
             "visible_fact_count": len(facts),
             "visible_fact_ids": sorted(str(fact.pk) for fact in facts),
             "noncanonical_instant_facts": list(error.anomalies),
+            "correction_availability_policy": correction_availability_policy(config),
+            "deferred_unproven_corrections": deferred_report,
         }
     return {
         **identity,
         "status": "audited",
         "visible_fact_count": len(facts),
         "visible_fact_ids": sorted(str(fact.pk) for fact in facts),
-        "ttm_alias_selection": _alias_report(series=series, facts=facts),
+        "correction_availability_policy": correction_availability_policy(config),
+        "deferred_unproven_corrections": deferred_report,
+        "assessed_fact_count": len(admitted),
+        "ttm_alias_selection": _alias_report(series=series, facts=list(admitted)),
         "invested_capital": _invested_capital_report(
             series=series,
             config=config,
@@ -352,6 +381,9 @@ def audit_visible_facts(
     and the audit run is excluded here just as it is in the forecast. Fact
     availability is bounded by ``available_through``, while asset visibility
     stays on the reader's decision time.
+
+    ``source_asset`` is selected eagerly because same-accession correction
+    timing is resolved against the retrieval that proved it.
     """
     period_lookback = timedelta(
         days=(max(family.minimum_annual_periods for family in config.metric_families.values()) + 1)
@@ -368,6 +400,7 @@ def audit_visible_facts(
             period_end__gte=target_date - period_lookback,
             period_end__lte=target_date,
         )
+        .select_related("source_asset")
     )
 
 
@@ -443,6 +476,7 @@ def _invested_capital_report(
         ending_target=anchor.period_end,
         tolerance_days=config.eligibility.balance_sheet_date_tolerance_days,
         priority=source_concept_priority(sec_config),
+        maximum_combinations=same_date_combination_ceiling(config),
     )
     report["status"] = "audited"
     report["anchor_concept"] = anchor.concept

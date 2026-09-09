@@ -9,13 +9,15 @@ from decimal import Decimal, InvalidOperation
 from time import sleep
 from zoneinfo import ZoneInfo
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.fact_identity import build_observation_hash, build_period_identity
 from stanstock.data.live_us import UsUniverseConfig
 from stanstock.data.models import (
+    OBSERVATION_INSTANT_CONSTRAINT,
     Company,
     CompanyClassificationObservation,
     DataAsset,
@@ -25,6 +27,7 @@ from stanstock.data.models import (
     ProviderRecord,
     Region,
     Security,
+    SourceObservationEvent,
 )
 from stanstock.data.providers import sec
 from stanstock.data.providers.contracts import FundamentalSourcePayload
@@ -37,6 +40,12 @@ from stanstock.data.sec_config import (
     SecCikMapping,
     SecConceptRule,
     SecFundamentalsConfig,
+)
+from stanstock.data.sec_fundamentals import (
+    CORRECTION_AVAILABILITY_BASIS,
+    CORRECTION_QUALITY_FLAG,
+    REBOUND_QUALITY_FLAG,
+    resolve_availability,
 )
 
 PROVIDER = sec.PROVIDER
@@ -395,14 +404,9 @@ def _ingest_company(
         if all(asset is not None for asset in history_assets.values())
         else None
     )
+    recovered_companyfacts = _latest_observed_companyfacts(mapping.cik)
     latest_companyfacts = (
-        DataAsset.objects.filter(
-            provider=PROVIDER,
-            kind=COMPANYFACTS_KIND,
-            subject=mapping.cik,
-        )
-        .order_by("-retrieved_at")
-        .first()
+        recovered_companyfacts.asset if recovered_companyfacts is not None else None
     )
     verification = _load_companyfacts_verification(cik=mapping.cik)
     verified_companyfacts = (
@@ -414,7 +418,9 @@ def _ingest_company(
     )
     reconciliation_due = _reconciliation_due(
         cik=mapping.cik,
-        latest_asset=latest_companyfacts,
+        last_observed_at=(
+            recovered_companyfacts.observed_at if recovered_companyfacts is not None else None
+        ),
         last_checked_at=(
             verified_companyfacts.checked_at if verified_companyfacts is not None else None
         ),
@@ -524,12 +530,26 @@ def _ingest_company(
         raw_created += int(companyfacts_created)
         raw_reused += int(not companyfacts_created)
         companyfacts_content = companyfacts_payload.content
+        # The retrieval that actually carried these bytes, which is *not*
+        # `companyfacts_asset.retrieved_at` whenever the content deduplicated
+        # onto an earlier asset (a restatement back to a previous value).
+        companyfacts_observed_at = companyfacts_payload.retrieved_at
     elif normalize_companyfacts:
-        if latest_companyfacts is None:
+        if latest_companyfacts is None or recovered_companyfacts is None:
             raise RuntimeError("SEC companyfacts normalization state is inconsistent")
         companyfacts_asset = latest_companyfacts
         companyfacts_content = store.read_bytes(companyfacts_asset.relative_path)
         raw_reused += 1
+        # Replaying an already-persisted asset is not a new observation, so
+        # the boundary is the observation that committed this content --
+        # which is *not* the asset's own `retrieved_at` when a later
+        # retrieval deduplicated onto an earlier asset.
+        companyfacts_observed_at = recovered_companyfacts.observed_at
+        _assert_replay_is_recoverable(
+            company=company,
+            recovered=recovered_companyfacts,
+            cik=mapping.cik,
+        )
 
     if normalize_companyfacts:
         companyfacts_checked_at = (
@@ -545,6 +565,7 @@ def _ingest_company(
             company=company,
             payload=companyfacts_content,
             source_asset=companyfacts_asset,
+            observed_at=companyfacts_observed_at,
             filing_index=filing_index,
             config=config,
         )
@@ -598,6 +619,151 @@ def _latest_history_asset(*, cik: str, filename: str) -> DataAsset | None:
         if asset.metadata.get("filename") == filename:
             return asset
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredCompanyfacts:
+    """The exact companyfacts content a retry must replay, and its boundary.
+
+    ``observed_at`` is the retrieval that committed this content, taken from
+    the append-only `SourceObservationEvent`. It is deliberately *not*
+    ``asset.retrieved_at``: raw assets are content-addressed, so a later
+    response that repeats earlier bytes reuses the earlier asset row while
+    the observation that actually carried it is much newer.
+    """
+
+    asset: DataAsset
+    observed_at: datetime
+    basis: str
+
+
+#: The recovered pair came from an explicit observation event.
+COMPANYFACTS_RECOVERY_OBSERVED = "observation_event"
+#: No observation event exists (rows predate them), so the asset's own
+#: retrieval is the only boundary available.
+COMPANYFACTS_RECOVERY_LEGACY = "legacy_asset_retrieval"
+
+
+def _latest_observed_companyfacts(cik: str) -> RecoveredCompanyfacts | None:
+    """Recover the latest *observed* companyfacts asset, not the newest asset.
+
+    Ordering persisted assets by ``retrieved_at`` answers the wrong question
+    after a content reversion. If a value went 100 -> 101 -> 100, the newest
+    observation carries the *older* asset (the 100 bytes already on file),
+    while the 101 asset still has the newer ``retrieved_at``. A replay driven
+    by asset retrieval would therefore substitute stale 101 content and
+    append it as a fresh correction over the committed 100.
+
+    Recovery is driven by the observation events instead, newest observation
+    first. ``unique_source_observation_instant`` guarantees at most one event
+    per ``(provider, kind, subject, observed_at)``, so "newest observation"
+    is unambiguous by construction and recovery never has to order two
+    conflicting payloads -- that conflict is refused at write time, before
+    anything is normalized.
+    """
+    events = (
+        SourceObservationEvent.objects.filter(
+            provider=PROVIDER,
+            kind=COMPANYFACTS_KIND,
+            subject=cik,
+        )
+        .select_related("source_asset")
+        .order_by("-observed_at")
+    )
+    newest = events.first()
+    if newest is None:
+        asset = (
+            DataAsset.objects.filter(
+                provider=PROVIDER,
+                kind=COMPANYFACTS_KIND,
+                subject=cik,
+            )
+            .order_by("-retrieved_at")
+            .first()
+        )
+        if asset is None:
+            return None
+        return RecoveredCompanyfacts(
+            asset=asset,
+            observed_at=asset.retrieved_at,
+            basis=COMPANYFACTS_RECOVERY_LEGACY,
+        )
+    _assert_event_matches_asset(newest)
+    return RecoveredCompanyfacts(
+        asset=newest.source_asset,
+        observed_at=newest.observed_at,
+        basis=COMPANYFACTS_RECOVERY_OBSERVED,
+    )
+
+
+def _assert_replay_is_recoverable(
+    *,
+    company: Company,
+    recovered: RecoveredCompanyfacts,
+    cik: str,
+) -> None:
+    """Refuse to replay when the committed content cannot be proven.
+
+    A replay re-normalizes persisted bytes, so it must know *exactly* which
+    bytes were committed last and when they were observed. Two situations
+    make that unprovable, and both fail closed rather than guessing:
+
+    1. **No observation evidence for a corrected chain.** A database upgraded
+       from before observation events has assets but no events, so the only
+       ordering available is `DataAsset.retrieved_at`. That is the wrong
+       clock precisely when it matters: after a 100 -> 101 -> 100 reversion
+       the superseded 101 asset still holds the newest retrieval, so a replay
+       would re-append 101 as a brand-new, event-bound revision the provider
+       never sent. Where the company has no correction chain at all there is
+       nothing to mis-order, and recovery proceeds.
+
+    2. **Content older than a committed correction.** If the recoverable
+       observation predates a correction already on file, re-normalizing it
+       would restore the superseded value as a new revision.
+
+    Neither is a dead end: a fresh fetch is separately gated and establishes
+    new evidence, after which recovery is proven again.
+    """
+    if recovered.basis == COMPANYFACTS_RECOVERY_LEGACY:
+        corrected = (
+            FundamentalFact.objects.filter(
+                company=company,
+                provider=PROVIDER,
+                source_revision__gt=1,
+            )
+            .order_by("concept", "period_end", "-source_revision")
+            .first()
+        )
+        if corrected is not None:
+            raise ProviderResponseError(
+                f"SEC companyfacts recovery for CIK {cik} is unproven: no observation "
+                "event records which stored payload was committed last, and this "
+                f"company already has a correction chain (e.g. {corrected.concept} "
+                f"{corrected.period_end.isoformat()} at revision "
+                f"{corrected.source_revision}). Ordering stored assets by retrieval "
+                "would replay a superseded payload as a new correction, so the replay "
+                "refuses. Re-run once a fresh Companyfacts retrieval is due, which "
+                "records the observation this recovery needs."
+            )
+    newest_correction = (
+        FundamentalFact.objects.filter(
+            company=company,
+            provider=PROVIDER,
+            availability_basis=CORRECTION_AVAILABILITY_BASIS,
+        )
+        .order_by("-available_at")
+        .first()
+    )
+    if newest_correction is None or newest_correction.available_at <= recovered.observed_at:
+        return
+    raise ProviderResponseError(
+        f"SEC companyfacts recovery for CIK {cik} would replay content observed at "
+        f"{recovered.observed_at.isoformat()}, which is older than the committed "
+        f"correction for {newest_correction.concept} "
+        f"{newest_correction.period_end.isoformat()} available at "
+        f"{newest_correction.available_at.isoformat()}. Replaying it would append a "
+        "correction the provider never sent."
+    )
 
 
 def _load_companyfacts_verification(*, cik: str) -> CompanyfactsVerification | None:
@@ -814,13 +980,21 @@ def _updated_missing_accession_checks(
 def _reconciliation_due(
     *,
     cik: str,
-    latest_asset: DataAsset | None,
+    last_observed_at: datetime | None,
     last_checked_at: datetime | None,
     days: int,
 ) -> bool:
-    if latest_asset is None:
+    """Whether this CIK's companyfacts are stale enough to re-request.
+
+    Staleness is measured from the last *observation*, not from the stored
+    asset's ``retrieved_at``. After a content reversion the committed asset
+    is an older row that was observed again recently, so reading its
+    retrieval clock would report months of staleness that did not happen and
+    spend a request rebuilding evidence already on file.
+    """
+    if last_observed_at is None:
         return True
-    reference_at = last_checked_at or latest_asset.retrieved_at
+    reference_at = last_checked_at or last_observed_at
     age = (timezone.now().date() - reference_at.date()).days
     stagger_days = int(cik[-2:]) % 7
     return age >= days + stagger_days
@@ -930,6 +1104,17 @@ def _persist_payload(
         .first()
     )
     if existing is not None:
+        # Content-addressed reuse: these exact bytes are already stored. The
+        # asset row keeps its original `retrieved_at` (when the content was
+        # *first* seen), so this retrieval is recorded as its own append-only
+        # observation event instead.
+        _record_observation_event(
+            asset=existing,
+            kind=kind,
+            subject=subject,
+            digest=digest,
+            observed_at=payload.retrieved_at,
+        )
         return existing, False
     stamp = payload.retrieved_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     safe_subject = _SAFE_PATH_COMPONENT.sub("_", subject)
@@ -946,11 +1131,155 @@ def _persist_payload(
                 available_at=payload.retrieved_at,
                 metadata=metadata,
             )
+            _record_observation_event(
+                asset=asset,
+                kind=kind,
+                subject=subject,
+                digest=digest,
+                observed_at=payload.retrieved_at,
+            )
     except Exception:
         if not DataAsset.objects.filter(relative_path=relative_path).exists():
             store.resolve(relative_path).unlink(missing_ok=True)
         raise
     return asset, True
+
+
+class ObservationEvidenceError(ProviderResponseError):
+    """An observation event and the asset it points at disagree.
+
+    The event's ``content_sha256`` is the claim "these exact bytes were seen
+    at this time". If it does not match the immutable asset's own checksum,
+    the event certifies a boundary for content that asset never held, and
+    every correction bound to it is unsound. There is no safe repair at read
+    time, so this always fails explicitly.
+    """
+
+
+def _observation_instant_conflict(error: IntegrityError) -> bool:
+    """Whether this error is the observation-instant uniqueness violation.
+
+    Deliberately narrow. A blanket ``except IntegrityError`` would swallow a
+    foreign-key violation, a not-null violation, or a check-constraint
+    failure and then "recover" by returning whatever row happens to sit at
+    that instant -- turning an unrelated database fault into a silent
+    success.
+    """
+    cause = getattr(error, "__cause__", None)
+    constraint = getattr(cause, "diag", None)
+    if constraint is not None:
+        # psycopg exposes the violated constraint by name.
+        return getattr(constraint, "constraint_name", None) == OBSERVATION_INSTANT_CONSTRAINT
+    # SQLite names the columns of the failed index in the message text.
+    message = str(error)
+    if "UNIQUE constraint failed" not in message:
+        return False
+    return all(
+        f"{SourceObservationEvent._meta.db_table}.{column}" in message
+        for column in ("provider", "kind", "subject", "observed_at")
+    )
+
+
+def _assert_event_matches_asset(event: SourceObservationEvent) -> SourceObservationEvent:
+    """Refuse an event whose digest does not match its own source asset."""
+    if event.content_sha256 != event.source_asset.sha256:
+        raise ObservationEvidenceError(
+            f"Observation event {event.pk} claims content {event.content_sha256[:12]} "
+            f"at {event.observed_at.isoformat()}, but its source asset "
+            f"{event.source_asset_id} holds {event.source_asset.sha256[:12]}. An "
+            "observation may only certify the bytes its asset actually contains."
+        )
+    return event
+
+
+def _record_observation_event(
+    *,
+    asset: DataAsset,
+    kind: str,
+    subject: str,
+    digest: str,
+    observed_at: datetime,
+) -> SourceObservationEvent:
+    """Append this retrieval as an immutable observation of exact bytes.
+
+    One ``(provider, kind, subject, observed_at)`` names exactly one content.
+    Recording the *same* retrieval again is idempotent, which is what makes a
+    retried or replayed ingestion safe.
+
+    Recording *different* content at that same timestamp is refused here,
+    before anything is normalized. Two different payloads at one observation
+    instant carry no evidence about which came later, and inferring an order
+    from a local commit clock would let a superseded payload be replayed as
+    the newest one (the A -> B -> A case, where the reversion to A reuses A's
+    original event and leaves B looking newer). Refusing keeps the boundary
+    honest; a genuinely later retrieval simply carries a later timestamp.
+
+    The digest is also checked against the asset it is being bound to, both
+    on insert and on an idempotent collision, so an event can never certify
+    bytes its own asset does not hold.
+    """
+    if observed_at.tzinfo is None:
+        raise ValueError("SEC observation events must carry a timezone-aware timestamp")
+    if digest != asset.sha256:
+        raise ObservationEvidenceError(
+            f"Refusing to record an observation of content {digest[:12]} against asset "
+            f"{asset.pk}, which holds {asset.sha256[:12]}. An observation may only "
+            "certify the bytes its asset actually contains."
+        )
+    try:
+        # The insert itself is the mutual exclusion. `unique_source_observation_instant`
+        # covers (provider, kind, subject, observed_at) without the digest, so
+        # exactly one writer can claim an instant no matter how many race for
+        # it. A read-then-write check would let two concurrent transactions
+        # both pass their read, and `select_for_update()` cannot help either:
+        # there is no row yet to lock.
+        #
+        # The savepoint is what makes the surrounding transaction usable
+        # again after the failed insert; without it the connection stays
+        # broken and the recovery read below could not run.
+        with transaction.atomic():
+            return SourceObservationEvent.objects.create(
+                provider=PROVIDER,
+                kind=kind,
+                subject=subject,
+                content_sha256=digest,
+                source_asset=asset,
+                observed_at=observed_at,
+            )
+    except IntegrityError as error:
+        if not _observation_instant_conflict(error):
+            # Any other integrity fault is a real database problem, not a
+            # racing writer. It must surface unchanged even when a row does
+            # happen to exist at this instant.
+            raise
+        committed = (
+            SourceObservationEvent.objects.select_related("source_asset")
+            .filter(
+                provider=PROVIDER,
+                kind=kind,
+                subject=subject,
+                observed_at=observed_at,
+            )
+            .first()
+        )
+        if committed is None:
+            # The uniqueness violation was reported but nothing is committed
+            # at this instant. That is not a state this code can reason
+            # about, so the original error stands.
+            raise
+    # Someone else claimed this instant. Whether that is a safe retry or a
+    # genuine conflict is decided by the committed content, and it is decided
+    # here -- before any fact is normalized.
+    _assert_event_matches_asset(committed)
+    if committed.content_sha256 != digest:
+        raise ProviderResponseError(
+            f"SEC {kind} for {subject} reports two different payloads observed at the "
+            f"same instant {observed_at.isoformat()} "
+            f"({committed.content_sha256[:12]} and {digest[:12]}). One observation "
+            "timestamp names one content; there is no evidence of which is newer, "
+            "so the run refuses rather than ordering them by a local clock."
+        )
+    return committed
 
 
 def _parse_current_submissions(
@@ -1067,6 +1396,7 @@ def _normalize_companyfacts(
     company: Company,
     payload: bytes,
     source_asset: DataAsset,
+    observed_at: datetime,
     filing_index: dict[str, FilingRecord],
     config: SecFundamentalsConfig,
 ) -> tuple[int, int]:
@@ -1100,6 +1430,7 @@ def _normalize_companyfacts(
                         unit=unit,
                         observation=observation,
                         source_asset=source_asset,
+                        observed_at=observed_at,
                         filing_index=filing_index,
                         config=config,
                         rule=rule,
@@ -1121,6 +1452,7 @@ def _normalized_fact(
     unit: str,
     observation: dict[str, object],
     source_asset: DataAsset,
+    observed_at: datetime,
     filing_index: dict[str, FilingRecord],
     config: SecFundamentalsConfig,
     rule: SecConceptRule,
@@ -1195,17 +1527,20 @@ def _normalized_fact(
         unit=unit,
     )
     latest = identity.order_by("-source_revision").first()
+    rebinds_unproven_correction = False
     if (
         latest is not None
         and latest.observation_hash == observation_hash
         and latest.concept == rule.canonical_concept
     ):
-        FundamentalFactEvidence.objects.get_or_create(
-            fact=latest,
-            role=FundamentalFactEvidence.Role.FILING,
-            defaults={"source_asset": filing_source_asset},
-        )
-        return latest, False
+        rebinds_unproven_correction = _needs_observation_rebinding(identity=identity, latest=latest)
+        if not rebinds_unproven_correction:
+            FundamentalFactEvidence.objects.get_or_create(
+                fact=latest,
+                role=FundamentalFactEvidence.Role.FILING,
+                defaults={"source_asset": filing_source_asset},
+            )
+            return latest, False
     quality_flags: list[str] = []
     if source_asset.retrieved_at > acceptance_at + timedelta(minutes=1):
         quality_flags.append("research_reconstruction")
@@ -1217,6 +1552,30 @@ def _normalized_fact(
         quality_flags.append("unclassified_period")
     if rule.explanation_only:
         quality_flags.append("explanation_only")
+    # A later revision under an accession that already has one is a
+    # correction: the provider restated this observation without filing a
+    # new accession. `acceptance_at`/`filed_at` keep the original, unmodified
+    # acceptance, but availability cannot: nothing before the retrieval that
+    # first carried the corrected value proves that value existed, so
+    # backdating it to acceptance would let a historical cutoff read a
+    # correction the run could not have known.
+    #
+    # The boundary is this retrieval's own observation event, never
+    # `source_asset.retrieved_at`. A restatement back to a previous value
+    # (100 -> 101 -> 100) serves bytes that already exist, so the asset row
+    # is reused and its `retrieved_at` still points at the *first* time that
+    # content was seen. `max` keeps the boundary monotonic and satisfies
+    # `fact_available_after_acceptance`.
+    available_at = acceptance_at
+    if latest is not None:
+        available_at = max(acceptance_at, observed_at)
+        availability_basis = CORRECTION_AVAILABILITY_BASIS
+        quality_flags.append(CORRECTION_QUALITY_FLAG)
+    if rebinds_unproven_correction:
+        # Same economic value as the revision it follows -- the point is the
+        # boundary, not the number -- so the provenance says explicitly why a
+        # new vintage exists despite identical content.
+        quality_flags.append(REBOUND_QUALITY_FLAG)
     with transaction.atomic():
         fact = FundamentalFact.objects.create(
             company=company,
@@ -1239,7 +1598,7 @@ def _normalized_fact(
             filing_date=filing_date,
             filed_at=acceptance_at,
             acceptance_at=acceptance_at,
-            available_at=acceptance_at,
+            available_at=available_at,
             availability_basis=availability_basis,
             is_amendment=filing_form.endswith("/A"),
             source_revision=(latest.source_revision if latest is not None else 0) + 1,
@@ -1253,6 +1612,43 @@ def _normalized_fact(
             source_asset=filing_source_asset,
         )
     return fact, True
+
+
+def _needs_observation_rebinding(
+    *,
+    identity: QuerySet[FundamentalFact],
+    latest: FundamentalFact,
+) -> bool:
+    """Whether an identical fresh observation must append a new vintage.
+
+    The reuse shortcut ("same content, same row") is right almost always: a
+    later retrieval of unchanged evidence is not a correction and must not
+    inflate the ledger.
+
+    It is wrong in exactly one case. When the newest revision is a *legacy*
+    correction whose timing was never proven -- a reversion that deduplicated
+    onto an earlier asset, or a revision from an asset retrieved before the
+    one it supersedes -- returning it unchanged would waste the very proof
+    that just arrived. The as-of readers would keep deferring that row and
+    keep selecting the superseded value, even though a real retrieval has now
+    confirmed the current content. So a new revision is appended, carrying
+    the same economic value and observation hash but a genuine, observation-
+    bound availability.
+
+    Nothing is mutated or backdated: the unprovable row stays exactly as
+    persisted, and the new vintage stands beside it.
+
+    Both idempotent paths are preserved by the two short-circuits: an
+    unchanged original (revision 1) and an already observation-bound
+    correction both return `False`, so repeating either retrieval still
+    reuses its row.
+    """
+    if latest.source_revision <= 1:
+        return False
+    if latest.availability_basis == CORRECTION_AVAILABILITY_BASIS:
+        return False
+    chain = list(identity.select_related("source_asset").order_by("source_revision"))
+    return resolve_availability(chain)[str(latest.pk)].proven_at is None
 
 
 def _period_type(*, rule: SecConceptRule, period_start: date | None) -> str | None:

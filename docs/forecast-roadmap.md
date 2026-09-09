@@ -257,7 +257,10 @@ original pinned configuration hash.
 
 ### `us-sec-long-v3`: prospective evidence selection only
 
-**Not the default, and not approved for activation.** `us-sec-long-v3` exists
+**Not the default, and not approved for activation.** (Scope: the SEC
+correction-availability integrity fix shipped alongside it *is* active in the
+default configuration and benefits every reader; only the long-v3 reader
+below is inactive.) `us-sec-long-v3` exists
 as a prospective configuration for the replay phase. It changes evidence
 selection only; every formula weight, bound, cap, fade path, multiple
 reversion, peer floor, metric-family rule, freshness limit, tax proxy,
@@ -275,9 +278,9 @@ legitimately anchors the newest quarter cannot supply a homogeneous
 four-quarter tail. Whether the change is a net benefit is an open question
 that a cutoff-safe replay must answer before any activation decision.
 
-Long-v3 declares two default-off capabilities. A configuration that does not
-declare them parses to "absent", which is removed from the effective hash, so
-adding them cannot change an already-frozen version's hash.
+Long-v3 declares three default-off capabilities. A configuration that does
+not declare them parses to "absent", which is removed from the effective
+hash, so adding them cannot change an already-frozen version's hash.
 
 - `newest_quarter_anchored_homogeneous_ttm_alias_selection`: for each
   canonical TTM concept, anchor on the newest eligible quarter end, rank the
@@ -318,6 +321,16 @@ adding them cannot change an already-frozen version's hash.
   forbids the component basis at that date, so no debt component is ever
   counted twice, and superseded revisions are still discarded. Legacy
   `instants`, long-v1, and long-v2 are untouched.
+- `proven_observation_correction_availability`: resolve each same-accession
+  correction against the observation that proves it rather than against a
+  recorded availability an earlier ingestion may have backdated to the
+  original filing acceptance. A correction whose timing is not proven at the
+  requested cutoff is withheld from the series, the revision it superseded
+  stands in its place, and the withheld row is reported as assessed evidence
+  with its resolved availability and reason. The capability is declared and
+  hashed on its own, so adopting either capability above never silently
+  acquires it; frozen long-v1 and long-v2 declare no such key and keep
+  reading recorded availability exactly as released.
 
 Every pair search is recorded as an assessment, including the ones that
 reject the evidence. A missing beginning side, a missing ending side, zero

@@ -210,6 +210,14 @@ annual periods (same 15% tolerance); the frozen `us-sec-long-v1`
 configuration never evaluates that adjacent check and remains reproducible
 exactly as originally released.
 
+**Scope note.** The SEC correction-availability integrity fix that this work
+also delivers is *active* in the shipped default `us-sec-long-v2`
+configuration: ingestion binds every same-accession correction to the
+retrieval that carried it, and every reader benefits. Only the long-v3
+*reader* below -- alias selection, joint pair selection, and read-time
+correction resolution -- is inactive. The change as a whole is therefore not
+wholly inactive.
+
 `us-sec-long-v3` is a prospective, evidence-selection-only version that is
 **not the default and not approved for activation**. It keeps every long-v2
 formula weight, bound, cap, fade path, multiple reversion, peer floor,
@@ -271,15 +279,45 @@ ordering, latest-revision selection, and pair ranking fall through to the
 persisted observation identity instead. A balance-sheet date whose instant
 observations do not all carry the canonical `instant::<date>` identity, and a
 date whose permitted same-date source-basis combinations exceed the reviewed
-ceiling of 256 (counted from per-axis alias counts before any product is
+ceiling declared by the configuration (counted from per-axis alias counts before any product is
 built, with every alias, fact, and axis multiplier behind that count
 recorded), each withhold that one listing explicitly while the rest of the
 run continues.
 
+- **Prospective deferral of unproven corrections.** Long-v3 resolves each
+  same-accession correction against the observation that proves it, not
+  against a recorded availability that a legacy ingestion may have backdated
+  to the original filing acceptance. A correction whose timing is not proven
+  at the requested cutoff is withheld from the series, the revision it
+  superseded -- which *is* proven there -- stands in its place, and the
+  withheld row is recorded under `deferred_unproven_corrections` with its
+  recorded availability, its resolved availability, and the reason. A legacy
+  revision with no actual observation boundary -- a reversion whose bytes
+  deduplicated onto an earlier revision's asset, or a revision from an asset
+  retrieved before the revision it supersedes became knowable -- is deferred
+  at every boundary. A chain-ordering lower bound is reported as assessed
+  context and never admits a row. Nothing is
+  rewritten: resolution is a read-time decision over immutable rows, and no
+  persisted fact or prediction is mutated. See `docs/point-in-time.md` for
+  the three clocks involved.
+
+  This policy is configuration-gated by its own declared, hashed capability
+  `proven_observation_correction_availability`, so adopting alias or joint
+  pair selection never silently acquires it. Frozen long-v1/long-v2 declare
+  no such key, read recorded availability exactly as released, and defer
+  nothing; the offline evidence audit applies the identical gate, so a frozen
+  version is never reported against a selection it would not make. The
+  same-date combination ceiling is likewise a declared, hashed config value
+  (`maximum_same_date_source_combinations: 256`) accepted only at the one
+  reviewed number -- never tuned, defaulted, or truncated.
+
 Every fact any of these assessments referenced -- including rejected,
 unpaired, and later-withheld candidates, the facts responsible for a refused
-combination space, and every trailing-twelve-month dependency -- has its
-source and filing-evidence assets in the immutable forecast `source_assets`
+combination space, every trailing-twelve-month dependency, every deferred
+correction, and every fact an alias-tail assessment examined and rejected
+before any quarter candidate could be constructed (an annual-only alternate
+alias, or a year-to-date pair whose derivation was refused) -- has its source
+and filing-evidence assets in the immutable forecast `source_assets`
 manifest. The payload separates that evidence into explicit, disjoint lists:
 the selected formula inputs described in `input_facts`, the assessed
 candidates that were read but not selected, and the union the manifest closes
@@ -315,6 +353,27 @@ differs from the requested one. Listings are addressed by immutable listing
 ID; a ticker resolves only when exactly one listing matches, and a symbol
 shared across exchanges or reused after a delisting is an explicit ambiguity
 error.
+
+The audit reads through exactly the forecast's gates, including the
+correction-availability policy, and states which one it applied
+(`correction_availability_policy`). Audited against a frozen version it
+therefore reports that version's own recorded-availability selection and
+defers nothing; audited against long-v3 it reports the same deferrals the
+long-v3 forecast would make, listing each withheld correction. Auditing a
+frozen version against the prospective policy would describe a selection that
+version never makes, which is why one shared, configuration-gated function
+answers the question for both readers.
+
+Recovery of an interrupted or repeated ingestion is likewise fail-closed:
+one observation instant names one content, an upgraded database with a
+correction chain but no observation evidence refuses to replay rather than
+ordering stored assets by retrieval, and a fresh retrieval is the separately
+gated way to re-establish proven evidence. See `docs/point-in-time.md`.
+
+A malformed configuration fails closed and the YAML parser message is
+withheld, because a parse error quotes the offending source line and an
+operator who points `--long-config` at the wrong file would otherwise have
+that line echoed into stderr and the operator log.
 
 Its base input is:
 
