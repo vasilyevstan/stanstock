@@ -726,6 +726,14 @@ tbody tr:last-child td {
   border-color: rgb(246 199 91 / 45%);
 }
 
+.under10-panel {
+  /* Every value here is untrusted, stored text (reasons, dates, monetary
+     strings, IDs): a single long unbroken run must wrap inside the panel
+     rather than force horizontal page scroll. Inherited by every descendant
+     text node (`p`, `li`, `strong`, `dt`/`dd`), current or future. */
+  overflow-wrap: anywhere;
+}
+
 .login-card {
   width: min(100%, 760px);
   display: grid;

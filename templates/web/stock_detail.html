@@ -84,17 +84,101 @@
             <li>{{ foundation }}</li>
           {% endfor %}
         </ul>
-        <p>Unreleased activation controls:</p>
+        <p>Released shadow diagnostic capabilities &mdash; unactivated:</p>
+        <ul class="compact-gate-list">
+          {% for diagnostic in under_10_released_shadow_diagnostics %}
+            <li>{{ diagnostic }}</li>
+          {% endfor %}
+        </ul>
+        <p>Still-unreleased activation control:</p>
         <ul class="compact-gate-list">
           {% for control in long_horizon_unreleased_activation_controls %}
             <li>{{ control }}</li>
           {% endfor %}
         </ul>
+        <p>{{ under_10_shadow_disclosure }}</p>
         <p>
           Released foundations are not candidate approvals. Joint Under-$10
           review and candidate-specific eligibility remain outstanding.
         </p>
       </div>
+    {% endif %}
+    {% if under10_panel %}
+      <section class="notice under10-panel" role="status" aria-label="Under-$10 shadow diagnostics">
+        <strong>Under-$10 shadow diagnostics (unactivated).</strong>
+        {% if under10_panel.state == "recorded" %}
+          <p>
+            Recorded on the decision run for {{ under10_panel.decision_target_date }}
+            (data cutoff {{ under10_panel.decision_data_cutoff }}); reference close
+            {{ under10_panel.reference_close }} USD. Policy
+            {{ under10_panel.policy_version }}. These diagnostics do not change score,
+            confidence, recommendation, forecasts, or allocation.
+          </p>
+          <h3>Solvency and obligation</h3>
+          <p><strong>{{ under10_panel.solvency.headline }}</strong></p>
+          {% if under10_panel.solvency.reasons %}
+            <ul class="compact-gate-list">
+              {% for reason in under10_panel.solvency.reasons %}
+                <li>{{ reason }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+          <p>Assessed inputs; a withheld value is labelled withheld, never shown as zero.</p>
+          <dl class="key-values">
+            {% for input in under10_panel.solvency.inputs %}
+              <div>
+                <dt>{{ input.label }}</dt>
+                <dd>
+                  {% if input.present %}{{ input.value }}{% else %}Withheld{% endif %}
+                </dd>
+              </div>
+            {% endfor %}
+          </dl>
+          <p>
+            Balance-sheet date:
+            {% if under10_panel.solvency.periods.instant_date %}
+              {{ under10_panel.solvency.periods.instant_date }}
+            {% else %}
+              withheld
+            {% endif %}
+            · Flow period:
+            {% if under10_panel.solvency.periods.duration_end %}
+              {{ under10_panel.solvency.periods.duration_start }} to
+              {{ under10_panel.solvency.periods.duration_end }}
+              ({{ under10_panel.solvency.periods.duration_basis }})
+            {% else %}
+              withheld
+            {% endif %}
+            · Assessed SEC facts: {{ under10_panel.solvency.assessed_fact_count }}
+          </p>
+          <p>{{ under10_panel.solvency.runway.headline }}</p>
+          <h3>Dollar liquidity</h3>
+          <p><strong>{{ under10_panel.liquidity.headline }}</strong></p>
+          {% if under10_panel.liquidity.state == "assessed" %}
+            <p>
+              {{ under10_panel.liquidity.value }} {{ under10_panel.liquidity.currency }}
+              over {{ under10_panel.liquidity.sessions_used }} observed sessions
+              ({{ under10_panel.liquidity.first_session }} to
+              {{ under10_panel.liquidity.last_session }}).
+            </p>
+          {% endif %}
+          <p>{{ under10_panel.liquidity.volume_basis_caveat }}</p>
+          <h3>Split and reverse-split verification</h3>
+          <p><strong>{{ under10_panel.split.headline }}</strong></p>
+          <p>{{ under10_panel.split.explanation }}</p>
+          <p>
+            New allocation remains {{ under10_panel.new_allocation_percent }}%; candidate
+            activation is not eligible and joint Under-$10 review remains required.
+          </p>
+        {% else %}
+          <p>{{ under10_panel.headline }}</p>
+          <p>
+            Decision run {{ under10_panel.decision_target_date }} (data cutoff
+            {{ under10_panel.decision_data_cutoff }}). New allocation remains 0% and
+            joint Under-$10 review remains required.
+          </p>
+        {% endif %}
+      </section>
     {% endif %}
     <section class="metric-grid forecast-grid" aria-label="Current analysis and forecasts">
       <article>

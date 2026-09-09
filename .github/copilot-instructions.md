@@ -51,6 +51,14 @@ Every task begins by reading, in order:
   + synthesis -> developer -> research-integrity -> critic-tester ->
   final-validator; the final validator also runs at milestone/release
   boundaries.
+- The orchestrator owns progress through that chain and must detect stalls
+  rather than silently wait. Treat an idle/completed agent with unread output,
+  an agent that stops making tool progress, a repeated unresolved finding, a
+  stale worktree fingerprint, pending CI/deployment gates, or a dirty
+  worktree approaching the next scheduled refresh as actionable. Read the
+  result, return the finding to its owner, fall back to direct work or a
+  replacement only when the owner is unavailable, and keep going until the
+  requested result is released and locally verified.
 - Maintain local-first behavior: the app must remain runnable with `docker
   compose up --build` and must not require a live external provider or cloud
   service to function in its default (demo) mode.

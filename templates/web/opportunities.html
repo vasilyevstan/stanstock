@@ -153,12 +153,19 @@
                 <li>{{ foundation }}</li>
               {% endfor %}
             </ul>
-            <p>Unreleased activation controls:</p>
+            <p>Released shadow diagnostic capabilities &mdash; unactivated:</p>
+            <ul class="compact-gate-list">
+              {% for diagnostic in under_10_released_shadow_diagnostics %}
+                <li>{{ diagnostic }}</li>
+              {% endfor %}
+            </ul>
+            <p>Still-unreleased activation control:</p>
             <ul class="compact-gate-list">
               {% for control in under_10_unreleased_activation_controls %}
                 <li>{{ control }}</li>
               {% endfor %}
             </ul>
+            <p>{{ under_10_shadow_disclosure }}</p>
             <p>
               Joint Under-$10 review and candidate-specific eligibility remain
               outstanding.

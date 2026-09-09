@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from stanstock.research.indicators import calculate_indicators
+from stanstock.research.indicators import calculate_indicators, median_dollar_volume
 
 
 def _price_frame(rows: int = 260, *, start: float = 100.0, step: float = 0.2) -> pl.DataFrame:
@@ -158,3 +158,262 @@ def test_invalid_recent_volume_withholds_liquidity_indicators() -> None:
     assert "avg_dollar_volume_20d" not in result.values
     assert "abnormal_volume_strict" not in result.values
     assert result.missing["avg_dollar_volume_20d"] == ("Recent volume observations must be finite")
+
+
+# ---------------------------------------------------------------------------
+# `median_dollar_volume` -- the Under-$10 shadow liquidity primitive.
+#
+# The helper is additive: `calculate_indicators` output must stay unchanged,
+# and every refusal must name the condition actually observed rather than
+# describing a malformed row as missing history.
+# ---------------------------------------------------------------------------
+
+
+def _sessions(
+    count: int,
+    *,
+    close: float = 4.0,
+    volume: float = 1_000_000.0,
+    start: date = date(2025, 1, 1),
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "date": [start + timedelta(days=index) for index in range(count)],
+            "close": [close] * count,
+            "volume": [volume] * count,
+        }
+    )
+
+
+def test_median_dollar_volume_computes_over_the_latest_252_observed_sessions() -> None:
+    frame = _sessions(300, close=4.0, volume=1_000_000.0)
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "computed"
+    assert result.value == pytest.approx(4_000_000.0)
+    assert result.sessions_used == 252
+    assert result.first_session == frame["date"][-252]
+    assert result.last_session == frame["date"][-1]
+    assert result.reason is None
+
+
+def test_median_dollar_volume_uses_the_latest_window_not_the_earliest() -> None:
+    early = _sessions(100, close=1.0, volume=1.0)
+    late = _sessions(252, close=4.0, volume=1_000_000.0, start=date(2026, 1, 1))
+
+    result = median_dollar_volume(pl.concat([early, late]))
+
+    assert result.status == "computed"
+    assert result.value == pytest.approx(4_000_000.0)
+    assert result.sessions_used == 252
+    assert result.first_session == date(2026, 1, 1)
+
+
+def test_median_dollar_volume_sorts_unsorted_sessions_before_selecting() -> None:
+    frame = _sessions(252, close=4.0, volume=1_000_000.0)
+    shuffled = frame.reverse()
+
+    result = median_dollar_volume(shuffled)
+
+    assert result.status == "computed"
+    assert result.first_session == frame["date"][0]
+    assert result.last_session == frame["date"][-1]
+
+
+@pytest.mark.parametrize(("count", "expected"), [(0, 0), (1, 1), (251, 251)])
+def test_median_dollar_volume_withholds_short_windows_without_padding(
+    count: int,
+    expected: int,
+) -> None:
+    frame = _sessions(count)
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "withheld"
+    assert result.reason == "insufficient_sessions"
+    assert result.value is None
+    assert result.sessions_used == expected
+
+
+def test_median_dollar_volume_boundary_is_exactly_252_sessions() -> None:
+    assert median_dollar_volume(_sessions(251)).status == "withheld"
+    assert median_dollar_volume(_sessions(252)).status == "computed"
+
+
+def test_median_dollar_volume_counts_distinct_sessions_not_calendar_days() -> None:
+    trading_days = [
+        day
+        for day in (date(2025, 1, 1) + timedelta(days=index) for index in range(400))
+        if day.weekday() < 5
+    ][:252]
+    frame = pl.DataFrame(
+        {
+            "date": trading_days,
+            "close": [4.0] * 252,
+            "volume": [1_000_000.0] * 252,
+        }
+    )
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "computed"
+    assert result.sessions_used == 252
+    assert (result.last_session - result.first_session).days > 252
+
+
+def test_median_dollar_volume_refuses_duplicate_session_dates() -> None:
+    frame = _sessions(252)
+    duplicated = pl.concat([frame, frame.tail(1)])
+
+    result = median_dollar_volume(duplicated)
+
+    assert result.status == "withheld"
+    assert result.reason == "duplicate_sessions"
+    assert result.value is None
+    assert result.sessions_used is None
+
+
+def test_median_dollar_volume_requires_date_close_and_volume_columns() -> None:
+    frame = _sessions(252)
+
+    for column in ("date", "close", "volume"):
+        result = median_dollar_volume(frame.drop(column))
+
+        assert result.status == "withheld"
+        assert result.reason == "missing_price_columns"
+
+
+def test_median_dollar_volume_refuses_unusable_session_identities() -> None:
+    string_dates = pl.DataFrame(
+        {
+            "date": [f"2025-01-{index + 1:02d}" for index in range(3)],
+            "close": [4.0] * 3,
+            "volume": [1.0] * 3,
+        }
+    )
+    null_dates = _sessions(3).with_columns(
+        pl.when(pl.int_range(pl.len()) == 1).then(None).otherwise(pl.col("date")).alias("date")
+    )
+
+    assert median_dollar_volume(string_dates).reason == "invalid_session_dates"
+    assert median_dollar_volume(null_dates).reason == "invalid_session_dates"
+
+
+@pytest.mark.parametrize(
+    "close",
+    [None, 0.0, -1.0, float("nan"), float("inf")],
+)
+def test_median_dollar_volume_refuses_invalid_closes(close: float | None) -> None:
+    frame = _sessions(252).with_columns(
+        pl.when(pl.int_range(pl.len()) == 120)
+        .then(pl.lit(close, dtype=pl.Float64))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "withheld"
+    assert result.reason == "invalid_close_values"
+    assert result.value is None
+    assert result.sessions_used == 252
+
+
+@pytest.mark.parametrize("volume", [None, -1.0, float("nan"), float("inf")])
+def test_median_dollar_volume_refuses_invalid_volumes(volume: float | None) -> None:
+    frame = _sessions(252).with_columns(
+        pl.when(pl.int_range(pl.len()) == 7)
+        .then(pl.lit(volume, dtype=pl.Float64))
+        .otherwise(pl.col("volume"))
+        .alias("volume")
+    )
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "withheld"
+    assert result.reason == "invalid_volume_values"
+
+
+def test_median_dollar_volume_refuses_unparseable_numeric_text() -> None:
+    frame = _sessions(252).with_columns(pl.col("close").cast(pl.Utf8))
+    broken = frame.with_columns(
+        pl.when(pl.int_range(pl.len()) == 3)
+        .then(pl.lit("not-a-number"))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+
+    assert median_dollar_volume(frame).status == "computed"
+    assert median_dollar_volume(broken).reason == "invalid_close_values"
+
+
+def test_median_dollar_volume_reports_invalidity_even_in_a_short_window() -> None:
+    frame = _sessions(10).with_columns(
+        pl.when(pl.int_range(pl.len()) == 2)
+        .then(pl.lit(-5.0, dtype=pl.Float64))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "withheld"
+    assert result.reason == "invalid_close_values"
+    assert result.reason != "insufficient_sessions"
+
+
+def test_median_dollar_volume_refuses_a_nonfinite_product() -> None:
+    frame = _sessions(252, close=1e300, volume=1e300)
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "withheld"
+    assert result.reason == "nonfinite_dollar_volume_product"
+
+
+def test_median_dollar_volume_treats_zero_volume_as_valid_data() -> None:
+    frame = _sessions(252, volume=0.0)
+
+    result = median_dollar_volume(frame)
+
+    assert result.status == "computed"
+    assert result.value == 0.0
+    assert result.reason is None
+
+
+def test_median_dollar_volume_is_split_equivalent() -> None:
+    frame = _sessions(260, close=40.0, volume=100_000.0)
+    split = frame.with_columns(
+        (pl.col("close") / 10).alias("close"),
+        (pl.col("volume") * 10).alias("volume"),
+    )
+
+    original = median_dollar_volume(frame)
+    transformed = median_dollar_volume(split)
+
+    assert original.status == transformed.status == "computed"
+    assert original.value is not None
+    assert transformed.value == pytest.approx(original.value)
+
+
+def test_median_dollar_volume_window_size_is_configurable_and_positive() -> None:
+    frame = _sessions(20)
+
+    assert median_dollar_volume(frame, sessions=20).status == "computed"
+    assert median_dollar_volume(frame, sessions=21).reason == "insufficient_sessions"
+    with pytest.raises(ValueError, match="positive session count"):
+        median_dollar_volume(frame, sessions=0)
+
+
+def test_median_dollar_volume_does_not_change_calculate_indicators_output() -> None:
+    frame = _price_frame(300)
+    before = calculate_indicators(frame)
+
+    median_dollar_volume(frame)
+    after = calculate_indicators(frame)
+
+    assert before.values == after.values
+    assert before.missing == after.missing
+    assert "median_dollar_volume_252" not in before.values
+    assert "median_dollar_volume_252" not in before.missing

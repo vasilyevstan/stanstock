@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -7,7 +8,12 @@ import polars as pl
 import pytest
 from django.core.management import call_command
 
-from stanstock.data.asof import AsOfData, PriceFrameSchemaError
+from stanstock.data.asof import (
+    AsOfData,
+    PriceFrameChecksumMismatchError,
+    PriceFrameRead,
+    PriceFrameSchemaError,
+)
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import (
     CompanyClassificationObservation,
@@ -227,7 +233,7 @@ def _register_price_asset(
     """
     store = AssetStore(root=tmp_path)
     stored = store.write_frame(f"price_history/{subject}.parquet", frame)
-    dates = frame["date"].to_list()
+    dates = [value for value in frame["date"].to_list() if value is not None]
     asset = register_asset(
         provider="asof_hardening_test",
         kind="price_history",
@@ -235,8 +241,8 @@ def _register_price_asset(
         stored=stored,
         retrieved_at=available_at,
         available_at=available_at,
-        period_start=min(dates),
-        period_end=max(dates),
+        period_start=min(dates) if dates else None,
+        period_end=max(dates) if dates else None,
     )
     return store, asset
 
@@ -482,3 +488,598 @@ def test_price_frame_unparseable_string_dates_fail_explicitly(tmp_path: Path) ->
         AsOfData(available_at, store=store).price_frame(
             provider="asof_hardening_test", subject="BADSTRINGS"
         )
+
+
+# ---------------------------------------------------------------------------
+# `price_frame_with_diagnostics` -- null session-date counting.
+#
+# `_clip_to_through_date`'s `date <= through_date` filter silently drops a
+# null-dated row exactly like it drops a future one: neither raises. Only a
+# *future* row is a normal, valid clip; a null session identity could never
+# be established at all, and `invalid_session_date_rows` exists so a caller
+# can tell the two apart instead of reading a shorter-but-plausible history.
+# ---------------------------------------------------------------------------
+
+
+def _diagnostics_column(dates: list[date | None], *, date_kind: str) -> pl.Series:
+    """Build a `date` column of the requested dtype, preserving ``None`` entries."""
+    if date_kind == "date":
+        return pl.Series("date", dates, dtype=pl.Date)
+    if date_kind == "datetime":
+        values = [
+            datetime(value.year, value.month, value.day, 16, 0, tzinfo=UTC)
+            if value is not None
+            else None
+            for value in dates
+        ]
+        return pl.Series("date", values, dtype=pl.Datetime("us", "UTC"))
+    if date_kind == "utf8":
+        values = [value.isoformat() if value is not None else None for value in dates]
+        return pl.Series("date", values, dtype=pl.Utf8)
+    raise ValueError(f"Unsupported date_kind: {date_kind!r}")
+
+
+def _register_diagnostics_asset(
+    tmp_path: Path,
+    *,
+    subject: str,
+    dates: list[date | None],
+    date_kind: str,
+    available_at: datetime,
+) -> AssetStore:
+    frame = pl.DataFrame(
+        {
+            "date": _diagnostics_column(dates, date_kind=date_kind),
+            "close": [float(index) for index in range(len(dates))],
+        }
+    )
+    store = AssetStore(root=tmp_path)
+    stored = store.write_frame(f"price_history/{subject}.parquet", frame)
+    register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject=subject,
+        stored=stored,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    return store
+
+
+@pytest.mark.parametrize("date_kind", ["date", "datetime", "utf8"])
+def test_price_frame_with_diagnostics_matches_price_frame_for_a_clean_frame(
+    tmp_path: Path,
+    date_kind: str,
+) -> None:
+    """No nulls, no future rows: the diagnostic frame is byte-identical to `price_frame`."""
+    dates: list[date | None] = [date(2024, 1, 1) + timedelta(days=index) for index in range(5)]
+    available_at = datetime(2024, 1, 5, tzinfo=UTC)
+    store = _register_diagnostics_asset(
+        tmp_path,
+        subject=f"CLEAN-{date_kind}",
+        dates=dates,
+        date_kind=date_kind,
+        available_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+
+    direct = asof.price_frame(provider="asof_diagnostics_test", subject=f"CLEAN-{date_kind}")
+    read = asof.price_frame_with_diagnostics(
+        provider="asof_diagnostics_test", subject=f"CLEAN-{date_kind}"
+    )
+
+    assert read.frame.equals(direct)
+    assert read.invalid_session_date_rows == 0
+    assert read.frame.height == 5
+
+
+@pytest.mark.parametrize("date_kind", ["date", "datetime", "utf8"])
+def test_price_frame_with_diagnostics_counts_only_null_session_dates(
+    tmp_path: Path,
+    date_kind: str,
+) -> None:
+    """A null-dated row is counted; a merely-future row is clipped but not counted."""
+    dates: list[date | None] = [
+        date(2024, 1, 1),
+        None,
+        date(2024, 1, 3),
+        None,
+        date(2024, 1, 5),
+        date(2024, 1, 20),  # after through_date: a normal clip, not an invalid row.
+    ]
+    available_at = datetime(2024, 1, 5, tzinfo=UTC)
+    subject = f"NULLMIX-{date_kind}"
+    store = _register_diagnostics_asset(
+        tmp_path, subject=subject, dates=dates, date_kind=date_kind, available_at=available_at
+    )
+    asof = AsOfData(available_at, store=store)
+
+    direct = asof.price_frame(provider="asof_diagnostics_test", subject=subject)
+    read = asof.price_frame_with_diagnostics(provider="asof_diagnostics_test", subject=subject)
+
+    assert read.invalid_session_date_rows == 2
+    assert read.frame.equals(direct)
+    assert set(read.frame["date"].to_list()) == {
+        date(2024, 1, 1),
+        date(2024, 1, 3),
+        date(2024, 1, 5),
+    }
+
+
+@pytest.mark.parametrize("date_kind", ["date", "datetime", "utf8"])
+def test_price_frame_with_diagnostics_counts_every_row_when_entirely_null(
+    tmp_path: Path,
+    date_kind: str,
+) -> None:
+    dates: list[date | None] = [None, None, None]
+    available_at = datetime(2024, 1, 5, tzinfo=UTC)
+    subject = f"ALLNULL-{date_kind}"
+    store = _register_diagnostics_asset(
+        tmp_path, subject=subject, dates=dates, date_kind=date_kind, available_at=available_at
+    )
+    asof = AsOfData(available_at, store=store)
+
+    direct = asof.price_frame(provider="asof_diagnostics_test", subject=subject)
+    read = asof.price_frame_with_diagnostics(provider="asof_diagnostics_test", subject=subject)
+
+    assert read.invalid_session_date_rows == 3
+    assert read.frame.height == 0
+    assert read.frame.equals(direct)
+
+
+@pytest.mark.parametrize("date_kind", ["date", "datetime", "utf8"])
+def test_price_frame_with_diagnostics_future_only_rows_are_clipped_not_counted(
+    tmp_path: Path,
+    date_kind: str,
+) -> None:
+    dates: list[date | None] = [date(2024, 1, 10), date(2024, 1, 11)]
+    available_at = datetime(2024, 1, 5, tzinfo=UTC)
+    subject = f"FUTUREONLY-{date_kind}"
+    store = _register_diagnostics_asset(
+        tmp_path, subject=subject, dates=dates, date_kind=date_kind, available_at=available_at
+    )
+    asof = AsOfData(available_at, store=store)
+
+    read = asof.price_frame_with_diagnostics(provider="asof_diagnostics_test", subject=subject)
+
+    assert read.invalid_session_date_rows == 0
+    assert read.frame.height == 0
+
+
+def test_price_frame_with_diagnostics_missing_date_column_fails_explicitly(tmp_path: Path) -> None:
+    frame = pl.DataFrame({"close": [1.0, 2.0]})
+    available_at = datetime(2024, 1, 1, tzinfo=UTC)
+    store = AssetStore(root=tmp_path)
+    stored = store.write_frame("price_history/DIAGNODATECOL.parquet", frame)
+    register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject="DIAGNODATECOL",
+        stored=stored,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+
+    with pytest.raises(PriceFrameSchemaError, match="no 'date' column"):
+        asof.price_frame(provider="asof_diagnostics_test", subject="DIAGNODATECOL")
+    with pytest.raises(PriceFrameSchemaError, match="no 'date' column"):
+        asof.price_frame_with_diagnostics(provider="asof_diagnostics_test", subject="DIAGNODATECOL")
+
+
+def test_price_frame_with_diagnostics_unsupported_date_dtype_fails_explicitly(
+    tmp_path: Path,
+) -> None:
+    frame = pl.DataFrame({"date": [20240101, 20240102], "close": [1.0, 2.0]})
+    available_at = datetime(2024, 1, 2, tzinfo=UTC)
+    store = AssetStore(root=tmp_path)
+    stored = store.write_frame("price_history/DIAGBADDTYPE.parquet", frame)
+    register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject="DIAGBADDTYPE",
+        stored=stored,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+
+    with pytest.raises(PriceFrameSchemaError, match="unsupported dtype"):
+        asof.price_frame(provider="asof_diagnostics_test", subject="DIAGBADDTYPE")
+    with pytest.raises(PriceFrameSchemaError, match="unsupported dtype"):
+        asof.price_frame_with_diagnostics(provider="asof_diagnostics_test", subject="DIAGBADDTYPE")
+
+
+def test_price_frame_with_diagnostics_malformed_non_null_strings_fail_explicitly(
+    tmp_path: Path,
+) -> None:
+    """A malformed *non-null* string still raises; `price_frame` does not start rejecting nulls."""
+    frame = pl.DataFrame({"date": ["not-a-date", None, "2024-01-03"], "close": [1.0, 2.0, 3.0]})
+    available_at = datetime(2024, 1, 3, tzinfo=UTC)
+    store = AssetStore(root=tmp_path)
+    stored = store.write_frame("price_history/DIAGBADSTRINGS.parquet", frame)
+    register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject="DIAGBADSTRINGS",
+        stored=stored,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+
+    with pytest.raises(PriceFrameSchemaError, match="could not be parsed"):
+        asof.price_frame(provider="asof_diagnostics_test", subject="DIAGBADSTRINGS")
+    with pytest.raises(PriceFrameSchemaError, match="could not be parsed"):
+        asof.price_frame_with_diagnostics(
+            provider="asof_diagnostics_test", subject="DIAGBADSTRINGS"
+        )
+
+
+def test_price_frame_with_diagnostics_returns_the_price_frame_read_dataclass(
+    tmp_path: Path,
+) -> None:
+    dates = [date(2024, 1, 1) + timedelta(days=index) for index in range(3)]
+    available_at = datetime(2024, 1, 3, tzinfo=UTC)
+    store = _register_diagnostics_asset(
+        tmp_path, subject="DATACLASS", dates=dates, date_kind="date", available_at=available_at
+    )
+
+    read = AsOfData(available_at, store=store).price_frame_with_diagnostics(
+        provider="asof_diagnostics_test", subject="DATACLASS"
+    )
+
+    assert isinstance(read, PriceFrameRead)
+    assert isinstance(read.asset, DataAsset)
+    assert read.asset.subject == "DATACLASS"
+    assert isinstance(read.frame, pl.DataFrame)
+    assert isinstance(read.invalid_session_date_rows, int)
+
+
+def test_price_frame_with_diagnostics_selects_once_and_returns_that_exact_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hypothetical later vintage cannot separate frame bytes from provenance.
+
+    The selector alternates between two eligible immutable assets. A second
+    selection would therefore return ``newer``; the diagnostics read must make
+    only one selection, read ``selected``'s path, and return ``selected``.
+    """
+    available_at = datetime(2024, 1, 3, tzinfo=UTC)
+    store = AssetStore(root=tmp_path)
+    selected_stored = store.write_frame(
+        "price_history/SELECT-ONCE-a.parquet",
+        pl.DataFrame(
+            {
+                "date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [1.0, 2.0, 3.0],
+            }
+        ),
+    )
+    selected = register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject="SELECT-ONCE",
+        stored=selected_stored,
+        retrieved_at=available_at - timedelta(minutes=1),
+        available_at=available_at - timedelta(minutes=1),
+    )
+    newer_stored = store.write_frame(
+        "price_history/SELECT-ONCE-b.parquet",
+        pl.DataFrame(
+            {
+                "date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0, 30.0],
+            }
+        ),
+    )
+    newer = register_asset(
+        provider="asof_diagnostics_test",
+        kind="price_history",
+        subject="SELECT-ONCE",
+        stored=newer_stored,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+    selections: list[str] = []
+
+    def alternating_selector(*, provider: str, kind: str, subject: str) -> DataAsset:
+        assert (provider, kind, subject) == (
+            "asof_diagnostics_test",
+            "price_history",
+            "SELECT-ONCE",
+        )
+        selections.append(subject)
+        return selected if len(selections) == 1 else newer
+
+    monkeypatch.setattr(asof, "latest_asset", alternating_selector)
+
+    read = asof.price_frame_with_diagnostics(
+        provider="asof_diagnostics_test",
+        subject="SELECT-ONCE",
+    )
+
+    assert selections == ["SELECT-ONCE"]
+    assert read.asset == selected
+    assert read.asset != newer
+    assert read.frame["close"].to_list() == [1.0, 2.0, 3.0]
+
+
+# ---------------------------------------------------------------------------
+# Explicit immutable-vintage replay.
+# ---------------------------------------------------------------------------
+
+
+def _explicit_price_asset(
+    store: AssetStore,
+    *,
+    path: str,
+    subject: str,
+    frame: pl.DataFrame,
+    available_at: datetime,
+    retrieved_at: datetime | None = None,
+    kind: str = "price_history",
+) -> DataAsset:
+    stored = store.write_frame(path, frame)
+    return register_asset(
+        provider="asof_explicit_asset_test",
+        kind=kind,
+        subject=subject,
+        stored=stored,
+        available_at=available_at,
+        retrieved_at=retrieved_at or available_at,
+    )
+
+
+def test_explicit_price_asset_read_never_reselects_a_newer_vintage_and_clips_rows(
+    tmp_path: Path,
+    django_assert_num_queries,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = AssetStore(tmp_path)
+    subject = "EXACT-VINTAGE"
+    old = _explicit_price_asset(
+        store,
+        path="price_history/exact-vintage-a.parquet",
+        subject=subject,
+        frame=pl.DataFrame(
+            {
+                "date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 5),
+                ],
+                "close": [1.0, 2.0, 500.0],
+            }
+        ),
+        available_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
+    )
+    newer = _explicit_price_asset(
+        store,
+        path="price_history/exact-vintage-b.parquet",
+        subject=subject,
+        frame=pl.DataFrame(
+            {
+                "date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0, 30.0],
+            }
+        ),
+        available_at=datetime(2024, 1, 3, 12, tzinfo=UTC),
+    )
+    asof = AsOfData(datetime(2024, 1, 3, 18, tzinfo=UTC), store=store)
+
+    assert (
+        asof.latest_asset(
+            provider="asof_explicit_asset_test",
+            kind="price_history",
+            subject=subject,
+        )
+        == newer
+    )
+    local_reads: list[str] = []
+    original_read_bytes = store.read_bytes
+
+    def recording_read_bytes(relative_path: str) -> bytes:
+        local_reads.append(relative_path)
+        return original_read_bytes(relative_path)
+
+    def forbidden_read_frame(_relative_path: str) -> pl.DataFrame:
+        raise AssertionError("verified exact-asset reads must parse the in-memory payload")
+
+    monkeypatch.setattr(store, "read_bytes", recording_read_bytes)
+    monkeypatch.setattr(store, "read_frame", forbidden_read_frame)
+    with django_assert_num_queries(0):
+        read = asof.price_frame_for_asset_with_diagnostics(
+            asset=old,
+            through_date=date(2024, 1, 3),
+        )
+
+    assert read.asset == old
+    assert read.frame["date"].to_list() == [date(2024, 1, 1), date(2024, 1, 2)]
+    assert read.frame["close"].to_list() == [1.0, 2.0]
+    assert read.invalid_session_date_rows == 0
+    assert local_reads == [old.relative_path]
+
+
+def test_explicit_price_asset_read_rejects_checksum_mismatched_valid_parquet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = AssetStore(tmp_path)
+    asset = _explicit_price_asset(
+        store,
+        path="price_history/explicit-checksum-mismatch.parquet",
+        subject="EXPLICIT-CHECKSUM-MISMATCH",
+        frame=pl.DataFrame(
+            {
+                "date": [date(2024, 1, 1), date(2024, 1, 2)],
+                "close": [1.0, 2.0],
+            }
+        ),
+        available_at=datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    target = store.resolve(asset.relative_path)
+    pl.DataFrame(
+        {
+            "date": [date(2024, 1, 1), date(2024, 1, 2)],
+            "close": [1.0, 3.0],
+        }
+    ).write_parquet(target)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() != asset.sha256
+
+    local_reads: list[str] = []
+    original_read_bytes = store.read_bytes
+
+    def recording_read_bytes(relative_path: str) -> bytes:
+        local_reads.append(relative_path)
+        return original_read_bytes(relative_path)
+
+    def forbidden_read_frame(_relative_path: str) -> pl.DataFrame:
+        raise AssertionError("checksum verification must not reopen the asset path")
+
+    monkeypatch.setattr(store, "read_bytes", recording_read_bytes)
+    monkeypatch.setattr(store, "read_frame", forbidden_read_frame)
+
+    with pytest.raises(PriceFrameChecksumMismatchError) as raised:
+        AsOfData(
+            datetime(2024, 1, 2, tzinfo=UTC),
+            store=store,
+        ).price_frame_for_asset_with_diagnostics(asset=asset)
+
+    assert local_reads == [asset.relative_path]
+    assert asset.relative_path not in str(raised.value)
+    assert str(store.root) not in str(raised.value)
+
+
+def test_explicit_price_asset_read_preserves_null_date_diagnostics(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path)
+    asset = _explicit_price_asset(
+        store,
+        path="price_history/explicit-null-date.parquet",
+        subject="EXPLICIT-NULL",
+        frame=pl.DataFrame(
+            {
+                "date": pl.Series(
+                    "date",
+                    [date(2024, 1, 2), None, date(2024, 1, 1), date(2024, 1, 8)],
+                    dtype=pl.Date,
+                ),
+                "close": [2.0, 99.0, 1.0, 8.0],
+            }
+        ),
+        available_at=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+
+    read = AsOfData(
+        datetime(2024, 1, 3, tzinfo=UTC), store=store
+    ).price_frame_for_asset_with_diagnostics(asset=asset)
+
+    assert read.invalid_session_date_rows == 1
+    assert read.frame["date"].to_list() == [date(2024, 1, 1), date(2024, 1, 2)]
+
+
+def test_explicit_price_asset_read_rejects_malformed_non_null_dates(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path)
+    asset = _explicit_price_asset(
+        store,
+        path="price_history/explicit-malformed-date.parquet",
+        subject="EXPLICIT-MALFORMED",
+        frame=pl.DataFrame(
+            {
+                "date": ["2024-01-01", None, "not-a-date"],
+                "close": [1.0, 2.0, 3.0],
+            }
+        ),
+        available_at=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+
+    with pytest.raises(PriceFrameSchemaError, match="could not be parsed"):
+        AsOfData(
+            datetime(2024, 1, 3, tzinfo=UTC), store=store
+        ).price_frame_for_asset_with_diagnostics(asset=asset)
+
+
+def test_explicit_price_asset_read_rejects_wrong_kind_and_asof_violations(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path)
+    frame = pl.DataFrame({"date": [date(2024, 1, 1)], "close": [1.0]})
+    wrong_kind = _explicit_price_asset(
+        store,
+        path="price_history/explicit-wrong-kind.parquet",
+        subject="WRONG-KIND",
+        frame=frame,
+        available_at=datetime(2024, 1, 1, tzinfo=UTC),
+        kind="raw_fundamentals",
+    )
+    late_available = _explicit_price_asset(
+        store,
+        path="price_history/explicit-late-available.parquet",
+        subject="LATE-AVAILABLE",
+        frame=frame,
+        available_at=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+    late_retrieved = _explicit_price_asset(
+        store,
+        path="price_history/explicit-late-retrieved.parquet",
+        subject="LATE-RETRIEVED",
+        frame=frame,
+        available_at=datetime(2024, 1, 1, tzinfo=UTC),
+        retrieved_at=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+    valid = _explicit_price_asset(
+        store,
+        path="price_history/explicit-valid.parquet",
+        subject="VALID",
+        frame=frame,
+        available_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    asof = AsOfData(datetime(2024, 1, 2, tzinfo=UTC), store=store)
+
+    with pytest.raises(ValueError, match="expected 'price_history'"):
+        asof.price_frame_for_asset_with_diagnostics(asset=wrong_kind)
+    with pytest.raises(ValueError, match="available_at after"):
+        asof.price_frame_for_asset_with_diagnostics(asset=late_available)
+    with pytest.raises(ValueError, match="retrieved_at after"):
+        asof.price_frame_for_asset_with_diagnostics(asset=late_retrieved)
+    with pytest.raises(ValueError, match="through_date .* cannot be after"):
+        asof.price_frame_for_asset_with_diagnostics(
+            asset=valid,
+            through_date=date(2024, 1, 3),
+        )
+
+
+def test_explicit_price_asset_read_fails_for_missing_or_escaping_files(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path)
+    available_at = datetime(2024, 1, 2, tzinfo=UTC)
+    missing = _explicit_price_asset(
+        store,
+        path="price_history/explicit-missing.parquet",
+        subject="MISSING",
+        frame=pl.DataFrame({"date": [date(2024, 1, 1)], "close": [1.0]}),
+        available_at=available_at,
+    )
+    store.resolve(missing.relative_path).unlink()
+    escaping = DataAsset.objects.create(
+        provider="asof_explicit_asset_test",
+        kind="price_history",
+        subject="ESCAPING",
+        relative_path="../escaping.parquet",
+        sha256="f" * 64,
+        available_at=available_at,
+        retrieved_at=available_at,
+    )
+    asof = AsOfData(available_at, store=store)
+
+    with pytest.raises(FileNotFoundError):
+        asof.price_frame_for_asset_with_diagnostics(asset=missing)
+    with pytest.raises(ValueError, match="escapes STANSTOCK_DATA_DIR"):
+        asof.price_frame_for_asset_with_diagnostics(asset=escaping)

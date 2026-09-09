@@ -273,10 +273,66 @@ This command validates settings; it does not prove the database is reachable.
   refusal, same-day snapshot deduplication, snapshot database immutability,
   split warnings, opportunity-policy highlighting, exact price-band
   boundaries, neutral band filtering, Under $10 promotion/sample exclusion,
-  released-foundation versus unreleased-control disclosure, complete
+  released-foundation versus released-shadow-diagnostic versus
+  still-unreleased-control disclosure, the three Under-$10 detail panel states
+  (assessed, withheld, not assessed) with explicit zero rendering, complete
   stock-detail prediction history, current activation-context labels, ETF
   sample exclusion, supported-SPY holding selection, and preservation of
   existing holdings;
+- `us-under10-shadow-v1` shadow diagnostics: the four-state solvency partition
+  with exact Decimal boundaries (`D == C`, `A == L`, `F == 0`, an exact
+  four-quarter runway, and burn just above/below cash at eight decimals),
+  adverse-versus-missing separation, each debt component independently missing
+  versus explicitly zero, non-positive current liabilities, instant-period
+  mismatch, the 200/201-day and future-date boundaries, TTM precedence over the
+  annual fallback, proven versus deferred same-accession corrections with
+  rejected evidence still referenced, exact canonical-concept/fact-provider/
+  source-asset-provider SEC qualification across full-analysis reuse and
+  price-only query paths, foreign and provider-mismatched lineage exclusion,
+  cutoff-safe withholding that ignores unqualified late assets and never raises,
+  raw 252-session window validation (251/252 boundary, duplicate dates, unsorted
+  input, missing columns, invalid closes/volumes, non-finite products, zero
+  volume as valid data, split equivalence), basis and staleness refusals that
+  never invent metadata, Basic versus generic split-capability refusals with no
+  verified branch, the provider-qualified literal `policy_hash` pin, canonical
+  payload and assessment-checksum stability, and fixed false activation
+  summaries in every branch;
+- the stock-detail Under-$10 reader's own validation matrix: exact permanent
+  listing id, run target date, data cutoff (bound to exact equality, not
+  merely at or before), reference close, and currency binding, plus the
+  exact immutable price-asset UUID *and* content checksum anchored to the
+  original decision-prediction manifest and parent analysis provenance. The
+  matrix rejects a whole-`data_quality`-blob transplant between two genuine
+  same-date/same-price/same-cutoff/same-currency candidates with different
+  listings, price assets, and solvency evidence in both directions, a
+  same-UUID/different-checksum price asset on either side, and a
+  missing/ambiguous parent source-asset anchor. It independently replays the
+  accepted builder from the exact cutoff-clipped price asset and
+  provider-qualified SEC lineage, rejecting recomputed-checksum substitutions
+  of same-cardinality unrelated facts/assets, an altered finite liquidity
+  median, an impossible one-fact complete claim, and changed operands that
+  happen to preserve the same classification. The accidental-corruption
+  checksum remains a separate layer (a stale hash alone is rejected);
+  positively enumerated recognized-reason tables reject JSON list/dict reason
+  values without raising in direct validation and authenticated GETs; and
+  non-dict `data_quality` never raises;
+- Under-$10 pipeline integration: candidate detection on the rounded
+  decision-run reference close (including the $10 rounding boundary and non-USD
+  refusal), zero additional SEC queries for a non-candidate, one added SEC query
+  per candidate, at most one provider-plan lookup per run across several
+  candidates, both `analyze_listing` and `analyze_snapshot` entry points, and a
+  true `analyze_listing` -> committed database reload -> authenticated detail
+  render proving the stored values survive only when exact evidence replay
+  succeeds. Tests also prove bounded queries/file reads, no GET writes or
+  provider access, no rewrite or backfill of existing analyses, and no shadow
+  SEC asset entering `computation.source_assets`,
+  `data_quality["source_assets"]`, or any prediction manifest, calculation, or
+  source mode. A differential suite
+  executes the actual base revision's `research/service.py`
+  (`65314f87fe0eb8adbb05d35d3874c22c736ae54c`) against the same deterministic
+  synthetic fixture and proves non-candidate payloads are equal in full,
+  candidate payloads are equal after removing only `under10_assessment`, and
+  prediction payloads/manifests plus opportunity qualification are unchanged;
 - immutable/idempotent external deposits, side-effect-free monthly previews,
   70/30 total-NAV arithmetic, fractional and whole-share rounding, residual
   cash, at-most-one explicitly short-horizon satellite, Under-$10 allocation

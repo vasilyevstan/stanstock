@@ -144,32 +144,26 @@ def build_medium_forecast_panel(
     session_index = {session: index for index, session in enumerate(calendar_sessions)}
     calendar_hash = _hash_json([session.isoformat() for session in calendar_sessions])
 
-    benchmark_asset = asof.latest_asset(
-        provider=provider,
-        kind="price_history",
-        subject=benchmark_subject,
-    )
-    _validate_price_basis(benchmark_asset)
-    benchmark_frame = asof.price_frame(
+    benchmark_read = asof.price_frame_with_diagnostics(
         provider=provider,
         subject=benchmark_subject,
         through_date=target_date,
     )
-    benchmark_prices = _price_observations(benchmark_frame)
+    _validate_price_basis(benchmark_read.asset)
+    benchmark_prices = _price_observations(benchmark_read.frame)
 
-    source_assets = [benchmark_asset]
+    source_assets = [benchmark_read.asset]
     listing_inputs: list[tuple[Listing, DataAsset, dict[date, tuple[float, float | None]]]] = []
     for listing in sorted(listings, key=lambda item: str(item.pk)):
         subject = listing.provider_symbol or listing.ticker
-        asset = asof.latest_asset(provider=provider, kind="price_history", subject=subject)
-        _validate_price_basis(asset)
-        frame = asof.price_frame(
+        read = asof.price_frame_with_diagnostics(
             provider=provider,
             subject=subject,
             through_date=target_date,
         )
-        source_assets.append(asset)
-        listing_inputs.append((listing, asset, _price_observations(frame)))
+        _validate_price_basis(read.asset)
+        source_assets.append(read.asset)
+        listing_inputs.append((listing, read.asset, _price_observations(read.frame)))
 
     rows: list[dict[str, object]] = []
     for horizon in MEDIUM_FORECAST_HORIZONS:

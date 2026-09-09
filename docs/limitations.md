@@ -104,12 +104,61 @@ See `docs/operations.md` for the destructive termination procedure.
   long-v2 diluted-share/per-share continuity assessment with withholding (not
   post-period event verification), and the deterministic 3-year/5-year formula
   engine with missing-input withholding; none establishes candidate
-  qualification. Unreleased activation controls are a dedicated
-  solvency/cash-runway policy, a versioned Under-$10-specific dollar-liquidity
-  policy, and a verified split/reverse-split event source. Previously issued
-  immutable long-horizon ledger evidence remains visible, with its original
-  horizon and evidence role preserved, and is labeled with the current
-  activation context.
+  qualification. The solvency/cash-runway and 252-session dollar-liquidity
+  capabilities are released as unactivated shadow diagnostics (see below). The
+  only still-unreleased activation control is a verified split/reverse-split
+  event source. Previously issued immutable long-horizon ledger evidence
+  remains visible, with its original horizon and evidence role preserved, and
+  is labeled with the current activation context.
+- The `us-under10-shadow-v1` assessment is diagnostic only and deliberately
+  conservative. It is recorded on **newly created** qualifying analyses and
+  nothing is backfilled, so an absent `data_quality["under10_assessment"]` key
+  means the analysis was never assessed -- not that it failed. Because a
+  missing debt component is missing rather than zero, all five balance-sheet
+  inputs must share one period end, and a metric older than 200 days is stale,
+  many candidates land in `insufficient_evidence`. That is the intended honest
+  answer, not a defect. “Assessed SEC facts” includes only fixed canonical
+  concepts whose fact row and source asset both identify SEC; foreign or
+  provider-mismatched rows are excluded from calculation, lineage, and the
+  on-time SEC asset cutoff check.
+- The Under-$10 dollar-volume diagnostic has **no threshold** and can never
+  pass an activation gate on its own. Split-only adjustment is proven for
+  Twelve Data prices but not for its reported volume, so the metric's basis is
+  recorded as `provider_reported_unverified_split_basis` even when a number is
+  computed. A synthetic demo price asset carries no reviewed basis metadata at
+  all, so the diagnostic is withheld rather than estimated.
+- Verified split and reverse-split evidence is unavailable for every provider.
+  The recorded Twelve Data Basic plan is not entitled to a corporate-actions
+  feed, and no reviewed corporate-actions source is integrated for any other
+  provider; a different plan alone would not supply one. Split events are never
+  inferred from adjusted prices, share-count discontinuities, or SEC facts, so
+  Under-$10 candidate activation cannot pass in this version.
+- The analysis pipeline persists the Under-$10 assessment in
+  `StockAnalysis.data_quality`, but that JSON field is mutable and has no
+  model or database immutability guard. Only protected evidence such as
+  `Prediction`, `DataAsset`, and `FundamentalFact` supplies the independent
+  replay boundary. The shadow assessment's `assessment_hash` and
+  `policy_hash` are recomputation checksums for a canonical payload --
+  corruption detection, not signatures or proof that the row was never
+  modified.
+- The stock-detail reader only renders a stored assessment after binding it
+  exactly to its parent decision: the permanent `Listing.id`, the parent
+  analysis run's own exact target date and data cutoff, its exact immutable
+  decision-run reference close and currency (cross-checked against the
+  immutable original decision predictions), and the exact immutable
+  price-asset UUID *and* content checksum recorded alongside it. A matching
+  checksum alone never substitutes for any of these -- two unrelated
+  candidates can share every other field on the same decision date, and
+  copying an entire genuine `data_quality` blob from one analysis to another
+  moves every other internal anchor along with it. Before display, the reader
+  replays the accepted builder from the original immutable decision-prediction
+  provenance, the exact cutoff-clipped price asset, and the exact
+  cutoff-qualified SEC facts. Only canonical equality with the stored
+  solvency and liquidity blocks renders; missing, unreadable, or mismatched
+  evidence is withheld and never written back.
+- The recorded provider plan describes capability context at assessment
+  generation time. It is not evidence of a historical entitlement, and the raw
+  plan label is never persisted into the assessment.
 - Sample-portfolio return is current total value versus starting capital. It
   is a split-adjusted price return excluding dividends. A possible split
   suppresses the headline return until its quantity basis is reviewed.
