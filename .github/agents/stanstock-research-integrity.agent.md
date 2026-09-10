@@ -16,6 +16,7 @@ Read:
 
 - `CONTRIBUTING.md`;
 - `.github/agents/README.md`;
+- `docs/change-planning.md` — applicable change-planning contract.
 - `docs/review-checklists/research-integrity.md`;
 - `LEARNINGS.md`;
 - the architect/simplifier handoff, developer handoff, and exact diff;

@@ -9,7 +9,7 @@ or merge authority.
 | Agent | Role |
 |---|---|
 | `stanstock-architect` | Read-only. Turns an accepted request into a bounded, dependency-ordered implementation contract. |
-| `stanstock-simplifier` | Read-only. One pass for ordinary changes; three sealed distinct-model passes plus synthesis for material changes. |
+| `stanstock-simplifier` | Read-only. Required for material changes as three sealed distinct-model passes plus synthesis; optional user-invoked simplification is outside the ordinary chain. |
 | `stanstock-developer` | Bounded full-stack editor (`src/`, `templates/`, `static/`, `tests/`). No git or deploy authority. |
 | `stanstock-research-integrity` | Read-only. Reviews provider rights/provenance, as-of/look-ahead correctness, empirical forecast panels, SEC fact semantics, methodology, outcomes, and simulations. |
 | `stanstock-critic-tester` | Read-only. Adversarial diff review plus test execution, using the security/UX/contracts/operations checklists. |
@@ -70,6 +70,7 @@ from_agent: <agent-name>
 to_agent: <agent-name>
 status: <agent's exact namespaced status>
 change_class: ordinary|data-quant|material
+contract_revision: <exact-or-"N/A: factual reason">
 base_sha: <exact-or-"no commits yet">
 head_sha: <exact-or-null>
 files_changed: []
@@ -81,6 +82,10 @@ tests:
   exit_codes: []
 risks: []
 ```
+
+`docs/change-planning.md` is the canonical proportional pre-action planning
+policy. It defines when `contract_revision` is required, where filled evidence
+lives, and how drift is handled. Ordinary work has no planning artifact.
 
 Never put secrets, `.env` values, provider credentials, private financial
 data, or session/workspace paths in a handoff.
@@ -244,7 +249,7 @@ they do not act on the repository beyond their stated read/edit scope.
 | Agent | Statuses |
 |---|---|
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
-| Simplifier (ordinary) | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED` |
+| Simplifier (optional user-invoked) | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED` |
 | Simplifier (independent pass) | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
 | Simplifier (synthesis) | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |
 | Developer | `IMPLEMENTED_LOCAL`, `BLOCKED` |
