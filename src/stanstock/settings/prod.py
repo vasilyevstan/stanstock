@@ -8,7 +8,7 @@ from .base import *  # noqa: F403
 
 DEBUG = False
 
-if not os.getenv("DATABASE_URL"):
+if not os.getenv("DATABASE_URL", "").strip():
     raise ImproperlyConfigured("DATABASE_URL is required for production settings")
 
 SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", True)  # noqa: F405
