@@ -20,9 +20,11 @@ LAUNCH_AGENT_FILENAME = f"{LAUNCH_AGENT_LABEL}.plist"
 SCHEDULED_REFRESH_MODULE = "stanstock.core.scheduled_refresh_entrypoint"
 SCHEDULED_WEEKDAYS = frozenset({1, 2, 3, 4, 5})
 LAUNCHD_WEEKDAYS = (2, 3, 4, 5, 6)
-SCHEDULE_HOUR = 2
-SCHEDULE_MINUTE = 0
+SCHEDULE_HOUR = 3
+SCHEDULE_MINUTE = 30
+SCHEDULE_TIME_LABEL = f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}"
 VALIDATION_DAYS = 400
+_REQUIRED_TRIGGER_KEYS = frozenset({"Weekday", "Hour", "Minute"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +107,8 @@ def validate_schedule(
         round_trip = scheduled_local.astimezone(UTC).astimezone(local_zone)
         if round_trip.replace(fold=scheduled_local.fold) != scheduled_local:
             raise ValueError(
-                f"02:00 does not exist or is ambiguous in {timezone_name} on "
-                f"{local_date.isoformat()}"
+                f"{SCHEDULE_TIME_LABEL} does not exist or is ambiguous in "
+                f"{timezone_name} on {local_date.isoformat()}"
             )
         scheduled_utc = scheduled_local.astimezone(UTC)
         target_session = calendar.date_to_session(
@@ -124,9 +126,10 @@ def validate_schedule(
         next_open = calendar.session_open(calendar.next_session(target_session)).to_pydatetime()
         if scheduled_utc < ready_at or scheduled_utc >= next_open:
             raise ValueError(
-                f"02:00 {timezone_name} is unsafe on {local_date.isoformat()}: "
-                "the invocation must be after the completed XNYS close publication "
-                "delay and before the next XNYS session opens."
+                f"{SCHEDULE_TIME_LABEL} {timezone_name} is unsafe on "
+                f"{local_date.isoformat()}: the invocation must be after the "
+                "completed XNYS close publication delay and before the next "
+                "XNYS session opens."
             )
 
         close_local = ready_at.astimezone(new_york) - timedelta(minutes=DEFAULT_CLOSE_DELAY_MINUTES)
@@ -257,18 +260,19 @@ def launch_agent_status(home: Path | None = None) -> dict[str, object]:
     plist_path, stdout_path, stderr_path = launch_agent_paths(home)
     current_timezone = detect_iana_timezone()
     installed = plist_path.is_file()
-    expected_timezone: str | None = None
-    schedule: object = None
+    payload: object = None
     if installed:
         with plist_path.open("rb") as handle:
             payload = plistlib.load(handle)
-        if isinstance(payload, dict):
-            metadata = payload.get("StanStockSchedule")
-            if isinstance(metadata, dict):
-                raw_timezone = metadata.get("timezone")
-                if isinstance(raw_timezone, str):
-                    expected_timezone = raw_timezone
-                schedule = metadata
+    expected_timezone, timezone_matches = (
+        _derive_timezone_status(payload, current_timezone=current_timezone)
+        if installed
+        else (None, False)
+    )
+    schedule_metadata = payload.get("StanStockSchedule") if isinstance(payload, dict) else None
+    installed_schedule_label, schedule_matches = (
+        _derive_installed_schedule(payload) if installed else (None, False)
+    )
     return {
         "installed": installed,
         "loaded": installed and _is_loaded() if sys.platform == "darwin" else False,
@@ -277,9 +281,157 @@ def launch_agent_status(home: Path | None = None) -> dict[str, object]:
         "stderr_path": str(stderr_path),
         "current_timezone": current_timezone,
         "expected_timezone": expected_timezone,
-        "timezone_matches": expected_timezone in {None, current_timezone},
-        "schedule": schedule,
+        "timezone_matches": timezone_matches,
+        "schedule": schedule_metadata if isinstance(schedule_metadata, dict) else None,
+        "installed_schedule_label": installed_schedule_label,
+        "expected_schedule_label": SCHEDULE_TIME_LABEL,
+        "schedule_matches": schedule_matches,
     }
+
+
+_WEEKDAY_NAMES = {
+    0: "Sunday",
+    1: "Monday",
+    2: "Tuesday",
+    3: "Wednesday",
+    4: "Thursday",
+    5: "Friday",
+    6: "Saturday",
+}
+
+
+def _as_plain_int(value: object) -> int | None:
+    """Return ``value`` as an int, rejecting bools (which are also ints)."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _describe_weekdays(weekdays: list[int]) -> str:
+    ordered = sorted(set(weekdays))
+    return ", ".join(_WEEKDAY_NAMES.get(day, f"weekday {day}") for day in ordered)
+
+
+def _metadata_consistent_with_triggers(
+    metadata: object,
+    *,
+    hour: int,
+    minute: int,
+    weekday_set: set[int],
+    weekday_count: int,
+) -> bool:
+    """Metadata is an optional display/consistency aid, never a certification.
+
+    Absence of metadata (or of a specific field within it) is not a failure;
+    a present-but-wrong-typed or present-but-mismatched value is.
+    """
+    if not isinstance(metadata, dict):
+        return True
+    if "hour" in metadata or "minute" in metadata:
+        raw_hour = _as_plain_int(metadata.get("hour"))
+        raw_minute = _as_plain_int(metadata.get("minute"))
+        if raw_hour is None or raw_minute is None or raw_hour != hour or raw_minute != minute:
+            return False
+    if "weekdays" in metadata:
+        raw_weekdays = metadata.get("weekdays")
+        if not isinstance(raw_weekdays, list) or not all(
+            _as_plain_int(day) is not None for day in raw_weekdays
+        ):
+            return False
+        if len(raw_weekdays) != weekday_count or set(raw_weekdays) != weekday_set:
+            return False
+    return True
+
+
+def _derive_installed_schedule(payload: object) -> tuple[str | None, bool]:
+    """Derive the actually-installed schedule from the authoritative
+    ``StartCalendarInterval`` trigger array -- never from the
+    ``StanStockSchedule`` display metadata, which cannot certify execution.
+
+    Requires exactly one trigger per weekday, all sharing one hour/minute;
+    missing, malformed, duplicate, extra, or mixed-time triggers -- or a
+    ``StanStockSchedule`` metadata block that disagrees with the derived
+    triggers -- all yield ``schedule_matches=False``. Never raises.
+    """
+    if not isinstance(payload, dict):
+        return None, False
+    triggers = payload.get("StartCalendarInterval")
+    if not isinstance(triggers, list) or not triggers:
+        return None, False
+
+    weekdays: list[int] = []
+    hours: set[int] = set()
+    minutes: set[int] = set()
+    for entry in triggers:
+        if not isinstance(entry, dict):
+            return None, False
+        if set(entry.keys()) != _REQUIRED_TRIGGER_KEYS:
+            # Any extra executable calendar key (e.g. Month, Day) changes when
+            # launchd actually fires; only an exact Weekday/Hour/Minute
+            # trigger can be safely described or certified.
+            return None, False
+        weekday = _as_plain_int(entry.get("Weekday"))
+        hour = _as_plain_int(entry.get("Hour"))
+        minute = _as_plain_int(entry.get("Minute"))
+        if weekday is None or hour is None or minute is None:
+            return None, False
+        if not (0 <= weekday <= 7) or not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return None, False
+        weekdays.append(0 if weekday == 7 else weekday)
+        hours.add(hour)
+        minutes.add(minute)
+
+    if len(weekdays) != len(set(weekdays)):
+        return None, False  # duplicate weekday trigger: ambiguous execution
+    if len(hours) != 1 or len(minutes) != 1:
+        return None, False  # mixed-time triggers: no single safe label
+
+    hour = hours.pop()
+    minute = minutes.pop()
+    time_label = f"{hour:02d}:{minute:02d}"
+    weekday_set = set(weekdays)
+    exact_weekdays = weekday_set == set(LAUNCHD_WEEKDAYS) and len(weekdays) == len(LAUNCHD_WEEKDAYS)
+    weekday_description = "Tuesday-Saturday" if exact_weekdays else _describe_weekdays(weekdays)
+    label = f"{time_label} ({weekday_description})"
+
+    triggers_match = exact_weekdays and hour == SCHEDULE_HOUR and minute == SCHEDULE_MINUTE
+    metadata_consistent = _metadata_consistent_with_triggers(
+        payload.get("StanStockSchedule"),
+        hour=hour,
+        minute=minute,
+        weekday_set=weekday_set,
+        weekday_count=len(weekdays),
+    )
+    return label, triggers_match and metadata_consistent
+
+
+def _derive_timezone_status(payload: object, *, current_timezone: str) -> tuple[str | None, bool]:
+    """Require an exact three-way match: metadata timezone, the runtime
+    ``STANSTOCK_SCHEDULE_TIMEZONE`` environment value, and the machine's
+    currently detected timezone. Missing, blank, non-string, or conflicting
+    values fail closed (``timezone_matches=False``) rather than crashing or
+    defaulting to a match.
+    """
+    if not isinstance(payload, dict):
+        return None, False
+    metadata = payload.get("StanStockSchedule")
+    if not isinstance(metadata, dict):
+        return None, False
+    raw_timezone = metadata.get("timezone")
+    if not isinstance(raw_timezone, str) or not raw_timezone.strip():
+        return None, False
+    expected_timezone = raw_timezone
+
+    environment = payload.get("EnvironmentVariables")
+    runtime_timezone = (
+        environment.get("STANSTOCK_SCHEDULE_TIMEZONE") if isinstance(environment, dict) else None
+    )
+    if not isinstance(runtime_timezone, str) or not runtime_timezone.strip():
+        return expected_timezone, False
+    if runtime_timezone != expected_timezone:
+        return expected_timezone, False
+
+    return expected_timezone, expected_timezone == current_timezone
 
 
 def validation_details(validation: ScheduleValidation) -> dict[str, object]:

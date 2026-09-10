@@ -114,7 +114,7 @@ Treat each of these as an actionable stall signal:
 - CI, a deployment/environment gate, or a CLI-owned approval is pending
   without inspection;
 - a dirty development worktree approaches an operational deadline such as
-  the next 02:00 scheduled refresh, which requires a clean committed revision.
+  the next scheduled refresh, which requires a clean committed revision.
 
 On a stall signal, inspect the current repository and task ledger, record the
 specific blocker, and take the smallest progress-making action: read the

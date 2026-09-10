@@ -15,6 +15,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
+from stanstock.core.launchd import SCHEDULE_TIME_LABEL
 from stanstock.data.models import (
     Company,
     DataAsset,
@@ -58,6 +59,9 @@ def scheduler_status(monkeypatch: pytest.MonkeyPatch) -> None:
             "loaded": True,
             "timezone_matches": True,
             "expected_timezone": "America/New_York",
+            "installed_schedule_label": f"{SCHEDULE_TIME_LABEL} (Tuesday-Saturday)",
+            "expected_schedule_label": SCHEDULE_TIME_LABEL,
+            "schedule_matches": True,
         },
     )
 

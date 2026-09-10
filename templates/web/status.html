@@ -93,25 +93,33 @@
       </article>
       <article class="status-card">
         <div class="status-line">
-          <span class="status-dot {% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
+          <span class="status-dot {% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches and scheduler.schedule_matches %}status-ok{% else %}status-waiting{% endif %}" aria-hidden="true"></span>
           <h3>Daily automation</h3>
         </div>
         <p>
           {% if scheduler.error %}
             Scheduler status is unavailable: {{ scheduler.error }}
           {% elif scheduler.installed %}
-            Configured for 02:00 local time Tuesday-Saturday.
+            {% if scheduler.installed_schedule_label %}
+              Installed for {{ scheduler.installed_schedule_label }} local time.
+            {% else %}
+              The installed schedule could not be read.
+            {% endif %}
             {% if not scheduler.timezone_matches %}
-              The machine timezone changed; reinstall before the next run.
+              The machine timezone changed or does not match the installed schedule;
+              reinstall before the next run.
             {% elif not scheduler.loaded %}
               The LaunchAgent file exists but is not loaded.
+            {% elif not scheduler.schedule_matches %}
+              This does not match the expected {{ scheduler.expected_schedule_label }} local time
+              Tuesday-Saturday schedule; reinstall the LaunchAgent to update it.
             {% endif %}
           {% else %}
             The local post-market LaunchAgent is not installed.
           {% endif %}
         </p>
         <strong>
-          {% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches %}
+          {% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches and scheduler.schedule_matches %}
             Scheduled
           {% elif scheduler.installed %}
             Attention required

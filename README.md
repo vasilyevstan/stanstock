@@ -212,7 +212,7 @@ manual provider workflow succeeds:
 .venv/bin/python manage.py launchd_refresh status
 ```
 
-The LaunchAgent invokes one recoverable refresh at 02:00 local time
+The LaunchAgent invokes one recoverable refresh at 03:30 local time
 Tuesday-Saturday. Installation is refused unless that wall-clock schedule is
 after Twelve Data's publication delay and before the next XNYS opening across
 regular closes, early closes, and DST transitions. The ignored `.env` must be
@@ -220,6 +220,14 @@ owner-only (`chmod 600 .env`); its values are sourced by a private runner and
 never copied into the plist. A late sleep/wake invocation refuses automatic
 research-grade backdating. Remove the job with
 `.venv/bin/python manage.py launchd_refresh uninstall`.
+
+Install the LaunchAgent from a clean, committed checkout; the scheduled
+market child requires a clean Git worktree
+(`stanstock.core.revision.clean_git_revision`) and fails closed on local
+changes. If the primary development checkout is intentionally dirty, install
+the LaunchAgent from a separate clean runtime checkout instead, pointed at
+the same local SQLite database and `STANSTOCK_DATA_DIR` via
+`STANSTOCK_SQLITE_PATH` (see above).
 
 The Basic quota guard is 8 credits/minute and 800/day. The 100-symbol
 configuration uses approximately 103 credits per full run (two catalogs, 100
@@ -277,6 +285,16 @@ The direct development path uses SQLite unless `DATABASE_URL` is set. Docker
 Compose uses PostgreSQL and durable named volumes for the database and
 `STANSTOCK_DATA_DIR`. Development Compose runs the idempotent synthetic demo
 refresh automatically when `STANSTOCK_DEMO_MODE=true`.
+
+A separate clean runtime checkout (for example, one dedicated to the
+LaunchAgent schedule while the primary development checkout stays
+intentionally dirty for in-progress work) can share the same local SQLite
+database and `STANSTOCK_DATA_DIR` as the primary checkout by setting
+`STANSTOCK_SQLITE_PATH` to an absolute path. Leave `DATABASE_URL` unset when
+using `STANSTOCK_SQLITE_PATH`; the two are mutually exclusive and setting
+both fails closed at startup rather than silently picking one. A relative
+path is also rejected; `STANSTOCK_SQLITE_PATH` must already be absolute after
+`~` expansion.
 
 Evaluate pending predictions through an explicit observed-data cutoff:
 

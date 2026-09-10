@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import plistlib
 import sys
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -13,6 +14,12 @@ from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from stanstock.core.launchd import (
+    LAUNCH_AGENT_LABEL,
+    SCHEDULE_TIME_LABEL,
+    launch_agent_paths,
+    launch_agent_status,
+)
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.etfs import sync_investable_spy_from_asset
 from stanstock.data.models import (
@@ -1236,6 +1243,241 @@ def test_provider_backed_run_suppresses_synthetic_banner(
     assert "Twelve Data" in market_page.content.decode()
     assert "twelve_data" not in market_page.content.decode()
     assert "ZZHIDDEN" not in market_page.content.decode()
+
+
+@pytest.mark.django_db
+def test_status_page_renders_scheduled_time_from_the_launchd_constant(
+    authenticated_client,
+) -> None:
+    response = authenticated_client.get(reverse("status"))
+
+    assert response.status_code == 200
+    assert f"Installed for {SCHEDULE_TIME_LABEL} (Tuesday-Saturday) local time" in (
+        response.content.decode()
+    )
+    assert "Installed for 02:00" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_status_page_flags_a_stale_installed_schedule_as_attention_required(
+    authenticated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: {
+            "installed": True,
+            "loaded": True,
+            "timezone_matches": True,
+            "expected_timezone": "America/New_York",
+            "installed_schedule_label": "02:00 (Tuesday-Saturday)",
+            "expected_schedule_label": SCHEDULE_TIME_LABEL,
+            "schedule_matches": False,
+        },
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Installed for 02:00 (Tuesday-Saturday) local time" in body
+    assert f"expected {SCHEDULE_TIME_LABEL} local time" in body
+    assert "reinstall the LaunchAgent to update it" in body
+    assert "Attention required" in body
+    assert "Scheduled" not in body
+
+
+@pytest.mark.django_db
+def test_status_page_never_presents_a_missing_schedule_as_installed(
+    authenticated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: {
+            "installed": True,
+            "loaded": True,
+            "timezone_matches": True,
+            "expected_timezone": "America/New_York",
+            "installed_schedule_label": None,
+            "expected_schedule_label": SCHEDULE_TIME_LABEL,
+            "schedule_matches": False,
+        },
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "The installed schedule could not be read." in body
+    assert f"Installed for {SCHEDULE_TIME_LABEL} local time" not in body
+    assert "Attention required" in body
+    assert "Scheduled" not in body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("extra_key", ["Month", "Day"])
+def test_status_page_never_certifies_a_trigger_with_an_extra_calendar_key(
+    authenticated_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_key: str,
+) -> None:
+    """F4 regression: a Month=1/Day=1 (or any extra) key restricts when
+    launchd actually fires; the status page must never present that as a
+    normal healthy Tue-Sat schedule.
+    """
+    monkeypatch.setattr(
+        "stanstock.core.launchd.detect_iana_timezone",
+        lambda: "America/New_York",
+    )
+    home = tmp_path / "home"
+    plist_path, _stdout_path, _stderr_path = launch_agent_paths(home)
+    plist_path.parent.mkdir(parents=True)
+    triggers = [{"Weekday": weekday, "Hour": 3, "Minute": 30} for weekday in (2, 3, 4, 5, 6)]
+    triggers[0] = {**triggers[0], extra_key: 1}
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": LAUNCH_AGENT_LABEL,
+                "StartCalendarInterval": triggers,
+            },
+            handle,
+        )
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: launch_agent_status(home),
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "The installed schedule could not be read." in body
+    assert "03:30 (Tuesday-Saturday)" not in body
+    assert "Scheduled" not in body
+    assert "Attention required" in body
+
+
+@pytest.mark.django_db
+def test_status_page_never_claims_tuesday_saturday_for_a_tuesday_only_trigger(
+    authenticated_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rendered-card regression using the real (unmocked) plist reader."""
+    monkeypatch.setattr(
+        "stanstock.core.launchd.detect_iana_timezone",
+        lambda: "America/New_York",
+    )
+    home = tmp_path / "home"
+    plist_path, _stdout_path, _stderr_path = launch_agent_paths(home)
+    plist_path.parent.mkdir(parents=True)
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": LAUNCH_AGENT_LABEL,
+                "StartCalendarInterval": [{"Weekday": 2, "Hour": 3, "Minute": 30}],
+            },
+            handle,
+        )
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: launch_agent_status(home),
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Installed for 03:30 (Tuesday) local time" in body
+    assert "Installed for 03:30 (Tuesday-Saturday)" not in body
+    assert "Attention required" in body
+    assert "Scheduled" not in body
+
+
+@pytest.mark.django_db
+def test_status_page_never_certifies_stale_triggers_from_fresh_metadata(
+    authenticated_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1 regression: metadata claims 03:30 but triggers are still 02:00."""
+    monkeypatch.setattr(
+        "stanstock.core.launchd.detect_iana_timezone",
+        lambda: "America/New_York",
+    )
+    home = tmp_path / "home"
+    plist_path, _stdout_path, _stderr_path = launch_agent_paths(home)
+    plist_path.parent.mkdir(parents=True)
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": LAUNCH_AGENT_LABEL,
+                "StartCalendarInterval": [
+                    {"Weekday": weekday, "Hour": 2, "Minute": 0} for weekday in (2, 3, 4, 5, 6)
+                ],
+                "StanStockSchedule": {
+                    "timezone": "America/New_York",
+                    "hour": 3,
+                    "minute": 30,
+                    "weekdays": [2, 3, 4, 5, 6],
+                },
+                "EnvironmentVariables": {"STANSTOCK_SCHEDULE_TIMEZONE": "America/New_York"},
+            },
+            handle,
+        )
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: launch_agent_status(home),
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Installed for 02:00 (Tuesday-Saturday) local time" in body
+    assert "Scheduled" not in body
+    assert "Attention required" in body
+
+
+@pytest.mark.django_db
+def test_status_page_flags_timezone_metadata_runtime_conflict(
+    authenticated_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2 regression: StanStockSchedule.timezone disagrees with the runtime env var."""
+    monkeypatch.setattr(
+        "stanstock.core.launchd.detect_iana_timezone",
+        lambda: "America/New_York",
+    )
+    home = tmp_path / "home"
+    plist_path, _stdout_path, _stderr_path = launch_agent_paths(home)
+    plist_path.parent.mkdir(parents=True)
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": LAUNCH_AGENT_LABEL,
+                "StartCalendarInterval": [
+                    {"Weekday": weekday, "Hour": 3, "Minute": 30} for weekday in (2, 3, 4, 5, 6)
+                ],
+                "StanStockSchedule": {"timezone": "America/New_York"},
+                "EnvironmentVariables": {"STANSTOCK_SCHEDULE_TIMEZONE": "America/Los_Angeles"},
+            },
+            handle,
+        )
+    monkeypatch.setattr(
+        "stanstock.web.views.launch_agent_status",
+        lambda: launch_agent_status(home),
+    )
+
+    response = authenticated_client.get(reverse("status"))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "The machine timezone changed or does not match the installed schedule" in body
+    assert "Scheduled" not in body
 
 
 @pytest.mark.django_db
