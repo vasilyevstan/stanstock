@@ -31,6 +31,8 @@ from stanstock.data.providers.contracts import FundamentalSourcePayload, PriceBa
 from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.data.sec_evidence import MAPPING_SUBJECT
 from stanstock.research.jobs import execute_prediction_evaluation_job
+from stanstock.research.models import PredictionOutcome
+from test_refresh_verification import _create_lagging_prediction, _register_lagging_price_history
 
 pytestmark = pytest.mark.django_db
 
@@ -1355,3 +1357,134 @@ def test_sec_stage_storage_faults_fail_closed_without_path_leak(
     # anything that was not.
     retry = sec_jobs_module.execute_sec_fundamentals_job(target_date=prepared.target_date)
     assert retry.status == JobRun.Status.SUCCESS
+
+
+def test_scheduled_refresh_outcome_tamper_retry_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A standalone, genuinely-matured `Prediction` (unrelated to the main
+    run's own snapshot) is evaluated for real by the command's evaluation
+    stage; tampering its persisted `PredictionOutcome` after that real
+    success must fail the parent even though every child `JobRun` already
+    recorded SUCCESS/SKIPPED, and a corrected retry must recover using the
+    exact same completed children/assets with zero additional provider
+    fetch/credits -- the outcome-verification analogue of
+    `test_verification_failure_after_real_success_fails_closed_without_refetch`.
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: "a" * 40,
+    )
+
+    # A standalone prediction, matured well before the main run's own
+    # target date, evaluated by the SAME command-level evaluation stage
+    # (which evaluates every eligible pending prediction system-wide, not
+    # just ones tied to the current run's own snapshot).
+    lagging_target = TARGET_DATE - timedelta(days=60)
+    lagging = _create_lagging_prediction(target_date=lagging_target)
+    _register_lagging_price_history(
+        tmp_path=tmp_path,
+        subject=lagging.price_subject,
+        baseline_date=lagging_target,
+        baseline_close=Decimal("100"),
+        available_at=DECISION_TIME,
+    )
+
+    evaluation_attempts = 0
+
+    def flaky_once_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        run = execute_prediction_evaluation_job(**kwargs)
+        if evaluation_attempts == 1:
+            # The child's own real work above already committed (including
+            # genuinely maturing `lagging`); this failure only forces the
+            # *parent's* attempt sequence to stay open, exactly like the
+            # unrelated-failure technique `_real_prepared`'s callers use.
+            raise ValueError("temporary post-evaluation failure")
+        return run
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        flaky_once_evaluation,
+    )
+
+    with pytest.raises(CommandError, match="temporary post-evaluation failure"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert first_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SUCCESS
+    assert "verification" not in first_parent.details
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    lagging_outcome = PredictionOutcome.objects.get(prediction=lagging)
+    assert lagging_outcome.status == PredictionOutcome.Status.MATURED
+    original_resolution = lagging_outcome.resolution
+    original_evaluated_at = lagging_outcome.evaluated_at
+
+    # Tamper the already-persisted outcome directly (no re-evaluation, no
+    # provider access) -- models a corrupted/forged local row the parent's
+    # own verification must independently catch by replay.
+    PredictionOutcome.objects.filter(prediction=lagging).update(
+        resolution="a fabricated maturity claim"
+    )
+
+    with pytest.raises(CommandError, match="Scheduled refresh failed"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    # Every child stage recovers by reference to its already-committed
+    # success -- no re-evaluation and no re-fetch is triggered by the
+    # tamper; verification alone catches it.
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert second_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SKIPPED
+    verification = second_parent.details["verification"]
+    assert verification["status"] == "failed"
+    assert verification["reason_code"] == "evaluation_outcome_replay_mismatch"
+    assert "checks" not in verification
+    assert not any(str(tmp_path) in str(value) for value in verification.values())
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    assert evaluation_attempts == 2
+    assert PredictionOutcome.objects.filter(prediction=lagging).count() == 1
+
+    # Restore the exact original (synthetic) evidence -- not a re-fetch --
+    # and confirm the retry recovers to a genuinely verified success.
+    PredictionOutcome.objects.filter(prediction=lagging).update(resolution=original_resolution)
+
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert third_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SKIPPED
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    assert evaluation_attempts == 3
+    lagging_outcome.refresh_from_db()
+    assert lagging_outcome.resolution == original_resolution
+    assert lagging_outcome.evaluated_at == original_evaluated_at

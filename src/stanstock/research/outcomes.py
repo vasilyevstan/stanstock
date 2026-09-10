@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -26,6 +26,16 @@ HORIZON_SESSION_COUNTS: dict[str, int] = {
 }
 PriceFrameCache = MutableMapping[tuple[str, str, date, datetime], pl.DataFrame]
 
+#: `(subject, through_date) -> price frame` -- the only IO `resolve_outcome`
+#: ever triggers. The producer's loader reads through `AsOfData` (and may
+#: legitimately raise `DataAsset.DoesNotExist`/`PriceFrameSchemaError`/
+#: `ValueError`, all replayed as a genuine unresolved outcome below); the
+#: scheduled-refresh verifier's own loader independently re-derives and
+#: checksum-proves the same subject's price evidence and must never raise
+#: one of those same producer-domain exception types for a verifier-only
+#: integrity failure (see `research.outcome_refresh_validation`).
+PriceLoader = Callable[[str, date], pl.DataFrame]
+
 
 @dataclass(frozen=True, slots=True)
 class EvaluationResult:
@@ -35,8 +45,239 @@ class EvaluationResult:
     resolution: str
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedOutcome:
+    """One prediction's fully-resolved (but not yet persisted) outcome.
+
+    Every field here is exactly the value `evaluate_prediction` would pass
+    to `PredictionOutcome.objects.update_or_create` -- computed by the same
+    pure `resolve_outcome` function the writing producer and the read-only
+    verifier both call, so neither can ever compute a different answer from
+    the same evidence.
+    """
+
+    status: str
+    evaluation_date: date
+    actual_return: Decimal | None
+    benchmark_return: Decimal | None
+    success: bool | None
+    direction_correct: bool | None
+    interval_covered: bool | None
+    resolution: str
+    error: Decimal | None
+    signed_error: Decimal | None
+    metadata: dict[str, Any]
+
+
 class PriceSessionDataError(ValueError):
     """Raised when price observations cannot represent unique market sessions."""
+
+
+def resolve_outcome(
+    prediction: Prediction,
+    *,
+    provider: str,
+    evaluation_date: date,
+    evaluated_at: datetime,
+    benchmark_subject: str | None,
+    price_loader: PriceLoader,
+) -> ResolvedOutcome:
+    """Decide one prediction's outcome from already-resolved inputs.
+
+    Pure with respect to persistence: performs no locking, no existing-row
+    lookup, and no write. `provider` must already be the caller's own
+    resolved/conflict-checked provider (`evaluate_prediction` calls
+    `_resolve_price_provider` itself, unconditionally, before this
+    function is ever reached -- including for an outcome this function
+    will never be asked to resolve because it is already terminal -- so
+    that check is never repeated here). All IO goes through
+    `price_loader(subject, through_date)`; the date/withheld-scenario
+    guards below intentionally run first so a verifier can prove those
+    branches without any read at all.
+    """
+    if evaluation_date > evaluated_at.date():
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution="Evaluation date is after actual evaluation time",
+            metadata={"provider": provider, "evaluation_time": evaluated_at.isoformat()},
+        )
+    if evaluation_date < prediction.target_date:
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution="Evaluation date is before prediction target date",
+            metadata={"provider": provider, "target_date": prediction.target_date.isoformat()},
+        )
+    if (
+        prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
+        and prediction.bear_return is None
+        and prediction.base_return is None
+        and prediction.bull_return is None
+    ):
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution="Withheld forecast has no scenario to evaluate",
+            metadata={
+                "provider": provider,
+                "insufficiency_reason": prediction.insufficiency_reason,
+            },
+        )
+
+    subject = _price_subject(prediction)
+    session_count = HORIZON_SESSION_COUNTS[prediction.horizon]
+
+    try:
+        price_frame = price_loader(subject, evaluation_date)
+    except (DataAsset.DoesNotExist, PriceFrameSchemaError, ValueError) as exc:
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution=f"Unable to load evaluation price history: {exc}",
+            metadata={"provider": provider, "subject": subject},
+        )
+
+    try:
+        session = _nth_observed_session(price_frame, prediction.target_date, session_count)
+        observed = _observed_session_count(price_frame, prediction.target_date)
+    except PriceSessionDataError as exc:
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution=str(exc),
+            metadata={"provider": provider, "subject": subject},
+        )
+    if session is None:
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution=(
+                f"Insufficient observed sessions after target date: "
+                f"{observed}/{session_count} through {evaluation_date.isoformat()}"
+            ),
+            metadata={"provider": provider, "subject": subject, "observed_sessions": observed},
+        )
+
+    price_at_prediction = float(prediction.price_at_prediction)
+    if price_at_prediction <= 0:
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution="Prediction price is not positive",
+            metadata={"provider": provider, "subject": subject},
+        )
+
+    evaluation_baseline = _close_at_or_before(price_frame, prediction.target_date)
+    if evaluation_baseline is None:
+        return _unresolved_outcome(
+            evaluation_date=session.observation_date,
+            resolution="Evaluation price history has no baseline close at or before target date",
+            metadata={"provider": provider, "subject": subject},
+        )
+    if not _same_price_basis(evaluation_baseline.close, price_at_prediction):
+        return _corporate_event_outcome(
+            evaluation_date=session.observation_date,
+            resolution="Target-date price changed in the evaluation vintage",
+            metadata={
+                "provider": provider,
+                "subject": subject,
+                "prediction_price": price_at_prediction,
+                "evaluation_vintage_target_close": evaluation_baseline.close,
+                "evaluation_vintage_target_date": evaluation_baseline.observation_date.isoformat(),
+            },
+        )
+
+    actual_return = session.close / price_at_prediction - 1.0
+    success = (
+        _success(prediction, actual_return)
+        if prediction.evidence_role == Prediction.EvidenceRole.DECISION
+        else None
+    )
+    if prediction.evidence_role == Prediction.EvidenceRole.DECISION and success is None:
+        return _unresolved_outcome(
+            evaluation_date=session.observation_date,
+            resolution="HOLD success requires non-null stored bear and bull returns",
+            metadata={"provider": provider, "subject": subject},
+        )
+
+    benchmark_return = None
+    benchmark_resolution = ""
+    if benchmark_subject:
+        benchmark_return, benchmark_resolution = _benchmark_return(
+            price_loader=price_loader,
+            subject=benchmark_subject,
+            target_date=prediction.target_date,
+            evaluation_date=session.observation_date,
+        )
+    error = None
+    direction_correct = None
+    interval_covered = None
+    if prediction.base_return is not None:
+        error = actual_return - float(prediction.base_return)
+        direction_correct = _direction(actual_return) == _direction(float(prediction.base_return))
+    if prediction.bear_return is not None and prediction.bull_return is not None:
+        interval_covered = (
+            float(prediction.bear_return) <= actual_return <= float(prediction.bull_return)
+        )
+
+    return ResolvedOutcome(
+        status=PredictionOutcome.Status.MATURED,
+        evaluation_date=session.observation_date,
+        actual_return=_decimal(actual_return),
+        benchmark_return=_optional_decimal(benchmark_return),
+        success=success,
+        direction_correct=direction_correct,
+        interval_covered=interval_covered,
+        resolution=_matured_resolution(prediction, session.observation_date, benchmark_resolution),
+        error=_optional_decimal(error),
+        signed_error=_optional_decimal(error),
+        metadata={
+            "provider": provider,
+            "subject": subject,
+            "horizon_sessions": session_count,
+            "evidence_role": prediction.evidence_role,
+            "evaluation_close": session.close,
+            "benchmark_subject": benchmark_subject or "",
+            "benchmark_resolution": benchmark_resolution,
+            "success_semantics": _success_semantics(prediction),
+        },
+    )
+
+
+def _price_subject(prediction: Prediction) -> str:
+    return (
+        prediction.price_subject or prediction.listing.provider_symbol or prediction.listing.ticker
+    )
+
+
+def _unresolved_outcome(
+    *, evaluation_date: date, resolution: str, metadata: dict[str, Any]
+) -> ResolvedOutcome:
+    return ResolvedOutcome(
+        status=PredictionOutcome.Status.UNRESOLVED,
+        evaluation_date=evaluation_date,
+        actual_return=None,
+        benchmark_return=None,
+        success=None,
+        direction_correct=None,
+        interval_covered=None,
+        resolution=resolution[:120],
+        error=None,
+        signed_error=None,
+        metadata=metadata,
+    )
+
+
+def _corporate_event_outcome(
+    *, evaluation_date: date, resolution: str, metadata: dict[str, Any]
+) -> ResolvedOutcome:
+    return ResolvedOutcome(
+        status=PredictionOutcome.Status.CORPORATE_EVENT,
+        evaluation_date=evaluation_date,
+        actual_return=None,
+        benchmark_return=None,
+        success=None,
+        direction_correct=None,
+        interval_covered=None,
+        resolution=resolution[:120],
+        error=None,
+        signed_error=None,
+        metadata=metadata,
+    )
 
 
 @transaction.atomic
@@ -63,201 +304,70 @@ def evaluate_prediction(
 
     evaluated_at = evaluation_time or timezone.now()
     frame_cache = frame_cache if frame_cache is not None else {}
-    if evaluation_date > evaluated_at.date():
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution="Evaluation date is after actual evaluation time",
-            metadata={"provider": selected_provider, "evaluation_time": evaluated_at.isoformat()},
-        )
-    if evaluation_date < prediction.target_date:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution="Evaluation date is before prediction target date",
-            metadata={
-                "provider": selected_provider,
-                "target_date": prediction.target_date.isoformat(),
-            },
-        )
-    if (
-        prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
-        and prediction.bear_return is None
-        and prediction.base_return is None
-        and prediction.bull_return is None
-    ):
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution="Withheld forecast has no scenario to evaluate",
-            metadata={
-                "provider": selected_provider,
-                "insufficiency_reason": prediction.insufficiency_reason,
-            },
-        )
+    # `AsOfData`/`AssetStore` construction can touch the filesystem (creating
+    # `STANSTOCK_DATA_DIR` if `store` is not given), so it must not happen
+    # before `resolve_outcome`'s own date/withheld-advisory guards have had a
+    # chance to return an unresolved outcome without ever reading price data
+    # -- matching the base revision's own ordering byte-for-byte. Memoized on
+    # first actual frame request rather than constructed eagerly here.
+    asof: AsOfData | None = None
 
-    asof = AsOfData(evaluated_at, store)
-    subject = (
-        prediction.price_subject or prediction.listing.provider_symbol or prediction.listing.ticker
-    )
-    session_count = HORIZON_SESSION_COUNTS[prediction.horizon]
-
-    try:
-        price_frame = _cached_price_frame(
+    def _loader(subject: str, through_date: date) -> pl.DataFrame:
+        nonlocal asof
+        if asof is None:
+            asof = AsOfData(evaluated_at, store)
+        return _cached_price_frame(
             asof=asof,
             provider=selected_provider,
             subject=subject,
-            through_date=evaluation_date,
+            through_date=through_date,
             evaluated_at=evaluated_at,
             cache=frame_cache,
         )
-    except (DataAsset.DoesNotExist, PriceFrameSchemaError, ValueError) as exc:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution=f"Unable to load evaluation price history: {exc}",
-            metadata={"provider": selected_provider, "subject": subject},
-        )
 
-    try:
-        session = _nth_observed_session(price_frame, prediction.target_date, session_count)
-        observed = _observed_session_count(price_frame, prediction.target_date)
-    except PriceSessionDataError as exc:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution=str(exc),
-            metadata={"provider": selected_provider, "subject": subject},
-        )
-    if session is None:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution=(
-                f"Insufficient observed sessions after target date: "
-                f"{observed}/{session_count} through {evaluation_date.isoformat()}"
-            ),
-            metadata={
-                "provider": selected_provider,
-                "subject": subject,
-                "observed_sessions": observed,
-            },
-        )
+    resolved = resolve_outcome(
+        prediction,
+        provider=selected_provider,
+        evaluation_date=evaluation_date,
+        evaluated_at=evaluated_at,
+        benchmark_subject=benchmark_subject,
+        price_loader=_loader,
+    )
 
-    price_at_prediction = float(prediction.price_at_prediction)
-    if price_at_prediction <= 0:
+    if resolved.status == PredictionOutcome.Status.UNRESOLVED:
         return _save_unresolved(
             prediction,
             existing=existing,
             evaluated_at=evaluated_at,
-            evaluation_date=evaluation_date,
-            resolution="Prediction price is not positive",
-            metadata={"provider": selected_provider, "subject": subject},
+            evaluation_date=resolved.evaluation_date,
+            resolution=resolved.resolution,
+            metadata=resolved.metadata,
         )
-
-    evaluation_baseline = _close_at_or_before(price_frame, prediction.target_date)
-    if evaluation_baseline is None:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=session.observation_date,
-            resolution="Evaluation price history has no baseline close at or before target date",
-            metadata={"provider": selected_provider, "subject": subject},
-        )
-    if not _same_price_basis(evaluation_baseline.close, price_at_prediction):
+    if resolved.status == PredictionOutcome.Status.CORPORATE_EVENT:
         return _save_corporate_event(
             prediction,
             existing=existing,
             evaluated_at=evaluated_at,
-            evaluation_date=session.observation_date,
-            resolution="Target-date price changed in the evaluation vintage",
-            metadata={
-                "provider": selected_provider,
-                "subject": subject,
-                "prediction_price": price_at_prediction,
-                "evaluation_vintage_target_close": evaluation_baseline.close,
-                "evaluation_vintage_target_date": evaluation_baseline.observation_date.isoformat(),
-            },
-        )
-
-    actual_return = session.close / price_at_prediction - 1.0
-    success = (
-        _success(prediction, actual_return)
-        if prediction.evidence_role == Prediction.EvidenceRole.DECISION
-        else None
-    )
-    if prediction.evidence_role == Prediction.EvidenceRole.DECISION and success is None:
-        return _save_unresolved(
-            prediction,
-            existing=existing,
-            evaluated_at=evaluated_at,
-            evaluation_date=session.observation_date,
-            resolution="HOLD success requires non-null stored bear and bull returns",
-            metadata={"provider": selected_provider, "subject": subject},
-        )
-
-    benchmark_return = None
-    benchmark_resolution = ""
-    if benchmark_subject:
-        benchmark_return, benchmark_resolution = _benchmark_return(
-            asof=asof,
-            provider=selected_provider,
-            subject=benchmark_subject,
-            target_date=prediction.target_date,
-            evaluation_date=session.observation_date,
-            evaluated_at=evaluated_at,
-            cache=frame_cache,
-        )
-    error = None
-    direction_correct = None
-    interval_covered = None
-    if prediction.base_return is not None:
-        error = actual_return - float(prediction.base_return)
-        direction_correct = _direction(actual_return) == _direction(float(prediction.base_return))
-    if prediction.bear_return is not None and prediction.bull_return is not None:
-        interval_covered = (
-            float(prediction.bear_return) <= actual_return <= float(prediction.bull_return)
+            evaluation_date=resolved.evaluation_date,
+            resolution=resolved.resolution,
+            metadata=resolved.metadata,
         )
 
     outcome, created = PredictionOutcome.objects.update_or_create(
         prediction=prediction,
         defaults={
             "evaluated_at": evaluated_at,
-            "evaluation_date": session.observation_date,
+            "evaluation_date": resolved.evaluation_date,
             "status": PredictionOutcome.Status.MATURED,
-            "actual_return": _decimal(actual_return),
-            "benchmark_return": _optional_decimal(benchmark_return),
-            "success": success,
-            "direction_correct": direction_correct,
-            "interval_covered": interval_covered,
-            "resolution": _matured_resolution(
-                prediction, session.observation_date, benchmark_resolution
-            ),
-            "error": _optional_decimal(error),
-            "signed_error": _optional_decimal(error),
-            "metadata": {
-                "provider": selected_provider,
-                "subject": subject,
-                "horizon_sessions": session_count,
-                "evidence_role": prediction.evidence_role,
-                "evaluation_close": session.close,
-                "benchmark_subject": benchmark_subject or "",
-                "benchmark_resolution": benchmark_resolution,
-                "success_semantics": _success_semantics(prediction),
-            },
+            "actual_return": resolved.actual_return,
+            "benchmark_return": resolved.benchmark_return,
+            "success": resolved.success,
+            "direction_correct": resolved.direction_correct,
+            "interval_covered": resolved.interval_covered,
+            "resolution": resolved.resolution,
+            "error": resolved.error,
+            "signed_error": resolved.signed_error,
+            "metadata": resolved.metadata,
         },
     )
     return EvaluationResult(
@@ -378,23 +488,13 @@ def _cached_price_frame(
 
 def _benchmark_return(
     *,
-    asof: AsOfData,
-    provider: str,
+    price_loader: PriceLoader,
     subject: str,
     target_date: date,
     evaluation_date: date,
-    evaluated_at: datetime,
-    cache: PriceFrameCache,
 ) -> tuple[float | None, str]:
     try:
-        frame = _cached_price_frame(
-            asof=asof,
-            provider=provider,
-            subject=subject,
-            through_date=evaluation_date,
-            evaluated_at=evaluated_at,
-            cache=cache,
-        )
+        frame = price_loader(subject, evaluation_date)
         target = _close_at_or_before(frame, target_date)
         evaluation = _close_at_or_before(frame, evaluation_date)
     except (

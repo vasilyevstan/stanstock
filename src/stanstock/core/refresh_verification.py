@@ -31,7 +31,6 @@ import polars as pl
 from stanstock.core.integrity import verify_registered_assets
 from stanstock.core.models import JobRun
 from stanstock.core.verification_types import RefreshVerificationError
-from stanstock.data.asof import AsOfData
 from stanstock.data.assets import verify_catalog_refs
 from stanstock.data.jobs import JOB_NAME as MARKET_JOB_NAME
 from stanstock.data.live_us import (
@@ -84,7 +83,7 @@ from stanstock.research.long_forecast_config import (
     long_forecast_config_hash,
 )
 from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
-from stanstock.research.outcomes import HORIZON_SESSION_COUNTS, _nth_observed_session
+from stanstock.research.outcome_refresh_validation import verify_prediction_outcome
 from stanstock.research.provenance import DATA_MODE_PROVIDER, source_data_mode
 from stanstock.research.service import _decimal, _optional_decimal
 
@@ -447,7 +446,7 @@ def verify_scheduled_refresh(
         target_date=target_date,
     )
     _require_success(evaluation, EVALUATION_STAGE)
-    evaluation_summary = _verify_evaluation_details(
+    evaluation_summary, evaluation_asset_ids = _verify_evaluation_details(
         evaluation, universe_config=universe_config, target_date=target_date
     )
 
@@ -468,6 +467,7 @@ def verify_scheduled_refresh(
         | set(asset_registry.keys())
         | portfolio_asset_ids
         | catalog_asset_ids
+        | evaluation_asset_ids
     )
     manifest = _verify_asset_evidence(asset_ids)
 
@@ -910,7 +910,7 @@ def _verify_evaluation_details(
     *,
     universe_config: UsUniverseConfig,
     target_date: date,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], set[UUID]]:
     details = _details_dict(evaluation)
     required = {
         "provider",
@@ -1039,109 +1039,36 @@ def _verify_evaluation_details(
             "Evaluated predictions do not match the independently re-derived candidate set",
         )
 
-    outcome_rows = list(
-        PredictionOutcome.objects.filter(prediction_id__in=prediction_ids).values(
-            "prediction_id", "status", "evaluation_date", "evaluated_at"
-        )
-    )
+    outcome_rows = list(PredictionOutcome.objects.filter(prediction_id__in=prediction_ids))
     if len(outcome_rows) != len(prediction_ids):
         raise RefreshVerificationError(
             "evaluation_outcome_missing",
             "One or more evaluated predictions have no persisted outcome",
         )
-    # Independent per-prediction identity (target_date/horizon/provider/
-    # subject) to bind each outcome's maturity date to its *own* prediction
-    # -- never a run-wide assumption -- and to re-derive a terminal outcome's
-    # required nth observed-session date from its exact provider asset.
-    prediction_meta = {
-        row["id"]: row
-        for row in Prediction.objects.filter(pk__in=prediction_ids).values(
-            "id", "target_date", "horizon", "price_provider", "price_subject"
-        )
+    # Full model instances (not `.values()`): `verify_prediction_outcome`
+    # calls `resolve_outcome`, which needs the same fields
+    # `evaluate_prediction` itself reads (`.listing.provider_symbol`,
+    # `.bear_return`/`.base_return`/`.bull_return`, etc.), not a fixed
+    # projection.
+    predictions = {
+        prediction.pk: prediction
+        for prediction in Prediction.objects.select_related("listing").filter(pk__in=prediction_ids)
     }
     recomputed_statuses: dict[str, int] = {}
-    maturity_frame_cache: dict[tuple[str, str], pl.DataFrame] = {}
-    for outcome_row in outcome_rows:
-        meta = prediction_meta[outcome_row["prediction_id"]]
-        # `evaluation_date` is the maturity *observation* date, which may be
-        # well before `target_date` for a missed-day/lagging-series catch-up
-        # run, but it can never be before the prediction's own issuance
-        # target: a maturity observation logically cannot precede the date
-        # the return is measured from.
-        if outcome_row["evaluation_date"] > target_date:
-            raise RefreshVerificationError(
-                "evaluation_outcome_date_after_target",
-                "An evaluated prediction's outcome observation date is after the target date",
-            )
-        if outcome_row["evaluation_date"] < meta["target_date"]:
-            raise RefreshVerificationError(
-                "evaluation_outcome_date_before_prediction_target",
-                "An evaluated prediction's outcome observation date is before its own "
-                "prediction target date",
-            )
-        touched_now = outcome_row["evaluated_at"] == evaluation_time
-        status = outcome_row["status"]
-        if status in TERMINAL_OUTCOME_STATUSES:
-            # `expected_ids` already subtracts every pre-existing-terminal
-            # candidate (see above), so any terminal row reaching this point
-            # must have been produced by *this* exact execution -- there is
-            # no legitimate "already terminal before this child" branch left
-            # to accept here.
-            if not touched_now:
-                raise RefreshVerificationError(
-                    "evaluation_outcome_not_bound_to_execution",
-                    "An evaluated prediction's outcome was not produced by the recorded "
-                    "evaluation execution",
-                )
-            # Independently re-derive the required nth observed-session date
-            # from the prediction's own exact provider asset -- the same
-            # pure session-resolution helper `evaluate_prediction` itself
-            # uses -- rather than trusting the persisted `evaluation_date`.
-            cache_key = (meta["price_provider"], meta["price_subject"])
-            frame = maturity_frame_cache.get(cache_key)
-            if frame is None:
-                try:
-                    frame = AsOfData(evaluation_time).price_frame(
-                        provider=meta["price_provider"],
-                        subject=meta["price_subject"],
-                        through_date=target_date,
-                    )
-                except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
-                    raise RefreshVerificationError(
-                        "evaluation_outcome_maturity_unreadable",
-                        "A terminal outcome's maturity price history could not be "
-                        "independently re-read and verified",
-                    ) from exc
-                maturity_frame_cache[cache_key] = frame
-            session_count = HORIZON_SESSION_COUNTS[meta["horizon"]]
-            session = _nth_observed_session(frame, meta["target_date"], session_count)
-            if session is None or session.observation_date != outcome_row["evaluation_date"]:
-                raise RefreshVerificationError(
-                    "evaluation_outcome_maturity_date_invalid",
-                    "A terminal outcome's observation date does not match its own "
-                    "prediction's independently re-derived required maturity session",
-                )
-        else:
-            # A genuinely *unchanged* unresolved retry (the established rule
-            # against rewriting an unresolved outcome merely to create a
-            # fresh timestamp) is legitimate even when `evaluated_at` was
-            # not touched by this exact execution. What distinguishes it
-            # from a fabricated stale non-terminal claim is that
-            # `evaluate_prediction` only ever leaves a non-terminal outcome
-            # unwritten when its already-persisted `evaluation_date` is
-            # *already* exactly this run's own `target_date` (its
-            # recomputed defaults matched byte-for-byte); a stale row from
-            # a different evaluation_date would instead have been
-            # overwritten, so requiring exact equality here -- not `<=` --
-            # rejects a stale-but-nonterminal row masquerading as this
-            # run's skip.
-            if not touched_now and outcome_row["evaluation_date"] != target_date:
-                raise RefreshVerificationError(
-                    "evaluation_outcome_stale_unresolved",
-                    "A reported unresolved outcome was not produced or reconfirmed by the "
-                    "recorded evaluation execution",
-                )
-        recomputed_statuses[status] = recomputed_statuses.get(status, 0) + 1
+    evaluation_asset_ids: set[UUID] = set()
+    frame_cache: dict[tuple[str, str, date], pl.DataFrame] = {}
+    for outcome in outcome_rows:
+        result = verify_prediction_outcome(
+            predictions[outcome.prediction_id],
+            outcome,
+            provider=details["provider"],
+            benchmark_subject=details["benchmark_subject"],
+            evaluation_time=evaluation_time,
+            parent_target_date=target_date,
+            frame_cache=frame_cache,
+        )
+        evaluation_asset_ids.update(ref.id for ref in result.asset_refs)
+        recomputed_statuses[outcome.status] = recomputed_statuses.get(outcome.status, 0) + 1
     if recomputed_statuses != outcome_statuses:
         raise RefreshVerificationError(
             "evaluation_outcome_statuses_mismatch",
@@ -1151,7 +1078,7 @@ def _verify_evaluation_details(
         "job_run_id": str(evaluation.pk),
         "eligible_predictions": eligible_predictions,
         "evaluated_prediction_count": len(prediction_ids),
-    }
+    }, evaluation_asset_ids
 
 
 def _verify_portfolio(

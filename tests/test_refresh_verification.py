@@ -66,6 +66,7 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
+from stanstock.research.outcomes import evaluate_prediction
 
 pytestmark = pytest.mark.django_db
 
@@ -1563,8 +1564,9 @@ def test_stale_pre_child_outcome_falsely_claimed_fails_closed(
 
     The prediction is genuinely mature and provider-matching (so it does
     belong to the re-derived candidate set), but its persisted outcome was
-    never actually touched by *this* evaluation execution -- it is neither
-    freshly timestamped nor a legitimate pre-existing terminal outcome.
+    never actually touched by *this* evaluation execution -- and no real
+    price evidence exists for its listing at all, so an independent replay
+    cannot reproduce the falsely-claimed "pending" resolution/metadata.
     """
     stages, config = _build_verified_state(monkeypatch, tmp_path)
     evaluation_run = JobRun.objects.get(pk=stages["evaluation"]["job_run_id"])
@@ -1592,7 +1594,7 @@ def test_stale_pre_child_outcome_falsely_claimed_fails_closed(
             stages=stages,
             sec_required=False,
         )
-    assert excinfo.value.reason_code == "evaluation_outcome_stale_unresolved"
+    assert excinfo.value.reason_code == "evaluation_outcome_replay_mismatch"
 
 
 def test_unchanged_unresolved_same_target_retry_verifies(
@@ -1600,28 +1602,37 @@ def test_unchanged_unresolved_same_target_retry_verifies(
 ) -> None:
     """The established rule against rewriting an unchanged unresolved
     outcome merely to create a fresh timestamp must not make a legitimate
-    retry unverifiable: the outcome's `evaluation_date` already equals this
-    run's own `target_date` (proving it was produced/reconfirmed by
-    evaluation logic bound to this exact evaluation), even though its
-    `evaluated_at` predates the recorded `evaluation_time`."""
-    stages, config = _build_verified_state(monkeypatch, tmp_path)
-    evaluation_run = JobRun.objects.get(pk=stages["evaluation"]["job_run_id"])
-    unresolved = _create_lagging_prediction(target_date=TARGET_DATE - timedelta(days=30))
-    PredictionOutcome.objects.create(
-        prediction=unresolved,
-        evaluated_at=DECISION_TIME - timedelta(days=1),
-        evaluation_date=TARGET_DATE,
-        status=PredictionOutcome.Status.UNRESOLVED,
-        resolution="Insufficient observed sessions after target date: 3/10",
-    )
-    details = dict(evaluation_run.details)
-    details["eligible_predictions"] += 1
-    details["evaluated_prediction_ids"].append(str(unresolved.pk))
-    details["actions"]["skipped"] = details["actions"].get("skipped", 0) + 1
-    details["outcome_statuses"][PredictionOutcome.Status.UNRESOLVED] = (
-        details["outcome_statuses"].get(PredictionOutcome.Status.UNRESOLVED, 0) + 1
-    )
-    JobRun.objects.filter(pk=evaluation_run.pk).update(details=details)
+    retry unverifiable. An earlier execution already left a genuinely
+    unresolved outcome -- real `evaluate_prediction` output from only 3 of
+    the 10 required sessions, not a fabricated fixture -- whose content an
+    independent fresh replay still reproduces byte-for-byte, even though
+    its own `evaluated_at` predates the recorded `evaluation_time`; the
+    real evaluation job run this test drives then re-confirms it unchanged
+    (the established `_outcome_matches` skip) rather than rewriting it.
+    """
+    lagging_target = TARGET_DATE - timedelta(days=30)
+    prior_time = DECISION_TIME - timedelta(days=1)
+    injected: dict[str, Prediction] = {}
+
+    def _inject() -> None:
+        lagging = _create_lagging_prediction(target_date=lagging_target)
+        injected["prediction"] = lagging
+        _register_lagging_price_history(
+            tmp_path=tmp_path,
+            subject=lagging.listing.provider_symbol,
+            baseline_date=lagging_target,
+            baseline_close=Decimal("100"),
+            available_at=prior_time,
+            session_count=3,
+        )
+        evaluate_prediction(
+            lagging,
+            provider=twelve_data.PROVIDER,
+            evaluation_date=TARGET_DATE,
+            evaluation_time=prior_time,
+        )
+
+    stages, config = _build_verified_state(monkeypatch, tmp_path, before_evaluation=_inject)
 
     result = verify_scheduled_refresh(
         target_date=TARGET_DATE,
@@ -1630,7 +1641,12 @@ def test_unchanged_unresolved_same_target_retry_verifies(
         stages=stages,
         sec_required=False,
     )
+
     assert result["status"] == "verified"
+    lagging = injected["prediction"]
+    outcome = PredictionOutcome.objects.get(prediction=lagging)
+    assert outcome.status == PredictionOutcome.Status.UNRESOLVED
+    assert outcome.evaluated_at == prior_time
 
 
 def test_evaluation_outcome_before_prediction_target_fails_closed(
