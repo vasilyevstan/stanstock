@@ -114,6 +114,9 @@ jobs:
             tests/test_data_sec_ingestion.py::test_a_real_instant_collision_is_still_handled \
             tests/test_data_sec_ingestion.py::test_a_corrupt_event_fails_on_idempotent_collision_and_on_recovery \
             tests/test_immutability_migrations.py::test_postgresql_immutability_sql_escapes_psycopg_placeholders \
+            tests/test_research_refresh_validation.py \
+            tests/test_research_outcome_refresh_validation.py \
+            tests/test_scheduled_refresh.py::test_scheduled_refresh_outcome_tamper_retry_without_refetch \
             --ds=stanstock.settings.dev
 
   container:
