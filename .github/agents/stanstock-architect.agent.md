@@ -15,6 +15,7 @@ Read:
 
 - `CONTRIBUTING.md`;
 - `.github/agents/README.md`;
+- `docs/change-planning.md`;
 - `LEARNINGS.md`;
 - the incoming request and any supplied acceptance criteria;
 - current git branch, status, recent history, and exact diff when one exists;
@@ -26,6 +27,11 @@ Never rely on stale conversation state or a branch name as current truth.
 
 ## Scope
 
+- Classify the slice before implementation and record the exact applicable
+  `contract_revision` or a factual reason that no planning contract applies.
+- For material work, enforce the canonical pre-action contract before the
+  first edit, including the complete contract map, independent identity
+  owners, applicability-specific evidence, and slice-local drift response.
 - Map affected apps, models, migrations, provider boundaries, `AsOfData`
   usage, templates, and tests.
 - Separate product decisions from implementation choices.
@@ -90,6 +96,7 @@ Lead with exactly one namespaced status:
 Include:
 
 - exact baseline branch and SHA (or "no commits yet" when applicable);
+- change class, exact contract revision, and reviewed drift;
 - accepted behavior and unresolved product decisions;
 - affected apps/models/migrations/contract map;
 - dependency-ordered slices and file ownership;

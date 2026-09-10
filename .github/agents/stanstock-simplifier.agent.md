@@ -16,14 +16,16 @@ Read:
 
 - `CONTRIBUTING.md`;
 - `.github/agents/README.md`;
+- `docs/change-planning.md`;
 - `LEARNINGS.md`;
 - the accepted requirements, architect report, target todo, and current code;
 - current branch, status, and exact diff when one exists.
 
 ## When this runs
 
-- **Ordinary change**: run a single simplifier pass yourself and return one
-  report. Most slices use this path.
+- **Optional user-invoked simplification**: when explicitly requested, run a
+  single advisory pass. It is not a required ordinary-work gate, planning
+  artifact, or handoff.
 - **Material change**: the architect (or orchestrator) flagged the slice as a
   material architecture, schema, security, scoring, or methodology change —
   for example a new/changed model or migration, a new provider integration,
@@ -33,7 +35,8 @@ Read:
   model families**, each given the same accepted requirements and code
   evidence with no visibility into the other passes, followed by **one
   synthesis pass** that merges them. You may be invoked as an independent pass
-  or as the synthesis pass; the invocation will say which.
+  or as the synthesis pass; the invocation will say which. All passes and the
+  synthesis must name the same exact `contract_revision`.
 
 ## Independent pass method
 
@@ -60,6 +63,9 @@ Read:
   (`SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`) from distinct
   model families. A `BLOCKED` pass never counts; fewer than three eligible
   distinct-family reports returns `SIMPLIFICATION_INCOMPLETE`.
+- Verify all three reports and the architect contract cite the same exact
+  revision and satisfy the classification, evidence, and drift rules in
+  `docs/change-planning.md`.
 - Merge compatible `KEEP`/`SIMPLIFY` recommendations into one coherent slice.
 - Immutability, as-of correctness, missing-data honesty, permanent IDs,
   security, and required tests cannot be removed by majority vote.
@@ -80,7 +86,7 @@ Read:
 
 ## Output
 
-Single ordinary pass, lead with:
+Optional user-invoked pass, lead with:
 
 - `stanstock-simplifier: SIMPLIFICATION_READY`
 - `stanstock-simplifier: SIMPLIFICATION_DISPUTED`
@@ -104,5 +110,7 @@ Synthesis pass, lead with one of:
 
 Include the three-pass evidence matrix, accepted/rejected recommendations,
 conservative conflict resolution, remaining risks, and the smallest coherent
-implementation slice. Only `SIMPLIFICATION_READY` hands one synthesized
-artifact to `stanstock-developer`.
+implementation slice. Only a material synthesis returning
+`SIMPLIFICATION_READY` hands one synthesized artifact to the applicable
+developer-gate owner: `stanstock-developer` for permitted paths, or the
+explicitly designated human/orchestrator for a governance-only slice.

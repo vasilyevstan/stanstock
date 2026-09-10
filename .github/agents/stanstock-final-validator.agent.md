@@ -16,6 +16,7 @@ Read:
 
 - `CONTRIBUTING.md`;
 - `.github/agents/README.md`;
+- `docs/change-planning.md` — applicable change-planning contract.
 - `.github/pull_request_template.md`;
 - `LEARNINGS.md`;
 - all four `docs/review-checklists/*.md` files;

@@ -20,27 +20,33 @@
 not run
 ```
 
+## Change planning
+
+- Change class: <!-- ordinary | data-quant | material -->
+- Pre-action evidence: <!-- Link or summarize; include the exact contract revision when required, or N/A: factual reason -->
+- Reviewed drift: <!-- none, updated/repeated gate evidence, or N/A: factual reason -->
+
 ## Data and methodology
 
-- Provider/source changes: not applicable
-- Schema or migration changes: not applicable
-- Point-in-time/look-ahead impact: not applicable
-- Score, risk, scenario, outcome, or simulation impact: not applicable
-- Research-grade versus observed-history impact: not applicable
+- Provider/source changes: N/A: <factual reason>
+- Schema or migration changes: N/A: <factual reason>
+- Point-in-time/look-ahead impact: N/A: <factual reason>
+- Score, risk, scenario, outcome, or simulation impact: N/A: <factual reason>
+- Research-grade versus observed-history impact: N/A: <factual reason>
 
 ## Security and operations
 
-- Authentication/authorization impact: not applicable
-- Secrets or private-data impact: not applicable
-- Scheduled-job/recovery impact: not applicable
-- Deployment/rollback impact: not applicable
+- Authentication/authorization impact: N/A: <factual reason>
+- Secrets or private-data impact: N/A: <factual reason>
+- Scheduled-job/recovery impact: N/A: <factual reason>
+- Deployment/rollback impact: N/A: <factual reason>
 
 ## Agent reviews
 
-- Architect/simplifier: not applicable
-- Research integrity: not applicable
-- Critic-tester: not applicable
-- Final validator: not applicable
+- Architect/simplifier: N/A: <factual reason>
+- Research integrity: N/A: <factual reason>
+- Critic-tester: N/A: <factual reason>
+- Final validator: N/A: <factual reason>
 
 ## Remaining risks
 

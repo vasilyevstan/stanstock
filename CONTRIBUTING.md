@@ -10,6 +10,13 @@
   automation-stable source is explicitly approved. Never bypass a browser
   challenge or substitute an unofficial scraper.
 - Use the tiered agent workflow in `.github/agents/README.md`.
+- Follow the proportional pre-action contract in
+  `docs/change-planning.md`.
+- Governance paths are owned by the explicitly designated human/orchestrator,
+  not the bounded developer agent.
+- Apply the planning contract prospectively; do not relabel released work,
+  including the Under-$10 diagnostics or September 9 refresh, as pre-action
+  approved.
 - Run the smallest relevant checks during development and `make check` before
   release review.
 
