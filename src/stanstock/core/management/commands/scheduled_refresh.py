@@ -13,7 +13,9 @@ from django.utils import timezone
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.launchd import detect_iana_timezone
 from stanstock.core.models import JobRun
+from stanstock.core.refresh_verification import verify_scheduled_refresh
 from stanstock.core.revision import clean_git_revision
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.jobs import execute_us_daily_job, prepare_us_daily_job
 from stanstock.data.management.config_loader import default_us_universe_config_path
 from stanstock.data.models import ProviderRecord
@@ -143,6 +145,22 @@ class Command(BaseCommand):
                         failures.append(f"{stage_name} ended with {run.status}")
                 if failures:
                     raise ValueError("Scheduled refresh incomplete: " + "; ".join(failures))
+                stages = details["stages"]
+                if not isinstance(stages, dict):
+                    raise ValueError("Scheduled refresh stage state is invalid")
+                try:
+                    verification = verify_scheduled_refresh(
+                        target_date=prepared.target_date,
+                        universe_config=prepared.config,
+                        code_revision=revision,
+                        stages=stages,
+                        sec_required=sec_required,
+                    )
+                except RefreshVerificationError as exc:
+                    details["verification"] = exc.to_failure_details()
+                    JobRun.objects.filter(pk=parent.pk).update(details=details)
+                    raise ValueError(f"Scheduled refresh verification failed: {exc}") from exc
+                details["verification"] = verification
                 return JobExecutionResult(details=details)
 
             parent = execute_target_job(

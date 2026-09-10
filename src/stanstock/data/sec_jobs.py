@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.models import JobRun
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.live_us import load_us_universe_config
 from stanstock.data.management.config_loader import (
     default_sec_cik_mapping_path,
@@ -46,7 +47,27 @@ def execute_sec_fundamentals_job(
                 universe_config=universe_config,
                 target_date=target_date,
             )
-        except (OSError, ProviderError, ValueError) as exc:
+        except OSError:
+            # A raw physical error should never reach this boundary --
+            # `run_sec_ingestion`'s own storage operations normalize
+            # expected filesystem faults into a path-free domain error --
+            # but this is a defensive last line so a genuinely raw
+            # `OSError` (whose default message embeds a resolved
+            # filesystem path) can never be recorded verbatim onto
+            # `ProviderRecord.last_error`, nor let escape into the
+            # child/parent `JobRun` details or `CommandError` above this
+            # job boundary: re-raising a stable, path-free domain error
+            # (not the raw `OSError` itself) keeps every downstream
+            # consumer safe too.
+            record, _created = ProviderRecord.objects.get_or_create(provider="sec")
+            record.status = "error"
+            record.last_error = "SEC ingestion failed due to an unexpected storage error"
+            record.save(update_fields=["status", "last_error"])
+            raise RefreshVerificationError(
+                "sec_unexpected_storage_error",
+                "SEC ingestion failed due to an unexpected storage error",
+            ) from None
+        except (ProviderError, ValueError) as exc:
             record, _created = ProviderRecord.objects.get_or_create(provider="sec")
             record.status = "error"
             record.last_error = f"{type(exc).__name__}: {exc}"
@@ -66,6 +87,7 @@ def execute_sec_fundamentals_job(
             "config_hash": fundamentals_config.config_hash,
             "cik_config_version": cik_config.config_version,
             "cik_config_hash": cik_config.config_hash,
+            "asset_refs": [ref.to_json() for ref in result.asset_refs],
         }
         _record_provider_success(target_date=target_date, details=details)
         return JobExecutionResult(details=details)

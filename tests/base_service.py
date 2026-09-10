@@ -26,6 +26,14 @@ object database and executes them in a throwaway module namespace.
   Under-$10 shadow feature itself. They are bound here defensively, at zero
   behavioral cost, in case a later correction to this same base-differential
   surface needs it -- not because base's actual source resolves them today.
+- ``research/long_forecasts.py`` -- base `research/service.py` directly
+  imports it (`LongForecast`, `build_long_forecasts`), and the
+  `refresh-output-verification` slice renamed four of its private helpers
+  to public names for reuse by `research.refresh_validation` (a pure
+  rename; neither imported name nor any behavior changed). Its bytes now
+  differ from base for that reason alone, so it must be bound here too --
+  otherwise base `service.py`'s own import of it would resolve against the
+  live, working-tree module instead of base's own bytes.
 - ``research/service.py`` itself is, of course, always bound: it is the
   module under comparison.
 
@@ -77,19 +85,21 @@ BASE_SHA = "65314f87fe0eb8adbb05d35d3874c22c736ae54c"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: Bound in dependency order: `data.asof` before `research.medium_forecasts`
-#: (which imports it), independent leaves next, and `research.service` last.
-#: Executing a module's base source registers it in `sys.modules` *before* any
-#: later module in this list is executed, so imports inside the base medium
-#: builder and service resolve against the base modules this context manager
-#: just bound -- never the live ones. `data.asof` itself only imports
-#: `data.assets`/`data.models`, neither of which this slice touched.
+#: Bound in dependency order: `data.assets` before `data.asof` (which now
+#: imports it), then `research.medium_forecasts` (which imports `data.asof`),
+#: independent leaves next, and `research.service` last. Executing a
+#: module's base source registers it in `sys.modules` *before* any later
+#: module in this list is executed, so imports inside the base medium
+#: builder and service resolve against the base modules this context
+#: manager just bound -- never the live ones.
 DEPENDENCY_MODULES: tuple[tuple[str, str], ...] = (
+    ("stanstock.data.assets", "src/stanstock/data/assets.py"),
     ("stanstock.data.asof", "src/stanstock/data/asof.py"),
     ("stanstock.research.medium_forecasts", "src/stanstock/research/medium_forecasts.py"),
     ("stanstock.research.indicators", "src/stanstock/research/indicators.py"),
     ("stanstock.research.affordability", "src/stanstock/research/affordability.py"),
     ("stanstock.data.provider_policy", "src/stanstock/data/provider_policy.py"),
+    ("stanstock.research.long_forecasts", "src/stanstock/research/long_forecasts.py"),
     ("stanstock.research.service", "src/stanstock/research/service.py"),
 )
 

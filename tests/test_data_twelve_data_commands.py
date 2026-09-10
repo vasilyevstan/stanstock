@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -268,6 +269,7 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
         run_calls.append(kwargs)
         return LiveUsRunResult(
             snapshot=snapshot,
+            analysis_run_id=uuid4(),
             analyses=2,
             predictions=6,
             eligible=2,
@@ -276,6 +278,7 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
             raw_assets=4,
             credits_used=4,
             benchmark_symbol="SPY",
+            catalog_asset_ids=(),
         )
 
     monkeypatch.setattr(data_jobs, "run_us_daily", run_us_daily)

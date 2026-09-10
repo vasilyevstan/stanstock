@@ -31,6 +31,7 @@ def execute_portfolio_snapshot_job(
                 "portfolios": portfolio_count,
                 "snapshots_created": report.created,
                 "snapshots_unchanged": report.unchanged,
+                "snapshot_ids": dict(report.snapshot_ids),
                 "failures": list(report.failures),
                 "required_session_date": (
                     target_date.isoformat() if require_session_date else None

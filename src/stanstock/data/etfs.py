@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -10,7 +11,8 @@ import polars as pl
 from django.db import transaction
 from django.db.models import Q
 
-from stanstock.data.assets import AssetStore
+from stanstock.core.verification_types import RefreshVerificationError
+from stanstock.data.assets import AssetStore, read_checksummed_bytes
 from stanstock.data.market_state import update_latest_market_data
 from stanstock.data.models import (
     Company,
@@ -138,7 +140,7 @@ def sync_investable_spy_from_asset(
     store: AssetStore | None = None,
 ) -> Listing:
     metadata = _validate_spy_price_asset(asset)
-    frame = _clean_price_frame((store or AssetStore()).read_frame(asset.relative_path))
+    frame = _read_verified_spy_price_frame(asset, store)
     eligible = frame.filter(pl.col("date") <= target_date)
     if eligible.is_empty():
         raise ValueError(f"SPY price asset has no rows through {target_date.isoformat()}")
@@ -183,9 +185,7 @@ def build_etf_overview(
         raise ValueError(f"{listing.ticker} has no current market data") from exc
 
     _validate_spy_price_asset(market_data.source_asset)
-    frame = _clean_price_frame(
-        (store or AssetStore()).read_frame(market_data.source_asset.relative_path)
-    )
+    frame = _read_verified_spy_price_frame(market_data.source_asset, store)
     eligible = frame.filter(pl.col("date") <= market_data.session_date)
     if eligible.is_empty() or eligible["date"][-1] != market_data.session_date:
         raise ValueError(f"SPY price asset has no {market_data.session_date.isoformat()} close")
@@ -214,6 +214,35 @@ def build_etf_overview(
         return_definition=str(metadata["return_definition"]),
         dividends_included=bool(metadata["dividends_included"]),
     )
+
+
+class InvestableEtfEvidenceError(ValueError):
+    """The exact SPY price evidence asset could not be read or parsed.
+
+    Carries a stable, path-free message; never chains a path-bearing cause.
+    """
+
+
+def _read_verified_spy_price_frame(asset: DataAsset, store: AssetStore | None) -> pl.DataFrame:
+    """Read, checksum-authenticate, and strictly validate the exact SPY
+    price frame for `asset`.
+
+    The physical bytes are hashed once via `read_checksummed_bytes` and
+    those same bytes are parsed in-memory -- never re-opened by path after
+    hashing -- so an on-disk substitution that changes content cannot be
+    projected as if it were the registered asset. Any store-construction,
+    checksum, read, or schema/conversion failure -- including a path-bearing
+    `OSError`/`ValueError`/`pl.exceptions.PolarsError` -- becomes a stable,
+    path-free `InvestableEtfEvidenceError` raised without a path-bearing
+    cause.
+    """
+    try:
+        active_store = store or AssetStore()
+        payload = read_checksummed_bytes(active_store, asset)
+        frame = pl.read_parquet(io.BytesIO(payload))
+        return _clean_price_frame(frame)
+    except (OSError, ValueError, KeyError, pl.exceptions.PolarsError, RefreshVerificationError):
+        raise InvestableEtfEvidenceError("SPY price evidence could not be read") from None
 
 
 def _validate_spy_price_asset(asset: DataAsset) -> dict[str, object]:
@@ -260,27 +289,43 @@ def _validate_spy_price_asset(asset: DataAsset) -> dict[str, object]:
     return metadata
 
 
+_REQUIRED_PRICE_SCHEMA: dict[str, pl.DataType] = {
+    "date": pl.Date(),
+    "close": pl.Float64(),
+    "volume": pl.Int64(),
+}
+
+
 def _clean_price_frame(frame: pl.DataFrame) -> pl.DataFrame:
-    required = {"date", "close", "volume"}
-    missing = sorted(required - set(frame.columns))
+    """Strictly validate the *entire* selected `date`/`close`/`volume`
+    frame -- never silently dropping a malformed row.
+
+    A checksum-valid but malformed row (a null date/close, a non-finite or
+    non-positive close, a negative volume) must fail the whole asset
+    closed, not be filtered away as if it never existed -- otherwise a
+    sync could silently bridge across a discarded session, and an overview
+    could compute trailing metrics from a quietly-reduced frame.
+    """
+    missing = sorted(set(_REQUIRED_PRICE_SCHEMA) - set(frame.columns))
     if missing:
         raise ValueError(f"ETF price asset is missing columns: {', '.join(missing)}")
-    clean = (
-        frame.select(
-            pl.col("date").cast(pl.Date, strict=False),
-            pl.col("close").cast(pl.Float64, strict=False),
-            pl.col("volume").cast(pl.Int64, strict=False),
-        )
-        .filter(
-            pl.col("date").is_not_null()
-            & pl.col("close").is_not_null()
-            & pl.col("close").is_finite()
-            & (pl.col("close") > 0)
-        )
-        .sort("date")
-    )
-    if clean.is_empty():
-        raise ValueError("ETF price asset has no valid positive close observations")
+    for column, expected_dtype in _REQUIRED_PRICE_SCHEMA.items():
+        if frame.schema[column] != expected_dtype:
+            raise ValueError(f"ETF price asset column {column!r} has an unexpected type")
+    selected = frame.select("date", "close", "volume")
+    if selected.is_empty():
+        raise ValueError("ETF price asset has no observations")
+    if selected["date"].null_count() > 0:
+        raise ValueError("ETF price asset contains a null session date")
+    if selected["close"].null_count() > 0:
+        raise ValueError("ETF price asset contains a null close")
+    if not bool(selected["close"].is_finite().all()):
+        raise ValueError("ETF price asset contains a non-finite close")
+    if bool((selected["close"] <= 0).any()):
+        raise ValueError("ETF price asset contains a non-positive close")
+    if bool((selected["volume"].is_not_null() & (selected["volume"] < 0)).any()):
+        raise ValueError("ETF price asset contains a negative volume")
+    clean = selected.sort("date")
     if clean["date"].n_unique() != clean.height:
         raise ValueError("ETF price asset contains duplicate session dates")
     return clean

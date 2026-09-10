@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -12,11 +13,11 @@ from typing import Any
 from uuid import UUID
 
 import polars as pl
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
-from stanstock.data.assets import AssetStore, register_asset
+from stanstock.data.assets import AssetStore, open_asset_store, register_asset
 from stanstock.data.etfs import (
     INVESTABLE_US_ETF_MIC,
     INVESTABLE_US_ETF_SYMBOL,
@@ -51,9 +52,14 @@ from stanstock.data.providers.exceptions import (
     ProviderError,
     ProviderQuotaError,
 )
+from stanstock.data.refresh_evidence import (
+    UNIVERSE_MEMBERSHIP_EVIDENCE_KIND,
+    build_membership_evidence_envelope,
+    universe_snapshot_evidence_payload,
+)
 from stanstock.research import config as research_config
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
-from stanstock.research.service import analyze_snapshot
+from stanstock.research.service import AnalysisOutputPaths, analyze_snapshot
 from stanstock.research.timing import is_us_session_issuance_on_time
 
 PROVIDER = twelve_data.PROVIDER
@@ -89,6 +95,7 @@ class UsUniverseConfig:
 @dataclass(frozen=True, slots=True)
 class LiveUsRunResult:
     snapshot: UniverseSnapshot
+    analysis_run_id: UUID
     analyses: int
     predictions: int
     eligible: int
@@ -97,6 +104,7 @@ class LiveUsRunResult:
     raw_assets: int
     credits_used: int
     benchmark_symbol: str
+    catalog_asset_ids: tuple[UUID, ...]
 
 
 class ProviderCreditBudget:
@@ -327,6 +335,25 @@ def is_us_prediction_on_time(*, target_date: date, generated_at: datetime) -> bo
     )
 
 
+def _best_effort_unlink_if_orphaned(store: AssetStore, relative_path: str) -> None:
+    """Best-effort cleanup for one candidate orphaned path after this
+    call's own outer transaction has already rolled back.
+
+    Content-addressed storage means an unrelated, already-committed run
+    can legitimately share the identical `relative_path` (same content
+    hashed to the same location); only unlink when no `DataAsset` row
+    still references it. Every failure here -- the existence check itself,
+    `store.resolve`, or the unlink -- is swallowed: this is cleanup for a
+    failure already being propagated, and must never raise a *different*
+    exception that would replace or mask the original one.
+    """
+    try:
+        if not DataAsset.objects.filter(relative_path=relative_path).exists():
+            store.resolve(relative_path).unlink(missing_ok=True)
+    except (OSError, ValueError, DatabaseError):
+        pass
+
+
 def run_us_daily(
     *,
     config: UsUniverseConfig,
@@ -339,7 +366,11 @@ def run_us_daily(
     require_on_time: bool = False,
 ) -> LiveUsRunResult:
     """Fetch, persist, and analyze one complete US target-date snapshot."""
-    store = store or AssetStore()
+    # `open_asset_store()` normalizes a default-construction failure (an
+    # unwritable/misconfigured root) into a path-free, stable `ValueError`
+    # subclass *before* any recovery or provider work below -- an explicitly
+    # supplied `store` is passed through untouched.
+    store = store or open_asset_store()
     existing_result = _existing_completed_result(
         config=config,
         target_date=target_date,
@@ -440,6 +471,7 @@ def run_us_daily(
         series=benchmark_series,
         listing=None,
         resolved_mic_code=INVESTABLE_US_ETF_MIC,
+        catalog_assets=catalog_assets,
     )
 
     analysis_clock = decision_time if decision_time is not None else timezone.now()
@@ -448,7 +480,8 @@ def run_us_daily(
         benchmark_series.retrieved_at,
         *(series.retrieved_at for series in series_by_symbol.values()),
     )
-    panel_paths: list[str] = []
+    output_paths = AnalysisOutputPaths()
+    evidence_relative_path: str | None = None
     try:
         with transaction.atomic():
             if require_on_time:
@@ -457,13 +490,15 @@ def run_us_daily(
                     target_date=target_date,
                     generated_at=analysis_time,
                 )
-            snapshot = _ensure_snapshot(
+            snapshot, evidence_relative_path = _ensure_snapshot(
                 config=config,
                 target_date=target_date,
                 grade=snapshot_grade,
                 listings=listings,
                 exclusion_reasons=exclusion_reasons,
                 catalog_assets=catalog_assets,
+                store=store,
+                retrieved_at=analysis_time,
             )
             results = analyze_snapshot(
                 universe_snapshot=snapshot,
@@ -480,25 +515,31 @@ def run_us_daily(
                 benchmark_subject=config.benchmark_symbol,
                 store=store,
                 config_path=default_us_scoring_config_path(),
+                output_paths=output_paths,
             )
-            first_analysis = getattr(results[0], "analysis", None) if results else None
-            if first_analysis is not None:
-                panel_paths = list(
-                    DataAsset.objects.filter(
-                        provider="stanstock",
-                        kind="medium_forecast_panel",
-                        subject=str(first_analysis.run_id),
-                    ).values_list("relative_path", flat=True)
+            if not results:
+                raise ValueError(
+                    f"analyze_snapshot produced no persisted analyses for {target_date.isoformat()}"
                 )
+            first_analysis = results[0].analysis
+            analysis_run_id = first_analysis.run_id
             if require_on_time:
                 _require_automatic_on_time(
                     target_date=target_date,
                     generated_at=max(analysis_time, timezone.now()),
                 )
     except Exception:
-        for relative_path in panel_paths:
-            if not DataAsset.objects.filter(relative_path=relative_path).exists():
-                store.resolve(relative_path).unlink(missing_ok=True)
+        orphan_candidates = [
+            path
+            for path in (
+                output_paths.panel_relative_path,
+                output_paths.manifest_relative_path,
+                evidence_relative_path,
+            )
+            if path is not None
+        ]
+        for relative_path in orphan_candidates:
+            _best_effort_unlink_if_orphaned(store, relative_path)
         raise
     _record_provider_success(
         at=analysis_time,
@@ -513,6 +554,7 @@ def run_us_daily(
     )
     return LiveUsRunResult(
         snapshot=snapshot,
+        analysis_run_id=analysis_run_id,
         analyses=len(results),
         predictions=sum(len(result.predictions) for result in results),
         eligible=len(eligible_symbols),
@@ -521,6 +563,7 @@ def run_us_daily(
         raw_assets=len(price_assets) + 1 + len(catalog_assets),
         credits_used=credits_used,
         benchmark_symbol=config.benchmark_symbol,
+        catalog_asset_ids=tuple(asset.id for asset in catalog_assets),
     )
 
 
@@ -719,6 +762,7 @@ def _persist_price_series(
     series: PriceSeries,
     listing: Listing | None,
     resolved_mic_code: str | None = None,
+    catalog_assets: list[DataAsset] | None = None,
 ) -> DataAsset:
     frame = _price_frame(series)
     digest = hashlib.sha256(series.raw_bytes).hexdigest()
@@ -768,6 +812,28 @@ def _persist_price_series(
                 price_metadata["mic_code_source"] = (
                     "provider" if series.mic_code is not None else "configured_spy_identity"
                 )
+            if catalog_assets is not None:
+                # Recorded here (immutable, alongside the exact benchmark
+                # evidence `benchmark_asset_for_completed_run` already
+                # independently resolves for a completed run) so a later
+                # zero-fetch recovery through `_existing_completed_result`
+                # can recover the exact catalog assets this run's snapshot
+                # was built from without guessing a "latest" row.
+                # `id`/`sha256` are also read verbatim by
+                # `_catalog_asset_ids_for_completed_run`; the extra
+                # `provider`/`kind`/`subject` fields let the full-identity
+                # `AssetRef` cross-check bind this leg the same way as the
+                # membership envelope and market job details.
+                price_metadata["catalog_assets"] = [
+                    {
+                        "id": str(asset.id),
+                        "sha256": asset.sha256,
+                        "provider": asset.provider,
+                        "kind": asset.kind,
+                        "subject": asset.subject,
+                    }
+                    for asset in catalog_assets
+                ]
             price_asset = register_asset(
                 provider=PROVIDER,
                 kind="price_history",
@@ -863,7 +929,6 @@ def _ensure_listings(
     return listings
 
 
-@transaction.atomic
 def _ensure_snapshot(
     *,
     config: UsUniverseConfig,
@@ -872,7 +937,22 @@ def _ensure_snapshot(
     listings: dict[str, Listing],
     exclusion_reasons: dict[str, str],
     catalog_assets: list[DataAsset],
-) -> UniverseSnapshot:
+    store: AssetStore,
+    retrieved_at: datetime,
+) -> tuple[UniverseSnapshot, str | None]:
+    """Return the snapshot and, only when this call wrote fresh evidence,
+    that evidence's relative path -- so a caller whose *own* outer
+    transaction later rolls back can still clean up the orphaned physical
+    file once no `DataAsset` row survives for it.
+
+    Deliberately *not* its own nested `@transaction.atomic`: its only
+    caller, `run_us_daily`, already runs it inside one encompassing atomic
+    block. A redundant inner savepoint boundary can itself raise on exit
+    *after* releasing its savepoint, which would lose this function's
+    return value (and therefore `evidence_relative_path`) even though the
+    write already happened -- leaving an orphan the outer rollback cleanup
+    could never learn about.
+    """
     universe, _created = Universe.objects.update_or_create(
         slug=config.slug,
         defaults={
@@ -881,21 +961,12 @@ def _ensure_snapshot(
             "config_version": config.config_version,
         },
     )
-    snapshot_payload = {
-        "config": config.raw,
-        "catalog_assets": [
-            {"sha256": asset.sha256, "subject": asset.subject} for asset in catalog_assets
-        ],
-        "members": [
-            {
-                "listing_id": str(listings[symbol].id),
-                "symbol": symbol,
-                "eligible": symbol not in exclusion_reasons,
-                "exclusion_reason": exclusion_reasons.get(symbol, ""),
-            }
-            for symbol in config.symbols
-        ],
-    }
+    snapshot_payload = universe_snapshot_evidence_payload(
+        config=config,
+        catalog_assets=catalog_assets,
+        listings=listings,
+        exclusion_reasons=exclusion_reasons,
+    )
     digest = config_hash(snapshot_payload)
     existing = UniverseSnapshot.objects.filter(
         universe=universe,
@@ -908,7 +979,7 @@ def _ensure_snapshot(
                 f"Universe snapshot {existing.pk} already exists for "
                 f"{target_date.isoformat()} with different evidence"
             )
-        return existing
+        return existing, None
 
     snapshot = UniverseSnapshot.objects.create(
         universe=universe,
@@ -927,7 +998,47 @@ def _ensure_snapshot(
             for symbol in config.symbols
         ]
     )
-    return snapshot
+    # Persist an envelope *around* the exact canonical bytes `digest` was
+    # hashed from, as an immutable, independently-checksummed `DataAsset`,
+    # so a later co-mutation of both `UniverseMembership` rows and this
+    # snapshot's own `config_hash` field cannot silently authenticate
+    # itself: the verifier re-reads *this* physical artifact rather than
+    # recomputing from whatever the mutable rows currently say.
+    envelope = build_membership_evidence_envelope(
+        snapshot_id=snapshot.id, hash_payload=snapshot_payload, catalog_assets=catalog_assets
+    )
+    envelope_bytes = json.dumps(
+        envelope, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    relative_path = f"universe/{snapshot.id}/membership-evidence.json"
+    # Decided from the filesystem *before* writing, never from an
+    # in-transaction row-existence query: this call's own uncommitted
+    # `DataAsset.objects.create` below is visible to `.exists()` on this
+    # same connection even though nothing has actually committed yet, so a
+    # failure occurring after that insert would otherwise be mistaken for
+    # "a row already claims this file" and skip the cleanup it needs. A
+    # fresh snapshot's evidence path embeds its own new UUID, so this file
+    # can only already exist here as a genuine prior committed asset (never
+    # deleted) or a leftover from an earlier failed attempt at identical
+    # bytes (safe to leave alone either way).
+    file_already_existed = store.resolve(relative_path).exists()
+    try:
+        written = store.write_bytes(relative_path, envelope_bytes)
+        DataAsset.objects.create(
+            provider="stanstock",
+            kind=UNIVERSE_MEMBERSHIP_EVIDENCE_KIND,
+            subject=str(snapshot.id),
+            relative_path=written.relative_path,
+            sha256=written.sha256,
+            retrieved_at=retrieved_at,
+            available_at=retrieved_at,
+            metadata={"usage_scope": PRIVATE_USAGE_SCOPE},
+        )
+    except Exception:
+        if not file_already_existed:
+            store.resolve(relative_path).unlink(missing_ok=True)
+        raise
+    return snapshot, relative_path
 
 
 def _existing_completed_result(
@@ -969,7 +1080,7 @@ def _existing_completed_result(
     excluded = memberships.filter(eligible=False).count()
     analyses = StockAnalysis.objects.filter(run=run).count()
     predictions = Prediction.objects.filter(analysis__run=run).count()
-    benchmark_asset = _benchmark_asset_for_completed_run(
+    benchmark_asset = benchmark_asset_for_completed_run(
         run=run,
         benchmark_symbol=config.benchmark_symbol,
         target_date=target_date,
@@ -979,8 +1090,13 @@ def _existing_completed_result(
         target_date=target_date,
         store=store,
     )
+    catalog_asset_ids = _catalog_asset_ids_for_completed_run(
+        benchmark_asset=benchmark_asset,
+        target_date=target_date,
+    )
     return LiveUsRunResult(
         snapshot=snapshot,
+        analysis_run_id=run.id,
         analyses=analyses,
         predictions=predictions,
         eligible=eligible,
@@ -989,10 +1105,70 @@ def _existing_completed_result(
         raw_assets=0,
         credits_used=0,
         benchmark_symbol=config.benchmark_symbol,
+        catalog_asset_ids=catalog_asset_ids,
     )
 
 
-def _benchmark_asset_for_completed_run(
+def _catalog_asset_ids_for_completed_run(
+    *,
+    benchmark_asset: DataAsset,
+    target_date: date,
+) -> tuple[UUID, ...]:
+    """Recover the exact catalog assets a completed run's snapshot used.
+
+    The benchmark price asset's own immutable ``metadata`` was populated at
+    creation time (see ``_persist_price_series``) with the exact
+    ``catalog_assets`` (id + sha256) this run's ``_ensure_snapshot`` built
+    its membership payload from -- the same identities
+    `benchmark_asset_for_completed_run` already independently resolves for a
+    completed run. Recovering them from that persisted evidence -- rather
+    than guessing a "latest" `stock_catalog` row -- lets zero-fetch recovery
+    (analysis committed, later ETF/benchmark projection failed) still
+    supply the exact identities `refresh_verification` requires.
+    """
+    raw_entries = (
+        benchmark_asset.metadata.get("catalog_assets")
+        if isinstance(benchmark_asset.metadata, dict)
+        else None
+    )
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError(
+            f"Completed US run for {target_date.isoformat()} has no recorded catalog "
+            "asset identities on its benchmark evidence"
+        )
+    asset_ids: list[UUID] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError(
+                f"Completed US run for {target_date.isoformat()} has a malformed catalog "
+                "asset reference"
+            )
+        try:
+            asset_id = UUID(str(raw_entry.get("id")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Completed US run for {target_date.isoformat()} has an invalid catalog "
+                "asset reference"
+            ) from exc
+        expected_sha256 = raw_entry.get("sha256")
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+            raise ValueError(
+                f"Completed US run for {target_date.isoformat()} has an invalid catalog "
+                "asset checksum"
+            )
+        asset = DataAsset.objects.filter(
+            pk=asset_id, provider=PROVIDER, kind="stock_catalog"
+        ).first()
+        if asset is None or asset.sha256 != expected_sha256:
+            raise ValueError(
+                f"Completed US run for {target_date.isoformat()} has unavailable or "
+                "conflicting catalog asset evidence"
+            )
+        asset_ids.append(asset_id)
+    return tuple(asset_ids)
+
+
+def benchmark_asset_for_completed_run(
     *,
     run: AnalysisRun,
     benchmark_symbol: str,

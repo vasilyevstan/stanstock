@@ -16,6 +16,7 @@ import polars as pl
 from django.db import transaction
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import DataAsset, Listing
@@ -62,6 +63,26 @@ PANEL_SCHEMA = {
     "eligible": pl.Boolean,
     "insufficiency_reason": pl.String,
 }
+
+
+def calendar_sessions_through(
+    *, calendar_name: str, fixed_epoch: date, target_date: date
+) -> tuple[date, ...]:
+    """The exact ordered trading-session closure this configuration's panel
+    is built over, from `fixed_epoch` through `target_date` inclusive.
+
+    A single pure leaf shared by the panel producer and its research-domain
+    verifier, so the verifier can independently reproduce the panel's own
+    `calendar_hash` rather than trusting whatever hash the panel's metadata
+    happens to declare.
+    """
+    calendar = get_calendar(calendar_name)
+    target_session = calendar.date_to_session(target_date, direction="none")
+    epoch_session = calendar.date_to_session(fixed_epoch, direction="none")
+    if target_session < epoch_session:
+        raise ValueError("Forecast target date precedes the configured fixed epoch")
+    sessions = calendar.sessions_in_range(epoch_session, target_session)
+    return tuple(session.date() for session in sessions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,16 +154,11 @@ def build_medium_forecast_panel(
     code_revision: str,
     store: AssetStore,
 ) -> MediumPanel:
-    calendar = get_calendar(config.calendar)
-    target_session = calendar.date_to_session(target_date, direction="none")
-    epoch_session = calendar.date_to_session(config.fixed_epoch, direction="none")
-    if target_session < epoch_session:
-        raise ValueError("Forecast target date precedes the configured fixed epoch")
-    calendar_sessions = tuple(
-        session.date() for session in calendar.sessions_in_range(epoch_session, target_session)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=config.calendar, fixed_epoch=config.fixed_epoch, target_date=target_date
     )
     session_index = {session: index for index, session in enumerate(calendar_sessions)}
-    calendar_hash = _hash_json([session.isoformat() for session in calendar_sessions])
+    calendar_hash = hash_json([session.isoformat() for session in calendar_sessions])
 
     benchmark_read = asof.price_frame_with_diagnostics(
         provider=provider,
@@ -221,11 +237,36 @@ def build_medium_forecast_panel(
         f"derived/forecast/medium/{target_date.isoformat()}/"
         f"{run_id.hex}-{content_hash[:12]}.parquet"
     )
-    stored = store.write_bytes(relative_path, payload)
-    deduped_sources = _dedupe_assets(source_assets)
-    source_manifest = [_asset_identity(asset) for asset in deduped_sources]
-    source_manifest_hash = _hash_json(source_manifest)
-    evidence_bundle_hash = _hash_json(
+    # Decide file ownership *before* writing (mirrors
+    # `research.service._write_analysis_output_manifest`'s exact idiom):
+    # a fresh `run_id`/content-hash path should never already exist, so
+    # this only guards against a stale leftover from an earlier failed
+    # attempt at the very same path. Ownership must never be inferred
+    # from a post-failure DB query -- if the nested `transaction.atomic()`
+    # below fails on its own savepoint *exit* (after already truly
+    # committing the row into the outer transaction), the connection is
+    # left in a doomed "needs rollback" state and a further ORM query in
+    # the `except` block would itself raise, masking the original error
+    # and making row-based ownership detection unreliable.
+    try:
+        resolved = store.resolve(relative_path)
+        file_already_existed = resolved.exists()
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "medium_forecast_panel_path_unavailable",
+            "The medium-forecast panel path could not be checked",
+        ) from None
+    try:
+        stored = store.write_bytes(relative_path, payload)
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "medium_forecast_panel_write_failed",
+            "The medium-forecast panel could not be written",
+        ) from None
+    deduped_sources = dedupe_assets(source_assets)
+    source_manifest = [asset_identity(asset) for asset in deduped_sources]
+    source_manifest_hash = hash_json(source_manifest)
+    evidence_bundle_hash = hash_json(
         {
             "calendar_hash": calendar_hash,
             "code_revision": code_revision,
@@ -281,8 +322,15 @@ def build_medium_forecast_panel(
                 },
             )
     except Exception:
-        if not DataAsset.objects.filter(relative_path=relative_path).exists():
-            store.resolve(relative_path).unlink(missing_ok=True)
+        if not file_already_existed:
+            # A cleanup fault here (e.g. an unexpected permission error on
+            # unlink) must never replace the original exception being
+            # handled: swallow only this narrow best-effort cleanup step,
+            # never the failure that actually caused it.
+            try:
+                store.resolve(relative_path).unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
         raise
     return MediumPanel(
         frame=frame,
@@ -1303,7 +1351,7 @@ def _parquet_bytes(frame: pl.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-def _asset_identity(asset: DataAsset) -> dict[str, object]:
+def asset_identity(asset: DataAsset) -> dict[str, object]:
     return {
         "id": str(asset.pk),
         "provider": asset.provider,
@@ -1316,13 +1364,13 @@ def _asset_identity(asset: DataAsset) -> dict[str, object]:
     }
 
 
-def _dedupe_assets(assets: list[DataAsset]) -> list[DataAsset]:
+def dedupe_assets(assets: list[DataAsset]) -> list[DataAsset]:
     unique: dict[str, DataAsset] = {}
     for asset in assets:
         unique[str(asset.pk)] = asset
     return [unique[key] for key in sorted(unique)]
 
 
-def _hash_json(value: object) -> str:
+def hash_json(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

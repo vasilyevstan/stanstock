@@ -1,27 +1,44 @@
 from __future__ import annotations
 
+import hashlib
 import os
-from datetime import UTC, date, datetime
-from io import StringIO
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import polars as pl
 import pytest
+from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+import refresh_fixtures
+import test_data_sec_ingestion as sec_fixtures
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.management.commands import scheduled_refresh
 from stanstock.core.models import JobRun
+from stanstock.data import live_us as live_us_module
+from stanstock.data import sec_jobs as sec_jobs_module
+from stanstock.data.assets import AssetStore
 from stanstock.data.jobs import PreparedUsDailyJob, execute_us_daily_job
 from stanstock.data.live_us import UsUniverseConfig
-from stanstock.data.models import ProviderRecord, UniverseSnapshot
+from stanstock.data.models import DataAsset, LatestMarketData, ProviderRecord, UniverseSnapshot
+from stanstock.data.providers import sec as sec_provider
+from stanstock.data.providers.contracts import FundamentalSourcePayload, PriceBar, PriceSeries
+from stanstock.data.sec_config import load_sec_fundamentals_config
+from stanstock.data.sec_evidence import MAPPING_SUBJECT
+from stanstock.research.jobs import execute_prediction_evaluation_job
 
 pytestmark = pytest.mark.django_db
 
+TARGET_DATE = date(2026, 9, 4)
+DECISION_TIME = datetime(2026, 9, 5, 6, tzinfo=UTC)
 
-def _prepared(target: date = date(2026, 9, 4)) -> PreparedUsDailyJob:
+
+def _prepared(target: date = TARGET_DATE) -> PreparedUsDailyJob:
     config = cast(
         UsUniverseConfig,
         SimpleNamespace(benchmark_symbol="SPY"),
@@ -30,7 +47,7 @@ def _prepared(target: date = date(2026, 9, 4)) -> PreparedUsDailyJob:
         config=config,
         target_date=target,
         snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
-        decision_time=datetime(2026, 9, 5, 6, tzinfo=UTC),
+        decision_time=DECISION_TIME,
     )
 
 
@@ -43,11 +60,58 @@ def _successful_child(job_name: str, region: str, target_date: date) -> JobRun:
     )
 
 
+def _real_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    symbols: tuple[str, ...] = ("AAA", "BBB"),
+    minimum_eligible: int = 1,
+    target: date = TARGET_DATE,
+    decision_time: datetime = DECISION_TIME,
+) -> tuple[PreparedUsDailyJob, UsUniverseConfig, tuple[list[str], list[str]]]:
+    """Build a `PreparedUsDailyJob` backed by a genuinely-executable pipeline.
+
+    Unlike `_prepared`, `config` here is a real `UsUniverseConfig` (not a
+    bare `SimpleNamespace`) and the Twelve Data provider boundary is patched
+    with synthetic fixtures, so calling the real, unmocked
+    `execute_us_daily_job` produces genuine persisted evidence that
+    `refresh_verification.verify_scheduled_refresh` can independently prove.
+    """
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    config = refresh_fixtures.build_universe_config(
+        symbols=symbols,
+        minimum_eligible=minimum_eligible,
+    )
+    refresh_fixtures.enable_twelve_data_provider()
+    refresh_fixtures.set_twelve_data_api_key(monkeypatch)
+    calls = refresh_fixtures.patch_twelve_data_provider(
+        monkeypatch,
+        config,
+        target_date=target,
+        retrieved_at=decision_time,
+    )
+    # `execute_us_daily_job` always runs with `require_on_time=True`, whose
+    # deadline check folds in the *real* wall clock (`timezone.now()`) --
+    # not just the supplied `decision_time` -- so it must be pinned to a
+    # moment inside the on-time window too (same technique
+    # `test_data_live_us.py::test_automatic_run_uses_current_clock_for_issuance_deadline`
+    # uses), or a real test run's actual current date would always appear
+    # "late" for a fixed historical `target`/`decision_time` fixture.
+    monkeypatch.setattr("stanstock.data.live_us.timezone.now", lambda: decision_time)
+    prepared = PreparedUsDailyJob(
+        config=config,
+        target_date=target,
+        snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+        decision_time=decision_time,
+    )
+    return prepared, config, calls
+
+
 def test_scheduled_refresh_records_recoverable_child_stages(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = _prepared()
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
     clean_checks: list[Path] = []
     evaluation_attempts = 0
     evaluation_times: list[datetime] = []
@@ -64,47 +128,35 @@ def test_scheduled_refresh_records_recoverable_child_stages(
         return "a" * 40
 
     monkeypatch.setattr(scheduled_refresh, "clean_git_revision", clean_revision)
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_us_daily_job",
-        lambda *args, **kwargs: _successful_child("daily", "us", prepared.target_date),
-    )
-
-    def evaluate() -> JobRun:
-        nonlocal evaluation_attempts
-        evaluation_attempts += 1
-
-        def task(run: JobRun) -> JobExecutionResult:
-            if evaluation_attempts == 1:
-                raise ValueError("temporary evaluation failure")
-            return JobExecutionResult()
-
-        return execute_target_job(
-            job_name="evaluate_predictions",
-            region="us",
-            target_date=prepared.target_date,
-            task=task,
-        )
+    # Market and portfolio stages are deliberately left unmocked here so the
+    # real pipeline runs against the patched Twelve Data fixtures above,
+    # producing genuine persisted evidence `verify_scheduled_refresh` can
+    # independently re-derive -- not a hand-built `JobExecutionResult` that
+    # merely has the right shape.
 
     def execute_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
         evaluation_time = kwargs["evaluation_time"]
         assert isinstance(evaluation_time, datetime)
         evaluation_times.append(evaluation_time)
-        return evaluate()
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
 
     monkeypatch.setattr(
         scheduled_refresh,
         "execute_prediction_evaluation_job",
         execute_evaluation,
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_portfolio_snapshot_job",
-        lambda **kwargs: _successful_child(
-            "scheduled_portfolio_snapshots",
-            "",
-            prepared.target_date,
-        ),
     )
 
     with pytest.raises(CommandError, match="temporary evaluation failure"):
@@ -118,7 +170,11 @@ def test_scheduled_refresh_records_recoverable_child_stages(
     assert first_parent.status == JobRun.Status.FAILED
     assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
     assert first_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.FAILED
-    assert first_parent.details["stages"]["portfolio_snapshots"]["status"] == JobRun.Status.SUCCESS
+    # Zero active portfolios is an explicit satisfied skip, not a failure.
+    assert first_parent.details["stages"]["portfolio_snapshots"]["status"] == JobRun.Status.SKIPPED
+    assert "verification" not in first_parent.details
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
 
     call_command(
         "scheduled_refresh",
@@ -131,9 +187,17 @@ def test_scheduled_refresh_records_recoverable_child_stages(
     assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
     assert second_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SUCCESS
     assert second_parent.details["stages"]["portfolio_snapshots"]["status"] == JobRun.Status.SKIPPED
+    assert second_parent.details["verification"]["status"] == "verified"
+    # Retry/no-op: the market child is recovered by reference to its prior
+    # success, never re-fetched -- zero additional provider calls/credits.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
     assert len(clean_checks) == 2
     assert len(evaluation_times) == 2
-    assert all(value != prepared.decision_time for value in evaluation_times)
+    # The global clock is pinned to `decision_time` for this fixture (the
+    # market stage's on-time deadline check needs it); evaluation naturally
+    # observes that same pinned moment on both attempts.
+    assert evaluation_times == [prepared.decision_time, prepared.decision_time]
     assert os.environ["STANSTOCK_CODE_REVISION"] == "a" * 40
 
 
@@ -183,9 +247,22 @@ def test_enabled_sec_stage_runs_before_market(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = _prepared()
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
     order: list[str] = []
     ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    sec_evidence = refresh_fixtures.build_sec_evidence(
+        store=AssetStore(tmp_path),
+        company=listing.security.company,
+        available_before=prepared.decision_time,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
     monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
     monkeypatch.setattr(
         scheduled_refresh,
@@ -197,38 +274,39 @@ def test_enabled_sec_stage_runs_before_market(
         "clean_git_revision",
         lambda root: "a" * 40,
     )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_sec_fundamentals_job",
-        lambda **kwargs: (
-            order.append("sec") or _successful_child("sec_fundamentals", "us", prepared.target_date)
-        ),
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_us_daily_job",
-        lambda *args, **kwargs: (
-            order.append("market") or _successful_child("daily", "us", prepared.target_date)
-        ),
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_prediction_evaluation_job",
-        lambda **kwargs: _successful_child(
-            "evaluate_predictions",
-            "us",
-            prepared.target_date,
-        ),
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_portfolio_snapshot_job",
-        lambda **kwargs: _successful_child(
-            "scheduled_portfolio_snapshots",
-            "",
-            prepared.target_date,
-        ),
-    )
+
+    def execute_sec(**kwargs: object) -> JobRun:
+        order.append("sec")
+
+        def task(run: JobRun) -> JobExecutionResult:
+            return JobExecutionResult(
+                details={
+                    "mapping_asset_id": sec_evidence.mapping_asset_id,
+                    "mapping_sha256": sec_evidence.mapping_sha256,
+                    "cik_config_version": sec_evidence.cik_config_version,
+                    "cik_config_hash": sec_evidence.cik_config_hash,
+                    "config_version": sec_evidence.fundamentals_config_version,
+                    "config_hash": sec_evidence.fundamentals_config_hash,
+                    "asset_refs": [ref.to_json() for ref in sec_evidence.asset_refs],
+                }
+            )
+
+        return execute_target_job(
+            job_name="sec_fundamentals",
+            region="us",
+            target_date=prepared.target_date,
+            task=task,
+        )
+
+    def execute_market(*args: object, **kwargs: object) -> JobRun:
+        order.append("market")
+        # Delegate to the real, unmocked production entrypoint so the market
+        # stage produces genuine persisted evidence -- ordering is captured
+        # here, evidence realism is not sacrificed for it.
+        return execute_us_daily_job(prepared, require_observed=True)
+
+    monkeypatch.setattr(scheduled_refresh, "execute_sec_fundamentals_job", execute_sec)
+    monkeypatch.setattr(scheduled_refresh, "execute_us_daily_job", execute_market)
 
     call_command(
         "scheduled_refresh",
@@ -238,7 +316,13 @@ def test_enabled_sec_stage_runs_before_market(
 
     assert order == ["sec", "market"]
     parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.status == JobRun.Status.SUCCESS
     assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.SUCCESS
+    assert parent.details["verification"]["status"] == "verified"
+    assert parent.details["verification"]["sec"]["required"] is True
+    assert parent.details["verification"]["sec"]["mapping_asset_id"] == (
+        sec_evidence.mapping_asset_id
+    )
 
 
 def test_failed_sec_stage_blocks_market(
@@ -297,8 +381,36 @@ def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = _prepared()
-    _successful_child("sec_fundamentals", "us", prepared.target_date)
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    sec_evidence = refresh_fixtures.build_sec_evidence(
+        store=AssetStore(tmp_path),
+        company=listing.security.company,
+        available_before=prepared.decision_time,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    prior_sec_success = execute_target_job(
+        job_name="sec_fundamentals",
+        region="us",
+        target_date=prepared.target_date,
+        task=lambda run: JobExecutionResult(
+            details={
+                "mapping_asset_id": sec_evidence.mapping_asset_id,
+                "mapping_sha256": sec_evidence.mapping_sha256,
+                "cik_config_version": sec_evidence.cik_config_version,
+                "cik_config_hash": sec_evidence.cik_config_hash,
+                "config_version": sec_evidence.fundamentals_config_version,
+                "config_hash": sec_evidence.fundamentals_config_hash,
+                "asset_refs": [ref.to_json() for ref in sec_evidence.asset_refs],
+            }
+        ),
+    )
     ProviderRecord.objects.create(provider="sec", enabled=False, status="disabled")
     sec_calls = 0
     monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
@@ -316,39 +428,23 @@ def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
     def recover_sec(**kwargs: object) -> JobRun:
         nonlocal sec_calls
         sec_calls += 1
-        return _successful_child("sec_fundamentals", "us", prepared.target_date)
+        # A prior SUCCESS already exists for this exact target, so
+        # `execute_target_job` must auto-skip by reference below without
+        # ever invoking this task -- proving the disabled provider is never
+        # actually contacted again for an already-succeeded target.
+        return execute_target_job(
+            job_name="sec_fundamentals",
+            region="us",
+            target_date=prepared.target_date,
+            task=lambda run: pytest.fail(
+                "SEC task must not re-run for an already-succeeded target"
+            ),
+        )
 
     monkeypatch.setattr(
         scheduled_refresh,
         "execute_sec_fundamentals_job",
         recover_sec,
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_us_daily_job",
-        lambda *args, **kwargs: _successful_child(
-            "daily",
-            "us",
-            prepared.target_date,
-        ),
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_prediction_evaluation_job",
-        lambda **kwargs: _successful_child(
-            "evaluate_predictions",
-            "us",
-            prepared.target_date,
-        ),
-    )
-    monkeypatch.setattr(
-        scheduled_refresh,
-        "execute_portfolio_snapshot_job",
-        lambda **kwargs: _successful_child(
-            "scheduled_portfolio_snapshots",
-            "",
-            prepared.target_date,
-        ),
     )
 
     call_command(
@@ -359,4 +455,903 @@ def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
 
     assert sec_calls == 1
     parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.status == JobRun.Status.SUCCESS
     assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.SKIPPED
+    assert parent.details["verification"]["status"] == "verified"
+    assert parent.details["verification"]["sec"]["job_run_id"] == str(prior_sec_success.pk)
+
+
+def test_verification_failure_after_real_success_fails_closed_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F7: a corrupted *local* output must fail the parent even though every
+    child `JobRun` already recorded SUCCESS/SKIPPED -- proving the parent's
+    own success genuinely depends on independently re-provable evidence, not
+    merely on child status. The correcting retry must then recover without
+    spending any additional provider credit.
+
+    The parent `scheduled_refresh` job is itself an idempotent target job
+    keyed by ``(job_name, region, target_date)``: once it records SUCCESS,
+    a later invocation for the same target short-circuits before doing any
+    work at all (by design -- this is the same recovery pattern children
+    use). So corruption must be injected *while the parent's own attempt
+    sequence is still open*: attempt 1 is forced to fail for an unrelated
+    reason (a one-shot evaluation failure, same technique as
+    `test_scheduled_refresh_records_recoverable_child_stages`) after the
+    market child has already really executed and persisted; the local
+    output is corrupted before attempt 2, which recovers every child by
+    reference (no refetch) yet must still fail on verification.
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: "a" * 40,
+    )
+
+    evaluation_attempts = 0
+
+    def flaky_once_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        flaky_once_evaluation,
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert "verification" not in first_parent.details
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    # Corrupt one persisted local output directly -- `LatestMarketData` is
+    # not immutability-protected (it is meant to be overwritten with each
+    # fresh session), so deleting a row here models genuinely losing local
+    # proof (e.g. a partial write, a disk issue) without touching any
+    # immutable evidence row. Its field values are captured first so the
+    # "repair" step below can restore it from already-committed evidence
+    # rather than re-fetching from the provider.
+    corrupted = LatestMarketData.objects.get(listing__ticker="AAA")
+    restore_fields = {
+        field.name: getattr(corrupted, field.name)
+        for field in LatestMarketData._meta.get_fields()
+        if hasattr(field, "attname") and field.name != "id"
+    }
+    corrupted.delete()
+
+    with pytest.raises(CommandError, match="Scheduled refresh failed"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    # Every child stage still recovers by reference to its already-committed
+    # success -- the corruption is caught by verification, not by re-running
+    # (and possibly re-fetching) any child.
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert second_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SUCCESS
+    verification = second_parent.details["verification"]
+    assert verification["status"] == "failed"
+    assert verification["reason_code"] == "latest_market_data_missing"
+    # No success-shaped partial verification block, and no local filesystem
+    # path leaks into the persisted failure detail.
+    assert "checks" not in verification
+    assert not any(str(tmp_path) in str(value) for value in verification.values())
+    # Zero additional provider fetches/credits were spent recovering (or
+    # failing to recover) an already-committed child.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    # Repairing the local output from the exact evidence already committed
+    # (not re-fetching from the provider) lets the retry recover and reach a
+    # genuinely verified success again.
+    LatestMarketData.objects.create(**restore_fields)
+
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+def test_missing_bound_price_file_fails_path_free_and_recovers_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F10: losing the *local file* behind an otherwise intact, correctly
+    registered price asset (distinct from losing the `LatestMarketData` row
+    itself) must fail the parent with a structured, path-free verification
+    reason -- never a raw filesystem path in any error, detail, or log --
+    and must recover on retry without any additional provider fetch.
+
+    As in `test_verification_failure_after_real_success_fails_closed_without_refetch`,
+    the parent job is itself idempotent by `(job_name, region, target_date)`,
+    so corruption must be injected while its own attempt sequence is still
+    open (a one-shot evaluation failure keeps attempt 1 from recording
+    SUCCESS after the market child has already really executed).
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    evaluation_attempts = 0
+
+    def flaky_once_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh, "execute_prediction_evaluation_job", flaky_once_evaluation
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    bound = LatestMarketData.objects.select_related("source_asset").get(listing__ticker="AAA")
+    asset_path = tmp_path / bound.source_asset.relative_path
+    assert asset_path.exists()
+    original_bytes = asset_path.read_bytes()
+    asset_path.unlink()
+
+    with pytest.raises(CommandError, match="Scheduled refresh failed"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    verification = second_parent.details["verification"]
+    assert verification["status"] == "failed"
+    assert verification["reason_code"] == "latest_market_data_asset_unreadable"
+    assert not any(str(tmp_path) in str(value) for value in verification.values())
+    assert str(tmp_path) not in str(second_parent.details)
+    # No additional provider credit was spent attempting (and failing) to
+    # recover a child that already succeeded.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    # Restoring the exact original bytes locally (no re-fetch) lets the
+    # retry verify successfully again.
+    asset_path.write_bytes(original_bytes)
+
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+def test_final_asset_integrity_os_error_fails_path_free_without_leaking_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An OS-level failure (permission error, I/O error) resolving/reading a
+    registered asset's file during the final physical-integrity pass must
+    never leak its own exception message (which embeds a resolved absolute
+    path) into `JobRun.error`, `JobRun.details`, or any log line -- it must
+    surface only as the structured, path-free `asset_integrity_failed`
+    verification failure.
+
+    As in `test_missing_bound_price_file_fails_path_free_and_recovers_without_refetch`,
+    the parent job is itself idempotent by `(job_name, region, target_date)`,
+    so the OS-level failure must be injected while attempt 1's own sequence
+    is still open (a one-shot evaluation failure keeps attempt 1 from
+    recording SUCCESS after the market child has already really executed).
+    """
+    prepared, _config, _calls = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    sentinel = "/sentinel-should-never-leak/asset.bin"
+    injected_at_attempt = 2
+    evaluation_attempts = 0
+
+    def flaky_once_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh, "execute_prediction_evaluation_job", flaky_once_evaluation
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+
+    def boom_file_digest(source: object, algorithm: str) -> object:
+        raise OSError(f"[Errno 5] Input/output error: {sentinel!r}")
+
+    monkeypatch.setattr("stanstock.core.integrity.hashlib.file_digest", boom_file_digest)
+
+    caplog.set_level("INFO")
+    with pytest.raises(CommandError):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=injected_at_attempt)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert sentinel not in second_parent.error
+    assert sentinel not in str(second_parent.details)
+    assert sentinel not in caplog.text
+    verification = second_parent.details["verification"]
+    assert verification["status"] == "failed"
+    assert verification["reason_code"] == "asset_integrity_failed"
+
+
+def test_recovered_spy_evidence_read_failure_fails_path_free_and_recovers_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A physical read/parse failure recovering the exact SPY price evidence
+    asset -- via `_existing_completed_result`'s zero-fetch recovery path,
+    after a real analysis has already committed but the initial ETF
+    projection deliberately failed -- must never leak a path-bearing
+    `OSError`/Polars exception into any command text, exception cause, log
+    line, or child/parent `JobRun.error`/`details`. It must fail closed with
+    a controlled, path-free error, then recover cleanly with zero
+    additional provider fetch once the injected failure is removed.
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    real_sync = live_us_module.sync_investable_spy_from_asset
+    sync_attempts = 0
+
+    def flaky_once_sync(**kwargs: object) -> object:
+        nonlocal sync_attempts
+        sync_attempts += 1
+        if sync_attempts == 1:
+            raise ValueError("temporary ETF projection failure")
+        return real_sync(**kwargs)
+
+    monkeypatch.setattr(live_us_module, "sync_investable_spy_from_asset", flaky_once_sync)
+
+    # Attempt 1: analysis/predictions genuinely commit, but the initial SPY
+    # projection is deliberately failed afterward -- the market stage fails
+    # even though the analysis evidence is already durable.
+    with pytest.raises(CommandError, match="temporary ETF projection failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    benchmark_asset = DataAsset.objects.get(
+        provider="twelve_data", kind="price_history", subject="SPY"
+    )
+    assert benchmark_asset.relative_path
+
+    sentinel = "/sentinel-should-never-leak/spy-price-evidence.parquet"
+
+    def boom_read_bytes(self: AssetStore, relative_path: str) -> object:
+        raise OSError(f"[Errno 5] Input/output error: {sentinel!r}")
+
+    # Attempt 2: `_existing_completed_result` recovers the already-committed
+    # analysis and tries to re-project the exact SPY evidence asset, whose
+    # physical read now fails with a path-bearing error.
+    caplog.set_level("INFO")
+    with monkeypatch.context() as read_patch:
+        read_patch.setattr(AssetStore, "read_bytes", boom_read_bytes)
+        with pytest.raises(CommandError) as excinfo:
+            call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    assert sentinel not in str(excinfo.value)
+    assert sentinel not in caplog.text
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert sentinel not in second_parent.error
+    assert sentinel not in str(second_parent.details)
+    # No additional provider credit was spent on the failed recovery
+    # attempt -- `_existing_completed_result` returns before any fetch.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    # Attempt 3: with the injected read failure removed, the same exact
+    # recovered evidence asset now reads cleanly and the parent succeeds --
+    # still with zero additional provider fetch.
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+def test_recovered_spy_evidence_checksum_mismatch_fails_closed_before_any_mutation_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A physically altered SPY price file that still parses as a
+    structurally valid Parquet frame (so no `OSError`/Polars parse error is
+    raised) but whose bytes no longer match the registered
+    `DataAsset.sha256` -- e.g. a wrong close projected into an otherwise
+    well-formed file -- must fail the market stage *before* any SPY
+    listing/`LatestMarketData` mutation, must never leak a filesystem path,
+    must spend zero additional provider credit, and must recover cleanly
+    (not remain poisoned) once the exact original bytes are restored.
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    real_sync = live_us_module.sync_investable_spy_from_asset
+    sync_attempts = 0
+
+    def flaky_once_sync(**kwargs: object) -> object:
+        nonlocal sync_attempts
+        sync_attempts += 1
+        if sync_attempts == 1:
+            raise ValueError("temporary ETF projection failure")
+        return real_sync(**kwargs)
+
+    monkeypatch.setattr(live_us_module, "sync_investable_spy_from_asset", flaky_once_sync)
+
+    # Attempt 1: analysis/predictions genuinely commit, but the initial SPY
+    # projection is deliberately failed afterward -- no SPY listing or
+    # `LatestMarketData` exists yet.
+    with pytest.raises(CommandError, match="temporary ETF projection failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    assert not LatestMarketData.objects.filter(listing__ticker="SPY").exists()
+
+    benchmark_asset = DataAsset.objects.get(
+        provider="twelve_data", kind="price_history", subject="SPY"
+    )
+    registered_sha256 = benchmark_asset.sha256
+    asset_path = tmp_path / benchmark_asset.relative_path
+    original_bytes = asset_path.read_bytes()
+
+    # Tamper the physical bytes: still a structurally valid Parquet frame,
+    # but its content (and therefore checksum) has changed -- e.g. the last
+    # close has been altered.
+    tampered_frame = pl.read_parquet(BytesIO(original_bytes)).with_columns(
+        (pl.col("close") * 5.0).alias("close")
+    )
+    buffer = BytesIO()
+    tampered_frame.write_parquet(buffer)
+    tampered_bytes = buffer.getvalue()
+    assert tampered_bytes != original_bytes
+    asset_path.write_bytes(tampered_bytes)
+
+    # Attempt 2: `_existing_completed_result` recovers the already-committed
+    # analysis and tries to re-project the exact SPY evidence asset. The
+    # checksum no longer matches, so the market stage must fail closed
+    # *before* any SPY listing/`LatestMarketData` row is created.
+    with pytest.raises(CommandError):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert str(tmp_path) not in str(second_parent.error)
+    assert str(tmp_path) not in str(second_parent.details)
+    assert not LatestMarketData.objects.filter(listing__ticker="SPY").exists()
+    # No additional provider credit was spent on the failed recovery
+    # attempt -- `_existing_completed_result` returns before any fetch.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    # The asset's own registered checksum was never mutated by the
+    # tampering -- confirming the failure comes from a genuine mismatch
+    # against durable evidence, not a fixture artifact.
+    benchmark_asset.refresh_from_db()
+    assert benchmark_asset.sha256 == registered_sha256
+
+    # Restoring the exact original bytes (no re-fetch) lets the retry
+    # recover cleanly rather than remaining poisoned by the tampered read.
+    asset_path.write_bytes(original_bytes)
+
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    recovered = LatestMarketData.objects.get(listing__ticker="SPY")
+    assert recovered.source_asset_id == benchmark_asset.id
+
+
+def test_run_us_daily_default_store_construction_failure_fails_path_free_before_any_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`run_us_daily`'s own eager default-store construction -- the actual
+    entry point reached on every scheduled retry, *before*
+    `_existing_completed_result`'s zero-fetch recovery path -- must
+    normalize a construction failure (an unwritable/misconfigured root)
+    into a stable, path-free error. It must never leak a path into the
+    command's `CommandError`, its cause, any log line, or child/parent
+    `JobRun.error`/`details`, and it must fail *before* spending any
+    provider credit recovering an already-completed run.
+
+    As in `test_recovered_spy_evidence_read_failure_fails_path_free_and_recovers_without_refetch`,
+    the parent job is itself idempotent by `(job_name, region, target_date)`,
+    so the fault must be injected while attempt 1's own "daily" child
+    sequence is still open (a one-shot SPY-projection failure keeps the
+    "daily" child from recording SUCCESS after the real analysis has
+    already committed).
+    """
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    real_sync = live_us_module.sync_investable_spy_from_asset
+    sync_attempts = 0
+
+    def flaky_once_sync(**kwargs: object) -> object:
+        nonlocal sync_attempts
+        sync_attempts += 1
+        if sync_attempts == 1:
+            raise ValueError("temporary ETF projection failure")
+        return real_sync(**kwargs)
+
+    monkeypatch.setattr(live_us_module, "sync_investable_spy_from_asset", flaky_once_sync)
+
+    # Attempt 1: analysis/predictions genuinely commit, but the initial SPY
+    # projection is deliberately failed afterward -- the "daily" child
+    # itself records FAILED even though its evidence is already durable.
+    with pytest.raises(CommandError, match="temporary ETF projection failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    sentinel = "/sentinel-should-never-leak/asset-store-root"
+
+    def boom_init(self: AssetStore, root: Path | None = None) -> None:
+        raise OSError(f"[Errno 13] Permission denied: {sentinel!r}")
+
+    # Attempt 2: `run_us_daily`'s own default `AssetStore()` construction --
+    # which happens *before* `_existing_completed_result`'s zero-fetch
+    # recovery attempt -- now fails. No provider credit should be spent,
+    # since the fault is hit before recovery is ever attempted.
+    caplog.set_level("INFO")
+    with monkeypatch.context() as store_patch:
+        store_patch.setattr(AssetStore, "__init__", boom_init)
+        with pytest.raises(CommandError) as excinfo:
+            call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    assert sentinel not in str(excinfo.value)
+    assert excinfo.value.__cause__ is not None
+    assert sentinel not in str(excinfo.value.__cause__)
+    assert sentinel not in caplog.text
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert sentinel not in second_parent.error
+    assert sentinel not in str(second_parent.details)
+    market_child = JobRun.objects.get(job_name="daily", region="us", attempt=2)
+    assert market_child.status == JobRun.Status.FAILED
+    assert sentinel not in market_child.error
+    assert sentinel not in str(market_child.details)
+    # No additional provider credit was spent -- the construction failure
+    # happens before `_existing_completed_result` is ever reached.
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    # Attempt 3: with the fault removed, the same completed run recovers
+    # cleanly -- still with zero additional provider fetch.
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+def test_recovered_spy_evidence_malformed_non_target_row_fails_closed_with_zero_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A malformed row *elsewhere* in the exact, checksum-valid SPY price
+    asset -- not the target-date row itself -- must fail the market stage
+    closed, both on the run that first persists it and on every later
+    zero-fetch recovery attempt, never silently filtered away to let the
+    stage "succeed" over a quietly-reduced frame.
+
+    `DataAsset` rows are immutable (enforced by a DB trigger), so this
+    cannot be simulated by mutating an already-committed asset's bytes and
+    checksum in place, unlike the separate physical-tampering/checksum-
+    mismatch regressions. Instead, the malformed row is injected at the
+    provider boundary so the very first persisted SPY asset is genuinely
+    checksum-valid *and* malformed from the moment it is written -- exactly
+    the "checksum-valid malformed evidence" scenario this fix defends
+    against.
+    """
+    prepared, config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    real_fetch_prices = live_us_module.twelve_data.fetch_daily_price_series
+    target_date = prepared.target_date
+
+    def fetch_prices_with_malformed_benchmark(symbol: str, **kwargs: object) -> PriceSeries:
+        if symbol != config.benchmark_symbol:
+            return real_fetch_prices(symbol, **kwargs)
+        price_calls.append(symbol)
+        bars = (
+            PriceBar(
+                trade_date=live_us_module._years_before(target_date, 1),
+                open=Decimal("400"),
+                high=Decimal("402"),
+                low=Decimal("398"),
+                close=Decimal("400"),
+                volume=1_000_000,
+            ),
+            PriceBar(
+                trade_date=target_date - timedelta(days=1),
+                open=Decimal("410"),
+                high=Decimal("412"),
+                low=Decimal("408"),
+                close=Decimal("nan"),
+                volume=1_100_000,
+            ),
+            PriceBar(
+                trade_date=target_date,
+                open=Decimal("415"),
+                high=Decimal("418"),
+                low=Decimal("413"),
+                close=Decimal("417"),
+                volume=1_200_000,
+            ),
+        )
+        return PriceSeries(
+            provider="twelve_data",
+            symbol=symbol,
+            currency="USD",
+            bars=bars,
+            retrieved_at=DECISION_TIME,
+            source_url=f"https://api.twelvedata.com/time_series?symbol={symbol}",
+            raw_bytes=f'{{"status":"ok","symbol":"{symbol}"}}'.encode(),
+            exchange="NYSE ARCA",
+            mic_code="ARCX",
+            instrument_type="ETF",
+            exchange_timezone="America/New_York",
+            adjustment="splits",
+        )
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        fetch_prices_with_malformed_benchmark,
+    )
+
+    # Attempt 1: the real pipeline persists a genuinely checksum-valid SPY
+    # asset -- but its middle row is malformed from the moment it is
+    # written. The analysis/predictions commit, but the SPY projection at
+    # the end of `run_us_daily` must itself fail closed on this malformed
+    # evidence -- no `flaky_once` artifice is needed, since the malformed
+    # data alone is enough to fail the stage.
+    with pytest.raises(CommandError):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    assert not LatestMarketData.objects.filter(listing__ticker="SPY").exists()
+
+    benchmark_asset = DataAsset.objects.get(
+        provider="twelve_data", kind="price_history", subject="SPY"
+    )
+    persisted_bytes = (tmp_path / benchmark_asset.relative_path).read_bytes()
+    assert hashlib.sha256(persisted_bytes).hexdigest() == benchmark_asset.sha256
+    persisted_frame = pl.read_parquet(BytesIO(persisted_bytes))
+    assert persisted_frame["close"].is_nan().any()
+
+    # Attempt 2: `_existing_completed_result` recovers the already-
+    # committed analysis and resolves the *same* checksum-valid, malformed
+    # benchmark asset -- it must still fail closed, and it must not spend
+    # any additional provider credit doing so.
+    with pytest.raises(CommandError):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.FAILED
+    assert not LatestMarketData.objects.filter(listing__ticker="SPY").exists()
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+SEC_SENTINEL_ABS_PATH = "/definitely/not/a/real/path/sec-sentinel-evidence.json"
+
+
+def _sec_command_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[PreparedUsDailyJob, list[str], list[str], list[str]]:
+    """Wire a lightweight `scheduled_refresh` run whose SEC stage exercises
+    the *real*, unmocked `run_sec_ingestion` pipeline.
+
+    Market/evaluation/portfolio stages are never reached: a failed SEC
+    stage aborts the parent job before them (`_run_stage`'s `failures=None`
+    call immediately re-raises), so a bare `SimpleNamespace`-backed
+    `_prepared()` config is enough -- there is no need to stand up the full
+    real Twelve Data market pipeline just to prove this SEC-domain
+    path-confidentiality boundary.
+    """
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    prepared = _prepared()
+    universe_config = sec_fixtures._universe()
+    cik_config = sec_fixtures._cik_config()
+    fundamentals_config = load_sec_fundamentals_config()
+    monkeypatch.setattr(
+        sec_jobs_module, "load_us_universe_config", lambda *a, **kw: universe_config
+    )
+    monkeypatch.setattr(sec_jobs_module, "load_sec_cik_config", lambda *a, **kw: cik_config)
+    monkeypatch.setattr(
+        sec_jobs_module, "load_sec_fundamentals_config", lambda *a, **kw: fundamentals_config
+    )
+    sec_fixtures._listing()
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+
+    mapping_calls: list[str] = []
+    submissions_calls: list[str] = []
+    companyfacts_calls: list[str] = []
+
+    def fetch_mapping(**kwargs: object) -> FundamentalSourcePayload:
+        mapping_calls.append(MAPPING_SUBJECT)
+        return sec_fixtures._payload(
+            MAPPING_SUBJECT,
+            sec_fixtures.MAPPING_BYTES,
+            "https://www.sec.gov/files/company_tickers_exchange.json",
+        )
+
+    def fetch_submissions(cik: str) -> FundamentalSourcePayload:
+        submissions_calls.append(cik)
+        return sec_fixtures._payload(
+            "0000320193",
+            sec_fixtures.SUBMISSIONS_BYTES,
+            "https://data.sec.gov/submissions/CIK0000320193.json",
+        )
+
+    def fetch_companyfacts(cik: str) -> FundamentalSourcePayload:
+        companyfacts_calls.append(cik)
+        return sec_fixtures._payload(
+            "0000320193",
+            sec_fixtures._companyfacts_bytes(),
+            "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+        )
+
+    monkeypatch.setattr(sec_provider, "fetch_ticker_exchange_mapping", fetch_mapping)
+    monkeypatch.setattr(sec_provider, "fetch_submissions", fetch_submissions)
+    monkeypatch.setattr(
+        sec_provider,
+        "fetch_submissions_history",
+        lambda filename: sec_fixtures._payload(
+            filename,
+            sec_fixtures.HISTORY_BYTES,
+            f"https://data.sec.gov/submissions/{filename}",
+        ),
+    )
+    monkeypatch.setattr(sec_provider, "fetch_companyfacts", fetch_companyfacts)
+
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda *a, **kw: pytest.fail("market stage must remain blocked by a failed SEC stage"),
+    )
+    return prepared, mapping_calls, submissions_calls, companyfacts_calls
+
+
+@pytest.mark.parametrize(
+    "fault_kind,pre_register_mapping,expect_mapping_fetch",
+    [
+        ("constructor", False, False),
+        ("resolve", False, True),
+        ("read", True, False),
+        ("checksum", True, False),
+        ("hash", False, True),
+        ("write", False, True),
+    ],
+)
+def test_sec_stage_storage_faults_fail_closed_without_path_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    fault_kind: str,
+    pre_register_mapping: bool,
+    expect_mapping_fetch: bool,
+) -> None:
+    """Every SEC storage-boundary failure (default-store construction, path
+    resolution, physical read, checksum/hash computation, physical write)
+    must fail the SEC stage closed without leaking a resolved absolute or
+    relative asset path into `CommandError`, its cause chain, logs, the SEC
+    child or parent `JobRun.error`/`details`, or `ProviderRecord.last_error`
+    -- and must spend zero downstream SEC company or Twelve Data/market
+    provider calls doing so. Removing the fault must let a plain retry
+    recover normally.
+    """
+    prepared, mapping_calls, submissions_calls, companyfacts_calls = _sec_command_ready(
+        monkeypatch, tmp_path
+    )
+    if pre_register_mapping:
+        sec_fixtures._mapping_asset(AssetStore(tmp_path))
+
+    def broken_init(self: AssetStore, root: Path | None = None) -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{SEC_SENTINEL_ABS_PATH}'")
+
+    def broken_resolve(self: AssetStore, relative_path: str) -> Path:
+        raise ValueError(f"Asset path escapes STANSTOCK_DATA_DIR: {SEC_SENTINEL_ABS_PATH}")
+
+    def broken_read_bytes(self: AssetStore, relative_path: str) -> bytes:
+        raise OSError(f"[Errno 2] No such file or directory: '{SEC_SENTINEL_ABS_PATH}'")
+
+    def unhashable_read_bytes(self: AssetStore, relative_path: str) -> bytes:
+        return cast(bytes, "not-bytes")
+
+    def broken_write_bytes(self: AssetStore, relative_path: str, payload: bytes) -> object:
+        raise OSError(f"[Errno 28] No space left on device: '{SEC_SENTINEL_ABS_PATH}'")
+
+    def fetch_mapping_unhashable_content(**kwargs: object) -> FundamentalSourcePayload:
+        mapping_calls.append(MAPPING_SUBJECT)
+        return sec_fixtures._payload(
+            MAPPING_SUBJECT,
+            cast(bytes, object()),
+            f"https://www.sec.gov/files/{SEC_SENTINEL_ABS_PATH}",
+        )
+
+    with monkeypatch.context() as ctx:
+        if fault_kind == "constructor":
+            ctx.setattr(AssetStore, "__init__", broken_init)
+        elif fault_kind == "resolve":
+            ctx.setattr(AssetStore, "resolve", broken_resolve)
+        elif fault_kind == "read":
+            ctx.setattr(AssetStore, "read_bytes", broken_read_bytes)
+        elif fault_kind == "checksum":
+            ctx.setattr(AssetStore, "read_bytes", unhashable_read_bytes)
+        elif fault_kind == "write":
+            ctx.setattr(AssetStore, "write_bytes", broken_write_bytes)
+        elif fault_kind == "hash":
+            ctx.setattr(
+                sec_provider, "fetch_ticker_exchange_mapping", fetch_mapping_unhashable_content
+            )
+        else:  # pragma: no cover - guards a typo in the parametrize table
+            raise AssertionError(f"unhandled fault_kind {fault_kind!r}")
+
+        caplog.set_level("INFO")
+        with pytest.raises(CommandError) as excinfo:
+            call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    assert SEC_SENTINEL_ABS_PATH not in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+    cause = excinfo.value.__cause__
+    assert cause is not None
+    assert SEC_SENTINEL_ABS_PATH not in str(cause)
+    assert str(tmp_path) not in str(cause)
+    assert SEC_SENTINEL_ABS_PATH not in caplog.text
+    assert str(tmp_path) not in caplog.text
+
+    parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert parent.status == JobRun.Status.FAILED
+    assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.FAILED
+    assert "market" not in parent.details["stages"]
+    assert SEC_SENTINEL_ABS_PATH not in str(parent.details)
+    assert str(tmp_path) not in str(parent.details)
+    assert SEC_SENTINEL_ABS_PATH not in parent.error
+    assert str(tmp_path) not in parent.error
+
+    sec_child = JobRun.objects.filter(job_name="sec_fundamentals").order_by("-attempt").first()
+    assert sec_child is not None
+    assert sec_child.status == JobRun.Status.FAILED
+    assert SEC_SENTINEL_ABS_PATH not in sec_child.error
+    assert str(tmp_path) not in sec_child.error
+    assert SEC_SENTINEL_ABS_PATH not in str(sec_child.details)
+    assert str(tmp_path) not in str(sec_child.details)
+
+    record = ProviderRecord.objects.get(provider="sec")
+    assert record.status == "error"
+    assert SEC_SENTINEL_ABS_PATH not in record.last_error
+    assert str(tmp_path) not in record.last_error
+
+    # Zero downstream provider spend: no SEC company (submissions/history/
+    # companyfacts) fetch was ever attempted, and the mapping fetch itself
+    # was only reached for the fault kinds that occur *after* it (a fresh
+    # fetch that then fails to persist), never for kinds that fail before
+    # or during resolving an already-registered mapping asset.
+    assert submissions_calls == []
+    assert companyfacts_calls == []
+    assert mapping_calls == ([MAPPING_SUBJECT] if expect_mapping_fetch else [])
+
+    # Removing the fault (the `with monkeypatch.context()` above already
+    # reverted it) lets a plain retry recover normally -- zero re-fetch of
+    # anything already correctly persisted, and a genuine success for
+    # anything that was not.
+    retry = sec_jobs_module.execute_sec_fundamentals_job(target_date=prepared.target_date)
+    assert retry.status == JobRun.Status.SUCCESS
