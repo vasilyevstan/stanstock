@@ -83,19 +83,40 @@ WSGI_APPLICATION = "stanstock.wsgi.application"
 ASGI_APPLICATION = "stanstock.asgi.application"
 
 
+_SQLITE_OPTIONS: dict[str, object] = {
+    "timeout": 20,
+    "transaction_mode": "IMMEDIATE",
+    "init_command": ("PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA busy_timeout=20000"),
+}
+
+
+def _resolve_sqlite_path(raw_path: str) -> Path:
+    expanded = Path(raw_path).expanduser()
+    if not expanded.is_absolute():
+        raise ImproperlyConfigured(
+            "STANSTOCK_SQLITE_PATH must be an absolute path (after expanding '~')"
+        )
+    return expanded.resolve()
+
+
 def database_config() -> dict[str, object]:
-    database_url = os.getenv("DATABASE_URL")
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    sqlite_path_raw = os.getenv("STANSTOCK_SQLITE_PATH", "").strip()
+    if database_url and sqlite_path_raw:
+        raise ImproperlyConfigured(
+            "DATABASE_URL and STANSTOCK_SQLITE_PATH cannot both be set; "
+            "choose exactly one database backend."
+        )
     if not database_url:
+        sqlite_name = (
+            _resolve_sqlite_path(sqlite_path_raw)
+            if sqlite_path_raw
+            else BASE_DIR / "stanstock.sqlite3"
+        )
         return {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "stanstock.sqlite3",
-            "OPTIONS": {
-                "timeout": 20,
-                "transaction_mode": "IMMEDIATE",
-                "init_command": (
-                    "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA busy_timeout=20000"
-                ),
-            },
+            "NAME": sqlite_name,
+            "OPTIONS": dict(_SQLITE_OPTIONS),
         }
 
     parsed = urlparse(database_url)

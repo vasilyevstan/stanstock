@@ -281,7 +281,7 @@ retroactive evidence about when older corrections became knowable.
 
 ### Daily macOS LaunchAgent
 
-The supported unattended local workflow is one user LaunchAgent at 02:00
+The supported unattended local workflow is one user LaunchAgent at 03:30
 local time Tuesday-Saturday:
 
 ```bash
@@ -294,7 +294,7 @@ scheduled invocations, including regular and early XNYS closes plus local and
 New York DST changes. Every checked invocation must satisfy:
 
 ```text
-XNYS close + provider publication delay <= 02:00 local < next XNYS open
+XNYS close + provider publication delay <= 03:30 local < next XNYS open
 ```
 
 An unsafe timezone blocks installation; the installer never silently changes
@@ -319,21 +319,27 @@ aggregate parent `JobRun` with independently recoverable children:
 4. immutable portfolio snapshots bound to the resolved XNYS session date.
 
 The automated market child requires a clean Git worktree and records the exact
-40-character HEAD revision. A retry recovers any successful child before
-provider configuration, credentials, or quota are used again. A failed enabled
-SEC child blocks market analysis so stale or absent facts cannot look current.
-When Twelve Data and SEC are both enabled under the released US scoring
-version, the market child issues separate 3y/5y advisory predictions after all
-eligible stock computations are built against one shared point-in-time peer
-context. Missing long inputs create explicit insufficient-evidence predictions;
-they do not fail the market refresh or alter BUY/HOLD/AVOID.
-Evaluation and portfolio
-snapshots are attempted independently after market success, so one downstream
-failure does not hide the other's result. Holidays and already completed
-targets become explicit skips. If macOS wakes the job after the next XNYS
-session has opened, a missing market child fails rather than creating a late
-prediction marked as observed; use an explicit manual `daily --target-date`
-research reconstruction when historical catch-up is intentional.
+40-character HEAD revision. If the checkout that owns the LaunchAgent is kept
+intentionally dirty for other work (e.g. active forecasting changes), install
+and run the LaunchAgent from a separate clean runtime worktree instead of
+forcing the primary checkout clean; point that runtime worktree at the
+primary checkout's local SQLite database and asset directory with
+`STANSTOCK_SQLITE_PATH` and `STANSTOCK_DATA_DIR` (see below) so both share
+one database and one set of assets. A retry recovers any successful child
+before provider configuration, credentials, or quota are used again. A failed
+enabled SEC child blocks market analysis so stale or absent facts cannot look
+current. When Twelve Data and SEC are both enabled under the released US
+scoring version, the market child issues separate 3y/5y advisory predictions
+after all eligible stock computations are built against one shared
+point-in-time peer context. Missing long inputs create explicit
+insufficient-evidence predictions; they do not fail the market refresh or
+alter BUY/HOLD/AVOID. Evaluation and portfolio snapshots are attempted
+independently after market success, so one downstream failure does not hide
+the other's result. Holidays and already completed targets become explicit
+skips. If macOS wakes the job after the next XNYS session has opened, a
+missing market child fails rather than creating a late prediction marked as
+observed; use an explicit manual `daily --target-date` research
+reconstruction when historical catch-up is intentional.
 
 Uninstall without deleting historical logs or job evidence:
 
@@ -343,7 +349,13 @@ Uninstall without deleting historical logs or job evidence:
 
 Local SQLite uses WAL mode, an immediate transaction mode, and a 20-second busy
 timeout so the nightly writer and local web process coordinate predictably.
-PostgreSQL continues to use target-key advisory locks.
+PostgreSQL continues to use target-key advisory locks. The default local
+SQLite path is `BASE_DIR/stanstock.sqlite3`. An optional `STANSTOCK_SQLITE_PATH`
+environment variable overrides that path for a clean runtime checkout that
+must share the primary checkout's database file directly (rather than through
+`DATABASE_URL`/PostgreSQL); the value must be an absolute path after
+expanding `~`, and setting both `DATABASE_URL` and `STANSTOCK_SQLITE_PATH`
+fails closed at startup instead of silently choosing one.
 
 After each market refresh, record every active tracked portfolio:
 

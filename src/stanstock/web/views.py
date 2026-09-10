@@ -23,7 +23,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from stanstock.core.launchd import launch_agent_status
+from stanstock.core.launchd import SCHEDULE_TIME_LABEL, launch_agent_status
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
 from stanstock.data.etfs import (
@@ -297,6 +297,9 @@ def _scheduler_status() -> dict[str, object]:
             "installed": False,
             "loaded": False,
             "timezone_matches": False,
+            "schedule_matches": False,
+            "installed_schedule_label": None,
+            "expected_schedule_label": SCHEDULE_TIME_LABEL,
             "error": str(exc),
         }
 
