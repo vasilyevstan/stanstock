@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,15 @@ def test_blank_sqlite_path_falls_back_to_default(monkeypatch: pytest.MonkeyPatch
     config = database_config()
 
     assert config["NAME"] == BASE_DIR / "stanstock.sqlite3"
+
+
+def test_production_rejects_whitespace_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "   ")
+
+    with pytest.raises(
+        ImproperlyConfigured,
+        match="DATABASE_URL is required for production settings",
+    ):
+        importlib.import_module("stanstock.settings.prod")
