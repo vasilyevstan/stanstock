@@ -230,6 +230,41 @@ def test_twelve_data_quota_error_is_classified_without_granting_price_capability
     assert report["price_capability"] is False
 
 
+def test_twelve_data_missing_credentials_fails_closed_without_provider_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    def raise_missing_credentials() -> str:
+        raise ProviderConfigurationError("Twelve Data credentials are unavailable in this test")
+
+    monkeypatch.setattr(source_spike.twelve_data, "resolve_api_key", raise_missing_credentials)
+    monkeypatch.setattr(
+        source_spike.twelve_data,
+        "fetch_daily_price_series",
+        lambda *args, **kwargs: pytest.fail(
+            "Twelve Data provider fetch must not run without credentials"
+        ),
+    )
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "source_spike",
+            skip="stooq,sec,filings_xbrl_org,ecb",
+        )
+
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    assert record.status == source_spike.CLASSIFICATION_CONFIG_MISSING
+    assert "credits_used_local" not in record.metadata
+
+    report_path = next((tmp_path / "reports").glob("source_spike_*.json"))
+    report = json.loads(report_path.read_text())
+    assert report["decision"] == "NO_GO"
+    assert report["price_capability"] is False
+    assert [(probe["provider"], probe["classification"]) for probe in report["probes"]] == [
+        ("twelve_data", source_spike.CLASSIFICATION_CONFIG_MISSING)
+    ]
+
+
 def test_source_spike_does_not_downgrade_confirmed_twelve_data_usage_scope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -345,7 +380,7 @@ def test_network_error_classified_environment_blocked(
     monkeypatch.setattr(source_spike.ecb, "fetch_exr_csv", lambda *a, **k: _FakeEcbResult())
 
     with override_settings(DATA_DIR=tmp_path):
-        call_command("source_spike")
+        call_command("source_spike", skip="twelve_data")
 
     record = ProviderRecord.objects.get(provider="filings_xbrl_org")
     assert record.status == source_spike.CLASSIFICATION_ENV_BLOCKED
