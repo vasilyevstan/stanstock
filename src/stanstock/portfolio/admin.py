@@ -2,6 +2,7 @@ from typing import Any
 
 from django.contrib import admin
 from django.db import transaction
+from django.db.models import QuerySet
 from django.http import HttpRequest
 
 from stanstock.core.admin_mixins import ReadOnlyModelAdmin
@@ -14,6 +15,7 @@ from stanstock.portfolio.models import (
     PortfolioPurchase,
     PortfolioSnapshot,
     PortfolioSnapshotHolding,
+    TrackedSymbol,
 )
 
 
@@ -134,6 +136,36 @@ class PortfolioHoldingAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
                 locked.notes = obj.notes.strip()
                 locked.save(update_fields=["notes", "updated_at"])
             obj.refresh_from_db()
+
+
+@admin.register(TrackedSymbol)
+class TrackedSymbolAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    list_display = ("symbol", "owner", "created_at")
+    search_fields = ("symbol", "owner__username")
+    readonly_fields = ("owner", "symbol", "created_at")
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[TrackedSymbol]:
+        queryset = super().get_queryset(request)
+        if request.user.is_superuser:
+            return queryset
+        return queryset.filter(owner=request.user)
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_change_permission(
+        self,
+        request: HttpRequest,
+        obj: TrackedSymbol | None = None,
+    ) -> bool:
+        return False
+
+    def has_delete_permission(
+        self,
+        request: HttpRequest,
+        obj: TrackedSymbol | None = None,
+    ) -> bool:
+        return obj is None or request.user.is_superuser or obj.owner_id == request.user.pk
 
 
 admin.site.register(PortfolioSnapshot, ReadOnlyModelAdmin)

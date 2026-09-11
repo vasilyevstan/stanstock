@@ -25,6 +25,7 @@
             <a href="{% url 'market' %}"{% if request.resolver_match.url_name == "market" or request.resolver_match.url_name == "etf-detail" %} aria-current="page"{% endif %}>Market</a>
             <a href="{% url 'predictions' %}"{% if request.resolver_match.url_name == "predictions" %} aria-current="page"{% endif %}>Predictions</a>
             <a href="{% url 'performance' %}"{% if request.resolver_match.url_name == "performance" %} aria-current="page"{% endif %}>Performance</a>
+            <a href="{% url 'my-list' %}"{% if request.resolver_match.url_name == "my-list" or request.resolver_match.url_name == "tracked-symbol-delete" %} aria-current="page"{% endif %}>My list</a>
             <a href="{% url 'portfolios' %}"{% if request.resolver_match.url_name == "portfolios" or request.resolver_match.url_name == "portfolio-detail" %} aria-current="page"{% endif %}>Portfolios</a>
             <a href="{% url 'simulations' %}"{% if request.resolver_match.url_name == "simulations" %} aria-current="page"{% endif %}>Simulations</a>
             <a href="{% url 'status' %}"{% if request.resolver_match.url_name == "status" %} aria-current="page"{% endif %}>Status</a>

@@ -268,6 +268,13 @@ def test_parses_us_stock_reference_catalog(
     assert reference.mic_code == "XNGS"
     assert reference.access_plan == "Basic"
 
+    persisted_references, persisted_count = twelve_data.parse_stock_catalog_references(
+        json.dumps(VALID_CATALOG).encode(),
+        exchange="nasdaq",
+    )
+    assert persisted_references == catalog.references
+    assert persisted_count == catalog.count
+
 
 def test_catalog_filter_ignores_malformed_unrequested_rows(
     monkeypatch: pytest.MonkeyPatch,
@@ -302,6 +309,68 @@ def test_catalog_filter_ignores_malformed_unrequested_rows(
 
     assert [reference.symbol for reference in catalog.references] == ["AAPL"]
     assert catalog.count == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**VALID_CATALOG, "count": 2},
+        {key: value for key, value in VALID_CATALOG.items() if key != "count"},
+    ],
+)
+def test_complete_persisted_catalog_requires_declared_exact_row_count(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ProviderResponseError, match="invalid count"):
+        twelve_data.parse_stock_catalog_references(
+            json.dumps(payload).encode(),
+            exchange="NASDAQ",
+            require_complete=True,
+        )
+
+
+def test_complete_catalog_filters_before_normalizing_unrelated_rows() -> None:
+    payload = {
+        **VALID_CATALOG,
+        "data": [
+            *VALID_CATALOG["data"],
+            {
+                "symbol": "UNRELATED",
+                "name": None,
+                "currency": "USD",
+                "exchange": "NASDAQ",
+                "mic_code": "XNGS",
+                "country": "United States",
+                "type": "Common Stock",
+            },
+        ],
+        "count": 2,
+    }
+
+    references, count = twelve_data.parse_stock_catalog_references(
+        json.dumps(payload).encode(),
+        exchange="NASDAQ",
+        required_symbols={"aapl"},
+        require_complete=True,
+    )
+
+    assert [reference.symbol for reference in references] == ["AAPL"]
+    assert count == 2
+
+
+def test_complete_catalog_strictly_validates_matching_rows() -> None:
+    payload = {
+        **VALID_CATALOG,
+        "data": [{**VALID_CATALOG["data"][0], "name": None}],
+    }
+
+    with pytest.raises(ProviderResponseError, match="had no usable 'name'"):
+        twelve_data.parse_stock_catalog_references(
+            json.dumps(payload).encode(),
+            exchange="NASDAQ",
+            required_symbols={"AAPL"},
+            require_complete=True,
+        )
 
 
 def test_catalog_filter_still_rejects_malformed_required_rows(

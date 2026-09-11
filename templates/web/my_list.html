@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}My tracked symbols · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Personal preferences</p>
+      <h1>My tracked symbols</h1>
+      <p class="lede">
+        Keep a private list of supported US stock symbols. Adding or removing a
+        symbol changes only this list; it does not fetch data, expand the
+        research universe, run analysis, or change a portfolio.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="add-tracked-symbol">
+    <p class="eyebrow">Add a symbol</p>
+    <h2 id="add-tracked-symbol">Track persisted local coverage</h2>
+    <p>
+      StanStock accepts an existing supported listing or validates the symbol
+      against one complete NASDAQ/NYSE catalog bundle recorded by the latest
+      successfully verified scheduled refresh on this installation.
+    </p>
+    <p class="muted">
+      Catalog admission requires evidence no more than seven calendar days old.
+      This is only a support-currentness check, not an investment signal.
+    </p>
+    <form method="post" class="stack">
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+      {% for field in form %}
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
+        {% if field.errors %}<div class="field-error" role="alert">{{ field.errors }}</div>{% endif %}
+      {% endfor %}
+      <button class="primary-button" type="submit">Add symbol</button>
+    </form>
+  </section>
+
+  <section class="panel" aria-labelledby="selected-analysis-universe">
+    <p class="eyebrow">Analysis context</p>
+    <h2 id="selected-analysis-universe">Selected analysis universe</h2>
+    {% if selected_analysis_run %}
+      <dl class="key-values">
+        <div>
+          <dt>Target date</dt>
+          <dd>{{ selected_analysis_run.target_date|date:"Y-m-d" }}</dd>
+        </div>
+        <div>
+          <dt>Data cutoff</dt>
+          <dd>{{ selected_analysis_run.data_cutoff|date:"c" }}</dd>
+        </div>
+        <div>
+          <dt>Universe grade</dt>
+          <dd>{{ selected_analysis_run.universe_snapshot.get_grade_display }}</dd>
+        </div>
+      </dl>
+      {% if selected_analysis_run.universe_snapshot.grade == "research" %}
+        <p class="muted">
+          Research-grade reconstruction. This historical context is not labeled
+          as current.
+        </p>
+      {% endif %}
+    {% else %}
+      <p class="empty-state">
+        No stored analysis universe is available. Tracked symbols keep explicit
+        unavailable analysis states.
+      </p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Private list</p>
+        <h2>Tracked symbols</h2>
+      </div>
+    </div>
+    {% if tracked_symbols %}
+      <div class="table-scroll" tabindex="0" aria-label="My tracked symbols">
+        <table class="compact-table">
+          <thead>
+            <tr>
+              <th scope="col">Symbol</th>
+              <th scope="col">Local coverage</th>
+              <th scope="col">Latest persisted price</th>
+              <th scope="col">Selected analysis</th>
+              <th scope="col">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in tracked_symbols %}
+              <tr>
+                <td>
+                  {% if item.resolution_status == "unique_listing" %}
+                    <a href="{% url 'stock-detail' item.listing.id %}"><strong>{{ item.preference.symbol }}</strong></a>
+                    <small>{{ item.listing.security.company.name }}</small>
+                  {% elif item.resolution_status == "ambiguous_listing" %}
+                    <strong>{{ item.preference.symbol }}</strong>
+                    <small>No unique eligible local listing is available.</small>
+                  {% else %}
+                    <strong>{{ item.preference.symbol }}</strong>
+                    <small>No active eligible local listing is currently available.</small>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if item.resolution_status == "ambiguous_listing" %}
+                    <span class="badge">Ambiguous local listing</span>
+                    <small>Local coverage is withheld until the listing identity is unique.</small>
+                  {% elif item.in_selected_analysis_universe %}
+                    <span class="badge badge-success">Selected analysis universe</span>
+                  {% else %}
+                    <span class="badge">Not in the selected analysis universe</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if item.resolution_status == "ambiguous_listing" %}
+                    <span class="muted">Unavailable while listing identity is ambiguous</span>
+                  {% elif item.market_data %}
+                    <strong>{{ item.market_data.close|price }} {{ item.listing.currency }}</strong>
+                    <small>Session {{ item.market_data.session_date }}</small>
+                  {% else %}
+                    <span class="muted">No persisted price</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if item.resolution_status == "ambiguous_listing" %}
+                    <span class="muted">Unavailable while listing identity is ambiguous</span>
+                  {% elif item.analysis %}
+                    <span class="recommendation recommendation-{{ item.analysis.recommendation }}">{{ item.analysis.get_recommendation_display }}</span>
+                    <small>Score {{ item.analysis.overall_score|floatformat:2 }}/100</small>
+                  {% else %}
+                    <span class="muted">No stored analysis yet</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <form method="post" action="{% url 'tracked-symbol-delete' item.preference.id %}" class="inline-form">
+                    {% csrf_token %}
+                    <button class="danger-button" type="submit">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-state">Your list is empty. Add a supported symbol above.</p>
+    {% endif %}
+  </section>
+{% endblock %}

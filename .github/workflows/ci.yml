@@ -98,6 +98,9 @@ jobs:
         run: |
           export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/stanstock"
           uv run pytest -q \
+            tests/test_personal_watchlist.py::test_tracked_symbol_normalizes_and_database_enforces_owner_uniqueness \
+            tests/test_personal_watchlist.py::test_concurrent_equivalent_adds_create_exactly_one_tracked_symbol \
+            tests/test_personal_watchlist.py::test_add_does_not_swallow_unrelated_integrity_error \
             tests/test_portfolio_planner.py::test_concurrent_confirmations_for_different_portfolios_do_not_deadlock \
             tests/test_portfolio_planner.py::test_concurrent_deposit_and_confirmation_do_not_deadlock \
             tests/test_portfolio_planner.py::test_deposit_does_not_block_on_snapshot_foreign_key_locks \

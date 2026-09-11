@@ -14,6 +14,12 @@ urlpatterns = [
     path("market", views.market_overview_page, name="market"),
     path("predictions", views.prediction_history_page, name="predictions"),
     path("performance", views.performance_page, name="performance"),
+    path("my-list", views.my_list_page, name="my-list"),
+    path(
+        "my-list/<uuid:tracked_symbol_id>/delete",
+        views.tracked_symbol_delete,
+        name="tracked-symbol-delete",
+    ),
     path("portfolios", views.portfolios_page, name="portfolios"),
     path(
         "portfolios/<uuid:portfolio_id>",

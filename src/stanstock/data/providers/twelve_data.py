@@ -219,10 +219,65 @@ def fetch_stock_catalog(
         result,
         context=f"{normalized_exchange} {instrument_type} catalog",
     )
+    parsed_references, raw_count = _parse_stock_catalog_payload(
+        payload,
+        exchange=normalized_exchange,
+        required_symbols=required_symbols,
+    )
+    return StockCatalog(
+        provider=PROVIDER,
+        exchange=normalized_exchange,
+        references=parsed_references,
+        count=raw_count,
+        retrieved_at=datetime.now(tz=UTC),
+        source_url=result.url,
+        raw_bytes=result.content,
+    )
+
+
+def parse_stock_catalog_references(
+    raw_bytes: bytes,
+    *,
+    exchange: str,
+    required_symbols: Collection[str] | None = None,
+    require_complete: bool = False,
+) -> tuple[tuple[StockReference, ...], int]:
+    """Parse already-persisted stock-catalog bytes without provider access."""
+    normalized_exchange = exchange.strip().upper()
+    if not normalized_exchange:
+        raise ValueError("exchange is required")
+    payload = _load_json_payload(
+        raw_bytes,
+        context=f"{normalized_exchange} Common Stock catalog",
+    )
+    return _parse_stock_catalog_payload(
+        payload,
+        exchange=normalized_exchange,
+        required_symbols=required_symbols,
+        require_complete=require_complete,
+    )
+
+
+def _parse_stock_catalog_payload(
+    payload: dict[str, Any],
+    *,
+    exchange: str,
+    required_symbols: Collection[str] | None,
+    require_complete: bool = False,
+) -> tuple[tuple[StockReference, ...], int]:
     raw_data = payload.get("data")
     if not isinstance(raw_data, list):
+        raise ProviderResponseError(f"Twelve Data {exchange} stock catalog had no data array")
+    raw_count = payload.get("count", len(raw_data) if require_complete else None)
+    if require_complete and (
+        "count" not in payload
+        or isinstance(raw_count, bool)
+        or not isinstance(raw_count, int)
+        or raw_count != len(raw_data)
+    ):
         raise ProviderResponseError(
-            f"Twelve Data {normalized_exchange} stock catalog had no data array"
+            f"Twelve Data {exchange} stock catalog had invalid count "
+            f"{raw_count!r} for {len(raw_data)} raw rows"
         )
     symbol_filter = (
         frozenset(_normalize_symbol(symbol) for symbol in required_symbols)
@@ -237,23 +292,20 @@ def fetch_stock_catalog(
             row_symbol = _optional_text(row.get("symbol"))
             if row_symbol is None or row_symbol.upper() not in symbol_filter:
                 continue
-        references.append(_parse_stock_reference(row, exchange=normalized_exchange, index=index))
+        references.append(_parse_stock_reference(row, exchange=exchange, index=index))
     parsed_references = tuple(references)
-    raw_count = payload.get("count", len(references))
-    if not isinstance(raw_count, int) or raw_count < len(parsed_references):
+    if not require_complete:
+        raw_count = payload.get("count", len(references))
+    if (
+        isinstance(raw_count, bool)
+        or not isinstance(raw_count, int)
+        or raw_count < len(parsed_references)
+    ):
         raise ProviderResponseError(
-            f"Twelve Data {normalized_exchange} stock catalog had invalid count "
+            f"Twelve Data {exchange} stock catalog had invalid count "
             f"{raw_count!r} for {len(parsed_references)} rows"
         )
-    return StockCatalog(
-        provider=PROVIDER,
-        exchange=normalized_exchange,
-        references=parsed_references,
-        count=raw_count,
-        retrieved_at=datetime.now(tz=UTC),
-        source_url=result.url,
-        raw_bytes=result.content,
-    )
+    return parsed_references, raw_count
 
 
 def _auth_headers(api_key: str) -> dict[str, str]:
@@ -282,8 +334,12 @@ def _load_response(result: HttpFetchResult, *, context: str) -> dict[str, Any]:
         raise ProviderResponseError(
             f"Twelve Data response for {context} was not JSON (content-type={content_type!r})"
         )
+    return _load_json_payload(result.content, context=context)
+
+
+def _load_json_payload(content: bytes, *, context: str) -> dict[str, Any]:
     try:
-        payload = json.loads(result.content)
+        payload = json.loads(content)
     except json.JSONDecodeError as exc:
         raise ProviderResponseError(
             f"Twelve Data response for {context} was malformed JSON: {exc}"

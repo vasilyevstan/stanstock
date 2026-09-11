@@ -28,9 +28,13 @@ import refresh_fixtures
 from stanstock.core import refresh_verification as refresh_verification_module
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.models import JobRun
-from stanstock.core.refresh_verification import RefreshVerificationError, verify_scheduled_refresh
+from stanstock.core.refresh_verification import (
+    RefreshVerificationError,
+    replay_recorded_scheduled_refresh,
+    verify_scheduled_refresh,
+)
 from stanstock.data import live_us as live_us_module
-from stanstock.data import sec_ingestion
+from stanstock.data import provider_credentials, sec_ingestion
 from stanstock.data.asof import raw_price_asset_for
 from stanstock.data.assets import AssetStore, asset_ref_for, register_asset
 from stanstock.data.jobs import PreparedUsDailyJob, execute_us_daily_job
@@ -182,6 +186,34 @@ def _build_verified_state(
     stages["portfolio_snapshots"] = _stage_entry(portfolio_run)
 
     return stages, config
+
+
+def _record_verified_parent(
+    *,
+    stages: dict[str, dict[str, object]],
+    config: UsUniverseConfig,
+) -> JobRun:
+    verification = verify_scheduled_refresh(
+        target_date=TARGET_DATE,
+        universe_config=config,
+        code_revision=CODE_REVISION,
+        stages=stages,
+        sec_required="sec_fundamentals" in stages,
+    )
+    return JobRun.objects.create(
+        job_name="scheduled_refresh",
+        region="us",
+        target_date=TARGET_DATE,
+        status=JobRun.Status.SUCCESS,
+        finished_at=DECISION_TIME,
+        details={
+            "target_date": TARGET_DATE.isoformat(),
+            "snapshot_grade": UniverseSnapshot.Grade.OBSERVED,
+            "code_revision": CODE_REVISION,
+            "stages": stages,
+            "verification": verification,
+        },
+    )
 
 
 def _build_state_with_distinct_panel_sources(
@@ -439,6 +471,121 @@ def test_happy_path_verifies_and_is_path_free(
     assert result["sec"] == {"required": False}
     assert result["portfolio"]["active_portfolios"] == 0
     assert str(tmp_path) not in repr(result)
+
+
+def test_recorded_parent_replay_uses_real_verifier_and_no_provider_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    parent = _record_verified_parent(stages=stages, config=config)
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "load_us_universe_config",
+        lambda path: config,
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> Any:
+        pytest.fail("scheduled verification replay must not access provider or quota services")
+
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch", forbidden)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_stock_catalog", forbidden)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_daily_price_series", forbidden)
+    monkeypatch.setattr(live_us_module.twelve_data, "resolve_api_key", forbidden)
+    monkeypatch.setattr(live_us_module.twelve_data, "read_twelve_data_api_key", forbidden)
+    monkeypatch.setattr(provider_credentials, "read_twelve_data_api_key", forbidden)
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "preflight", forbidden)
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "consume", forbidden)
+
+    replayed = replay_recorded_scheduled_refresh(parent)
+
+    assert replayed.verification == parent.details["verification"]
+    assert str(replayed.snapshot.id) == replayed.verification["snapshot_id"]
+    assert str(replayed.analysis_run.id) == replayed.verification["analysis_run_id"]
+    assert tuple(asset.subject for asset in replayed.catalog_assets) == config.exchanges
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["manifest_hash", "manifest_count", "market_child_id"],
+)
+def test_recorded_parent_replay_rejects_mutated_canonical_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    parent = _record_verified_parent(stages=stages, config=config)
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "load_us_universe_config",
+        lambda path: config,
+    )
+    details = dict(parent.details)
+    verification = dict(details["verification"])
+    if mutation == "market_child_id":
+        verification["child_job_run_ids"] = {
+            **verification["child_job_run_ids"],
+            "market": str(uuid4()),
+        }
+    else:
+        manifest = dict(verification["asset_manifest"])
+        if mutation == "manifest_hash":
+            manifest["hash"] = "0" * 64
+        else:
+            manifest["count"] += 1
+        verification["asset_manifest"] = manifest
+    details["verification"] = verification
+    JobRun.objects.filter(pk=parent.pk).update(details=details)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        replay_recorded_scheduled_refresh(parent)
+
+    assert excinfo.value.reason_code == "recorded_verification_mismatch"
+
+
+def test_recorded_parent_replay_rejects_non_production_universe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    parent = _record_verified_parent(stages=stages, config=config)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        replay_recorded_scheduled_refresh(parent)
+
+    assert excinfo.value.reason_code == "snapshot_universe_mismatch"
+
+
+def test_recorded_parent_replay_rejects_wrong_sec_child_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stages, config = _build_verified_state(monkeypatch, tmp_path, sec=True)
+    parent = _record_verified_parent(stages=stages, config=config)
+    wrong_target = TARGET_DATE - timedelta(days=1)
+    wrong_sec = execute_target_job(
+        job_name="sec_fundamentals",
+        region="us",
+        target_date=wrong_target,
+        task=lambda run: JobExecutionResult(),
+    )
+    details = dict(parent.details)
+    details["stages"] = {
+        **details["stages"],
+        "sec_fundamentals": _stage_entry(wrong_sec),
+    }
+    JobRun.objects.filter(pk=parent.pk).update(details=details)
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "load_us_universe_config",
+        lambda path: config,
+    )
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        replay_recorded_scheduled_refresh(parent)
+
+    assert excinfo.value.reason_code == "stage_identity_mismatch"
 
 
 @pytest.mark.parametrize("retry_time_sec_enabled", [False, True])

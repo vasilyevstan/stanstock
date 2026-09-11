@@ -52,7 +52,7 @@ from stanstock.data.provider_policy import (
 )
 from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.data.sec_fundamentals import MAX_ANNUAL_DAYS, MIN_ANNUAL_DAYS
-from stanstock.portfolio.models import Portfolio, PortfolioHolding
+from stanstock.portfolio.models import Portfolio, PortfolioHolding, TrackedSymbol
 from stanstock.portfolio.planner import (
     PortfolioPlanningError,
     calculate_contribution_performance,
@@ -70,6 +70,12 @@ from stanstock.portfolio.service import (
     record_portfolio_snapshot,
     restore_portfolio,
     upsert_holding,
+)
+from stanstock.portfolio.watchlist import (
+    TrackedSymbolValidationError,
+    add_tracked_symbol,
+    selected_watchlist_analysis_run,
+    tracked_symbol_states,
 )
 from stanstock.research.affordability import (
     DECISION_TARGET_DATE_BASIS,
@@ -172,6 +178,7 @@ from stanstock.web.forms import (
     PortfolioPlanConfirmationForm,
     SamplePortfolioForm,
     SimulationForm,
+    TrackedSymbolForm,
 )
 
 STOCK_DETAIL_PREDICTIONS_PER_PAGE = 30
@@ -979,6 +986,62 @@ def simulation_detail_page(request: HttpRequest, run_id: UUID) -> HttpResponse:
             )[:50],
         },
     )
+
+
+@login_required
+def my_list_page(request: HttpRequest) -> HttpResponse:
+    owner = cast(User, request.user)
+    selected_analysis_run = selected_watchlist_analysis_run()
+    form = TrackedSymbolForm()
+    invalid_form = False
+    if request.method == "POST":
+        form = TrackedSymbolForm(request.POST)
+        invalid_form = not form.is_valid()
+        if not invalid_form:
+            symbol = form.cleaned_data["symbol"]
+            try:
+                preference, created = add_tracked_symbol(
+                    owner=owner,
+                    raw_symbol=symbol,
+                )
+            except TrackedSymbolValidationError as exc:
+                form.add_error("symbol", str(exc))
+                invalid_form = True
+            else:
+                if created:
+                    messages.success(request, f"{preference.symbol} added to My list.")
+                else:
+                    messages.info(request, f"{preference.symbol} is already in My list.")
+                return redirect("my-list")
+
+    return render(
+        request,
+        "web/my_list.html",
+        {
+            "form": form,
+            "selected_analysis_run": selected_analysis_run,
+            "tracked_symbols": tracked_symbol_states(
+                owner=owner,
+                selected_run=selected_analysis_run,
+            ),
+        },
+        status=HTTPStatus.BAD_REQUEST if invalid_form else HTTPStatus.OK,
+    )
+
+
+@login_required
+@require_POST
+def tracked_symbol_delete(request: HttpRequest, tracked_symbol_id: UUID) -> HttpResponse:
+    owner = cast(User, request.user)
+    preference = get_object_or_404(
+        TrackedSymbol,
+        pk=tracked_symbol_id,
+        owner=owner,
+    )
+    symbol = preference.symbol
+    preference.delete()
+    messages.success(request, f"{symbol} removed from My list.")
+    return redirect("my-list")
 
 
 @login_required
