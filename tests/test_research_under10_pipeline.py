@@ -26,6 +26,7 @@ import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from exchange_calendars import get_calendar
 
 from base_service import (
     BASE_SHA,
@@ -37,6 +38,7 @@ from base_service import (
     base_service_first_party_import_names,
     module_relative_path,
 )
+from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.management.config_loader import default_us_scoring_config_path
 from stanstock.data.models import (
@@ -65,7 +67,11 @@ from stanstock.research.service import (
     analyze_snapshot,
     under10_assessment_matches_persisted_evidence,
 )
-from stanstock.research.under10 import under10_assessment_hash, under10_policy_hash
+from stanstock.research.under10 import (
+    UNDER10_MAX_PRICE_STALENESS_DAYS,
+    under10_assessment_hash,
+    under10_policy_hash,
+)
 
 TARGET_DATE = date(2026, 3, 2)
 DECISION_TIME = datetime(2026, 3, 2, 21, 30, tzinfo=UTC)
@@ -97,6 +103,17 @@ DURATION_VALUES = {
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def _xnys_sessions_ending(last_session: date, rows: int) -> list[date]:
+    if rows < 1:
+        raise ValueError("rows must be positive")
+    calendar = get_calendar("XNYS")
+    if not calendar.is_session(last_session.isoformat()):
+        raise ValueError(f"{last_session.isoformat()} is not an XNYS session")
+    return [
+        timestamp.date() for timestamp in calendar.sessions_window(last_session.isoformat(), -rows)
+    ]
 
 
 def _snapshot(*, grade: str = UniverseSnapshot.Grade.RESEARCH) -> UniverseSnapshot:
@@ -133,6 +150,7 @@ def _price_asset(
     *,
     close: float,
     rows: int = 300,
+    last_session: date = TARGET_DATE,
     retrieved_at: datetime | None = None,
     available_at: datetime | None = None,
     metadata: dict[str, Any] | None = None,
@@ -141,7 +159,7 @@ def _price_asset(
     volume: float = 1_000_000.0,
 ) -> DataAsset:
     stamp = retrieved_at or (DECISION_TIME - timedelta(hours=2))
-    dates = [TARGET_DATE - timedelta(days=index) for index in range(rows)][::-1]
+    dates = _xnys_sessions_ending(last_session, rows)
     if trend_per_session:
         # A gentle, monotonic per-session compounding drift, applied so the
         # *last* (most recent, decision-run) close is exactly `close` --
@@ -296,6 +314,7 @@ def _reader_candidate(
     *,
     volume: float = 1_000_000.0,
     fact_values: dict[str, str] | None = None,
+    price_session: date = TARGET_DATE,
 ) -> tuple[StockAnalysis, AssetStore, DataAsset]:
     """Commit and reload one genuinely produced, evidence-bound candidate."""
     settings.DATA_DIR = tmp_path
@@ -307,6 +326,7 @@ def _reader_candidate(
         listing.ticker,
         close=4.25,
         volume=volume,
+        last_session=price_session,
     )
     _sec_facts(listing, _sec_asset(store), values=fact_values)
     # A non-Basic recorded plan avoids activating the single-owner Basic
@@ -316,7 +336,7 @@ def _reader_candidate(
     LatestMarketData.objects.create(
         listing=listing,
         observed_at=DECISION_TIME,
-        session_date=TARGET_DATE,
+        session_date=price_session,
         close=Decimal("4.25"),
         previous_close=Decimal("4.25"),
         volume=int(volume),
@@ -446,7 +466,7 @@ def test_true_producer_to_authenticated_render_replays_exact_recorded_evidence(
         "value": 4_250_000.0,
         "currency": "USD",
         "sessions_used": 252,
-        "first_session": (TARGET_DATE - timedelta(days=251)).isoformat(),
+        "first_session": _xnys_sessions_ending(TARGET_DATE, 252)[0].isoformat(),
         "last_session": TARGET_DATE.isoformat(),
         "basis": {
             "interval": "1day",
@@ -472,6 +492,175 @@ def test_true_producer_to_authenticated_render_replays_exact_recorded_evidence(
 
 
 @pytest.mark.django_db
+def test_true_producer_to_render_preserves_stale_evidence_as_withheld(
+    tmp_path,
+    settings,
+    authenticated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale persisted series stays explicit through production, replay, and UI."""
+
+    def forbidden_external_access(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("persisted-evidence E2E must not use network or credentials")
+
+    monkeypatch.setattr("httpx.Client.request", forbidden_external_access)
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.read_twelve_data_api_key",
+        forbidden_external_access,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.resolve_api_key",
+        forbidden_external_access,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.fetch_stock_catalog",
+        forbidden_external_access,
+    )
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.fetch_daily_price_series",
+        forbidden_external_access,
+    )
+    calendar = get_calendar("XNYS")
+    stale_session = date(2026, 2, 20)
+    assert calendar.is_session(stale_session.isoformat())
+    assert (TARGET_DATE - stale_session).days == 10
+    assert (TARGET_DATE - stale_session).days > UNDER10_MAX_PRICE_STALENESS_DAYS
+
+    analysis, store, stale_price_asset = _reader_candidate(
+        tmp_path,
+        settings,
+        price_session=stale_session,
+    )
+    recorded = analysis.data_quality[UNDER10_ASSESSMENT_KEY]
+    stale_rows = store.read_frame(stale_price_asset.relative_path).sort("date")
+    stale_dates = stale_rows["date"].to_list()
+    assert stale_dates[-1] == stale_session
+    assert all(calendar.is_session(session.isoformat()) for session in stale_dates)
+    assert recorded["liquidity"]["last_session"] == stale_session.isoformat()
+
+    stale_asset_reference = {
+        "id": str(stale_price_asset.pk),
+        "sha256": stale_price_asset.sha256,
+    }
+    assert recorded["liquidity"]["price_asset"] == stale_asset_reference
+    decision_predictions = list(
+        Prediction.objects.filter(
+            analysis=analysis,
+            evidence_role=Prediction.EvidenceRole.DECISION,
+        ).order_by("pk")
+    )
+    assert decision_predictions
+    immutable_prediction_manifests = {
+        prediction.pk: deepcopy(prediction.source_assets) for prediction in decision_predictions
+    }
+    for prediction in decision_predictions:
+        price_entries = [
+            entry
+            for entry in prediction.source_assets
+            if entry.get("provider") == stale_price_asset.provider
+            and entry.get("kind") == stale_price_asset.kind
+            and entry.get("subject") == stale_price_asset.subject
+        ]
+        assert len(price_entries) == 1
+        assert price_entries[0]["id"] == str(stale_price_asset.pk)
+        assert price_entries[0]["sha256"] == stale_price_asset.sha256
+
+    assert recorded["liquidity"]["status"] == "withheld"
+    assert recorded["liquidity"]["reason"] == "stale_price_evidence"
+
+    # Register a later eligible vintage only after the assessment and its
+    # immutable prediction manifests exist. It contains both a target-date
+    # close and a post-target session, so a replay that reselected "latest"
+    # would turn the stale refusal into a success-shaped liquidity result.
+    newer_price_asset = _price_asset(
+        store,
+        stale_price_asset.subject,
+        close=9.25,
+        last_session=date(2026, 3, 3),
+        retrieved_at=DECISION_TIME - timedelta(minutes=1),
+        available_at=DECISION_TIME - timedelta(minutes=1),
+    )
+    assert newer_price_asset.pk != stale_price_asset.pk
+    assert newer_price_asset.sha256 != stale_price_asset.sha256
+    newer_rows = store.read_frame(newer_price_asset.relative_path).sort("date")
+    newer_dates = newer_rows["date"].to_list()
+    assert TARGET_DATE in newer_dates
+    assert any(session > TARGET_DATE for session in newer_dates)
+    assert all(calendar.is_session(session.isoformat()) for session in newer_dates)
+    assert (
+        AsOfData(analysis.run.generated_at, store).latest_asset(
+            provider=stale_price_asset.provider,
+            kind=stale_price_asset.kind,
+            subject=stale_price_asset.subject,
+        )
+        == newer_price_asset
+    )
+
+    replayed_asset_reads: list[str] = []
+    original_explicit_asset_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def record_explicit_asset_read(
+        asof: AsOfData,
+        *,
+        asset: DataAsset,
+        through_date: date | None = None,
+    ) -> Any:
+        replayed_asset_reads.append(asset.relative_path)
+        assert asset.pk == stale_price_asset.pk
+        assert asset.sha256 == stale_price_asset.sha256
+        read = original_explicit_asset_read(
+            asof,
+            asset=asset,
+            through_date=through_date,
+        )
+        replay_dates = read.frame["date"].to_list()
+        assert replay_dates
+        assert replay_dates[-1] == stale_session
+        assert all(session <= TARGET_DATE for session in replay_dates)
+        assert all(calendar.is_session(session.isoformat()) for session in replay_dates)
+        return read
+
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        record_explicit_asset_read,
+    )
+    assert (
+        under10_assessment_matches_persisted_evidence(
+            analysis=analysis,
+            recorded=recorded,
+            store=store,
+        )
+        is True
+    )
+    assert replayed_asset_reads == [stale_price_asset.relative_path]
+
+    response = authenticated_client.get(reverse("stock-detail", args=[analysis.listing_id]))
+
+    assert response.status_code == 200
+    panel = response.context["under10_panel"]
+    assert panel["state"] == "recorded"
+    assert panel["liquidity"]["state"] == "withheld"
+    assert panel["liquidity"]["headline"] == "Withheld - stale_price_evidence"
+    assert panel["liquidity"]["last_session"] == stale_session.isoformat()
+    assert panel["liquidity"]["value"] is None
+    assert replayed_asset_reads == [
+        stale_price_asset.relative_path,
+        stale_price_asset.relative_path,
+    ]
+    assert newer_price_asset.relative_path not in replayed_asset_reads
+    for prediction in decision_predictions:
+        prediction.refresh_from_db()
+        assert prediction.source_assets == immutable_prediction_manifests[prediction.pk]
+    content = " ".join(response.content.decode().split())
+    assert 'role="status" aria-label="Under-$10 shadow diagnostics"' in content
+    assert "Withheld - stale_price_evidence" in content
+    assert "Assessed - median dollar volume over 252 observed sessions" not in content
+    assert "4250000.0 USD over 252 observed sessions" not in content
+    assert "New allocation remains 0%" in content
+
+
+@pytest.mark.django_db
 def test_checksum_mismatched_valid_price_bytes_are_unsupported_with_one_read(
     tmp_path,
     settings,
@@ -483,7 +672,7 @@ def test_checksum_mismatched_valid_price_bytes_are_unsupported_with_one_read(
     recorded = analysis.data_quality[UNDER10_ASSESSMENT_KEY]
     target = store.resolve(price_asset.relative_path)
     original = pl.read_parquet(target).sort("date")
-    changed_session = TARGET_DATE - timedelta(days=1)
+    changed_session = get_calendar("XNYS").previous_session(TARGET_DATE.isoformat()).date()
 
     assert original.tail(252)["date"].is_in([changed_session]).any()
     assert original["close"].tail(1).item() == 4.25
