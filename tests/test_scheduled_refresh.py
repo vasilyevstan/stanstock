@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -18,6 +19,7 @@ from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, connections
+from django.urls import reverse
 
 import refresh_fixtures
 import test_data_sec_ingestion as sec_fixtures
@@ -54,7 +56,7 @@ from stanstock.portfolio.refresh_validation import (
     verify_portfolio_snapshot_stage,
 )
 from stanstock.research.jobs import execute_prediction_evaluation_job
-from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome
+from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
 from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND
 from test_refresh_verification import _create_lagging_prediction, _register_lagging_price_history
 
@@ -133,14 +135,53 @@ def _real_prepared(
     return prepared, config, calls
 
 
-def test_scheduled_refresh_records_recoverable_child_stages(
+def test_scheduled_refresh_retry_and_no_op_render_persisted_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    authenticated_client,
 ) -> None:
+    real_timezone_now = live_us_module.timezone.now
     prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
     clean_checks: list[Path] = []
     evaluation_attempts = 0
     evaluation_times: list[datetime] = []
+
+    def research_identity_sets() -> dict[str, frozenset[UUID]]:
+        return {
+            "analysis_runs": frozenset(AnalysisRun.objects.values_list("id", flat=True)),
+            "stock_analyses": frozenset(StockAnalysis.objects.values_list("id", flat=True)),
+            "predictions": frozenset(Prediction.objects.values_list("id", flat=True)),
+        }
+
+    def asset_identities() -> frozenset[tuple[UUID, str]]:
+        return frozenset(DataAsset.objects.values_list("id", "sha256"))
+
+    def identity_manifest(
+        identities: frozenset[tuple[UUID, str]],
+    ) -> dict[str, object]:
+        ordered = sorted((str(asset_id), sha256) for asset_id, sha256 in identities)
+        canonical = "\n".join(f"{asset_id}:{sha256}" for asset_id, sha256 in ordered)
+        return {
+            "count": len(ordered),
+            "hash": hashlib.sha256(canonical.encode()).hexdigest(),
+        }
+
+    def assert_scheduled_refresh_card(response: Any, run: JobRun) -> None:
+        content = " ".join(response.content.decode().split())
+        section_start = content.index('<section aria-labelledby="jobs-title">')
+        section_end = content.index("</section>", section_start)
+        job_section = content[section_start:section_end]
+        cards = re.findall(r"<article>.*?</article>", job_section)
+        matching = [
+            card
+            for card in cards
+            if "<strong>Scheduled Refresh · US</strong>" in card
+            and f"attempt {run.attempt}</small>" in card
+        ]
+        assert len(matching) == 1
+        card = matching[0]
+        assert f'class="badge badge-{run.status}"' in card
+        assert f">{run.get_status_display()}</span>" in card
 
     monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
     monkeypatch.setattr(
@@ -193,6 +234,59 @@ def test_scheduled_refresh_records_recoverable_child_stages(
         )
 
     first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    first_market_stage = first_parent.details["stages"]["market"]
+    first_market_child = JobRun.objects.get(pk=first_market_stage["job_run_id"])
+    first_market_identity = (
+        first_market_child.pk,
+        first_market_child.job_name,
+        first_market_child.region,
+        first_market_child.target_date,
+        first_market_child.attempt,
+        first_market_child.status,
+    )
+    assert first_market_identity == (
+        first_market_child.pk,
+        "daily",
+        "us",
+        prepared.target_date,
+        1,
+        JobRun.Status.SUCCESS,
+    )
+    first_analysis_run_id = UUID(first_market_child.details["analysis_run_id"])
+    first_snapshot_id = UUID(first_market_child.details["snapshot_id"])
+    first_analysis_run = AnalysisRun.objects.get(pk=first_analysis_run_id)
+    first_snapshot = UniverseSnapshot.objects.get(pk=first_snapshot_id)
+    assert first_analysis_run.universe_snapshot_id == first_snapshot.pk
+    first_research_identities = research_identity_sets()
+    assert first_research_identities["analysis_runs"] == frozenset({first_analysis_run_id})
+    assert first_research_identities["stock_analyses"] == frozenset(
+        StockAnalysis.objects.filter(run_id=first_analysis_run_id).values_list("id", flat=True)
+    )
+    assert first_research_identities["predictions"] == frozenset(
+        Prediction.objects.filter(analysis__run_id=first_analysis_run_id).values_list(
+            "id", flat=True
+        )
+    )
+    first_market_asset_identities = frozenset(
+        DataAsset.objects.filter(provider=live_us_module.PROVIDER).values_list("id", "sha256")
+    )
+    assert first_market_asset_identities
+    first_analysis_manifest = DataAsset.objects.get(
+        provider="stanstock",
+        kind=ANALYSIS_OUTPUT_MANIFEST_KIND,
+        subject=str(first_analysis_run_id),
+    )
+    first_analysis_manifest_identity = (
+        first_analysis_manifest.pk,
+        first_analysis_manifest.sha256,
+    )
+    first_asset_identities = asset_identities()
+    assert first_analysis_manifest_identity in first_asset_identities
+    first_expected_asset_manifest = identity_manifest(first_asset_identities)
+    first_outcome_identities = frozenset(
+        PredictionOutcome.objects.values_list("prediction_id", flat=True)
+    )
+
     assert first_parent.status == JobRun.Status.FAILED
     assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
     assert first_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.FAILED
@@ -201,7 +295,29 @@ def test_scheduled_refresh_records_recoverable_child_stages(
     assert "verification" not in first_parent.details
     assert catalog_calls == ["NASDAQ"]
     assert price_calls == ["AAA", "BBB", "SPY"]
+    first_status = authenticated_client.get(reverse("status"))
+    assert first_status.status_code == 200
+    assert first_parent.pk in {run.pk for run in first_status.context["recent_jobs"]}
+    assert_scheduled_refresh_card(first_status, first_parent)
 
+    def forbidden_market_access(*_args: object, **_kwargs: object) -> str:
+        pytest.fail(
+            "failed-parent recovery must not resolve credentials or cross a provider fetch boundary"
+        )
+
+    monkeypatch.setattr(live_us_module.twelve_data, "resolve_api_key", forbidden_market_access)
+    monkeypatch.setattr(
+        live_us_module.twelve_data,
+        "fetch_stock_catalog",
+        forbidden_market_access,
+    )
+    monkeypatch.setattr(
+        live_us_module.twelve_data,
+        "fetch_daily_price_series",
+        forbidden_market_access,
+    )
+    second_attempt_time = prepared.decision_time + timedelta(minutes=1)
+    monkeypatch.setattr(live_us_module.timezone, "now", lambda: second_attempt_time)
     call_command(
         "scheduled_refresh",
         config=tmp_path / "universe.yml",
@@ -209,22 +325,157 @@ def test_scheduled_refresh_records_recoverable_child_stages(
     )
 
     second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.started_at > first_parent.started_at
+    second_market_child = JobRun.objects.get(
+        pk=second_parent.details["stages"]["market"]["job_run_id"]
+    )
     assert second_parent.status == JobRun.Status.SUCCESS
-    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert second_market_child.status == JobRun.Status.SKIPPED
+    assert second_market_child.details == {
+        "reason": "target_already_succeeded",
+        "successful_run_id": str(first_market_child.pk),
+    }
+    assert second_parent.details["stages"]["market"] == {
+        "job_run_id": str(second_market_child.pk),
+        "status": JobRun.Status.SKIPPED,
+        "attempt": second_market_child.attempt,
+        "error": "",
+    }
     assert second_parent.details["stages"]["evaluation"]["status"] == JobRun.Status.SUCCESS
     assert second_parent.details["stages"]["portfolio_snapshots"]["status"] == JobRun.Status.SKIPPED
     assert second_parent.details["verification"]["status"] == "verified"
+    verification = second_parent.details["verification"]
+    assert verification["snapshot_id"] == str(first_snapshot_id)
+    assert verification["analysis_run_id"] == str(first_analysis_run_id)
+    assert verification["stock_analysis_count"] == len(first_research_identities["stock_analyses"])
+    assert verification["prediction_count"] == len(first_research_identities["predictions"])
+    assert verification["asset_manifest"] == first_expected_asset_manifest
+    assert verification["child_job_run_ids"]["market"] == str(first_market_child.pk)
+    assert research_identity_sets() == first_research_identities
+    assert asset_identities() == first_asset_identities
+    assert (
+        frozenset(
+            DataAsset.objects.filter(provider=live_us_module.PROVIDER).values_list("id", "sha256")
+        )
+        == first_market_asset_identities
+    )
+    recovered_analysis_manifest = DataAsset.objects.get(
+        provider="stanstock",
+        kind=ANALYSIS_OUTPUT_MANIFEST_KIND,
+        subject=str(first_analysis_run_id),
+    )
+    assert (
+        recovered_analysis_manifest.pk,
+        recovered_analysis_manifest.sha256,
+    ) == first_analysis_manifest_identity
+    second_evaluation_child = JobRun.objects.get(
+        pk=second_parent.details["stages"]["evaluation"]["job_run_id"]
+    )
+    evaluated_prediction_ids = {
+        UUID(raw_id) for raw_id in second_evaluation_child.details["evaluated_prediction_ids"]
+    }
+    recovered_outcome_identities = frozenset(
+        PredictionOutcome.objects.values_list("prediction_id", flat=True)
+    )
+    assert first_outcome_identities <= recovered_outcome_identities
+    assert (recovered_outcome_identities - first_outcome_identities) <= evaluated_prediction_ids
     # Retry/no-op: the market child is recovered by reference to its prior
     # success, never re-fetched -- zero additional provider calls/credits.
     assert catalog_calls == ["NASDAQ"]
     assert price_calls == ["AAA", "BBB", "SPY"]
     assert len(clean_checks) == 2
     assert len(evaluation_times) == 2
-    # The global clock is pinned to `decision_time` for this fixture (the
-    # market stage's on-time deadline check needs it); evaluation naturally
-    # observes that same pinned moment on both attempts.
-    assert evaluation_times == [prepared.decision_time, prepared.decision_time]
+    # The global clock remains inside the market stage's on-time window while
+    # advancing enough to give the recovered parent deterministic UI ordering.
+    assert evaluation_times == [prepared.decision_time, second_attempt_time]
     assert os.environ["STANSTOCK_CODE_REVISION"] == "a" * 40
+
+    recovered_status = authenticated_client.get(reverse("status"))
+    assert recovered_status.status_code == 200
+    assert second_parent.pk in {run.pk for run in recovered_status.context["recent_jobs"]}
+    recovered_content = " ".join(recovered_status.content.decode().split())
+    assert '<section aria-labelledby="jobs-title">' in recovered_content
+    assert '<h2 id="jobs-title">Recent target-date jobs</h2>' in recovered_content
+    assert_scheduled_refresh_card(recovered_status, second_parent)
+
+    verified_identity = {
+        "snapshot_id": second_parent.details["verification"]["snapshot_id"],
+        "analysis_run_id": second_parent.details["verification"]["analysis_run_id"],
+        "asset_manifest": second_parent.details["verification"]["asset_manifest"],
+    }
+    persisted_research_identities = research_identity_sets()
+    persisted_asset_identities = asset_identities()
+    persisted_outcome_identities = frozenset(
+        PredictionOutcome.objects.values_list("prediction_id", flat=True)
+    )
+    persisted_job_ids = frozenset(JobRun.objects.values_list("id", flat=True))
+
+    def forbidden_parent_no_op_work(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("successful parent no-op must not execute revisions, children, or verification")
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        forbidden_parent_no_op_work,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        forbidden_parent_no_op_work,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        forbidden_parent_no_op_work,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_portfolio_snapshot_job",
+        forbidden_parent_no_op_work,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "verify_scheduled_refresh",
+        forbidden_parent_no_op_work,
+    )
+    # Restore the wall clock after the on-time historical fixture is complete,
+    # so the UI's newest-job ordering is deterministic for the no-op attempt.
+    monkeypatch.setattr(live_us_module.timezone, "now", real_timezone_now)
+    call_command(
+        "scheduled_refresh",
+        config=tmp_path / "universe.yml",
+        stdout=StringIO(),
+    )
+
+    no_op_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert no_op_parent.status == JobRun.Status.SKIPPED
+    assert no_op_parent.details == {
+        "reason": "target_already_succeeded",
+        "successful_run_id": str(second_parent.pk),
+    }
+    assert research_identity_sets() == persisted_research_identities
+    assert asset_identities() == persisted_asset_identities
+    assert (
+        frozenset(PredictionOutcome.objects.values_list("prediction_id", flat=True))
+        == persisted_outcome_identities
+    )
+    assert frozenset(JobRun.objects.values_list("id", flat=True)) == (
+        persisted_job_ids | {no_op_parent.pk}
+    )
+    second_parent.refresh_from_db()
+    assert {
+        "snapshot_id": second_parent.details["verification"]["snapshot_id"],
+        "analysis_run_id": second_parent.details["verification"]["analysis_run_id"],
+        "asset_manifest": second_parent.details["verification"]["asset_manifest"],
+    } == verified_identity
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+    assert len(clean_checks) == 2
+
+    no_op_status = authenticated_client.get(reverse("status"))
+    assert no_op_status.status_code == 200
+    assert no_op_status.context["recent_jobs"][0].pk == no_op_parent.pk
+    assert_scheduled_refresh_card(no_op_status, no_op_parent)
 
 
 @pytest.mark.parametrize(
@@ -1389,7 +1640,7 @@ def test_verification_failure_after_real_success_fails_closed_without_refetch(
     use). So corruption must be injected *while the parent's own attempt
     sequence is still open*: attempt 1 is forced to fail for an unrelated
     reason (a one-shot evaluation failure, same technique as
-    `test_scheduled_refresh_records_recoverable_child_stages`) after the
+    `test_scheduled_refresh_retry_and_no_op_render_persisted_evidence`) after the
     market child has already really executed and persisted; the local
     output is corrupted before attempt 2, which recovers every child by
     reference (no refetch) yet must still fail on verification.
