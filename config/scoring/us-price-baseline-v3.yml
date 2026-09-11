@@ -1,0 +1,170 @@
+version: us-price-baseline-v3
+analysis_mode: price_only_baseline
+overall_horizon: short
+supported_horizons: [short]
+windows: [1, 5, 10, 20, 63, 126, 252, 756, 1260]
+factor_policy:
+  macd_indicator: macd_histogram_pct
+  abnormal_volume_indicator: abnormal_volume_strict
+  liquidity_indicator: avg_dollar_volume_20d
+  strict_finite_inputs: true
+horizon_weights:
+  short:
+    quality: 0.00
+    growth: 0.00
+    valuation: 0.00
+    momentum_technical: 0.50
+    risk_liquidity: 0.30
+    market_sector: 0.20
+  medium:
+    quality: 0.00
+    growth: 0.00
+    valuation: 0.00
+    momentum_technical: 0.40
+    risk_liquidity: 0.35
+    market_sector: 0.25
+  long:
+    quality: 0.00
+    growth: 0.00
+    valuation: 0.00
+    momentum_technical: 0.25
+    risk_liquidity: 0.50
+    market_sector: 0.25
+component_factor_counts:
+  momentum_technical: 8
+  risk_liquidity: 5
+  market_sector: 3
+coverage:
+  minimum_component_coverage: 0.50
+  score_penalty_rate: 0.30
+  score_penalty_floor: 0.55
+  confidence_floor: 5
+  confidence_cap: 80
+freshness:
+  fresh_days: 5
+  stale_days: 30
+  stale_score_penalty: 0.35
+  stale_confidence_cap: 45
+risk:
+  low_max: 30
+  medium_max: 60
+  high_max: 80
+recommendation:
+  buy_min_score: 72
+  buy_max_risk: 55
+  buy_min_confidence: 45
+  buy_min_liquidity_20d: 5000000
+  buy_max_bear_downside:
+    short: -0.08
+  avoid_max_score: 38
+  avoid_min_risk: 82
+  avoid_max_confidence: 15
+scenarios:
+  short_horizon_days: 10
+  medium_horizon_days: 126
+  empirical_min_observations:
+    short: 80
+    medium: 252
+  probability_min_samples:
+    short: 60
+    medium: 60
+    long: 30
+  long_term_years: 3
+  long_bear_growth_haircut: 0.50
+  long_bull_growth_uplift: 1.35
+  long_bear_multiple_compression: -0.10
+  long_bull_multiple_expansion: 0.15
+short_scoring:
+  schema_version: 1
+  rsi:
+    convention: cutler_sma
+    window_sessions: 14
+  risk_window:
+    sessions: 252
+    annualization_sessions: 252
+  beta_roles:
+    factor_score: excluded
+    composite_risk: absolute_exposure_penalty
+  factor_maps:
+    momentum.return_20d:
+      kind: linear_higher
+      low: -0.10
+      high: 0.15
+    momentum.return_63d:
+      kind: linear_higher
+      low: -0.20
+      high: 0.30
+    momentum.return_126d:
+      kind: linear_higher
+      low: -0.30
+      high: 0.45
+    momentum.sma_50:
+      kind: linear_higher
+      low: -0.10
+      high: 0.10
+    momentum.sma_200:
+      kind: linear_higher
+      low: -0.15
+      high: 0.20
+    momentum.rsi:
+      kind: linear_higher
+      low: 30.0
+      high: 70.0
+    momentum.macd:
+      kind: linear_higher
+      low: -0.02
+      high: 0.02
+    momentum.52w:
+      kind: linear_higher
+      low: 0.15
+      high: 0.95
+    risk.annualized_volatility:
+      kind: linear_lower
+      low: 0.12
+      high: 0.65
+    risk.downside_volatility:
+      kind: linear_lower
+      low: 0.08
+      high: 0.50
+    risk.max_drawdown:
+      kind: linear_higher
+      low: -0.60
+      high: -0.05
+    risk.abnormal_volume:
+      kind: positive_target_penalty
+      target: 1.0
+      slope: 20.0
+      nonpositive_score: 0.0
+    risk.avg_volume:
+      kind: linear_higher
+      low: 1000000.0
+      high: 50000000.0
+    market.relative_20d:
+      kind: linear_higher
+      low: -0.08
+      high: 0.08
+    market.relative_63d:
+      kind: linear_higher
+      low: -0.15
+      high: 0.15
+    market.relative_252d:
+      kind: linear_higher
+      low: -0.25
+      high: 0.25
+  risk_penalty_maps:
+    annualized_volatility:
+      kind: linear_higher
+      low: 0.12
+      high: 0.65
+    downside_volatility:
+      kind: linear_higher
+      low: 0.08
+      high: 0.50
+    max_drawdown_magnitude:
+      kind: linear_higher
+      low: 0.05
+      high: 0.60
+    absolute_beta:
+      kind: linear_higher
+      low: 0.0
+      high: 2.0

@@ -29,6 +29,8 @@ from stanstock.data.models import (
     Listing,
     Region,
     Security,
+    Universe,
+    UniverseMembership,
     UniverseSnapshot,
 )
 from stanstock.data.sec_config import load_sec_fundamentals_config
@@ -46,6 +48,7 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
+from stanstock.research.service import analyze_listing
 from stanstock.research.under10 import under10_assessment_hash, under10_policy_hash
 from stanstock.simulation.models import (
     SimulationDefinition,
@@ -273,6 +276,88 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
 
 
 @pytest.mark.django_db
+def test_v3_omitted_benchmark_flows_from_exact_asset_to_stock_detail(
+    authenticated_client,
+    tmp_path: Path,
+) -> None:
+    now = timezone.now()
+    target = now.date()
+    company = Company.objects.create(name="V3 Web Co", country="US", sector="Technology")
+    security = Security.objects.create(company=company, name="V3 Web Common")
+    listing = Listing.objects.create(
+        security=security,
+        ticker="V3WEB",
+        exchange_mic="XNAS",
+        currency="USD",
+        region=Region.US,
+    )
+    universe = Universe.objects.create(
+        slug="v3-web",
+        name="V3 web",
+        config_version="test-v1",
+    )
+    snapshot = UniverseSnapshot.objects.create(
+        universe=universe,
+        as_of_date=target,
+        grade=UniverseSnapshot.Grade.OBSERVED,
+        config_hash="a" * 64,
+    )
+    UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
+    dates = [target - timedelta(days=299 - index) for index in range(300)]
+    closes = [50.0 + index * 0.05 + (index % 9) * 0.02 for index in range(300)]
+    store = AssetStore(tmp_path)
+    stored = store.write_frame(
+        "tests/v3-web.parquet",
+        pl.DataFrame(
+            {
+                "date": dates,
+                "close": closes,
+                "volume": [1_000_000 + index * 1_000 for index in range(300)],
+            }
+        ),
+    )
+    source = register_asset(
+        provider="synthetic",
+        kind="price_history",
+        subject=listing.ticker,
+        stored=stored,
+        retrieved_at=now,
+        available_at=now,
+        period_start=dates[0],
+        period_end=dates[-1],
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        issued_on_time=False,
+        provider="synthetic",
+        benchmark_subject=None,
+        store=store,
+        config_path=(
+            Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v3.yml"
+        ),
+    )
+    response = authenticated_client.get(reverse("stock-detail", args=[listing.id]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "us-price-baseline-v3" in content
+    assert "INSUFFICIENT EVIDENCE risk" in content
+    assert "Short scenario" in content
+    assert persisted.computation.scenarios["short"].bear is not None
+    assert persisted.computation.risk_score is None
+    assert persisted.run.issued_on_time is False
+    assert persisted.predictions[0].issued_on_time is False
+    assert persisted.predictions[0].source_assets[0]["id"] == str(source.id)
+    assert DataAsset.objects.filter(
+        kind="analysis_output_manifest",
+        subject=str(persisted.run.id),
+    ).exists()
+
+
+@pytest.mark.django_db
 def test_methodology_page_discloses_policy_and_uncertainty_boundaries(
     authenticated_client,
 ) -> None:
@@ -294,6 +379,27 @@ def test_methodology_page_discloses_policy_and_uncertainty_boundaries(
         "Demo and direct research can record working-tree unless an exact committed revision "
         "is explicitly supplied"
     ) in content
+    assert "explicit research use only" in content
+    assert "latest 252 common closes (251 aligned return pairs)" in content
+    assert "separate 252-session relative return needs 253 overlapping closes" in content
+    assert "Beta is excluded from factor and conviction scores" in content
+    assert "right-hand limit of 80 is intentional" in content
+    assert "Price ×" in content
+    assert "with fixed volume" in content
+    assert "Requested-missing is 1 failed selection/0 reads" in content
+    assert "selected-corrupt is 1 selection/1 attempted read" in content
+    assert "there is no cache, fallback, substitute, reselection, or downgrade" in content
+    assert "Generic latest readers remain method-neutral" in content
+    assert (
+        "the service enforces the exact v3 config version and effective config hash, "
+        "Twelve Data, SPY, and a raw lowercase 40-hex revision equal to the checkout's "
+        "exact clean committed HEAD"
+    ) in content
+    assert (
+        "The caller still owns reviewed-production-universe selection and independent "
+        "pre-invocation proof of the next-session deadline and source-cutoff safety"
+    ) in content
+    assert "Dollar volume is not the Amihud measure" in content
     assert "other transforms are bound to the exact code revision" not in content
 
 

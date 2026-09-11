@@ -29,6 +29,86 @@ buckets, caps, confidence/support formulas, fallbacks, thresholds, and gates
 are fixed StanStock policy choices—not literature-standard, optimized,
 causal, or statistically calibrated constants.
 
+### Prospective short price baseline v3
+
+`us-price-baseline-v3` is an explicit, research-only short methodology. It is
+not the production/default selector: scheduled/live US analysis and every
+medium/long compatibility lane remain pinned to `us-price-baseline-v2`.
+Explicit v3 analysis persists one short decision prediction and no
+medium/long advisory prediction. Generic latest-analysis, stock-detail,
+opportunity, watchlist, performance, and portfolio readers remain
+method-neutral, so an explicitly created v3 row may become their latest row;
+that reader truth is not default activation.
+
+V3's strict YAML is the sole authority for 16 transforms: eight normalized
+momentum/technical factors, five risk/liquidity factors, and three relative
+market factors. It rejects missing, unknown, or duplicate recursive keys,
+booleans used as numbers, non-finite inputs, invalid bounds, and hidden
+defaults. RSI remains Cutler/SMA RSI over the latest 14 close changes, not
+Wilder smoothing, and v3 maps it continuously as
+`100 * clamp((RSI - 30) / 40)` (`30/50/70 -> 0/50/100`). The normalized MACD
+input is histogram/latest positive close. Abnormal volume is `0` at a reported
+ratio `<= 0`; for a positive ratio `x` it is
+`clamp(100 - 20 * abs(x - 1))`. The jump from `0` at zero to a right-hand
+limit of `80` is intentional, not continuous.
+
+V3 volatility, downside deviation, maximum drawdown, and beta use exactly the
+latest 252 closes shared by the asset and benchmark (251 aligned simple-return
+pairs), require matching latest dates, and do not fill calendar gaps. The
+252-session relative-return factor is separate and needs 253 overlapping
+closes. Beta is excluded from factor/component/conviction scoring and enters
+only composite risk as `H(abs(beta); 0, 2)`. Composite risk is the equal
+average of YAML-mapped volatility, downside, drawdown magnitude, and absolute
+beta penalties; if any one is unavailable—including zero benchmark
+variance—the numeric risk is null. Numeric empirical scenarios can still be
+reported, while missing risk blocks BUY. The score, risk, and confidence
+AVOID gates remain independently active, so insufficiency does not
+automatically mean HOLD. A genuine zero remains numeric zero.
+
+A compatible split-equivalent transformation multiplies OHLC/close by finite
+`k > 0` and divides share volume by `k`; normalized factors, composite risk,
+confidence, scenarios, BUY gates, and recommendation are invariant, while raw
+prices, averages, MACD, and ATR scale by `k` and raw share volume scales by
+`1/k`. Price multiplied by `k` with volume fixed is not split-equivalent:
+measured USD turnover becomes `k` times larger and may change the configured
+liquidity factor, component, overall score, `$5m` BUY gate, and
+recommendation. Nominal price bands remain display/filter/execution metadata
+and never enter research arithmetic. Provider-reported volume has not been
+proven split-compatible; mathematical equivariance is not provider
+provenance.
+
+For persisted v3 analysis, each listing and each non-null requested benchmark
+is selected once through `AsOfData.latest_asset` and that exact immutable
+asset is physically read and SHA-256 checked once. An omitted benchmark means
+zero benchmark selections/reads and explicit common-risk insufficiency. A
+requested but unavailable benchmark means one failed selection and zero
+reads; a selected corrupt benchmark means one selection and one attempted
+exact read. Both failures propagate and roll back invocation-owned runs,
+analyses, predictions, manifests, panels, rows, and files—there is no cache,
+fallback, substitute, reselection, or insufficiency downgrade. V3 is USD-only.
+Provenance records exact asset UUID, checksum, provider, subject,
+`retrieved_at`, and `available_at`, with actual generation time kept distinct
+from target date and data cutoff.
+
+An exceptional observed v3 issuance is a direct
+`analyze_snapshot(..., issued_on_time=True, ...)` call, never
+`manage.py analyze`. For that explicit observed-v3 request, the service
+enforces the exact v3 config version and effective config hash,
+`provider="twelve_data"`, SPY, and a raw lowercase 40-hex
+`STANSTOCK_CODE_REVISION` equal to the checkout's exact clean committed HEAD.
+The caller still owns reviewed-production-universe selection and independent
+pre-invocation proof of the next-session-open deadline and source cutoff
+safety. Existing service deadline and source-cutoff checks remain fail-closed;
+an unsafe request raises rather than silently downgrading.
+
+Broad context comes from Wilder (1978) for the distinct Wilder-smoothed RSI
+convention, Jegadeesh and Titman (1993) and Moskowitz, Ooi, and Pedersen
+(2012) for momentum/trend research, Sharpe (1964) for beta as market
+sensitivity, and Amihud (2002) for treating liquidity separately. None of
+those works validates v3's exact windows, affine maps, thresholds, weights,
+confidence rules, risk classes, dollar-volume proxy, profitability, or
+recommendation gates.
+
 ## Current data boundary
 
 The original free-provider gate remains **NO_GO for broad US/European

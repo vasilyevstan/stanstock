@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from stanstock.research.config import CommonRiskPolicy
 from stanstock.research.types import IndicatorResult
 
 SUPPORTED_WINDOWS = (1, 5, 10, 20, 63, 126, 252, 756, 1260)
@@ -37,6 +38,7 @@ def calculate_indicators(
     *,
     benchmark: pl.DataFrame | None = None,
     windows: Iterable[int] = SUPPORTED_WINDOWS,
+    common_risk_policy: CommonRiskPolicy | None = None,
 ) -> IndicatorResult:
     clean = _prepare_price_frame(frame)
     missing: dict[str, str] = {}
@@ -100,14 +102,15 @@ def calculate_indicators(
     else:
         missing["atr_14"] = "Need high/low and at least 15 closes"
 
-    daily_returns = _returns(closes)
-    if len(daily_returns) >= 2:
-        values["annualized_volatility"] = _annualized_std(daily_returns)
-        values["downside_volatility"] = _downside_deviation(daily_returns)
-        values["max_drawdown"] = _max_drawdown(closes)
-    else:
-        missing["annualized_volatility"] = "Need at least three closes"
-        missing["max_drawdown"] = "Need at least two closes"
+    if common_risk_policy is None:
+        daily_returns = _returns(closes)
+        if len(daily_returns) >= 2:
+            values["annualized_volatility"] = _annualized_std(daily_returns)
+            values["downside_volatility"] = _downside_deviation(daily_returns)
+            values["max_drawdown"] = _max_drawdown(closes)
+        else:
+            missing["annualized_volatility"] = "Need at least three closes"
+            missing["max_drawdown"] = "Need at least two closes"
 
     for window in (20, 63, 126, 252):
         momentum_key = f"momentum_{window}d"
@@ -159,7 +162,16 @@ def calculate_indicators(
         missing["avg_dollar_volume_20d"] = missing["volume"]
         missing["abnormal_volume_strict"] = missing["volume"]
 
-    if benchmark is not None:
+    if common_risk_policy is not None:
+        values.update(
+            _common_benchmark_values(
+                clean,
+                benchmark,
+                missing,
+                common_risk_policy,
+            )
+        )
+    elif benchmark is not None:
         values.update(_benchmark_values(clean, benchmark, missing))
 
     last_date = clean.select("date").to_series().to_list()[-1] if "date" in clean.columns else None
@@ -428,6 +440,138 @@ def _max_drawdown(closes: np.ndarray[Any, np.dtype[np.float64]]) -> float:
     running_peak = np.maximum.accumulate(closes)
     drawdowns = closes / running_peak - 1.0
     return float(np.min(drawdowns))
+
+
+_COMMON_RISK_KEYS = (
+    "annualized_volatility",
+    "downside_volatility",
+    "max_drawdown",
+    "beta",
+)
+
+
+def _common_benchmark_values(
+    asset: pl.DataFrame,
+    benchmark: pl.DataFrame | None,
+    missing: dict[str, str],
+    policy: CommonRiskPolicy,
+) -> dict[str, float]:
+    """V3 benchmark-relative factors and exact common-window risk metrics."""
+    values: dict[str, float] = {}
+    if benchmark is None:
+        _mark_common_risk_missing(missing, "Common-risk benchmark is omitted")
+        _mark_relative_missing(missing, "Benchmark is omitted")
+        return values
+    if (
+        "date" not in asset.columns
+        or "date" not in benchmark.columns
+        or "close" not in benchmark.columns
+    ):
+        _mark_common_risk_missing(missing, "Common risk needs benchmark date and close columns")
+        _mark_relative_missing(missing, "Benchmark needs date and close columns")
+        return values
+
+    benchmark_clean = _prepare_price_frame(benchmark).rename({"close": "benchmark_close"})
+    joined = (
+        asset.select("date", "close")
+        .join(
+            benchmark_clean.select("date", "benchmark_close"),
+            on="date",
+            how="inner",
+        )
+        .sort("date")
+    )
+    values.update(_relative_return_values(joined, missing))
+
+    asset_last = asset["date"][-1]
+    benchmark_last = benchmark_clean["date"][-1] if benchmark_clean.height else None
+    if asset_last != benchmark_last:
+        _mark_common_risk_missing(
+            missing,
+            "Asset and benchmark latest dates do not match",
+        )
+        return values
+    if joined.height < policy.sessions:
+        _mark_common_risk_missing(
+            missing,
+            f"Need at least {policy.sessions} common closes",
+        )
+        return values
+
+    window = joined.tail(policy.sessions)
+    asset_closes = _series(window, "close")
+    benchmark_closes = _series(window, "benchmark_close")
+    asset_returns = _returns(asset_closes)
+    benchmark_returns = _returns(benchmark_closes)
+    required_returns = policy.sessions - 1
+    if len(asset_returns) != required_returns or len(benchmark_returns) != required_returns:
+        _mark_common_risk_missing(
+            missing,
+            f"Need exactly {required_returns} aligned common returns",
+        )
+        return values
+    if not np.isfinite(asset_returns).all() or not np.isfinite(benchmark_returns).all():
+        _mark_common_risk_missing(missing, "Common-window returns must be finite")
+        return values
+
+    annualization = math.sqrt(float(policy.annualization_sessions))
+    volatility = float(np.std(asset_returns, ddof=1) * annualization)
+    downside = float(np.sqrt(np.mean(np.minimum(asset_returns, 0.0) ** 2)) * annualization)
+    drawdown = _max_drawdown(asset_closes)
+    if not all(math.isfinite(value) for value in (volatility, downside, drawdown)):
+        _mark_common_risk_missing(missing, "Common-window risk metrics must be finite")
+        return values
+    values.update(
+        {
+            "annualized_volatility": volatility,
+            "downside_volatility": downside,
+            "max_drawdown": drawdown,
+        }
+    )
+
+    variance = float(np.var(benchmark_returns, ddof=1))
+    if not math.isfinite(variance) or variance <= 0:
+        missing["beta"] = "Benchmark return variance is zero"
+        return values
+    covariance = float(np.cov(asset_returns, benchmark_returns, ddof=1)[0, 1])
+    beta = covariance / variance
+    if math.isfinite(beta):
+        values["beta"] = beta
+    else:
+        missing["beta"] = "Beta must be finite"
+    return values
+
+
+def _relative_return_values(
+    joined: pl.DataFrame,
+    missing: dict[str, str],
+) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for window in (20, 63, 126, 252):
+        key = f"relative_return_{window}d"
+        if joined.height > window:
+            asset_return = float(joined["close"][-1] / joined["close"][-window - 1] - 1.0)
+            benchmark_return = float(
+                joined["benchmark_close"][-1] / joined["benchmark_close"][-window - 1] - 1.0
+            )
+            relative = asset_return - benchmark_return
+            if math.isfinite(relative):
+                values[key] = relative
+            else:
+                missing[key] = "Relative return must be finite"
+        else:
+            missing[key] = f"Need {window + 1} overlapping closes"
+    return values
+
+
+def _mark_common_risk_missing(missing: dict[str, str], reason: str) -> None:
+    for key in _COMMON_RISK_KEYS:
+        missing[key] = reason
+
+
+def _mark_relative_missing(missing: dict[str, str], reason: str) -> None:
+    for window in (20, 63, 126, 252):
+        missing[f"relative_return_{window}d"] = reason
 
 
 def _benchmark_values(

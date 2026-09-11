@@ -466,6 +466,46 @@ def test_verify_analysis_output_manifest_succeeds_for_decision_only_run(tmp_path
     assert manifest_ref.kind == ANALYSIS_OUTPUT_MANIFEST_KIND
 
 
+def test_v3_exact_source_run_round_trips_through_output_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = AssetStore(tmp_path)
+    snapshot = _snapshot(slug=f"manifest-v3-{uuid4().hex[:8]}")
+    listing = _long_listing("MV3")
+    UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
+    listing_asset = _write_subject_price_asset(store, listing.ticker, close=45.0)
+    benchmark_asset = _write_subject_price_asset(store, "SPY", close=300.0)
+    revision = "1" * 40
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", revision)
+    monkeypatch.setattr("stanstock.research.service.clean_git_revision", lambda _root: revision)
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=DECISION_TIME,
+        target_date=TARGET_DATE,
+        issued_on_time=True,
+        provider="twelve_data",
+        benchmark_subject="SPY",
+        store=store,
+        config_path=(
+            Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v3.yml"
+        ),
+        long_forecast_requested=False,
+    )
+    run = results[0].run
+    listings_by_id = {listing.id: listing}
+
+    outcome = _verify(run, listings_by_id)
+
+    assert outcome.summary["stock_analysis_count"] == 1
+    assert outcome.summary["prediction_count"] == 1
+    assert {entry["id"] for entry in results[0].computation.source_assets} == {
+        str(listing_asset.id),
+        str(benchmark_asset.id),
+    }
+
+
 def test_stock_analysis_row_mutation_is_detected(tmp_path: Path) -> None:
     _store, results = _decision_only_results(tmp_path)
     run = results[0].run

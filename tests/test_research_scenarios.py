@@ -7,6 +7,7 @@ import polars as pl
 
 from stanstock.research.config import load_scoring_config
 from stanstock.research.scenarios import build_scenarios
+from stanstock.research.scoring import assess_risk
 from stanstock.research.types import (
     AggregateScore,
     ComponentScores,
@@ -168,3 +169,25 @@ def test_probability_appears_only_when_configured_sample_support_is_sufficient()
     assert scenarios["long"].probability_positive is None
     assert "calibrated comparable outcomes" in scenarios["long"].insufficiency_reason
     assert scenarios["short"].insufficiency_reason == ""
+
+
+def test_v3_empirical_short_scenario_remains_numeric_when_risk_is_incomplete() -> None:
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v3.yml"
+    )
+    indicators = IndicatorResult(values={"momentum_20d": 0.04})
+
+    scenarios = build_scenarios(
+        _frame(300),
+        indicators,
+        ResearchValues(values={}),
+        _aggregate(),
+        config,
+    )
+    risk = assess_risk(indicators, ResearchValues(values={}), config)
+
+    assert scenarios["short"].bear is not None
+    assert scenarios["short"].base is not None
+    assert scenarios["short"].bull is not None
+    assert risk.score is None
+    assert risk.risk_class == "insufficient"
