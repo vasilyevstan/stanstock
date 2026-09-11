@@ -61,6 +61,7 @@ def test_authenticated_status_shows_local_shell(client) -> None:
     assert "Synthetic research data." in content
     assert "No serving analysis" in content
     assert "DEMO-US" in content
+    assert "Heuristic evidence score" in content
 
 
 @pytest.mark.django_db

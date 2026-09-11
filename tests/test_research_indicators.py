@@ -89,6 +89,42 @@ def test_flat_prices_have_neutral_rsi_and_zero_downside_deviation() -> None:
     assert result.values["downside_volatility"] == pytest.approx(0.0)
 
 
+def test_rsi_uses_simple_averages_of_latest_fourteen_gains_and_losses() -> None:
+    prefix_deltas = [50.0, -20.0, 10.0]
+    latest_deltas = [
+        -1.0,
+        2.0,
+        -3.0,
+        4.0,
+        -5.0,
+        6.0,
+        -7.0,
+        8.0,
+        -9.0,
+        10.0,
+        -11.0,
+        12.0,
+        -13.0,
+        14.0,
+    ]
+    closes = [100.0]
+    for delta in [*prefix_deltas, *latest_deltas]:
+        closes.append(closes[-1] + delta)
+    expected_average_gain = sum(max(delta, 0.0) for delta in latest_deltas) / 14
+    expected_average_loss = sum(max(-delta, 0.0) for delta in latest_deltas) / 14
+    expected = 100.0 - 100.0 / (1.0 + expected_average_gain / expected_average_loss)
+    frame = pl.DataFrame(
+        {
+            "date": [date(2026, 1, 1) + timedelta(days=index) for index in range(len(closes))],
+            "close": closes,
+        }
+    )
+
+    result = calculate_indicators(frame)
+
+    assert result.values["rsi_14"] == pytest.approx(expected)
+
+
 def test_downside_volatility_is_deviation_versus_zero_target() -> None:
     closes = [100.0, 90.0, 99.0, 89.1, 97.119]
     frame = pl.DataFrame(

@@ -38,14 +38,29 @@
     <article><small>Matured sample</small><strong>{{ summary.sample_count }}</strong><span>{% if summary.sufficient_sample %}Reportable{% else %}Insufficient sample{% endif %}</span></article>
     <article><small>Mean return</small><strong>{% if summary.sufficient_sample %}{{ summary.mean_return|percentage }}{% else %}Withheld{% endif %}</strong><span>Price/return convention from outcomes</span></article>
     <article><small>Positive outcomes</small><strong>{% if summary.sufficient_sample %}{{ summary.positive_rate|percentage }}{% else %}Withheld{% endif %}</strong><span>Not risk-adjusted</span></article>
-    <article><small>Directional accuracy</small><strong>{% if summary.sufficient_sample %}{{ summary.directional_accuracy|percentage }}{% else %}Withheld{% endif %}</strong><span>{{ summary.unresolved_count }} unresolved · {{ summary.corporate_event_count }} corporate event</span></article>
+    <article><small>Recommendation success rate</small><strong>{% if summary.sufficient_sample %}{{ summary.directional_accuracy|percentage }}{% else %}Withheld{% endif %}</strong><span>{{ summary.unresolved_count }} unresolved · {{ summary.corporate_event_count }} corporate event</span></article>
   </section>
+
+  <p class="muted">
+    Recommendation success uses decision rules: BUY succeeds when actual
+    return is greater than 0; AVOID when actual return is less than or equal
+    to 0; HOLD when actual return lies within the stored bear/bull range,
+    inclusive. It is not advisory base-case sign match.
+  </p>
+
+  <div class="notice">
+    <strong>Fixed display threshold, not statistical validation.</strong>
+    Metrics display after 30 canonical row-level prediction observations in
+    the relevant cohort. This threshold does not establish independent
+    support, effective cohort sufficiency, probability calibration, or
+    calibrated interval coverage.
+  </div>
 
   {% if not summary.sufficient_sample %}
     <div class="notice">
       <strong>Insufficient sample.</strong>
-      At least 30 matured observations are required before aggregate results are
-      presented as meaningful evidence.
+      Fewer than 30 canonical row-level prediction observations are available
+      for the current decision cohort, so aggregate metrics remain withheld.
     </div>
   {% endif %}
 
@@ -115,13 +130,14 @@
     <div class="section-heading">
       <div>
         <p class="eyebrow">Advisory evidence</p>
-        <h2>Forecast accuracy</h2>
+        <h2>Advisory outcome summary</h2>
       </div>
     </div>
     <p class="muted">
       Each row is an exact method, configuration, provider, evidence-grade, and
       horizon cohort. Metrics remain withheld until that individual cohort has
-      at least 30 applicable observations.
+      30 canonical row-level prediction observations; the fixed display
+      threshold is not a calibration or independence test.
     </p>
 
     <div class="table-scroll" tabindex="0" aria-label="Advisory forecast breakdown">
@@ -132,10 +148,10 @@
             <th scope="col">Horizon</th>
             <th scope="col">Provider</th>
             <th scope="col">Evidence grade</th>
-            <th scope="col">Sample</th>
-            <th scope="col">Direction accuracy</th>
-            <th scope="col">Interval coverage</th>
-            <th scope="col">Mean signed error</th>
+            <th scope="col">Prediction observations</th>
+            <th scope="col">Base-case sign match</th>
+            <th scope="col">Bear–bull inclusion rate</th>
+            <th scope="col">Mean signed base-case error</th>
           </tr>
         </thead>
         <tbody>

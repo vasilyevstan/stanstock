@@ -236,6 +236,7 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     assert "78.50/100" in opportunity_content
     assert "$50-$300" in opportunity_content
     assert "Latest close" in opportunity_content
+    assert "Heuristic evidence score" in opportunity_content
     assert "Legacy 6-12 months" in opportunity_content
     assert "Legacy 3+ years" in opportunity_content
 
@@ -257,9 +258,35 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     content = detail.content.decode()
     assert "Quality is above the configured threshold." in content
     assert "Prediction history" in content
+    assert "heuristic evidence score" in content
     assert "Legacy 6-12 month scenario" in content
     assert "Legacy 3+ year scenario" in content
     assert "Reconstructed training evidence." not in content
+
+
+@pytest.mark.django_db
+def test_methodology_page_discloses_policy_and_uncertainty_boundaries(
+    authenticated_client,
+) -> None:
+    response = authenticated_client.get(reverse("methodology"))
+
+    assert response.status_code == 200
+    content = " ".join(response.content.decode().split())
+    assert "fixed affine or piecewise policy map" in content
+    assert "Cutler/SMA style" in content
+    assert "nominal central 60% analog-return range" in content
+    assert "not a calibrated prediction, credible, or confidence interval" in content
+    assert "GAAP accrual proxy" in content
+    assert "separate frozen horizon-specific fade and multiple-reversion paths" in content
+    assert "not literature-standard, optimized, causal, or statistically calibrated" in content
+    assert "YAML/config policy is bound by the stored configuration hash" in content
+    assert "code-defined transforms are identified by the stored code_revision" in content
+    assert "Scheduled observed production automatically binds an exact clean commit SHA" in content
+    assert (
+        "Demo and direct research can record working-tree unless an exact committed revision "
+        "is explicitly supplied"
+    ) in content
+    assert "other transforms are bound to the exact code revision" not in content
 
 
 @pytest.mark.django_db
@@ -1495,11 +1522,16 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     assert "Research-grade reconstruction" in prediction_content
     assert "Decision" in prediction_content
     assert "Legacy provider not proven" in prediction_content
+    assert "Positive-return estimate" in prediction_content
+    assert "Support/coverage heuristic" in prediction_content
 
     assert performance.status_code == 200
-    performance_content = performance.content.decode()
+    performance_content = " ".join(performance.content.decode().split())
     assert "Insufficient sample" in performance_content
     assert "Withheld" in performance_content
+    assert "30 canonical row-level prediction observations" in performance_content
+    assert "does not establish independent support" in performance_content
+    assert "meaningful evidence" not in performance_content
 
 
 @pytest.mark.django_db
@@ -1564,12 +1596,14 @@ def test_recommendation_filter_excludes_advisory_predictions(
             "evidence_role": Prediction.EvidenceRole.ADVISORY,
         },
     )
+    all_predictions = authenticated_client.get(reverse("predictions"))
 
     assert decisions.status_code == 200
     assert decisions.context["result_count"] == 1
     assert decisions.context["prediction_cards"][0]["prediction"].evidence_role == "decision"
     assert incompatible.status_code == 200
     assert incompatible.context["result_count"] == 0
+    assert "Analog range only — probability withheld" in all_predictions.content.decode()
 
 
 @pytest.mark.django_db
@@ -1757,7 +1791,20 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
     assert advisory_groups[0]["sample_count"] == 1
     assert advisory_groups[0]["direction_accuracy"] is None
     assert advisory_groups[0]["direction_sample_count"] == 1
-    assert "Advisory evidence" in response.content.decode()
+    content = " ".join(response.content.decode().split())
+    assert "Advisory evidence" in content
+    assert "Advisory outcome summary" in content
+    assert "Prediction observations" in content
+    assert "Recommendation success rate" in content
+    assert "Directional accuracy" not in content
+    assert "Base-case sign match" in content
+    assert "Bear–bull inclusion rate" in content
+    assert '<th scope="col">Mean signed base-case error</th>' in content
+    assert '<th scope="col">Mean signed error</th>' not in content
+    assert "BUY succeeds when actual return is greater than 0" in content
+    assert "AVOID when actual return is less than or equal to 0" in content
+    assert "HOLD when actual return lies within the stored bear/bull range" in content
+    assert "It is not advisory base-case sign match" in content
 
 
 @pytest.mark.django_db

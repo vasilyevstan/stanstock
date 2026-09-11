@@ -16,6 +16,8 @@ def test_display_label_hides_internal_provider_and_evidence_slugs() -> None:
     assert display_label("twelve_data") == "Twelve Data"
     assert display_label("price_history") == "Price history"
     assert display_label("us") == "US"
+    assert display_label("empirical_calibrated") == "Probability gate passed — not calibrated"
+    assert display_label("empirical_range_only") == "Analog range only — probability withheld"
     assert display_label("custom_status") == "Custom Status"
 
 

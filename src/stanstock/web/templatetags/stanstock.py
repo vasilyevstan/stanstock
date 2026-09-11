@@ -15,6 +15,8 @@ DISPLAY_LABELS = {
     "6m": "6 months",
     "daily": "Daily market refresh",
     "europe": "Europe",
+    "empirical_calibrated": "Probability gate passed — not calibrated",
+    "empirical_range_only": "Analog range only — probability withheld",
     "filings_xbrl_org": "filings.xbrl.org",
     "heuristic": "Heuristic",
     "long": "3+ years (legacy)",

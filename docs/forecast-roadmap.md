@@ -38,8 +38,8 @@ forecast identities:
 - every new prediction records a decision/advisory role, immutable evidence
   grade/source mode, exact price provider and source subject when proven, and
   structured calculation provenance;
-- advisory outcomes use direction correctness, interval coverage, signed
-  error, and benchmark return, with no recommendation-success value;
+- advisory outcomes use base-case sign match, bear-to-bull inclusion, signed
+  base-case error, and benchmark return, with no recommendation-success value;
 - decision performance and opportunity policy explicitly exclude advisory
   forecasts, and advisory metrics remain separated by exact method,
   configuration, provider, evidence grade, and horizon.
@@ -60,9 +60,11 @@ only values known on that date:
 
 The panel also records 50/200-session trend, downside volatility, and dollar
 liquidity as eligibility, risk, and explanation inputs rather than additional
-matching axes. The current stock is matched to prior observations in the same versioned
-state buckets. The 20th, 50th, and 80th percentiles of the subsequent 126- and
-252-session price returns become the bear, base, and bull cases.
+matching axes. The current stock is matched to prior observations in the same
+versioned state buckets. The matched and unconditional cohort-weighted 20th,
+50th, and 80th percentiles of the subsequent 126- and 252-session price
+returns are each shrinkage blended. The published base is the blended p50;
+bear and bull are the blended p20 and p80.
 
 Sparse buckets will be shrunk toward the unconditional market distribution:
 
@@ -75,12 +77,19 @@ forecast_quantile =
 ```
 
 Rows are weighted so each market cohort contributes equal total weight even
-when many current-universe stocks share it. Bucket boundaries, fallback order,
-support floors, shrinkage, and calibration gates are frozen in
+when many current-universe stocks share it. Bear-to-bull is a nominal central
+60% analog-return range. It is not a calibrated prediction, credible, or
+confidence interval and has no coverage guarantee.
+
+Bucket boundaries, fallback order,
+support floors, shrinkage, and probability-publication gates are frozen in
 `config/forecasts/us-price-medium-v1.yml`, not selected by maximizing backtest
-results. Probability of a positive return remains hidden until effective
+results. The positive-return estimate remains hidden until effective
 cohort support, listing diversity, calendar span, matched market-regime
-breadth, and walk-forward calibration all qualify.
+breadth, base-case MAE comparisons against the unconditional and SPY-relative
+baselines, and the configured absolute Brier threshold all qualify. The
+persisted `empirical_calibrated` name records only passage of that publication
+gate; it does not prove probability calibration or interval coverage.
 The complete panel is stored as a private immutable Parquet asset with source,
 calendar, configuration, content, and code hashes. This stage is explicitly
 labeled `price-only` and cannot produce a fundamental long-term forecast or
@@ -185,15 +194,22 @@ fundamentals or turn an unsupported forecast into a BUY.
 **Released.** The long-horizon engine estimates business growth first and
 valuation second without changing the short recommendation policy.
 
-Sustainable growth is bounded by reinvestment economics:
+Sustainable growth uses bounded accounting proxies:
 
 ```text
-NOPAT = operating_income * (1 - bounded_cash_tax_rate)
+gaap_accrual_tax_proxy =
+    TTM_income_tax_expense / TTM_pretax_income
+NOPAT =
+    TTM_operating_income * (1 - bounded_gaap_accrual_tax_proxy)
 invested_capital = compatible_debt + equity - cash
 reinvestment_rate =
     (ending_invested_capital - beginning_invested_capital) / NOPAT
 sustainable_growth = ROIC * reinvestment_rate
 ```
+
+The tax input is a bounded GAAP accrual proxy, not cash taxes paid or a cash
+tax rate. Reinvestment is a compatible balance-sheet invested-capital-change
+proxy, not directly observed capex and not a proven causal reinvestment rate.
 
 The base growth path blends the company's historical per-share growth,
 sustainable growth, and the point-in-time same-family SIC-peer median. It then
@@ -224,6 +240,10 @@ cumulative_price_return =
 annualized_return =
     (1 + cumulative_price_return) ** (1 / T) - 1
 ```
+
+The 3-year and 5-year calculations use separate frozen horizon-specific fade
+sequences and multiple-reversion settings. Neither is a slice or extrapolation
+of one coherent shared 5-year path.
 
 Positive compatible FCF/share takes priority. EPS/share is considered only
 when FCF evidence is genuinely unavailable; negative, weak, or
@@ -497,13 +517,17 @@ realized price return and SPY.
 
 Reported evidence will include:
 
-- sample count and coverage;
-- median absolute forecast error;
-- directional accuracy;
-- bear/base/bull interval coverage;
-- return and excess-return calibration by forecast bucket;
+- canonical observation count and input-evidence coverage;
+- signed base-case error and median absolute base-case error;
+- base-case sign match;
+- bear-to-bull inclusion rate, assessed against its nominal central 60% target
+  only after independent support;
+- positive-return reliability by forecast bucket;
 - results by sector, risk class, and market regime;
 - separate research-grade and genuinely on-time live results.
+
+These are planned validation summaries, not claims that current forecasts or
+probability estimates are calibrated.
 
 Scenario widths will eventually use the 20th and 80th percentiles of historical
 forecast residuals from the same formula version. Until that evidence is
@@ -518,8 +542,9 @@ sufficient, a conservative volatility-based floor remains in force.
 4. **Released:** deterministic SEC-backed 3y/5y scenario views and immutable
    advisory predictions.
 5. **Next:** accumulate prospective outcomes and complete integrated
-   forecast-error, interval, direction, benchmark, and portfolio reporting by
-   exact method/configuration version.
+   base-case error, sign-match, bear-to-bull inclusion, positive-return
+   reliability, benchmark, and portfolio reporting by exact
+   method/configuration version.
 
 European long-term forecasts remain out of scope until an equally defensible
 point-in-time filing pipeline exists.

@@ -21,11 +21,22 @@
     </section>
     <section class="panel">
       <h2>Scoring</h2>
-      <p>Quality, growth, valuation, momentum, risk, and market context are combined through versioned horizon weights. Missing data reduces confidence instead of becoming zero.</p>
+      <p>Each available raw factor is independently mapped to 0-100 by a fixed affine or piecewise policy map, clamped, averaged into a component, and combined with versioned horizon weights. Opportunity order uses the completed overall score; it is not factor normalization.</p>
+      <p>YAML/config policy is bound by the stored configuration hash; code-defined transforms are identified by the stored code_revision. Scheduled observed production automatically binds an exact clean commit SHA. Demo and direct research can record working-tree unless an exact committed revision is explicitly supplied. Missing data reduces the heuristic evidence score instead of becoming zero. <code>rsi_14</code> uses simple averages of the latest 14 gains and losses (Cutler/SMA style), and its score transform is a StanStock heuristic, not a literature-standard RSI transform.</p>
     </section>
     <section class="panel">
       <h2>Scenarios</h2>
-      <p>Bear, base, and bull values are ranges from explicit empirical or fundamental rules. Probability is withheld when the relevant sample is insufficient.</p>
+      <p>For 6m/12m forecasts, matched and unconditional cohort-weighted p20, p50, and p80 estimates are each shrinkage blended. Bear/base/bull are the blended p20/p50/p80.</p>
+      <p>Bear-to-bull is a nominal central 60% analog-return range, not a calibrated prediction, credible, or confidence interval; it has no coverage guarantee. The positive-return estimate is withheld unless its publication gate passes, and a pass does not prove calibrated probabilities.</p>
+    </section>
+    <section class="panel">
+      <h2>Long horizons</h2>
+      <p>The bounded tax input is a GAAP accrual proxy: TTM income-tax expense divided by TTM pretax income, not cash taxes paid or a cash tax rate. Reinvestment is compatible balance-sheet invested-capital change divided by NOPAT, an accounting proxy rather than observed capex or a proven causal rate.</p>
+      <p>Three- and five-year cases use separate frozen horizon-specific fade and multiple-reversion paths; neither is a slice or extrapolation of one shared five-year path.</p>
+    </section>
+    <section class="panel">
+      <h2>Principles and fixed policy</h2>
+      <p>Broad research principles include momentum/trend, explicit risk, base rates and shrinkage, sustainable-growth accounting, valuation mean reversion, and point-in-time evaluation. Exact lookbacks, maps, RSI transform, weights, buckets, caps, support/confidence formulas, fallbacks, thresholds, and gates are StanStock policy—not literature-standard, optimized, causal, or statistically calibrated constants.</p>
     </section>
     <section class="panel">
       <h2>Limitations</h2>

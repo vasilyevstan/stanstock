@@ -58,8 +58,8 @@
           <th scope="col">Horizon</th>
           <th scope="col">Recommendation</th>
           <th scope="col">Bear / base / bull</th>
-          <th scope="col">Positive probability</th>
-          <th scope="col">Confidence</th>
+          <th scope="col">Positive-return estimate</th>
+          <th scope="col">Support/coverage heuristic</th>
           <th scope="col">Outcome</th>
         </tr>
       </thead>
@@ -108,6 +108,9 @@
             <td>
               {% if prediction.probability_positive is not None %}
                 {{ prediction.probability_positive|percentage }}
+                {% if prediction.horizon == "6m" or prediction.horizon == "12m" %}
+                  <small>Shrinkage-weighted analog estimate</small>
+                {% endif %}
               {% else %}
                 Insufficient evidence
                 {% if prediction.insufficiency_reason %}<small>{{ prediction.insufficiency_reason }}</small>{% endif %}

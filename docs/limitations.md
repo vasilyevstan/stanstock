@@ -210,15 +210,25 @@ unmeasurable.
 
 ## Forecast evidence
 
-- Confidence is heuristic until calibration evidence exists.
-- Probability of positive return is withheld below its configured sample
-  threshold.
+- Analysis confidence is a heuristic evidence score, and prediction
+  confidence is a support/coverage heuristic. Neither is a statistical
+  confidence level.
+- The medium positive-return estimate is shrinkage weighted and withheld until
+  its support/diversity and probability-publication gate passes. The persisted
+  `empirical_calibrated` status means only that support, base-case MAE
+  comparisons against unconditional and SPY-relative baselines, and the
+  configured absolute Brier threshold passed. It does not prove calibrated
+  probabilities or calibrated interval coverage.
 - The explicit `6m` and `12m` price-only engine uses the current configured
   universe's history. Its backfilled panel is therefore survivorship-biased
-  research evidence, not proof of live skill. Probability is additionally
-  withheld unless effective non-overlapping cohort support, listing diversity,
-  calendar span, matched market-regime breadth, and fixed walk-forward
-  calibration gates pass.
+  research evidence, not proof of live skill. The positive-return estimate is
+  additionally withheld unless effective non-overlapping cohort support,
+  listing diversity, calendar span, matched market-regime breadth, and fixed
+  publication gates pass. Its matched and unconditional cohort-weighted
+  p20/p50/p80 estimates are each shrinkage blended; base is blended p50 and
+  bear/bull are blended p20/p80. Bear-to-bull is a nominal central 60%
+  analog-return range, not a calibrated prediction/credible/confidence
+  interval, and it has no coverage guarantee.
 - Point-in-time SEC facts are available for the configured US universe, but
   Companyfacts excludes custom issuer concepts and segment dimensions. Current
   SIC snapshots are not historical classifications, ambiguous taxonomies stay
@@ -232,7 +242,13 @@ unmeasurable.
   peers, annual history, classification, or compatible price provenance
   produces `Insufficient evidence`; negative or inconsistent FCF cannot
   silently switch to EPS. Existing `medium` and `long` rows remain legacy
-  identities rather than being relabeled as exact horizons.
+  identities rather than being relabeled as exact horizons. Its bounded tax
+  input is TTM GAAP income-tax expense divided by TTM pretax income, an
+  accrual proxy rather than cash taxes paid or a cash tax rate. Reinvestment
+  is compatible balance-sheet invested-capital change divided by NOPAT, an
+  accounting proxy rather than observed capex or a proven causal rate. The 3y
+  and 5y calculations use separate frozen fade and multiple-reversion paths;
+  neither is a slice or extrapolation of one shared 5y path.
 - Advisory `6m`/`12m` and `3y`/`5y` forecasts require a complete eligible
   universe snapshot so their cohort and peer context is immutable. The
   single-listing analysis service intentionally issues only the decision
@@ -275,6 +291,10 @@ unmeasurable.
 - Long-horizon scenarios are explicit fundamental cases, not precise
   statistically validated forecasts.
 - Simulated or reconstructed performance is not live performance.
+- Performance metrics display after 30 canonical row-level prediction
+  observations in the relevant cohort. That fixed threshold does not establish
+  independent support/effective cohort sufficiency, probability calibration,
+  or calibrated interval coverage.
 - Price returns must not be described as total returns when dividend data is
   absent.
 

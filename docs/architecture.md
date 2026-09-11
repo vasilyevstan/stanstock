@@ -75,8 +75,8 @@ replacement.
 10. Outcomes append after the horizon matures; matured and corporate-event
    states are terminal and do not alter the original prediction. Decision
    outcomes retain recommendation success, while advisory outcomes use
-   direction, interval coverage, and signed forecast error with
-   `success=NULL`.
+   base-case sign match, bear-to-bull inclusion, and signed base-case error
+   with `success=NULL`.
 11. A simulation stores its base currency, result curve, and exact price,
    signal, benchmark, and FX frames as checksummed assets keyed by the run
    UUID. Converted price rows keep their native price and currency beside the
