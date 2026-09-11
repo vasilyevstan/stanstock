@@ -479,7 +479,7 @@ def _company_state(
     }
     candidates = _dedupe_text(
         (
-            *_referenced_evidence_fact_ids(evidence_selection),
+            *referenced_evidence_fact_ids(evidence_selection),
             *(state.failure_fact_ids if state.assessed_failure_evidence else ()),
         )
     )
@@ -812,7 +812,7 @@ def _boundary_failure_evidence_selection(
     }
 
 
-def _referenced_evidence_fact_ids(payload: Any) -> tuple[str, ...]:
+def referenced_evidence_fact_ids(payload: Any) -> tuple[str, ...]:
     """Deduplicated closure of every fact id an assessment payload cites.
 
     Walking the payload -- rather than re-deriving a hand-maintained list --
@@ -2477,7 +2477,7 @@ def _forecasts_for_state(
             sec_config=sec_config,
             input_facts=_state_input_fact_payloads(state),
             target_classification=(
-                _classification_payload(state.sic) if state.sic is not None else None
+                classification_payload(state.sic) if state.sic is not None else None
             ),
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=split_basis,
@@ -2492,7 +2492,7 @@ def _forecasts_for_state(
             metric_family=state.metric.family,
             sec_config=sec_config,
             input_facts=_state_input_fact_payloads(state),
-            target_classification=_classification_payload(state.sic),
+            target_classification=classification_payload(state.sic),
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=split_basis,
             evidence_selection=_state_evidence_selection_payload(state),
@@ -2608,7 +2608,7 @@ def _forecast_horizon(
             metric_family=state.metric.family,
             sec_config=sec_config,
             input_facts=_state_input_fact_payloads(state),
-            target_classification=_classification_payload(state.sic),
+            target_classification=classification_payload(state.sic),
             peer_set=[_peer_payload(member) for member in peers.members],
             target_price_asset_id=str(state.price_asset.pk),
             split_basis=_split_basis_payload(
@@ -2714,11 +2714,11 @@ def _forecast_horizon(
         "scenario_paths": scenario_outputs,
         "annualized_returns": annualized,
         "input_facts": [
-            _fact_payload(state.fact_map[fact_id], state.filing_assets)
+            fact_payload(state.fact_map[fact_id], state.filing_assets)
             for fact_id in target_fact_ids
             if fact_id in state.fact_map
         ],
-        "target_classification": _classification_payload(sic),
+        "target_classification": classification_payload(sic),
         "peer_set": [_peer_payload(member) for member in peers.members],
         "contribution_detail": {
             name: output["growth_contributions"] for name, output in scenario_outputs.items()
@@ -3006,7 +3006,7 @@ def _state_evidence_selection_payload(state: _CompanyState) -> dict[str, Any] | 
         # (b) assessed: read and considered, never selected.
         "assessed_evidence_fact_ids": list(assessed),
         "assessed_evidence": [
-            _fact_reference(state.fact_map[fact_id], state.filing_assets)
+            fact_reference(state.fact_map[fact_id], state.filing_assets)
             for fact_id in assessed
             if fact_id in state.fact_map
         ],
@@ -3017,7 +3017,7 @@ def _state_evidence_selection_payload(state: _CompanyState) -> dict[str, Any] | 
 
 def _state_input_fact_payloads(state: _CompanyState) -> list[dict[str, Any]]:
     return [
-        _fact_payload(state.fact_map[fact_id], state.filing_assets)
+        fact_payload(state.fact_map[fact_id], state.filing_assets)
         for fact_id in _state_selected_fact_ids(state)
         if fact_id in state.fact_map
     ]
@@ -3076,7 +3076,7 @@ def _peer_payload(state: _CompanyState) -> dict[str, Any]:
         "ticker": state.listing.ticker,
         "sic": _normalized_sic(state.sic.code),
         "classification_id": str(state.sic.pk),
-        "classification": _classification_payload(state.sic),
+        "classification": classification_payload(state.sic),
         "metric_family": state.metric.family,
         "current_price": state.price,
         "historical_growth": state.metric.historical_growth,
@@ -3084,14 +3084,14 @@ def _peer_payload(state: _CompanyState) -> dict[str, Any]:
         "current_multiple_capped": state.metric.current_multiple,
         "price_asset_id": str(state.price_asset.pk),
         "fact_references": [
-            _fact_reference(state.fact_map[fact_id], state.filing_assets)
+            fact_reference(state.fact_map[fact_id], state.filing_assets)
             for fact_id in state.metric.fact_ids
             if fact_id in state.fact_map
         ],
     }
 
 
-def _fact_reference(
+def fact_reference(
     fact: FundamentalFact,
     filing_assets: dict[str, DataAsset],
 ) -> dict[str, Any]:
@@ -3109,7 +3109,7 @@ def _fact_reference(
     }
 
 
-def _fact_payload(
+def fact_payload(
     fact: FundamentalFact,
     filing_assets: dict[str, DataAsset],
 ) -> dict[str, Any]:
@@ -3148,7 +3148,7 @@ def _fact_payload(
     }
 
 
-def _classification_payload(
+def classification_payload(
     classification: CompanyClassificationObservation,
 ) -> dict[str, Any]:
     return {

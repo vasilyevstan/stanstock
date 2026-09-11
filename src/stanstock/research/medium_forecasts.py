@@ -16,6 +16,7 @@ import polars as pl
 from django.db import transaction
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import DataAsset, Listing
@@ -64,11 +65,40 @@ PANEL_SCHEMA = {
 }
 
 
+def calendar_sessions_through(
+    *, calendar_name: str, fixed_epoch: date, target_date: date
+) -> tuple[date, ...]:
+    """The exact ordered trading-session closure this configuration's panel
+    is built over, from `fixed_epoch` through `target_date` inclusive.
+
+    A single pure leaf shared by the panel producer and its research-domain
+    verifier, so the verifier can independently reproduce the panel's own
+    `calendar_hash` rather than trusting whatever hash the panel's metadata
+    happens to declare.
+    """
+    calendar = get_calendar(calendar_name)
+    target_session = calendar.date_to_session(target_date, direction="none")
+    epoch_session = calendar.date_to_session(fixed_epoch, direction="none")
+    if target_session < epoch_session:
+        raise ValueError("Forecast target date precedes the configured fixed epoch")
+    sessions = calendar.sessions_in_range(epoch_session, target_session)
+    return tuple(session.date() for session in sessions)
+
+
 @dataclass(frozen=True, slots=True)
 class MediumPanel:
     frame: pl.DataFrame
     asset: DataAsset
     source_assets: tuple[DataAsset, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MediumPanelPriceInput:
+    """One exact normalized price vintage and its cutoff-clipped rows."""
+
+    listing: Listing
+    asset: DataAsset
+    frame: pl.DataFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,27 +163,12 @@ def build_medium_forecast_panel(
     code_revision: str,
     store: AssetStore,
 ) -> MediumPanel:
-    calendar = get_calendar(config.calendar)
-    target_session = calendar.date_to_session(target_date, direction="none")
-    epoch_session = calendar.date_to_session(config.fixed_epoch, direction="none")
-    if target_session < epoch_session:
-        raise ValueError("Forecast target date precedes the configured fixed epoch")
-    calendar_sessions = tuple(
-        session.date() for session in calendar.sessions_in_range(epoch_session, target_session)
-    )
-    session_index = {session: index for index, session in enumerate(calendar_sessions)}
-    calendar_hash = _hash_json([session.isoformat() for session in calendar_sessions])
-
     benchmark_read = asof.price_frame_with_diagnostics(
         provider=provider,
         subject=benchmark_subject,
         through_date=target_date,
     )
-    _validate_price_basis(benchmark_read.asset)
-    benchmark_prices = _price_observations(benchmark_read.frame)
-
-    source_assets = [benchmark_read.asset]
-    listing_inputs: list[tuple[Listing, DataAsset, dict[date, tuple[float, float | None]]]] = []
+    listing_inputs: list[MediumPanelPriceInput] = []
     for listing in sorted(listings, key=lambda item: str(item.pk)):
         subject = listing.provider_symbol or listing.ticker
         read = asof.price_frame_with_diagnostics(
@@ -161,71 +176,62 @@ def build_medium_forecast_panel(
             subject=subject,
             through_date=target_date,
         )
-        _validate_price_basis(read.asset)
-        source_assets.append(read.asset)
-        listing_inputs.append((listing, read.asset, _price_observations(read.frame)))
-
-    rows: list[dict[str, object]] = []
-    for horizon in MEDIUM_FORECAST_HORIZONS:
-        horizon_config = config.horizons[horizon]
-        historical_anchors = _historical_anchors(
-            benchmark_prices=benchmark_prices,
-            calendar_sessions=calendar_sessions,
-            session_index=session_index,
-            horizon_sessions=horizon_config.sessions,
-            feature_lookback=config.feature_windows.maximum,
-            target_date=target_date,
-        )
-        for anchor_date, label_end_date in historical_anchors:
-            for listing, asset, prices in listing_inputs:
-                rows.append(
-                    _panel_row(
-                        horizon=horizon,
-                        anchor_date=anchor_date,
-                        label_end_date=label_end_date,
-                        is_forecast=False,
-                        listing=listing,
-                        price_asset=asset,
-                        prices=prices,
-                        benchmark_prices=benchmark_prices,
-                        calendar_sessions=calendar_sessions,
-                        session_index=session_index,
-                        config=config,
-                    )
-                )
-        for listing, asset, prices in listing_inputs:
-            rows.append(
-                _panel_row(
-                    horizon=horizon,
-                    anchor_date=target_date,
-                    label_end_date=None,
-                    is_forecast=True,
-                    listing=listing,
-                    price_asset=asset,
-                    prices=prices,
-                    benchmark_prices=benchmark_prices,
-                    calendar_sessions=calendar_sessions,
-                    session_index=session_index,
-                    config=config,
-                )
+        listing_inputs.append(
+            MediumPanelPriceInput(
+                listing=listing,
+                asset=read.asset,
+                frame=read.frame,
             )
-
-    frame = pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row").sort(
-        "horizon",
-        "anchor_date",
-        "listing_id",
+        )
+    frame = reconstruct_medium_forecast_panel(
+        benchmark_asset=benchmark_read.asset,
+        benchmark_frame=benchmark_read.frame,
+        listing_inputs=listing_inputs,
+        target_date=target_date,
+        config=config,
     )
-    payload = _parquet_bytes(frame)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=config.calendar, fixed_epoch=config.fixed_epoch, target_date=target_date
+    )
+    calendar_hash = hash_json([session.isoformat() for session in calendar_sessions])
+    payload = serialize_medium_forecast_panel(frame)
     content_hash = hashlib.sha256(payload).hexdigest()
     relative_path = (
         f"derived/forecast/medium/{target_date.isoformat()}/"
         f"{run_id.hex}-{content_hash[:12]}.parquet"
     )
-    stored = store.write_bytes(relative_path, payload)
-    deduped_sources = _dedupe_assets(source_assets)
-    source_manifest = [_asset_identity(asset) for asset in deduped_sources]
-    source_manifest_hash = _hash_json(source_manifest)
-    evidence_bundle_hash = _hash_json(
+    # Decide file ownership *before* writing (mirrors
+    # `research.service._write_analysis_output_manifest`'s exact idiom):
+    # a fresh `run_id`/content-hash path should never already exist, so
+    # this only guards against a stale leftover from an earlier failed
+    # attempt at the very same path. Ownership must never be inferred
+    # from a post-failure DB query -- if the nested `transaction.atomic()`
+    # below fails on its own savepoint *exit* (after already truly
+    # committing the row into the outer transaction), the connection is
+    # left in a doomed "needs rollback" state and a further ORM query in
+    # the `except` block would itself raise, masking the original error
+    # and making row-based ownership detection unreliable.
+    try:
+        resolved = store.resolve(relative_path)
+        file_already_existed = resolved.exists()
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "medium_forecast_panel_path_unavailable",
+            "The medium-forecast panel path could not be checked",
+        ) from None
+    try:
+        stored = store.write_bytes(relative_path, payload)
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "medium_forecast_panel_write_failed",
+            "The medium-forecast panel could not be written",
+        ) from None
+    deduped_sources = dedupe_assets(
+        [benchmark_read.asset, *(item.asset for item in listing_inputs)]
+    )
+    source_manifest = [asset_identity(asset) for asset in deduped_sources]
+    source_manifest_hash = hash_json(source_manifest)
+    evidence_bundle_hash = hash_json(
         {
             "calendar_hash": calendar_hash,
             "code_revision": code_revision,
@@ -236,11 +242,11 @@ def build_medium_forecast_panel(
             "universe_config_hash": universe_config_hash,
         }
     )
-    anchor_dates: list[date] = []
-    for row in rows:
-        raw_anchor_date = row["anchor_date"]
-        if isinstance(raw_anchor_date, date):
-            anchor_dates.append(raw_anchor_date)
+    anchor_dates = [
+        anchor_date
+        for anchor_date in frame["anchor_date"].to_list()
+        if isinstance(anchor_date, date)
+    ]
     try:
         with transaction.atomic():
             asset = register_asset(
@@ -281,13 +287,100 @@ def build_medium_forecast_panel(
                 },
             )
     except Exception:
-        if not DataAsset.objects.filter(relative_path=relative_path).exists():
-            store.resolve(relative_path).unlink(missing_ok=True)
+        if not file_already_existed:
+            # A cleanup fault here (e.g. an unexpected permission error on
+            # unlink) must never replace the original exception being
+            # handled: swallow only this narrow best-effort cleanup step,
+            # never the failure that actually caused it.
+            try:
+                store.resolve(relative_path).unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
         raise
     return MediumPanel(
         frame=frame,
         asset=asset,
         source_assets=tuple(deduped_sources),
+    )
+
+
+def reconstruct_medium_forecast_panel(
+    *,
+    benchmark_asset: DataAsset,
+    benchmark_frame: pl.DataFrame,
+    listing_inputs: list[MediumPanelPriceInput],
+    target_date: date,
+    config: MediumForecastConfig,
+) -> pl.DataFrame:
+    """Purely reconstruct the versioned panel from exact normalized inputs.
+
+    The producer and verifier both call this function. It performs no ORM,
+    provider, filesystem, or asset writes, so verification can replay every
+    cohort, feature, label, eligibility relation, row, and float without
+    creating a second methodology implementation.
+    """
+    _validate_price_basis(benchmark_asset)
+    benchmark_prices = _price_observations(benchmark_frame)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=config.calendar,
+        fixed_epoch=config.fixed_epoch,
+        target_date=target_date,
+    )
+    session_index = {session: index for index, session in enumerate(calendar_sessions)}
+    normalized_inputs: list[tuple[Listing, DataAsset, dict[date, tuple[float, float | None]]]] = []
+    for item in sorted(listing_inputs, key=lambda value: str(value.listing.pk)):
+        _validate_price_basis(item.asset)
+        normalized_inputs.append((item.listing, item.asset, _price_observations(item.frame)))
+
+    rows: list[dict[str, object]] = []
+    for horizon in MEDIUM_FORECAST_HORIZONS:
+        horizon_config = config.horizons[horizon]
+        historical_anchors = _historical_anchors(
+            benchmark_prices=benchmark_prices,
+            calendar_sessions=calendar_sessions,
+            session_index=session_index,
+            horizon_sessions=horizon_config.sessions,
+            feature_lookback=config.feature_windows.maximum,
+            target_date=target_date,
+        )
+        for anchor_date, label_end_date in historical_anchors:
+            for listing, asset, prices in normalized_inputs:
+                rows.append(
+                    _panel_row(
+                        horizon=horizon,
+                        anchor_date=anchor_date,
+                        label_end_date=label_end_date,
+                        is_forecast=False,
+                        listing=listing,
+                        price_asset=asset,
+                        prices=prices,
+                        benchmark_prices=benchmark_prices,
+                        calendar_sessions=calendar_sessions,
+                        session_index=session_index,
+                        config=config,
+                    )
+                )
+        for listing, asset, prices in normalized_inputs:
+            rows.append(
+                _panel_row(
+                    horizon=horizon,
+                    anchor_date=target_date,
+                    label_end_date=None,
+                    is_forecast=True,
+                    listing=listing,
+                    price_asset=asset,
+                    prices=prices,
+                    benchmark_prices=benchmark_prices,
+                    calendar_sessions=calendar_sessions,
+                    session_index=session_index,
+                    config=config,
+                )
+            )
+
+    return pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row").sort(
+        "horizon",
+        "anchor_date",
+        "listing_id",
     )
 
 
@@ -1297,13 +1390,14 @@ def _validate_price_basis(asset: DataAsset) -> None:
         )
 
 
-def _parquet_bytes(frame: pl.DataFrame) -> bytes:
+def serialize_medium_forecast_panel(frame: pl.DataFrame) -> bytes:
+    """Serialize a canonical panel with the producer's frozen byte contract."""
     buffer = io.BytesIO()
     frame.write_parquet(buffer)
     return buffer.getvalue()
 
 
-def _asset_identity(asset: DataAsset) -> dict[str, object]:
+def asset_identity(asset: DataAsset) -> dict[str, object]:
     return {
         "id": str(asset.pk),
         "provider": asset.provider,
@@ -1316,13 +1410,13 @@ def _asset_identity(asset: DataAsset) -> dict[str, object]:
     }
 
 
-def _dedupe_assets(assets: list[DataAsset]) -> list[DataAsset]:
+def dedupe_assets(assets: list[DataAsset]) -> list[DataAsset]:
     unique: dict[str, DataAsset] = {}
     for asset in assets:
         unique[str(asset.pk)] = asset
     return [unique[key] for key in sorted(unique)]
 
 
-def _hash_json(value: object) -> str:
+def hash_json(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

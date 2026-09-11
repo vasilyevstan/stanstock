@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from uuid import uuid4
 
 import polars as pl
@@ -44,6 +47,7 @@ from stanstock.research.service import analyze_snapshot, compute_listing_analysi
 
 TARGET_DATE = date(2026, 9, 4)
 GENERATED_AT = datetime(2026, 9, 5, 1, tzinfo=UTC)
+PANEL_REFACTOR_BASE_SHA = "54b57a1ef439e9a3f0005539f3c925ceedabc24d"
 
 
 def test_medium_forecast_config_is_versioned_and_stable() -> None:
@@ -240,6 +244,88 @@ def test_panel_is_immutable_reproducible_and_uses_non_overlapping_complete_label
             assert forecast.scenario.bull is not None
             assert forecast.scenario.bear <= forecast.scenario.base <= forecast.scenario.bull
             assert forecast.calculation["support"]["effective_cohorts"] >= 1
+
+
+@pytest.mark.django_db
+def test_medium_panel_refactor_is_byte_for_byte_identical_to_committed_base(
+    tmp_path: Path,
+) -> None:
+    """The extracted pure replay helper cannot change frozen v1 output."""
+    source = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{PANEL_REFACTOR_BASE_SHA}:src/stanstock/research/medium_forecasts.py",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    module_name = "stanstock.research._medium_forecasts_committed_base"
+    previous = sys.modules.get(module_name)
+    base_module = ModuleType(module_name)
+    base_module.__file__ = f"{PANEL_REFACTOR_BASE_SHA}:src/stanstock/research/medium_forecasts.py"
+    sys.modules[module_name] = base_module
+    try:
+        exec(compile(source, base_module.__file__, "exec"), base_module.__dict__)
+
+        config = _small_support_config()
+        store = AssetStore(tmp_path)
+        listings = [_listing("BASEA"), _listing("BASEB")]
+        sessions = _sessions(900)
+        _price_asset(
+            store,
+            subject="SPY",
+            sessions=sessions,
+            closes=[100 + index * 0.04 for index in range(len(sessions))],
+        )
+        for listing_index, listing in enumerate(listings):
+            _price_asset(
+                store,
+                subject=listing.ticker,
+                sessions=sessions,
+                closes=[
+                    40 + index * (0.03 + listing_index * 0.002) + ((index % 17) - 8) * 0.04
+                    for index in range(len(sessions))
+                ],
+            )
+        asof = AsOfData(GENERATED_AT, store)
+        common = {
+            "listings": listings,
+            "asof": asof,
+            "provider": "synthetic",
+            "benchmark_subject": "SPY",
+            "target_date": TARGET_DATE,
+            "generated_at": GENERATED_AT,
+            "config": config,
+            "config_hash": medium_forecast_config_hash(config),
+            "scoring_config_version": "test-scoring-v1",
+            "scoring_config_hash": "a" * 64,
+            "universe_snapshot_id": uuid4(),
+            "universe_slug": "test-universe",
+            "universe_config_hash": "b" * 64,
+            "code_revision": "test-revision",
+            "store": store,
+        }
+        base_panel = base_module.build_medium_forecast_panel(
+            **common,
+            run_id=uuid4(),
+        )
+        current_panel = build_medium_forecast_panel(
+            **common,
+            run_id=uuid4(),
+        )
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+
+    assert current_panel.frame.equals(base_panel.frame)
+    assert current_panel.asset.sha256 == base_panel.asset.sha256
+    assert current_panel.asset.metadata == base_panel.asset.metadata
+    assert [asset.pk for asset in current_panel.source_assets] == [
+        asset.pk for asset in base_panel.source_assets
+    ]
 
 
 def test_cohort_weighting_prevents_one_date_with_many_listings_from_dominating() -> None:

@@ -6,11 +6,12 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import yaml
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
+from django.db import DatabaseError, IntegrityError, connection
 
 import stanstock.data.live_us as live_us_module
 from stanstock.data.assets import AssetStore
@@ -49,7 +50,9 @@ from stanstock.data.providers.exceptions import (
     ProviderQuotaError,
     ProviderResponseError,
 )
+from stanstock.data.refresh_evidence import UNIVERSE_MEMBERSHIP_EVIDENCE_KIND
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
+from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND
 
 pytestmark = pytest.mark.django_db
 
@@ -265,8 +268,12 @@ def _patch_analysis(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
         calls.append(kwargs)
         snapshot = kwargs["universe_snapshot"]
         assert isinstance(snapshot, UniverseSnapshot)
+        run_id = uuid4()
         return [
-            SimpleNamespace(predictions=(object(),))
+            SimpleNamespace(
+                analysis=SimpleNamespace(run_id=run_id),
+                predictions=(object(),),
+            )
             for _membership in snapshot.memberships.filter(eligible=True)
         ]
 
@@ -856,6 +863,223 @@ def test_post_analysis_deadline_rollback_removes_derived_forecast_panel(
     assert AnalysisRun.objects.count() == 0
     assert DataAsset.objects.filter(kind="medium_forecast_panel").count() == 0
     assert list(tmp_path.glob("derived/forecast/medium/**/*.parquet")) == []
+    # The observed analysis output manifest is written and durably
+    # committed inside `analyze_snapshot`'s own nested transaction before
+    # this later deadline failure rolls back `run_us_daily`'s encompassing
+    # transaction; its physical file must not be left orphaned either.
+    assert DataAsset.objects.filter(kind=ANALYSIS_OUTPUT_MANIFEST_KIND).count() == 0
+    assert list(tmp_path.glob("research/analysis/**/output-manifest.json")) == []
+
+
+def test_post_analysis_deadline_cleanup_unlink_failure_preserves_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cleanup-time `OSError` unlinking one orphaned candidate path must
+    never replace the original deadline failure that triggered cleanup in
+    the first place -- finding 6's "unlink OSError ... preserves original
+    error" case. The underlying rows must still roll back correctly; only
+    the *physical* unlink is faulted, and the fault must be swallowed by
+    `_best_effort_unlink_if_orphaned` rather than propagate and mask the
+    real cause."""
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: _catalog(config),
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        lambda symbol, **kwargs: _long_series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        ),
+    )
+    deadline_checks = 0
+
+    def enforce_deadline(*, target_date: date, generated_at: datetime) -> None:
+        nonlocal deadline_checks
+        deadline_checks += 1
+        if deadline_checks == 2:
+            raise ValueError("forced post-analysis deadline failure")
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us._require_automatic_on_time",
+        enforce_deadline,
+    )
+    store = AssetStore(tmp_path)
+    real_resolve = store.resolve
+
+    def faulty_resolve(relative_path: str) -> Path:
+        if deadline_checks >= 2 and relative_path.endswith("output-manifest.json"):
+            raise OSError("simulated permission failure during cleanup unlink")
+        return real_resolve(relative_path)
+
+    monkeypatch.setattr(store, "resolve", faulty_resolve)
+
+    with pytest.raises(ValueError, match="forced post-analysis deadline failure"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=store,
+            enforce_rate_limit=False,
+            require_on_time=True,
+        )
+
+    # Despite the faulted unlink for the manifest path, the original
+    # deadline error -- not an OSError -- is what actually propagated
+    # (asserted above), and the database rows still rolled back cleanly.
+    assert AnalysisRun.objects.count() == 0
+    assert DataAsset.objects.filter(kind="medium_forecast_panel").count() == 0
+    assert DataAsset.objects.filter(kind=ANALYSIS_OUTPUT_MANIFEST_KIND).count() == 0
+    # The panel file (whose resolve was not faulted) is still removed.
+    assert list(tmp_path.glob("derived/forecast/medium/**/*.parquet")) == []
+
+
+def test_post_analysis_deadline_cleanup_survives_a_faulted_existence_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A `DatabaseError` raised while checking whether one orphan
+    candidate's `relative_path` is still referenced by a surviving
+    `DataAsset` row must not stop cleanup of the *other* candidates, and
+    must not replace the original deadline failure -- finding 6's
+    "failure while collecting paths still removes panel and manifest
+    files" case reframed for the fixed design: paths are now tracked
+    directly from `analyze_snapshot`'s own `output_paths` out-parameter,
+    so there is no longer a separate fallible discovery query to fail;
+    what remains fallible is the existence check inside cleanup itself,
+    and it must fail closed (skip that one path) rather than raise."""
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: _catalog(config),
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        lambda symbol, **kwargs: _long_series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        ),
+    )
+    deadline_checks = 0
+
+    def enforce_deadline(*, target_date: date, generated_at: datetime) -> None:
+        nonlocal deadline_checks
+        deadline_checks += 1
+        if deadline_checks == 2:
+            raise ValueError("forced post-analysis deadline failure")
+
+    monkeypatch.setattr(
+        "stanstock.data.live_us._require_automatic_on_time",
+        enforce_deadline,
+    )
+    real_filter = DataAsset.objects.filter
+
+    def faulty_filter(*args: object, **kwargs: object) -> Any:
+        if kwargs.get("relative_path", "").endswith(".parquet"):
+            raise DatabaseError("simulated connection hiccup during existence check")
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(DataAsset.objects, "filter", faulty_filter)
+
+    with pytest.raises(ValueError, match="forced post-analysis deadline failure"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+            require_on_time=True,
+        )
+
+    # The panel's own existence check is faulted (skipped, file preserved
+    # only if truly still referenced -- but here it never is, so the panel
+    # row/file were already gone via DB rollback); the manifest candidate,
+    # whose existence check was not faulted, is still correctly removed.
+    assert AnalysisRun.objects.count() == 0
+    assert DataAsset.objects.filter(kind=ANALYSIS_OUTPUT_MANIFEST_KIND).count() == 0
+    assert list(tmp_path.glob("research/analysis/**/output-manifest.json")) == []
+
+
+def test_outer_commit_failure_after_manifest_registration_leaves_no_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A real savepoint-commit failure firing immediately after the
+    analysis-output manifest's own `DataAsset` row is created (release
+    genuinely happens, then the boundary still raises) must leave no
+    `AnalysisRun`/`StockAnalysis`/`Prediction`/panel/manifest DB rows and
+    no orphaned panel or manifest file -- finding 6's "outer atomic-exit/
+    commit failure after nested panel/manifest registration" case. Paths
+    read back from `analyze_snapshot`'s own `output_paths` out-parameter
+    (not a fallible post-write `DataAsset` query) is what lets
+    `run_us_daily`'s own cleanup find them even though `analyze_snapshot`'s
+    own internal safety net already attempted the same best-effort
+    cleanup first."""
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_stock_catalog",
+        lambda **kwargs: _catalog(config),
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.twelve_data.fetch_daily_price_series",
+        lambda symbol, **kwargs: _long_series(
+            symbol,
+            instrument_type="ETF" if symbol == "SPY" else "Common Stock",
+        ),
+    )
+    monkeypatch.setattr(
+        "stanstock.data.live_us.timezone.now", lambda: datetime(2026, 9, 9, 15, tzinfo=UTC)
+    )
+
+    real_create = DataAsset.objects.create
+    armed = {"value": False}
+
+    def spy_create(*args: object, **kwargs: object) -> DataAsset:
+        created = real_create(*args, **kwargs)
+        if kwargs.get("kind") == ANALYSIS_OUTPUT_MANIFEST_KIND:
+            armed["value"] = True
+        return created
+
+    monkeypatch.setattr(DataAsset.objects, "create", spy_create)
+
+    real_savepoint_commit = connection.savepoint_commit
+
+    def spy_savepoint_commit(sid: str) -> None:
+        if armed["value"]:
+            armed["value"] = False
+            real_savepoint_commit(sid)
+            raise RuntimeError("savepoint released but exit still raised")
+        real_savepoint_commit(sid)
+
+    monkeypatch.setattr(connection, "savepoint_commit", spy_savepoint_commit)
+
+    with pytest.raises(RuntimeError, match="savepoint released but exit still raised"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+        )
+
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="medium_forecast_panel").count() == 0
+    assert DataAsset.objects.filter(kind=ANALYSIS_OUTPUT_MANIFEST_KIND).count() == 0
+    assert list(tmp_path.glob("derived/forecast/medium/**/*.parquet")) == []
+    assert list(tmp_path.glob("research/analysis/**/output-manifest.json")) == []
 
 
 def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
@@ -914,6 +1138,13 @@ def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
     assert StockAnalysis.objects.count() == 1
     assert Prediction.objects.count() == 3
     assert not Listing.objects.filter(provider_symbol="SPY").exists()
+    completed_run = AnalysisRun.objects.get(status="complete")
+    assert (
+        DataAsset.objects.filter(
+            kind=ANALYSIS_OUTPUT_MANIFEST_KIND, subject=str(completed_run.id)
+        ).count()
+        == 1
+    )
 
     monkeypatch.setattr(
         "stanstock.data.live_us.sync_investable_spy_from_asset",
@@ -933,6 +1164,26 @@ def test_etf_sync_failure_preserves_analysis_for_zero_credit_recovery(
     assert catalog_calls == [None]
     assert price_calls == ["AAA", "SPY"]
     assert Listing.objects.filter(provider_symbol="SPY").exists()
+    # Zero-fetch recovery must recognize the exact same already-complete
+    # run and must never write a second manifest for it.
+    assert AnalysisRun.objects.filter(status="complete").count() == 1
+    assert AnalysisRun.objects.get(status="complete").id == completed_run.id
+    assert (
+        DataAsset.objects.filter(
+            kind=ANALYSIS_OUTPUT_MANIFEST_KIND, subject=str(completed_run.id)
+        ).count()
+        == 1
+    )
+    # Zero-fetch recovery must still supply the exact catalog assets this
+    # run's snapshot was built from -- recovered from the benchmark
+    # evidence's own immutable metadata, not guessed from a "latest" row.
+    original_catalog_asset_ids = set(
+        DataAsset.objects.filter(provider="twelve_data", kind="stock_catalog").values_list(
+            "id", flat=True
+        )
+    )
+    assert recovered.catalog_asset_ids
+    assert set(recovered.catalog_asset_ids) == original_catalog_asset_ids
 
 
 def test_missing_target_bar_creates_an_explicit_ineligible_membership(
@@ -1233,6 +1484,116 @@ def test_analysis_failure_rolls_back_snapshot_but_keeps_immutable_source_assets(
     assert DataAsset.objects.count() == 7
     assert LatestMarketData.objects.count() == 2
     assert not Listing.objects.filter(provider_symbol="SPY").exists()
+    orphaned_evidence_files = list((tmp_path / "universe").glob("**/membership-evidence.json"))
+    assert orphaned_evidence_files == []
+
+
+def test_evidence_insert_success_then_later_failure_leaves_no_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failure raised *after* the evidence `DataAsset` row's own INSERT has
+    already executed (but before the outer transaction commits) must not be
+    mistaken, by an in-transaction `.exists()` check, for "a row already
+    claims this file": the row is visible to this same connection despite
+    never being durably committed, so cleanup must not trust that query."""
+    config = _config()
+    _enable_provider()
+    _patch_provider(monkeypatch, config)
+
+    real_create = DataAsset.objects.create
+
+    def spy_create(*args: object, **kwargs: object) -> DataAsset:
+        created = real_create(*args, **kwargs)
+        if kwargs.get("kind") == UNIVERSE_MEMBERSHIP_EVIDENCE_KIND:
+            raise RuntimeError("boom after insert")
+        return created
+
+    monkeypatch.setattr(DataAsset.objects, "create", spy_create)
+
+    with pytest.raises(RuntimeError, match="boom after insert"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+        )
+
+    assert Universe.objects.count() == 0
+    assert UniverseSnapshot.objects.count() == 0
+    assert UniverseMembership.objects.count() == 0
+    assert not DataAsset.objects.filter(kind=UNIVERSE_MEMBERSHIP_EVIDENCE_KIND).exists()
+    orphaned_evidence_files = list((tmp_path / "universe").glob("**/membership-evidence.json"))
+    assert orphaned_evidence_files == []
+
+
+def test_evidence_savepoint_release_failure_after_real_commit_leaves_no_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failure raised when the first nested atomic boundary following the
+    evidence write releases its own savepoint (a real commit that still
+    raises) must not lose `evidence_relative_path`: pre-fix,
+    `_ensure_snapshot`'s own now-removed nested atomic decorator was that
+    very first boundary, and losing its return value orphaned the physical
+    evidence file even though the database rows correctly rolled back."""
+    config = _config(symbols=("AAA",), minimum_eligible=1)
+    _enable_provider()
+
+    def fetch_catalog(**kwargs: object) -> StockCatalog:
+        return _catalog(config)
+
+    def fetch_prices(symbol: str, **kwargs: object) -> PriceSeries:
+        return _long_series(symbol, instrument_type="ETF" if symbol == "SPY" else "Common Stock")
+
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_stock_catalog", fetch_catalog)
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_daily_price_series", fetch_prices)
+    monkeypatch.setattr(
+        "stanstock.data.live_us.timezone.now", lambda: datetime(2026, 9, 9, 15, tzinfo=UTC)
+    )
+
+    real_create = DataAsset.objects.create
+    armed = {"value": False}
+
+    def spy_create(*args: object, **kwargs: object) -> DataAsset:
+        created = real_create(*args, **kwargs)
+        if kwargs.get("kind") == UNIVERSE_MEMBERSHIP_EVIDENCE_KIND:
+            armed["value"] = True
+        return created
+
+    monkeypatch.setattr(DataAsset.objects, "create", spy_create)
+
+    real_savepoint_commit = connection.savepoint_commit
+
+    def spy_savepoint_commit(sid: str) -> None:
+        if armed["value"]:
+            armed["value"] = False
+            real_savepoint_commit(sid)
+            raise RuntimeError("savepoint released but exit still raised")
+        real_savepoint_commit(sid)
+
+    monkeypatch.setattr(connection, "savepoint_commit", spy_savepoint_commit)
+
+    with pytest.raises(RuntimeError, match="savepoint released but exit still raised"):
+        run_us_daily(
+            config=config,
+            target_date=TARGET_DATE,
+            snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+            api_key="private-test-key",
+            decision_time=RETRIEVED_AT,
+            store=AssetStore(tmp_path),
+            enforce_rate_limit=False,
+        )
+
+    assert Universe.objects.count() == 0
+    assert UniverseSnapshot.objects.count() == 0
+    assert UniverseMembership.objects.count() == 0
+    assert not DataAsset.objects.filter(kind=UNIVERSE_MEMBERSHIP_EVIDENCE_KIND).exists()
+    orphaned_evidence_files = list((tmp_path / "universe").glob("**/membership-evidence.json"))
+    assert orphaned_evidence_files == []
 
 
 def test_duplicate_catalog_registration_does_not_delete_existing_asset_file(

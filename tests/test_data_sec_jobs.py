@@ -26,6 +26,7 @@ def _result() -> SimpleNamespace:
         companyfacts_fetched=2,
         facts_created=100,
         facts_reused=20,
+        asset_refs=(),
     )
 
 

@@ -13,8 +13,9 @@ import polars as pl
 from django.db import transaction
 from django.utils import timezone
 
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.asof import AsOfData, PriceFrameChecksumMismatchError
-from stanstock.data.assets import AssetStore
+from stanstock.data.assets import AssetStore, open_asset_store
 from stanstock.data.models import (
     DataAsset,
     FundamentalFact,
@@ -23,7 +24,11 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
-from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER, normalized_provider_plan
+from stanstock.data.provider_policy import (
+    PRIVATE_USAGE_SCOPE,
+    TWELVE_DATA_PROVIDER,
+    normalized_provider_plan,
+)
 from stanstock.data.sec_config import SecFundamentalsConfig, load_sec_fundamentals_config
 from stanstock.research.affordability import (
     DECISION_TARGET_DATE_BASIS,
@@ -58,6 +63,26 @@ from stanstock.research.medium_forecasts import (
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.provenance import source_data_mode
+from stanstock.research.refresh_evidence import (
+    ANALYSIS_OUTPUT_MANIFEST_KIND,
+    ANALYSIS_RUN_FIELDS,
+    ANALYSIS_RUN_MODEL,
+    PREDICTION_FIELDS,
+    PREDICTION_MODEL,
+    STOCK_ANALYSIS_FIELDS,
+    STOCK_ANALYSIS_MODEL,
+    ManifestEntry,
+    ManifestPayloadError,
+    ManifestPlan,
+    actual_output_plan,
+    build_manifest_envelope,
+    build_output_plan,
+    decimal_from_float,
+    dumps_canonical_envelope,
+    model_row_values,
+    optional_decimal_from_float,
+    row_digest,
+)
 from stanstock.research.scenarios import build_scenarios
 from stanstock.research.scoring import (
     aggregate_score,
@@ -104,6 +129,27 @@ class PersistedAnalysis:
     analysis: StockAnalysis
     predictions: tuple[Prediction, ...]
     computation: AnalysisComputation
+
+
+@dataclass(slots=True)
+class AnalysisOutputPaths:
+    """Optional mutable out-parameter for `analyze_snapshot`.
+
+    A caller that needs its own later cleanup after `analyze_snapshot`
+    itself has already returned successfully (for example, an outer
+    transaction that still has to run its own post-analysis checks before
+    it can commit) passes one instance in and reads the two fields back
+    directly once the call returns -- the exact paths this call itself
+    wrote, tracked from the producer's own local state as they are set,
+    never re-derived by a separate, fallible post-write `DataAsset` query
+    keyed on `run_id`/`kind`/`provider` that could itself fail independent
+    of whether the paths actually exist, or -- for a research-grade run
+    that legitimately writes neither -- silently return nothing to clean
+    up.
+    """
+
+    panel_relative_path: str | None = None
+    manifest_relative_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,7 +911,176 @@ def _resolve_provider_plan(provider: str) -> str | None:
     return normalized_provider_plan(recorded)
 
 
-@transaction.atomic
+def _analysis_output_manifest_entries(
+    run: AnalysisRun, results: list[PersistedAnalysis]
+) -> list[ManifestEntry]:
+    """The complete, exact set of manifest entries for one observed run:
+    the `AnalysisRun` row itself, every persisted `StockAnalysis`, and every
+    persisted `Prediction` -- one canonical full-row digest each. Built
+    directly from the just-persisted ORM instances (never re-queried),
+    since this runs inside the same still-open transaction that created
+    them.
+    """
+    entries = [
+        ManifestEntry(
+            model=ANALYSIS_RUN_MODEL,
+            row_id=str(run.id),
+            digest=row_digest(ANALYSIS_RUN_MODEL, model_row_values(run, ANALYSIS_RUN_FIELDS)),
+        )
+    ]
+    for persisted in results:
+        entries.append(
+            ManifestEntry(
+                model=STOCK_ANALYSIS_MODEL,
+                row_id=str(persisted.analysis.id),
+                digest=row_digest(
+                    STOCK_ANALYSIS_MODEL,
+                    model_row_values(persisted.analysis, STOCK_ANALYSIS_FIELDS),
+                ),
+            )
+        )
+        for prediction in persisted.predictions:
+            entries.append(
+                ManifestEntry(
+                    model=PREDICTION_MODEL,
+                    row_id=str(prediction.id),
+                    digest=row_digest(
+                        PREDICTION_MODEL, model_row_values(prediction, PREDICTION_FIELDS)
+                    ),
+                )
+            )
+    return entries
+
+
+def _write_analysis_output_manifest(
+    *,
+    run: AnalysisRun,
+    results: list[PersistedAnalysis],
+    plan: ManifestPlan,
+    store: AssetStore,
+    retrieved_at: datetime,
+) -> str:
+    """Write and register the one immutable manifest asset binding this
+    observed `AnalysisRun` to the exact, complete set of rows it produced
+    and the exact output `plan` it was required to produce.
+
+    Mirrors `stanstock.data.live_us._ensure_snapshot`'s exact idiom: decide
+    whether the target path already exists *before* writing (a fresh
+    `run.id` UUID means it never should, so this only guards against a
+    stale leftover from an earlier failed attempt at the very same path),
+    write bytes then register the `DataAsset` row, and on any failure from
+    either step unlink only a file this call itself just created -- never a
+    genuinely pre-existing one.
+
+    Every expected storage-layer failure (path resolution, physical write)
+    is normalized into a stable, path-free `RefreshVerificationError` raised
+    `from None`; a `DataAsset.objects.create` failure (a DB integrity or
+    programming error) is never relabeled or swallowed, only cleaned up
+    after.
+    """
+    try:
+        envelope = build_manifest_envelope(
+            run_id=run.id, plan=plan, entries=_analysis_output_manifest_entries(run, results)
+        )
+        envelope_bytes = dumps_canonical_envelope(envelope)
+    except (ManifestPayloadError, TypeError, ValueError):
+        # Canonicalization/serialization of the manifest payload itself
+        # (an unsupported field type, a naive datetime, ...) is an
+        # expected-failure-shaped bug in the manifest contract, never a
+        # storage-layer or DB fault -- normalize it the same path-free way
+        # before any file or row is touched.
+        raise RefreshVerificationError(
+            "analysis_output_manifest_generation_failed",
+            "The analysis-output manifest payload could not be generated",
+        ) from None
+    relative_path = f"research/analysis/{run.id}/output-manifest.json"
+    try:
+        resolved = store.resolve(relative_path)
+        file_already_existed = resolved.exists()
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "analysis_output_manifest_path_unavailable",
+            "The analysis-output manifest path could not be checked",
+        ) from None
+    try:
+        written = store.write_bytes(relative_path, envelope_bytes)
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "analysis_output_manifest_write_failed",
+            "The analysis-output manifest could not be written",
+        ) from None
+    try:
+        with transaction.atomic():
+            DataAsset.objects.create(
+                provider="stanstock",
+                kind=ANALYSIS_OUTPUT_MANIFEST_KIND,
+                subject=str(run.id),
+                relative_path=written.relative_path,
+                sha256=written.sha256,
+                retrieved_at=retrieved_at,
+                available_at=retrieved_at,
+                metadata={"usage_scope": PRIVATE_USAGE_SCOPE},
+            )
+    except Exception:
+        if not file_already_existed:
+            # A cleanup fault here (e.g. an unexpected permission error on
+            # unlink) must never replace the original exception being
+            # handled: swallow only this narrow best-effort cleanup step,
+            # never the failure that actually caused it.
+            _safe_unlink(store, relative_path)
+        raise
+    return relative_path
+
+
+def _finalize_observed_manifest(
+    *,
+    run: AnalysisRun,
+    universe_snapshot: UniverseSnapshot,
+    results: list[PersistedAnalysis],
+    plan: ManifestPlan,
+    store: AssetStore,
+    generated_at: datetime,
+) -> str | None:
+    """Write and register the analysis-output manifest for `run` if, and
+    only if, `universe_snapshot` is OBSERVED-grade -- every observed
+    `AnalysisRun` must have exactly one manifest, and a research-grade run
+    must never carry one.
+
+    Before registering anything, the exact rows this call actually
+    persisted (`results`) must match the `plan` computed *before* the first
+    write, by count as well as by key: a defensive invariant that should
+    never trip in a correctly-behaving run, but must fail loudly rather
+    than silently register a manifest that disagrees with its own plan.
+    """
+    if universe_snapshot.grade != UniverseSnapshot.Grade.OBSERVED:
+        return None
+    actual = actual_output_plan(
+        (persisted.analysis for persisted in results),
+        (prediction for persisted in results for prediction in persisted.predictions),
+    )
+    if actual != plan:
+        raise ValueError("Observed analysis output does not match its precomputed output plan")
+    return _write_analysis_output_manifest(
+        run=run,
+        results=results,
+        plan=plan,
+        store=store,
+        retrieved_at=generated_at,
+    )
+
+
+def _safe_unlink(store: AssetStore, relative_path: str) -> None:
+    """Best-effort cleanup of a file this call itself just wrote, only
+    used when an observed run's own transaction (including its own
+    atomic-exit/commit) later fails. A cleanup fault here (e.g. an
+    unexpected permission error) must never replace the original exception
+    already being propagated."""
+    try:
+        store.resolve(relative_path).unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
 def analyze_listing(
     *,
     listing: Listing,
@@ -880,6 +1095,23 @@ def analyze_listing(
     config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
 ) -> PersistedAnalysis:
+    """Analyze one listing against `universe_snapshot`.
+
+    Every OBSERVED-grade `universe_snapshot` produces exactly one
+    analysis-output manifest, the same guarantee `analyze_snapshot` gives a
+    whole run -- this is the single-listing entry point, so its own
+    precomputed plan is always the simple "decision predictions only, one
+    listing" case (never medium/long advisory lanes, which only
+    `analyze_snapshot` can activate).
+
+    The whole body runs inside one explicit `with transaction.atomic():`
+    wrapped by this outer, undecorated function's own `try/except`: this
+    (not a bare `@transaction.atomic` decorator) is what lets the outer
+    `except` also catch a failure from the atomic block's own exit
+    (commit or savepoint release), not only a failure raised by code inside
+    the block, so a manifest file can never be orphaned by either kind of
+    failure.
+    """
     require_stock_research_listing(listing, operation="Stock analysis")
     generated_at = decision_time or timezone.now()
     logical_target_date = target_date or generated_at.date()
@@ -906,44 +1138,67 @@ def analyze_listing(
     config = load_scoring_config(config_path)
     digest = config_hash(config)
     revision = code_revision()
-    asof = AsOfData(generated_at, store)
-    run = _create_analysis_run(
-        generated_at=generated_at,
-        data_cutoff=data_cutoff,
-        target_date=logical_target_date,
-        issued_on_time=run_issued_on_time,
-        universe_snapshot=universe_snapshot,
-        config=config,
-        config_hash_value=digest,
-        code_revision_value=revision,
-    )
-    computation = _compute_listing_from_asof(
-        listing=listing,
-        asof=asof,
-        provider=provider,
-        config=config,
-        decision_time=data_cutoff,
-        issued_on_time=run_issued_on_time,
-        provider_plan=_resolve_provider_plan(provider),
-        code_revision_value=revision,
-        subject=subject,
-        benchmark_subject=benchmark_subject,
-        sample_support=sample_support,
-        target_date=logical_target_date,
-    )
-    return _persist_listing_analysis(
-        run=run,
-        listing=listing,
-        computation=computation,
-        generated_at=generated_at,
-        data_cutoff=data_cutoff,
-        model_version=_model_version(config.version, run.id.hex),
-        config_hash_value=digest,
-        code_revision_value=revision,
-    )
+    asset_store = store or open_asset_store()
+    asof = AsOfData(generated_at, asset_store)
+    manifest_relative_path: str | None = None
+    persisted: PersistedAnalysis
+    try:
+        with transaction.atomic():
+            run = _create_analysis_run(
+                generated_at=generated_at,
+                data_cutoff=data_cutoff,
+                target_date=logical_target_date,
+                issued_on_time=run_issued_on_time,
+                universe_snapshot=universe_snapshot,
+                config=config,
+                config_hash_value=digest,
+                code_revision_value=revision,
+            )
+            computation = _compute_listing_from_asof(
+                listing=listing,
+                asof=asof,
+                provider=provider,
+                config=config,
+                decision_time=data_cutoff,
+                issued_on_time=run_issued_on_time,
+                provider_plan=_resolve_provider_plan(provider),
+                code_revision_value=revision,
+                subject=subject,
+                benchmark_subject=benchmark_subject,
+                sample_support=sample_support,
+                target_date=logical_target_date,
+            )
+            plan = build_output_plan(
+                eligible_listing_ids={listing.pk},
+                decision_horizons=frozenset(config.supported_horizons),
+                medium_active=False,
+                long_active=False,
+            )
+            persisted = _persist_listing_analysis(
+                run=run,
+                listing=listing,
+                computation=computation,
+                generated_at=generated_at,
+                data_cutoff=data_cutoff,
+                model_version=_model_version(config.version, run.id.hex),
+                config_hash_value=digest,
+                code_revision_value=revision,
+            )
+            manifest_relative_path = _finalize_observed_manifest(
+                run=run,
+                universe_snapshot=universe_snapshot,
+                results=[persisted],
+                plan=plan,
+                store=asset_store,
+                generated_at=generated_at,
+            )
+    except Exception:
+        if manifest_relative_path is not None:
+            _safe_unlink(asset_store, manifest_relative_path)
+        raise
+    return persisted
 
 
-@transaction.atomic
 def analyze_snapshot(
     *,
     universe_snapshot: UniverseSnapshot,
@@ -957,8 +1212,53 @@ def analyze_snapshot(
     medium_forecast_config_path: Path | None = None,
     long_forecast_config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
+    output_paths: AnalysisOutputPaths | None = None,
+    long_forecast_requested: bool | None = None,
 ) -> list[PersistedAnalysis]:
+    """Analyze every eligible member of `universe_snapshot`.
+
+    An OBSERVED-grade `universe_snapshot` produces exactly one
+    analysis-output manifest for the whole run, covering the `AnalysisRun`
+    row and every `StockAnalysis`/`Prediction` this call persists. The
+    exact plan (eligible listings and the exact prediction key multiset)
+    is computed *before* the first `StockAnalysis`/`Prediction` write --
+    once the medium/long advisory lanes are gated on or off for this run,
+    never inferred afterward from whatever happened to be written -- and
+    the manifest is registered only once the actual persisted rows are
+    checked to match that plan exactly.
+
+    The whole write path runs inside one explicit
+    `with transaction.atomic():` wrapped by this outer, undecorated
+    function's own `try/except`: this (not a bare `@transaction.atomic`
+    decorator) is what lets the outer `except` also catch a failure from
+    the atomic block's own exit (commit or savepoint release), not only a
+    failure raised by code inside the block, so a panel or manifest file
+    can never be orphaned by either kind of failure.
+
+    `output_paths`, if supplied, is populated with this call's own panel
+    and manifest relative paths (or left `None` for whichever this run
+    does not write) as soon as each is known -- so a caller that must run
+    its own checks after this function already returned successfully can
+    read the exact paths this call owns directly, instead of re-deriving
+    them with a separate post-write `DataAsset` query.
+
+    `long_forecast_requested`, when supplied by scheduled production, is
+    the target-scoped provider gate frozen in the market child's JobRun
+    before this function writes output. Other callers retain the existing
+    invocation-time ProviderRecord default.
+    """
     generated_at = decision_time or timezone.now()
+    if long_forecast_requested is not None and not isinstance(long_forecast_requested, bool):
+        raise ValueError("long_forecast_requested must be a boolean")
+    # Freeze the mutable provider gate before the AnalysisRun, panel, or any
+    # prediction output is written. Scheduled production supplies this
+    # explicitly from its target-scoped market JobRun invocation details;
+    # direct/research callers retain their established provider-gated default.
+    effective_long_forecast_requested = (
+        ProviderRecord.objects.filter(provider="sec", enabled=True).exists()
+        if long_forecast_requested is None
+        else long_forecast_requested
+    )
     logical_target_date = target_date or generated_at.date()
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
     run_issued_on_time = _issued_on_time(
@@ -975,20 +1275,8 @@ def analyze_snapshot(
     config = load_scoring_config(config_path)
     digest = config_hash(config)
     revision = code_revision()
-    asset_store = store or AssetStore()
+    asset_store = store or open_asset_store()
     asof = AsOfData(generated_at, asset_store)
-    run = _create_analysis_run(
-        generated_at=generated_at,
-        data_cutoff=data_cutoff,
-        target_date=logical_target_date,
-        issued_on_time=run_issued_on_time,
-        universe_snapshot=universe_snapshot,
-        config=config,
-        config_hash_value=digest,
-        code_revision_value=revision,
-    )
-    model_version = _model_version(config.version, run.id.hex)
-    results: list[PersistedAnalysis] = []
     memberships = list(
         UniverseMembership.objects.select_related(
             "listing__security__company",
@@ -999,116 +1287,147 @@ def analyze_snapshot(
             membership.listing,
             operation="Snapshot stock analysis",
         )
-    advisory_context: AdvisoryForecastContext | None = None
-    long_context: LongForecastContext | None = None
+    results: list[PersistedAnalysis] = []
     panel_relative_path: str | None = None
+    manifest_relative_path: str | None = None
     try:
-        medium_config = load_medium_forecast_config(medium_forecast_config_path)
-        if (
-            benchmark_subject is not None
-            and config.version in medium_config.enabled_scoring_versions
-            and memberships
-        ):
-            medium_digest = medium_forecast_config_hash(medium_config)
-            panel = build_medium_forecast_panel(
-                listings=[membership.listing for membership in memberships],
-                asof=asof,
-                provider=provider,
-                benchmark_subject=benchmark_subject,
-                target_date=logical_target_date,
+        with transaction.atomic():
+            run = _create_analysis_run(
                 generated_at=generated_at,
-                run_id=run.id,
-                config=medium_config,
-                config_hash=medium_digest,
-                scoring_config_version=config.version,
-                scoring_config_hash=digest,
-                universe_snapshot_id=universe_snapshot.id,
-                universe_slug=universe_snapshot.universe.slug,
-                universe_config_hash=universe_snapshot.config_hash,
-                code_revision=revision,
-                store=asset_store,
-            )
-            panel_relative_path = panel.asset.relative_path
-            advisory_context = AdvisoryForecastContext(
-                panel=panel,
-                config=medium_config,
-                config_hash=medium_digest,
-                model_version=_model_version(medium_config.version, run.id.hex),
-                forecasts=build_medium_forecasts(panel.frame, medium_config),
-            )
-        computations: dict[str, AnalysisComputation] = {}
-        provider_plan = _resolve_provider_plan(provider)
-        for membership in memberships:
-            computation = _compute_listing_from_asof(
-                listing=membership.listing,
-                asof=asof,
-                provider=provider,
-                config=config,
-                decision_time=data_cutoff,
-                issued_on_time=run_issued_on_time,
-                provider_plan=provider_plan,
-                code_revision_value=revision,
-                benchmark_subject=benchmark_subject,
-                sample_support=sample_support,
+                data_cutoff=data_cutoff,
                 target_date=logical_target_date,
+                issued_on_time=run_issued_on_time,
+                universe_snapshot=universe_snapshot,
+                config=config,
+                config_hash_value=digest,
+                code_revision_value=revision,
             )
-            computations[str(membership.listing.pk)] = computation
-        long_config = load_long_forecast_config(long_forecast_config_path)
-        if (
-            provider == long_config.price_provider == "twelve_data"
-            and long_config.fundamentals_provider == "sec"
-            and config.version in long_config.enabled_scoring_versions
-            and ProviderRecord.objects.filter(
-                provider=long_config.fundamentals_provider,
-                enabled=True,
-            ).exists()
-            and memberships
-        ):
-            current_prices: dict[str, float] = {}
-            current_price_assets: dict[str, DataAsset] = {}
-            for membership in memberships:
-                listing_id = str(membership.listing.pk)
-                computation = computations[listing_id]
-                if computation.price_asset is None:
-                    raise ValueError(
-                        f"Long forecast price asset is missing for {membership.listing}"
-                    )
-                current_prices[listing_id] = computation.current_price
-                current_price_assets[listing_id] = computation.price_asset
-            long_digest = long_forecast_config_hash(long_config)
-            long_context = LongForecastContext(
-                config=long_config,
-                config_hash=long_digest,
-                model_version=_model_version(long_config.version, run.id.hex),
-                forecasts=build_long_forecasts(
+            model_version = _model_version(config.version, run.id.hex)
+            advisory_context: AdvisoryForecastContext | None = None
+            long_context: LongForecastContext | None = None
+            medium_config = load_medium_forecast_config(medium_forecast_config_path)
+            if (
+                benchmark_subject is not None
+                and config.version in medium_config.enabled_scoring_versions
+                and memberships
+            ):
+                medium_digest = medium_forecast_config_hash(medium_config)
+                panel = build_medium_forecast_panel(
                     listings=[membership.listing for membership in memberships],
                     asof=asof,
-                    data_cutoff=data_cutoff,
+                    provider=provider,
+                    benchmark_subject=benchmark_subject,
                     target_date=logical_target_date,
-                    config=long_config,
-                    current_prices=current_prices,
-                    price_assets=current_price_assets,
-                ),
-            )
-        for membership in memberships:
-            computation = computations[str(membership.listing.pk)]
-            results.append(
-                _persist_listing_analysis(
-                    run=run,
-                    listing=membership.listing,
-                    computation=computation,
                     generated_at=generated_at,
-                    data_cutoff=data_cutoff,
-                    model_version=model_version,
-                    config_hash_value=digest,
-                    code_revision_value=revision,
-                    advisory_context=advisory_context,
-                    long_context=long_context,
+                    run_id=run.id,
+                    config=medium_config,
+                    config_hash=medium_digest,
+                    scoring_config_version=config.version,
+                    scoring_config_hash=digest,
+                    universe_snapshot_id=universe_snapshot.id,
+                    universe_slug=universe_snapshot.universe.slug,
+                    universe_config_hash=universe_snapshot.config_hash,
+                    code_revision=revision,
+                    store=asset_store,
                 )
+                panel_relative_path = panel.asset.relative_path
+                if output_paths is not None:
+                    output_paths.panel_relative_path = panel_relative_path
+                advisory_context = AdvisoryForecastContext(
+                    panel=panel,
+                    config=medium_config,
+                    config_hash=medium_digest,
+                    model_version=_model_version(medium_config.version, run.id.hex),
+                    forecasts=build_medium_forecasts(panel.frame, medium_config),
+                )
+            computations: dict[str, AnalysisComputation] = {}
+            provider_plan = _resolve_provider_plan(provider)
+            for membership in memberships:
+                computation = _compute_listing_from_asof(
+                    listing=membership.listing,
+                    asof=asof,
+                    provider=provider,
+                    config=config,
+                    decision_time=data_cutoff,
+                    issued_on_time=run_issued_on_time,
+                    provider_plan=provider_plan,
+                    code_revision_value=revision,
+                    benchmark_subject=benchmark_subject,
+                    sample_support=sample_support,
+                    target_date=logical_target_date,
+                )
+                computations[str(membership.listing.pk)] = computation
+            long_config = load_long_forecast_config(long_forecast_config_path)
+            if (
+                provider == long_config.price_provider == "twelve_data"
+                and long_config.fundamentals_provider == "sec"
+                and config.version in long_config.enabled_scoring_versions
+                and effective_long_forecast_requested
+                and memberships
+            ):
+                current_prices: dict[str, float] = {}
+                current_price_assets: dict[str, DataAsset] = {}
+                for membership in memberships:
+                    listing_id = str(membership.listing.pk)
+                    computation = computations[listing_id]
+                    if computation.price_asset is None:
+                        raise ValueError(
+                            f"Long forecast price asset is missing for {membership.listing}"
+                        )
+                    current_prices[listing_id] = computation.current_price
+                    current_price_assets[listing_id] = computation.price_asset
+                long_digest = long_forecast_config_hash(long_config)
+                long_context = LongForecastContext(
+                    config=long_config,
+                    config_hash=long_digest,
+                    model_version=_model_version(long_config.version, run.id.hex),
+                    forecasts=build_long_forecasts(
+                        listings=[membership.listing for membership in memberships],
+                        asof=asof,
+                        data_cutoff=data_cutoff,
+                        target_date=logical_target_date,
+                        config=long_config,
+                        current_prices=current_prices,
+                        price_assets=current_price_assets,
+                    ),
+                )
+            plan = build_output_plan(
+                eligible_listing_ids={membership.listing.pk for membership in memberships},
+                decision_horizons=frozenset(config.supported_horizons),
+                medium_active=advisory_context is not None,
+                long_active=long_context is not None,
             )
+            for membership in memberships:
+                computation = computations[str(membership.listing.pk)]
+                results.append(
+                    _persist_listing_analysis(
+                        run=run,
+                        listing=membership.listing,
+                        computation=computation,
+                        generated_at=generated_at,
+                        data_cutoff=data_cutoff,
+                        model_version=model_version,
+                        config_hash_value=digest,
+                        code_revision_value=revision,
+                        advisory_context=advisory_context,
+                        long_context=long_context,
+                    )
+                )
+            manifest_relative_path = _finalize_observed_manifest(
+                run=run,
+                universe_snapshot=universe_snapshot,
+                results=results,
+                plan=plan,
+                store=asset_store,
+                generated_at=generated_at,
+            )
+            if output_paths is not None:
+                output_paths.manifest_relative_path = manifest_relative_path
     except Exception:
         if panel_relative_path is not None:
-            asset_store.resolve(panel_relative_path).unlink(missing_ok=True)
+            _safe_unlink(asset_store, panel_relative_path)
+        if manifest_relative_path is not None:
+            _safe_unlink(asset_store, manifest_relative_path)
         raise
     return results
 
@@ -1587,13 +1906,11 @@ def _model_version(config_version: str, run_hex: str) -> str:
 
 
 def _decimal(value: float, *, places: int) -> Decimal:
-    return Decimal(str(round(value, places)))
+    return decimal_from_float(value, places=places)
 
 
 def _optional_decimal(value: float | None, *, places: int) -> Decimal | None:
-    if value is None:
-        return None
-    return _decimal(value, places=places)
+    return optional_decimal_from_float(value, places=places)
 
 
 def _analysis_data_cutoff(

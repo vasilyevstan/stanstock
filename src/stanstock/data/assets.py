@@ -11,6 +11,7 @@ import polars as pl
 from django.conf import settings
 from django.utils import timezone
 
+from stanstock.core.verification_types import AssetRef, RefreshVerificationError
 from stanstock.data.models import DataAsset
 
 
@@ -94,6 +95,98 @@ class AssetStore:
 
     def read_frame(self, relative_path: str) -> pl.DataFrame:
         return pl.read_parquet(self.resolve(relative_path))
+
+
+def open_asset_store() -> AssetStore:
+    """Open the default `AssetStore`, normalizing a constructor failure
+    (an unwritable/misconfigured root) into a path-free verification error.
+    """
+    try:
+        return AssetStore()
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "asset_store_unavailable", "The asset store could not be opened"
+        ) from None
+
+
+def resolve_asset_ref(ref: AssetRef, *, cutoff: datetime) -> DataAsset:
+    """Resolve `ref` to its exact, cutoff-eligible immutable `DataAsset` row.
+
+    Matches every declared field -- not just ``id`` -- so a same-id row with
+    a different provider/kind/subject/checksum (a co-mutation, or a
+    same-content asset registered under an alternate id) fails closed
+    instead of silently resolving to an unrelated row.
+    """
+    asset = DataAsset.objects.filter(
+        pk=ref.id, provider=ref.provider, kind=ref.kind, subject=ref.subject, sha256=ref.sha256
+    ).first()
+    if asset is None:
+        raise RefreshVerificationError(
+            "asset_ref_unresolved",
+            "A referenced asset could not be resolved by its exact identity and checksum",
+        )
+    if asset.available_at > cutoff or asset.retrieved_at > cutoff:
+        raise RefreshVerificationError(
+            "asset_ref_after_cutoff", "A referenced asset was admitted after its claiming cutoff"
+        )
+    return asset
+
+
+def read_checksummed_bytes(store: AssetStore, asset: DataAsset) -> bytes:
+    """Read `asset`'s physical bytes and verify them against its checksum.
+
+    A missing or unreadable file raises a path-free error without chaining
+    the underlying `OSError` (its default message embeds a resolved
+    filesystem path). Checksum computation itself is also normalized: a
+    hashing failure (an unexpected payload shape) must not surface a raw,
+    potentially path-bearing exception either.
+    """
+    try:
+        payload = store.read_bytes(asset.relative_path)
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "asset_unreadable", "A referenced asset's file could not be read"
+        ) from None
+    try:
+        digest = hashlib.sha256(payload).hexdigest()
+    except (TypeError, ValueError):
+        raise RefreshVerificationError(
+            "asset_checksum_failed", "A referenced asset's file could not be checksummed"
+        ) from None
+    if digest != asset.sha256:
+        raise RefreshVerificationError(
+            "asset_corrupt", "A referenced asset's file does not match its registered checksum"
+        )
+    return payload
+
+
+def asset_ref_for(asset: DataAsset) -> AssetRef:
+    return AssetRef(
+        id=asset.id,
+        provider=asset.provider,
+        kind=asset.kind,
+        subject=asset.subject,
+        sha256=asset.sha256,
+    )
+
+
+def verify_catalog_refs(
+    catalog_assets: list[DataAsset], raw_refs: object, *, reason_code: str
+) -> None:
+    """Bind one owner's declared catalog `AssetRef`s (full-identity, so an
+    alternate-UUID same-content substitute fails) to the resolved assets."""
+    expected = tuple(asset_ref_for(a) for a in catalog_assets)
+    mismatch = RefreshVerificationError(
+        reason_code, "Recorded catalog asset references do not match the resolved catalog assets"
+    )
+    if not isinstance(raw_refs, list) or len(raw_refs) != len(expected):
+        raise mismatch
+    try:
+        parsed = tuple(AssetRef.from_json(raw) for raw in raw_refs)
+    except RefreshVerificationError as exc:
+        raise RefreshVerificationError(reason_code, str(exc)) from exc
+    if parsed != expected:
+        raise mismatch
 
 
 def register_asset(

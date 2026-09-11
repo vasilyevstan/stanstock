@@ -138,13 +138,18 @@ def load_sec_cik_config(path: Path | None = None) -> SecCikConfig:
     if not isinstance(mappings_raw, dict) or not mappings_raw:
         raise ValueError("SEC CIK config requires a mappings mapping")
     mappings: dict[str, SecCikMapping] = {}
+    seen_ciks: set[str] = set()
     for raw_symbol, payload in mappings_raw.items():
         symbol = _normalize_symbol(raw_symbol)
         if not isinstance(payload, dict):
             raise ValueError(f"SEC CIK mapping for {symbol} must be a mapping")
+        cik = format_cik(_required_text(payload, "cik"))
+        if cik in seen_ciks:
+            raise ValueError(f"SEC CIK config maps more than one symbol to CIK {cik}")
+        seen_ciks.add(cik)
         mappings[symbol] = SecCikMapping(
             symbol=symbol,
-            cik=format_cik(_required_text(payload, "cik")),
+            cik=cik,
             official_ticker=_normalize_symbol(payload.get("official_ticker", symbol)),
             exchange=_required_text(payload, "exchange"),
             company_name=_required_text(payload, "company_name"),

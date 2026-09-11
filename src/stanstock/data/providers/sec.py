@@ -31,6 +31,7 @@ from stanstock.data.providers.exceptions import (
     ProviderResponseError,
 )
 from stanstock.data.providers.http import HttpFetchResult, fetch
+from stanstock.data.sec_evidence import MAPPING_SUBJECT
 
 PROVIDER = "sec"
 TERMS_URL = "https://www.sec.gov/about/developer-resources"
@@ -103,11 +104,11 @@ def fetch_ticker_exchange_mapping(
     """Fetch the SEC's current ticker/exchange/CIK mapping."""
     ua = build_user_agent(user_agent)
     result = fetch(TICKER_EXCHANGE_URL, user_agent=ua)
-    _raise_for_sec_status(result, subject="company_tickers_exchange")
+    _raise_for_sec_status(result, subject=MAPPING_SUBJECT)
     metadata = _extract_ticker_exchange_metadata(result.content)
     return FundamentalSourcePayload(
         provider=PROVIDER,
-        subject="company_tickers_exchange",
+        subject=MAPPING_SUBJECT,
         content=result.content,
         content_type=result.content_type or "application/json",
         retrieved_at=datetime.now(tz=UTC),
@@ -252,7 +253,7 @@ def _extract_submission_rows_metadata(payload: bytes, *, subject: str) -> dict[s
 
 
 def _extract_ticker_exchange_metadata(payload: bytes) -> dict[str, object]:
-    data = _load_json(payload, subject="company_tickers_exchange", kind="ticker mapping")
+    data = _load_json(payload, subject=MAPPING_SUBJECT, kind="ticker mapping")
     fields = data.get("fields")
     rows = data.get("data")
     if not isinstance(fields, list) or not all(isinstance(item, str) for item in fields):

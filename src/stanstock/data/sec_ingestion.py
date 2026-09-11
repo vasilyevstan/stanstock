@@ -13,7 +13,14 @@ from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from stanstock.data.assets import AssetStore, register_asset
+from stanstock.core.verification_types import AssetRef, RefreshVerificationError
+from stanstock.data.assets import (
+    AssetStore,
+    asset_ref_for,
+    open_asset_store,
+    read_checksummed_bytes,
+    register_asset,
+)
 from stanstock.data.fact_identity import build_observation_hash, build_period_identity
 from stanstock.data.live_us import UsUniverseConfig
 from stanstock.data.models import (
@@ -41,6 +48,14 @@ from stanstock.data.sec_config import (
     SecConceptRule,
     SecFundamentalsConfig,
 )
+from stanstock.data.sec_evidence import (
+    COMPANYFACTS_KIND,
+    HISTORY_FILENAME_METADATA_KEY,
+    MAPPING_KIND,
+    SUBMISSIONS_HISTORY_KIND,
+    SUBMISSIONS_KIND,
+    historical_submission_filenames,
+)
 from stanstock.data.sec_fundamentals import (
     CORRECTION_AVAILABILITY_BASIS,
     CORRECTION_QUALITY_FLAG,
@@ -49,10 +64,6 @@ from stanstock.data.sec_fundamentals import (
 )
 
 PROVIDER = sec.PROVIDER
-MAPPING_KIND = "sec_ticker_mapping"
-SUBMISSIONS_KIND = "sec_submissions"
-SUBMISSIONS_HISTORY_KIND = "sec_submissions_history"
-COMPANYFACTS_KIND = "sec_companyfacts"
 SIC_SCHEME = "sec_sic"
 _COMPANYFACTS_VERIFICATIONS_KEY = "companyfacts_verifications"
 _COMPANYFACTS_NORMALIZATION_VERSION = "sec-companyfacts-v2"
@@ -106,6 +117,7 @@ class SecCompanyIngestionResult:
     classifications_created: int
     historical_submission_files: int
     companyfacts_fetched: bool
+    asset_refs: tuple[AssetRef, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +125,7 @@ class SecIngestionResult:
     mapping_asset_id: str
     mapping_sha256: str
     companies: tuple[SecCompanyIngestionResult, ...]
+    asset_refs: tuple[AssetRef, ...]
 
     @property
     def facts_created(self) -> int:
@@ -201,7 +214,7 @@ def fetch_sec_mapping_asset(
     store: AssetStore | None = None,
     budget: SecRequestBudget | None = None,
 ) -> tuple[DataAsset, bool]:
-    store = store or AssetStore()
+    store = store or open_asset_store()
     budget = budget or SecRequestBudget(requests_per_second=config.requests_per_second)
     budget.consume()
     payload = sec.fetch_ticker_exchange_mapping()
@@ -281,7 +294,7 @@ def run_sec_ingestion(
     store: AssetStore | None = None,
     budget: SecRequestBudget | None = None,
 ) -> SecIngestionResult:
-    store = store or AssetStore()
+    store = store or open_asset_store()
     budget = budget or SecRequestBudget(requests_per_second=config.requests_per_second)
     if cik_config.universe_config_version != universe_config.config_version:
         raise ValueError("SEC CIK mapping universe version does not match the active US universe")
@@ -307,19 +320,24 @@ def run_sec_ingestion(
         )
     _verify_cik_config(
         cik_config=cik_config,
-        rows=parse_sec_mapping(store.read_bytes(mapping_asset.relative_path)),
+        rows=parse_sec_mapping(read_checksummed_bytes(store, mapping_asset)),
     )
     selected_symbols = symbols or tuple(universe_config.symbols)
     unknown = sorted(set(selected_symbols) - expected_symbols)
     if unknown:
         raise ValueError(f"SEC ingestion requested symbols outside the US universe: {unknown}")
+    selected = set(selected_symbols)
     companies: list[SecCompanyIngestionResult] = []
-    for symbol in selected_symbols:
-        if symbol in cik_config.excluded:
+    # Iterate the reviewed CIK config's own mapping order (not the
+    # universe's or a caller's `symbols` order) so this run's asset_refs
+    # are a stable, canonical sequence the SEC-stage validator can
+    # independently reconstruct and compare exactly.
+    for symbol, mapping in cik_config.mappings.items():
+        if symbol not in selected or symbol in cik_config.excluded:
             continue
         companies.append(
             _ingest_company(
-                mapping=cik_config.mappings[symbol],
+                mapping=mapping,
                 config=config,
                 target_date=target_date,
                 store=store,
@@ -330,6 +348,10 @@ def run_sec_ingestion(
         mapping_asset_id=str(mapping_asset.pk),
         mapping_sha256=mapping_asset.sha256,
         companies=tuple(companies),
+        asset_refs=(
+            asset_ref_for(mapping_asset),
+            *(ref for company in companies for ref in company.asset_refs),
+        ),
     )
 
 
@@ -389,7 +411,7 @@ def _ingest_company(
     )
     raw_created = int(submissions_created)
     raw_reused = int(not submissions_created)
-    history_filenames = _historical_submission_filenames(submissions_payload.content)
+    history_filenames = historical_submission_filenames(submissions_payload.content)
     history_assets = {
         filename: _latest_history_asset(cik=mapping.cik, filename=filename)
         for filename in history_filenames
@@ -427,7 +449,7 @@ def _ingest_company(
         days=config.submissions_reconciliation_days,
     )
     known_companyfacts_accessions = (
-        _companyfacts_accessions(store.read_bytes(latest_companyfacts.relative_path))
+        _companyfacts_accessions(read_checksummed_bytes(store, latest_companyfacts))
         if latest_companyfacts is not None
         else set()
     )
@@ -484,15 +506,16 @@ def _ingest_company(
                         config=config,
                         target_date=target_date,
                         symbol=mapping.symbol,
-                        extra={"filename": filename},
+                        extra={HISTORY_FILENAME_METADATA_KEY: filename},
                     ),
+                    history_filename=filename,
                 )
                 raw_created += int(history_created)
                 raw_reused += int(not history_created)
                 history_content = history_payload.content
             else:
                 raw_reused += 1
-                history_content = store.read_bytes(history_asset.relative_path)
+                history_content = read_checksummed_bytes(store, history_asset)
             resolved_history_assets[filename] = history_asset
             historical_count += 1
             filing_records.extend(
@@ -538,7 +561,7 @@ def _ingest_company(
         if latest_companyfacts is None or recovered_companyfacts is None:
             raise RuntimeError("SEC companyfacts normalization state is inconsistent")
         companyfacts_asset = latest_companyfacts
-        companyfacts_content = store.read_bytes(companyfacts_asset.relative_path)
+        companyfacts_content = read_checksummed_bytes(store, companyfacts_asset)
         raw_reused += 1
         # Replaying an already-persisted asset is not a new observation, so
         # the boundary is the observation that committed this content --
@@ -596,6 +619,30 @@ def _ingest_company(
         submissions_payload=submissions_payload,
         source_asset=submissions_asset,
     )
+    companyfacts_used_asset = (
+        companyfacts_asset
+        if (fetch_companyfacts or normalize_companyfacts)
+        else latest_companyfacts
+    )
+    if companyfacts_used_asset is None:
+        raise RuntimeError("SEC companyfacts asset identity is inconsistent")
+    # `resolved_history_assets` is populated only when this run actually
+    # normalized companyfacts. In the honest no-op branch, the exact
+    # history assets consulted to compute `initial_filing_sources_hash`
+    # (which gated that no-op) are `history_assets` instead -- omitting
+    # them here would silently under-report evidence for a run that did
+    # read and rely on their content. That no-op path only runs once every
+    # `history_assets` value is proven non-`None` (see
+    # `initial_filing_sources_hash` above), so this lookup is safe.
+    used_history_assets: list[DataAsset] = []
+    for filename in sorted(history_filenames):
+        history_asset = (resolved_history_assets if normalize_companyfacts else history_assets)[
+            filename
+        ]
+        if history_asset is None:
+            raise RuntimeError("SEC history asset identity is inconsistent")
+        used_history_assets.append(history_asset)
+    used_assets = [submissions_asset, *used_history_assets, companyfacts_used_asset]
     return SecCompanyIngestionResult(
         symbol=mapping.symbol,
         cik=mapping.cik,
@@ -606,6 +653,7 @@ def _ingest_company(
         classifications_created=classifications_created,
         historical_submission_files=historical_count,
         companyfacts_fetched=fetch_companyfacts,
+        asset_refs=tuple(asset_ref_for(asset) for asset in used_assets),
     )
 
 
@@ -616,7 +664,7 @@ def _latest_history_asset(*, cik: str, filename: str) -> DataAsset | None:
         subject=cik,
     ).order_by("-retrieved_at")
     for asset in assets:
-        if asset.metadata.get("filename") == filename:
+        if asset.metadata.get(HISTORY_FILENAME_METADATA_KEY) == filename:
             return asset
     return None
 
@@ -1091,18 +1139,36 @@ def _persist_payload(
     kind: str,
     subject: str,
     metadata: dict[str, object],
+    history_filename: str | None = None,
 ) -> tuple[DataAsset, bool]:
-    digest = hashlib.sha256(payload.content).hexdigest()
-    existing = (
-        DataAsset.objects.filter(
-            provider=PROVIDER,
-            kind=kind,
-            subject=subject,
-            sha256=digest,
-        )
-        .order_by("-retrieved_at")
-        .first()
+    """Persist `payload` as a content-addressed asset under `(kind, subject)`.
+
+    `history_filename` narrows both the reuse lookup and the observation
+    identity for `SUBMISSIONS_HISTORY_KIND`, whose `subject` is the CIK
+    shared by every one of its distinct history filenames: without it, two
+    different filenames with identical bytes would collapse onto the same
+    asset row and the same observation instant. `DataAsset.subject` itself
+    stays the plain CIK (the reader contract); only the reuse lookup and the
+    observation event's `subject` gain the filename discriminator.
+    """
+    try:
+        digest = hashlib.sha256(payload.content).hexdigest()
+    except (TypeError, ValueError):
+        raise RefreshVerificationError(
+            "sec_evidence_digest_failed", "SEC evidence payload could not be checksummed"
+        ) from None
+    lookup: dict[str, object] = {
+        "provider": PROVIDER,
+        "kind": kind,
+        "subject": subject,
+        "sha256": digest,
+    }
+    if history_filename is not None:
+        lookup[f"metadata__{HISTORY_FILENAME_METADATA_KEY}"] = history_filename
+    observation_subject = (
+        f"{subject}:{history_filename}" if history_filename is not None else subject
     )
+    existing = DataAsset.objects.filter(**lookup).order_by("-retrieved_at").first()
     if existing is not None:
         # Content-addressed reuse: these exact bytes are already stored. The
         # asset row keeps its original `retrieved_at` (when the content was
@@ -1111,15 +1177,26 @@ def _persist_payload(
         _record_observation_event(
             asset=existing,
             kind=kind,
-            subject=subject,
+            subject=observation_subject,
             digest=digest,
             observed_at=payload.retrieved_at,
         )
         return existing, False
     stamp = payload.retrieved_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     safe_subject = _SAFE_PATH_COMPONENT.sub("_", subject)
-    relative_path = f"raw/sec/{kind}/{safe_subject}/{stamp}-{digest[:12]}.json"
-    stored = store.write_bytes(relative_path, payload.content)
+    discriminator = (
+        f"-{_SAFE_PATH_COMPONENT.sub('_', history_filename)}"
+        if history_filename is not None
+        else ""
+    )
+    relative_path = f"raw/sec/{kind}/{safe_subject}/{stamp}-{digest[:12]}{discriminator}.json"
+    try:
+        stored = store.write_bytes(relative_path, payload.content)
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "sec_evidence_write_failed",
+            "SEC evidence payload could not be persisted to the asset store",
+        ) from None
     try:
         with transaction.atomic():
             asset = register_asset(
@@ -1134,13 +1211,21 @@ def _persist_payload(
             _record_observation_event(
                 asset=asset,
                 kind=kind,
-                subject=subject,
+                subject=observation_subject,
                 digest=digest,
                 observed_at=payload.retrieved_at,
             )
     except Exception:
-        if not DataAsset.objects.filter(relative_path=relative_path).exists():
-            store.resolve(relative_path).unlink(missing_ok=True)
+        # Best-effort cleanup of the just-written file when registration
+        # failed and no row ended up pointing at it. A raw `OSError` from
+        # this cleanup unlink (e.g. a permissions fault) must never replace
+        # -- and thereby leak a path via -- whatever exception is already
+        # propagating from the `try` block above.
+        try:
+            if not DataAsset.objects.filter(relative_path=relative_path).exists():
+                store.resolve(relative_path).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
         raise
     return asset, True
 
@@ -1293,22 +1378,6 @@ def _parse_current_submissions(
     if not isinstance(recent, dict):
         return ()
     return _records_from_columns(recent, source_asset=source_asset)
-
-
-def _historical_submission_filenames(payload: bytes) -> tuple[str, ...]:
-    data = _load_json_object(payload, label="SEC submissions")
-    filings = data.get("filings")
-    files = filings.get("files") if isinstance(filings, dict) else None
-    if not isinstance(files, list):
-        return ()
-    names: list[str] = []
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        if isinstance(name, str) and name.strip():
-            names.append(name.strip())
-    return tuple(dict.fromkeys(names))
 
 
 def _parse_submission_rows(

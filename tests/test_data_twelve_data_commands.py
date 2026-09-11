@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from typing import cast
+from uuid import uuid4
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -12,7 +14,7 @@ from django.core.management.base import CommandError
 
 from stanstock.core.models import JobRun
 from stanstock.data import jobs as data_jobs
-from stanstock.data.live_us import PRIVATE_USAGE_SCOPE, LiveUsRunResult
+from stanstock.data.live_us import PRIVATE_USAGE_SCOPE, LiveUsRunResult, UsUniverseConfig
 from stanstock.data.models import ProviderRecord, Universe, UniverseSnapshot
 from stanstock.data.provider_policy import BASIC_USAGE_SCOPE
 from stanstock.data.providers.contracts import PriceBar, PriceSeries
@@ -268,6 +270,7 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
         run_calls.append(kwargs)
         return LiveUsRunResult(
             snapshot=snapshot,
+            analysis_run_id=uuid4(),
             analyses=2,
             predictions=6,
             eligible=2,
@@ -276,6 +279,7 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
             raw_assets=4,
             credits_used=4,
             benchmark_symbol="SPY",
+            catalog_asset_ids=(),
         )
 
     monkeypatch.setattr(data_jobs, "run_us_daily", run_us_daily)
@@ -295,3 +299,92 @@ def test_daily_command_skips_provider_work_after_a_successful_target(
         JobRun.Status.SUCCESS,
         JobRun.Status.SKIPPED,
     ]
+
+
+@pytest.mark.parametrize(
+    "details_by_attempt",
+    [
+        [{"long_forecast_requested": "yes"}],
+        [
+            {"long_forecast_requested": False},
+            {"long_forecast_requested": True},
+        ],
+    ],
+    ids=["malformed", "conflicting"],
+)
+def test_daily_rejects_malformed_or_conflicting_prior_target_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    details_by_attempt: list[dict[str, object]],
+) -> None:
+    target = date(2026, 9, 4)
+    prepared = data_jobs.PreparedUsDailyJob(
+        config=cast(UsUniverseConfig, object()),
+        target_date=target,
+        snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+        decision_time=datetime(2026, 9, 5, 1, tzinfo=UTC),
+    )
+    for attempt, details in enumerate(details_by_attempt, start=1):
+        JobRun.objects.create(
+            job_name="daily",
+            region="us",
+            target_date=target,
+            attempt=attempt,
+            status=JobRun.Status.FAILED,
+            finished_at=prepared.decision_time,
+            details=details,
+        )
+    monkeypatch.setattr(
+        data_jobs,
+        "run_us_daily",
+        lambda **kwargs: pytest.fail("malformed prior gate must block the producer"),
+    )
+    monkeypatch.setattr(
+        data_jobs,
+        "_sample_current_long_forecast_requested",
+        lambda: pytest.fail("malformed prior gate must block retry-time provider state"),
+    )
+
+    with pytest.raises(ValueError, match="malformed|conflicting"):
+        data_jobs.execute_us_daily_job(prepared)
+
+    assert JobRun.objects.count() == len(details_by_attempt)
+
+
+@pytest.mark.parametrize(
+    ("frozen_gate", "explicit_gate"),
+    [(False, True), (True, False)],
+)
+def test_daily_rejects_explicit_gate_that_conflicts_with_prior_target(
+    monkeypatch: pytest.MonkeyPatch,
+    frozen_gate: bool,
+    explicit_gate: bool,
+) -> None:
+    target = date(2026, 9, 4)
+    prepared = data_jobs.PreparedUsDailyJob(
+        config=cast(UsUniverseConfig, object()),
+        target_date=target,
+        snapshot_grade=UniverseSnapshot.Grade.OBSERVED,
+        decision_time=datetime(2026, 9, 5, 1, tzinfo=UTC),
+    )
+    JobRun.objects.create(
+        job_name="daily",
+        region="us",
+        target_date=target,
+        attempt=1,
+        status=JobRun.Status.FAILED,
+        finished_at=prepared.decision_time,
+        details={"long_forecast_requested": frozen_gate},
+    )
+    monkeypatch.setattr(
+        data_jobs,
+        "run_us_daily",
+        lambda **kwargs: pytest.fail("conflicting explicit gate must block the producer"),
+    )
+
+    with pytest.raises(ValueError, match="explicit long-forecast invocation gate conflicts"):
+        data_jobs.execute_us_daily_job(
+            prepared,
+            long_forecast_requested=explicit_gate,
+        )
+
+    assert JobRun.objects.count() == 1

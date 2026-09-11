@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal
 from uuid import UUID
 
@@ -94,6 +94,20 @@ class PortfolioSnapshotBatch:
     created: int
     unchanged: int
     failures: tuple[str, ...]
+    #: Exact `(portfolio_id, snapshot_id)` pairs this batch actually
+    #: produced or reused, one per portfolio that did not fail. This is the
+    #: minimum stable identity a caller (e.g. scheduled-refresh output
+    #: verification) needs to independently re-fetch *the* snapshot this
+    #: run stands behind, rather than an arbitrary latest same-date row.
+    snapshot_ids: tuple[tuple[str, str], ...] = ()
+    #: Private in-process evidence of the actual ``get_or_create`` result for
+    #: every successful snapshot. Scheduled attestation consumes this exact
+    #: action instead of trying to infer it from timestamps. It deliberately
+    #: is not projected into the public ``JobRun.details`` contract.
+    _snapshot_actions: tuple[tuple[str, str, str], ...] = field(
+        default=(),
+        repr=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +435,7 @@ def calculate_portfolio_valuation(
     portfolio: Portfolio,
     *,
     expected_as_of_date: date | None = None,
+    before_recorded_at: datetime | None = None,
 ) -> PortfolioValuation:
     holdings = list(
         portfolio.holdings.select_related(
@@ -536,7 +551,10 @@ def calculate_portfolio_valuation(
         unrealized_gain = securities_value - cost_basis
         return_pct = unrealized_gain / cost_basis if cost_basis > 0 else None
 
-    corporate_action_warnings = sum(_corporate_action_suspected(position) for position in positions)
+    corporate_action_warnings = sum(
+        _corporate_action_suspected(position, before_recorded_at=before_recorded_at)
+        for position in positions
+    )
     if corporate_action_warnings:
         if portfolio.is_model_portfolio:
             warnings.append(
@@ -576,6 +594,47 @@ def calculate_portfolio_valuation(
     )
 
 
+def snapshot_input_payload(
+    portfolio: Portfolio,
+    valuation: PortfolioValuation,
+) -> dict[str, object]:
+    """The exact JSON-serialisable payload `record_portfolio_snapshot` hashes.
+
+    Extracted so both the production snapshot writer and an independent
+    verifier (e.g. scheduled-refresh output verification) derive the same
+    `input_hash` from the same recipe instead of maintaining two versions of
+    it.
+    """
+    return {
+        "portfolio_id": str(portfolio.pk),
+        "as_of_date": valuation.as_of_date.isoformat(),
+        "base_currency": portfolio.base_currency,
+        "cash_balance": str(valuation.cash_balance),
+        "positions": [
+            {
+                "listing_id": str(position.holding.listing_id),
+                "quantity": str(position.holding.quantity),
+                "average_cost": str(position.holding.average_cost),
+                "price": str(position.market_data.close),
+                "session_date": position.market_data.session_date.isoformat(),
+                "source_asset_id": str(position.market_data.source_asset_id),
+            }
+            for position in valuation.positions
+            if position.market_data is not None
+        ],
+    }
+
+
+def compute_snapshot_input_hash(
+    portfolio: Portfolio,
+    valuation: PortfolioValuation,
+) -> str:
+    payload = snapshot_input_payload(portfolio, valuation)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def record_portfolio_snapshot(
     portfolio: Portfolio,
     *,
@@ -594,27 +653,7 @@ def record_portfolio_snapshot(
     assert valuation.unrealized_gain is not None
 
     revision = code_revision()
-    payload = {
-        "portfolio_id": str(portfolio.pk),
-        "as_of_date": valuation.as_of_date.isoformat(),
-        "base_currency": portfolio.base_currency,
-        "cash_balance": str(valuation.cash_balance),
-        "positions": [
-            {
-                "listing_id": str(position.holding.listing_id),
-                "quantity": str(position.holding.quantity),
-                "average_cost": str(position.holding.average_cost),
-                "price": str(position.market_data.close),
-                "session_date": position.market_data.session_date.isoformat(),
-                "source_asset_id": str(position.market_data.source_asset_id),
-            }
-            for position in valuation.positions
-            if position.market_data is not None
-        ],
-    }
-    input_hash = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    input_hash = compute_snapshot_input_hash(portfolio, valuation)
     corporate_action_flags = {
         position.holding.listing_id: _corporate_action_suspected(position)
         for position in valuation.positions
@@ -705,16 +744,26 @@ def snapshot_all_portfolios(
     created = 0
     unchanged = 0
     failures: list[str] = []
+    snapshot_ids: list[tuple[str, str]] = []
+    snapshot_actions: list[tuple[str, str, str]] = []
     portfolios = Portfolio.objects.filter(archived_at__isnull=True).order_by("owner_id", "name")
     for portfolio in portfolios:
         try:
-            _snapshot, was_created = record_portfolio_snapshot(
+            snapshot, was_created = record_portfolio_snapshot(
                 portfolio,
                 expected_as_of_date=expected_as_of_date,
             )
         except PortfolioValuationError as exc:
             failures.append(f"{portfolio.name}: {exc}")
             continue
+        snapshot_ids.append((str(portfolio.pk), str(snapshot.pk)))
+        snapshot_actions.append(
+            (
+                str(portfolio.pk),
+                str(snapshot.pk),
+                "created" if was_created else "reused",
+            )
+        )
         if was_created:
             created += 1
         else:
@@ -723,6 +772,8 @@ def snapshot_all_portfolios(
         created=created,
         unchanged=unchanged,
         failures=tuple(failures),
+        snapshot_ids=tuple(snapshot_ids),
+        _snapshot_actions=tuple(snapshot_actions),
     )
 
 
@@ -749,18 +800,34 @@ def restore_portfolio(portfolio: Portfolio) -> Portfolio:
     return locked
 
 
-def _corporate_action_suspected(position: ValuedHolding) -> bool:
+def _corporate_action_suspected(
+    position: ValuedHolding, *, before_recorded_at: datetime | None = None
+) -> bool:
+    """Detect a split-sized price move against the most recent *prior*
+    persisted holding for this portfolio/listing.
+
+    ``before_recorded_at`` makes this historically reproducible: passing the
+    ``recorded_at`` of the snapshot currently being reconstructed excludes
+    that snapshot's own holding (and any later one) from "previous", so a
+    verifier re-deriving an already-persisted snapshot's flag cannot have
+    that snapshot's own (possibly fabricated) row silently confirm itself.
+    Normal snapshot creation omits the boundary -- the new snapshot does not
+    exist yet at that point, so behavior is unchanged. The filter is strict
+    (``__lt``, never ``__lte``) so a tied ``recorded_at`` still excludes the
+    row under reconstruction rather than treating it as its own history.
+    """
     market_data = position.market_data
     if market_data is None:
         return False
-    previous = (
-        PortfolioSnapshotHolding.objects.filter(
-            snapshot__portfolio=position.holding.portfolio,
-            listing=position.holding.listing,
-        )
-        .order_by("-snapshot__as_of_date", "-snapshot__recorded_at", "-snapshot_id")
-        .first()
+    queryset = PortfolioSnapshotHolding.objects.filter(
+        snapshot__portfolio=position.holding.portfolio,
+        listing=position.holding.listing,
     )
+    if before_recorded_at is not None:
+        queryset = queryset.filter(snapshot__recorded_at__lt=before_recorded_at)
+    previous = queryset.order_by(
+        "-snapshot__as_of_date", "-snapshot__recorded_at", "-snapshot_id"
+    ).first()
     if previous is None:
         return False
     if previous.corporate_action_suspected and previous.quantity == position.holding.quantity:

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 import polars as pl
 from django.db.models import Exists, OuterRef, Q, QuerySet
 
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import (
     CompanyClassificationObservation,
@@ -332,6 +335,161 @@ class AsOfData:
             "available_at",
             "pk",
         )
+
+
+def raw_price_asset_for(price_asset: DataAsset, *, cutoff: datetime) -> DataAsset:
+    """Resolve a normalized `price_history` asset's declared raw closure.
+
+    A normalized parquet asset is only ever a derivation of a raw
+    ``raw_price_history`` provider payload (ingestion always stamps
+    ``metadata["raw_asset_id"]``/``["raw_sha256"]``); this proves that link
+    genuinely resolves to a checksum-matching, identity-matching,
+    cutoff-eligible row rather than merely being present.
+    """
+    metadata = price_asset.metadata if isinstance(price_asset.metadata, dict) else {}
+    raw_id = metadata.get("raw_asset_id")
+    raw_sha256 = metadata.get("raw_sha256")
+    if not raw_id or not raw_sha256:
+        raise RefreshVerificationError(
+            "price_asset_raw_link_missing",
+            "A verified normalized price asset does not declare its own upstream raw asset",
+        )
+    try:
+        raw_uuid = UUID(str(raw_id))
+    except (TypeError, ValueError) as exc:
+        raise RefreshVerificationError(
+            "price_asset_raw_link_malformed",
+            "A verified normalized price asset's raw asset link is not a valid identifier",
+        ) from exc
+    raw_asset = DataAsset.objects.filter(pk=raw_uuid, sha256=str(raw_sha256)).first()
+    if raw_asset is None:
+        raise RefreshVerificationError(
+            "price_asset_raw_asset_missing",
+            "A verified normalized price asset's upstream raw asset could not be resolved "
+            "with the recorded checksum",
+        )
+    if (
+        raw_asset.provider != price_asset.provider
+        or raw_asset.kind != "raw_price_history"
+        or raw_asset.subject != price_asset.subject
+    ):
+        raise RefreshVerificationError(
+            "price_asset_raw_asset_identity_mismatch",
+            "A verified normalized price asset's upstream raw asset is not the expected "
+            "raw provider payload",
+        )
+    if raw_asset.available_at > cutoff or raw_asset.retrieved_at > cutoff:
+        raise RefreshVerificationError(
+            "price_asset_raw_asset_after_cutoff",
+            "A verified normalized price asset's upstream raw asset was admitted after "
+            "the claiming row's own cutoff",
+        )
+    return raw_asset
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedPriceFields:
+    """A price asset's own checksummed, cutoff-safe target/previous close + volume."""
+
+    close: Decimal
+    previous_close: Decimal | None
+    volume: int | None
+
+
+def _finite_positive_close(raw: object, *, quantum: Decimal) -> Decimal:
+    """Convert a writer-compatible `close` cell to a positive `Decimal`.
+
+    Rejects non-float, non-finite (NaN/Inf), and non-positive values before
+    ever attempting a `Decimal` conversion or quantize.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, float):
+        raise PriceFrameSchemaError(f"Price frame close value {raw!r} is not a finite float")
+    if not math.isfinite(raw) or raw <= 0:
+        raise PriceFrameSchemaError(f"Price frame close value {raw!r} is not finite/positive")
+    try:
+        return Decimal(str(raw)).quantize(quantum)
+    except InvalidOperation as exc:
+        raise PriceFrameSchemaError(
+            f"Price frame close value {raw!r} could not be quantized"
+        ) from exc
+
+
+def _bound_volume(raw: object) -> int | None:
+    """Validate a writer-compatible nullable `volume` cell.
+
+    `volume` is written as Polars `Int64`; anything other than `None` or a
+    non-negative Python `int` (bool is rejected even though it is an `int`
+    subclass) is a schema violation, not a valid missing/negative value.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise PriceFrameSchemaError(f"Price frame volume value {raw!r} is not an integer")
+    if raw < 0:
+        raise PriceFrameSchemaError(f"Price frame volume value {raw!r} is negative")
+    return raw
+
+
+def verified_price_fields(
+    asset: DataAsset, *, cutoff: datetime, target_date: date, close_places: int
+) -> VerifiedPriceFields:
+    """Re-read `asset` and extract its exact target-date/previous-session fields.
+
+    Missing/unreadable files, corrupted-but-checksum-valid Parquet, a
+    missing or duplicated target-date row, an invalid/duplicated session
+    date, and a `close`/`volume` value outside the writer's own schema
+    (wrong dtype, non-finite, non-positive close, negative volume) all fail
+    path-free here, so a caller never falls back to trusting a mutable
+    summary row.
+    """
+    try:
+        read = AsOfData(cutoff).price_frame_for_asset_with_diagnostics(
+            asset=asset, through_date=target_date
+        )
+        if read.invalid_session_date_rows != 0:
+            raise PriceFrameSchemaError("Price frame has rows with an invalid session date")
+        for column, dtype in (("close", pl.Float64), ("volume", pl.Int64)):
+            if column not in read.frame.columns:
+                raise PriceFrameSchemaError(f"Price frame has no {column!r} column")
+            if read.frame.schema[column] != dtype:
+                raise PriceFrameSchemaError(
+                    f"Price frame column {column!r} has unexpected dtype "
+                    f"{read.frame.schema[column]!r}"
+                )
+        if read.frame[DATE_COLUMN].n_unique() != read.frame.height:
+            raise PriceFrameSchemaError("Price frame has duplicate session dates")
+    except (ValueError, OSError, PriceFrameChecksumMismatchError, pl.exceptions.PolarsError):
+        raise RefreshVerificationError(
+            "latest_market_data_asset_unreadable",
+            "A bound price asset could not be independently re-read and verified",
+        ) from None
+    target_rows = read.frame.filter(pl.col(DATE_COLUMN) == target_date)
+    if target_rows.height != 1:
+        raise RefreshVerificationError(
+            "latest_market_data_row_missing",
+            "The verified price asset has no exact target-date row",
+        )
+    target_row = target_rows.row(0, named=True)
+    previous_rows = read.frame.filter(pl.col(DATE_COLUMN) < target_date)
+    has_previous_row = previous_rows.height > 0
+    previous_raw = previous_rows.row(-1, named=True)["close"] if has_previous_row else None
+    quantum = Decimal(1).scaleb(-close_places)
+    try:
+        # A genuinely present prior session row's close is always validated
+        # -- a null close there is a schema violation, not equivalent to
+        # "no prior session exists" (only an empty `previous_rows` frame
+        # may yield `previous_close=None`).
+        previous_close = (
+            _finite_positive_close(previous_raw, quantum=quantum) if has_previous_row else None
+        )
+        close = _finite_positive_close(target_row["close"], quantum=quantum)
+        volume = _bound_volume(target_row["volume"])
+    except PriceFrameSchemaError:
+        raise RefreshVerificationError(
+            "latest_market_data_asset_unreadable",
+            "A bound price asset could not be independently re-read and verified",
+        ) from None
+    return VerifiedPriceFields(close=close, previous_close=previous_close, volume=volume)
 
 
 def _clip_to_through_date(
