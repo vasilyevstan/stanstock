@@ -121,6 +121,7 @@ from stanstock.research.provenance import (
     latest_serving_analysis_run,
 )
 from stanstock.research.reporting import (
+    advisory_support_report,
     canonical_reportable_prediction_filter,
     reportable_prediction_filter,
 )
@@ -839,65 +840,14 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             "prediction__recommendation",
         )
     )
-    reportable_advisory_matured = canonical_reportable_outcomes.filter(
-        status=PredictionOutcome.Status.MATURED,
-        actual_return__isnull=False,
-        prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
-        prediction__base_return__isnull=False,
-    )
-    raw_advisory_groups = reportable_advisory_matured.values(
-        "prediction__method_version",
-        "prediction__config_hash",
-        "prediction__price_provider",
-        "prediction__horizon",
-        "prediction__evidence_grade",
-    ).annotate(
-        sample_count=Count("prediction"),
-        direction_sample_count=Count("direction_correct"),
-        direction_correct_count=Count(
-            "prediction",
-            filter=Q(direction_correct=True),
-        ),
-        interval_sample_count=Count("interval_covered"),
-        interval_covered_count=Count(
-            "prediction",
-            filter=Q(interval_covered=True),
-        ),
-        signed_error_sample_count=Count("signed_error"),
-        mean_signed_error=Avg("signed_error"),
-    )
-    advisory_groups: list[dict[str, Any]] = []
-    for raw_group in raw_advisory_groups.order_by(
-        "prediction__method_version",
-        "prediction__config_hash",
-        "prediction__price_provider",
-        "prediction__horizon",
-    ):
-        group: dict[str, Any] = dict(raw_group)
-        direction_sample_count = int(group["direction_sample_count"])
-        interval_sample_count = int(group["interval_sample_count"])
-        signed_error_sample_count = int(group["signed_error_sample_count"])
-        group["direction_accuracy"] = (
-            Decimal(group["direction_correct_count"]) / Decimal(direction_sample_count)
-            if direction_sample_count >= 30
-            else None
-        )
-        group["interval_coverage"] = (
-            Decimal(group["interval_covered_count"]) / Decimal(interval_sample_count)
-            if interval_sample_count >= 30
-            else None
-        )
-        if signed_error_sample_count < 30:
-            group["mean_signed_error"] = None
-        advisory_groups.append(group)
+    advisory_report = advisory_support_report()
     return render(
         request,
         "web/performance.html",
         {
             "summary": summary,
             "groups": groups,
-            "advisory_groups": advisory_groups,
-            "advisory_matured_count": reportable_advisory_matured.count(),
+            "advisory_report": advisory_report,
         },
     )
 

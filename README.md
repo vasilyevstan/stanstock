@@ -420,11 +420,12 @@ uv run python manage.py snapshot_portfolios
   identity, and provenance without a stock recommendation.
 - `/predictions` - the append-only prediction ledger, including explicit
   decision/advisory role and the recorded price provider/subject.
-- `/performance` - decision outcomes with a fixed display threshold and a
-  separate advisory-outcome section when advisory outcomes exist. Metrics
-  display after 30 canonical row-level prediction observations in a cohort;
-  that threshold does not establish independent support, effective-cohort
-  sufficiency, probability calibration, or calibrated interval coverage.
+- `/performance` - decision outcomes retain their fixed 30-observation display
+  threshold. A separate advisory section validates exact
+  method/configuration/provider/horizon/evidence/revision groups, reduces
+  overlapping target dates to non-overlapping cohorts, and publishes
+  equal-vintage sign, inclusion, and base-error metrics only after the
+  horizon-specific breadth and calendar-span floors pass.
 - `/my-list` - private owner-scoped symbol preferences validated only from
   existing listings or checksummed locally stored stock catalogs.
 - `/portfolios` - owner-scoped holdings, immutable deposits/purchases,

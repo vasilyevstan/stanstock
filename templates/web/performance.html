@@ -49,11 +49,10 @@
   </p>
 
   <div class="notice">
-    <strong>Fixed display threshold, not statistical validation.</strong>
-    Metrics display after 30 canonical row-level prediction observations in
-    the relevant cohort. This threshold does not establish independent
-    support, effective cohort sufficiency, probability calibration, or
-    calibrated interval coverage.
+    <strong>Decision display threshold, not statistical validation.</strong>
+    Decision metrics display after 30 canonical row-level prediction
+    observations in the relevant cohort. This presentation threshold alone
+    does not establish statistical validity.
   </div>
 
   {% if not summary.sufficient_sample %}
@@ -126,52 +125,97 @@
     </table>
   </div>
 
-  {% if advisory_matured_count %}
+  {% if advisory_report.overflow %}
+    <div class="notice" role="alert">
+      <strong>Advisory support report withheld.</strong>
+      More than 50,000 grouped target-date summaries are available. No partial
+      advisory table or metric is shown; narrow the stored evidence before
+      publishing this report.
+    </div>
+  {% elif advisory_report.has_evidence %}
     <div class="section-heading">
       <div>
         <p class="eyebrow">Advisory evidence</p>
-        <h2>Advisory outcome summary</h2>
+        <h2>Overlap-aware advisory support</h2>
       </div>
     </div>
     <p class="muted">
-      Each row is an exact method, configuration, provider, evidence-grade, and
-      horizon cohort. Metrics remain withheld until that individual cohort has
-      30 canonical row-level prediction observations; the fixed display
-      threshold is not a calibration or independence test.
+      Each row keeps its exact method, configuration, provider, evidence grade,
+      forecast horizon, and code revision separate. Candidate target dates are
+      validated before closed evaluation intervals are scheduled. Metrics give
+      equal weight to each selected non-overlapping target-date cohort.
     </p>
 
-    <div class="table-scroll" tabindex="0" aria-label="Advisory forecast breakdown">
-      <table class="compact-table">
-        <thead>
-          <tr>
-            <th scope="col">Method</th>
-            <th scope="col">Horizon</th>
-            <th scope="col">Provider</th>
-            <th scope="col">Evidence grade</th>
-            <th scope="col">Prediction observations</th>
-            <th scope="col">Base-case sign match</th>
-            <th scope="col">Bear–bull inclusion rate</th>
-            <th scope="col">Mean signed base-case error</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for group in advisory_groups %}
-            <tr>
-              <td>
-                {{ group.prediction__method_version|default:"Legacy method" }}
-                <small>{{ group.prediction__config_hash|slice:":8" }}</small>
-              </td>
-              <td>{{ group.prediction__horizon|display_label }}</td>
-              <td>{{ group.prediction__price_provider|default:"Not proven"|display_label }}</td>
-              <td>{{ group.prediction__evidence_grade|display_label }}</td>
-              <td>{{ group.sample_count }}</td>
-              <td>{% if group.direction_sample_count >= 30 %}{{ group.direction_accuracy|percentage }}{% else %}Withheld{% endif %}<small>{{ group.direction_sample_count }} scored</small></td>
-              <td>{% if group.interval_sample_count >= 30 %}{{ group.interval_coverage|percentage }}{% else %}Withheld{% endif %}<small>{{ group.interval_sample_count }} scored</small></td>
-              <td>{% if group.signed_error_sample_count >= 30 %}{{ group.mean_signed_error|percentage }}{% else %}Withheld{% endif %}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+    {% for section in advisory_report.sections %}
+      <section aria-labelledby="advisory-{{ section.key }}-title">
+        <div class="section-heading">
+          <div>
+            <h3 id="advisory-{{ section.key }}-title">{{ section.title }}</h3>
+            <p class="muted">{{ section.disclosure }}</p>
+          </div>
+        </div>
+        <div class="table-scroll" tabindex="0" aria-label="{{ section.title }}">
+          <table class="compact-table">
+            <thead>
+              <tr>
+                <th scope="col">Exact evidence identity</th>
+                <th scope="col">Candidate target cohorts</th>
+                <th scope="col">Effective cohorts</th>
+                <th scope="col">Support floors</th>
+                <th scope="col">Target-date span</th>
+                <th scope="col">Base-case sign match</th>
+                <th scope="col">{{ section.inclusion_label }}</th>
+                <th scope="col">Mean signed base-case error</th>
+                <th scope="col">Evidence state</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for group in section.groups %}
+                <tr>
+                  <td>
+                    <strong>{{ group.method_version|default:"(empty)" }}</strong>
+                    <small>Configuration: <code>{{ group.config_hash|default:"(empty)" }}</code></small>
+                    <small>Provider: {{ group.price_provider|default:"(empty)" }}</small>
+                    <small>Grade: {{ group.evidence_grade|default:"(empty)" }}</small>
+                    <small>Horizon: {{ group.horizon|default:"(empty)" }}</small>
+                    <small>Revision: <code>{{ group.revision_label }}</code></small>
+                  </td>
+                  <td>{{ group.candidate_cohort_count }}</td>
+                  <td>{{ group.effective_cohort_count|default_if_none:"Not available" }}</td>
+                  <td>
+                    {{ group.minimum_effective_cohorts }} effective cohorts
+                    <small>
+                      At least {{ group.minimum_listings_per_selected_cohort }}
+                      listings in every selected cohort
+                    </small>
+                  </td>
+                  <td>
+                    {{ group.target_span_days|default_if_none:"Not available" }} days
+                    <small>Minimum {{ group.minimum_target_span_days }} days</small>
+                  </td>
+                  {% if group.publishable %}
+                    <td>{{ group.base_sign_match|percentage }}</td>
+                    <td>{{ group.inclusion_rate|percentage }}</td>
+                    <td>{{ group.mean_signed_base_error|percentage }}</td>
+                  {% else %}
+                    <td>Withheld</td>
+                    <td>Withheld</td>
+                    <td>Withheld</td>
+                  {% endif %}
+                  <td>
+                    {{ group.status_label }}
+                    {% for reason in group.withheld_reasons %}
+                      <small>{{ reason }}</small>
+                    {% endfor %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="9">No evidence is available for this advisory section.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endfor %}
   {% endif %}
 {% endblock %}

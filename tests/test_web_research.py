@@ -135,6 +135,14 @@ def _prediction_history_row(content: str, model_version: str) -> str:
     raise AssertionError(f"Prediction history row not found for {model_version}")
 
 
+def _advisory_report_groups(response) -> list[dict[str, object]]:
+    return [
+        group
+        for section in response.context["advisory_report"]["sections"]
+        for group in section["groups"]
+    ]
+
+
 def _persist_spy_etf(tmp_path) -> Listing:
     start = date(2025, 12, 1)
     dates = [start + timedelta(days=index) for index in range(260)]
@@ -1530,7 +1538,7 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     assert "Insufficient sample" in performance_content
     assert "Withheld" in performance_content
     assert "30 canonical row-level prediction observations" in performance_content
-    assert "does not establish independent support" in performance_content
+    assert "does not establish statistical validity" in performance_content
     assert "meaningful evidence" not in performance_content
 
 
@@ -1786,19 +1794,19 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
     assert response.status_code == 200
     assert response.context["summary"]["sample_count"] == 1
     assert response.context["summary"]["research_matured_count"] == 1
-    advisory_groups = response.context["advisory_groups"]
+    advisory_groups = _advisory_report_groups(response)
     assert len(advisory_groups) == 1
-    assert advisory_groups[0]["sample_count"] == 1
-    assert advisory_groups[0]["direction_accuracy"] is None
-    assert advisory_groups[0]["direction_sample_count"] == 1
+    assert advisory_groups[0]["candidate_cohort_count"] == 1
+    assert advisory_groups[0]["base_sign_match"] is None
+    assert advisory_groups[0]["publishable"] is False
     content = " ".join(response.content.decode().split())
     assert "Advisory evidence" in content
-    assert "Advisory outcome summary" in content
-    assert "Prediction observations" in content
+    assert "Overlap-aware advisory support" in content
+    assert "Candidate target cohorts" in content
     assert "Recommendation success rate" in content
     assert "Directional accuracy" not in content
     assert "Base-case sign match" in content
-    assert "Bear–bull inclusion rate" in content
+    assert "Analog-range inclusion" in content
     assert '<th scope="col">Mean signed base-case error</th>' in content
     assert '<th scope="col">Mean signed error</th>' not in content
     assert "BUY succeeds when actual return is greater than 0" in content
@@ -1808,7 +1816,7 @@ def test_overnight_observed_prediction_is_included_when_marked_issued_on_time(
 
 
 @pytest.mark.django_db
-def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
+def test_performance_keeps_malformed_matured_advisory_evidence_visible_and_withheld(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
@@ -1936,6 +1944,13 @@ def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
         data_cutoff=run.data_cutoff,
         code_revision="test-revision",
     )
+    PredictionOutcome.objects.create(
+        prediction=samekey_withheld_earliest,
+        evaluated_at=datetime(2027, 3, 10, 11, tzinfo=UTC),
+        evaluation_date=date(2027, 3, 10),
+        status=PredictionOutcome.Status.UNRESOLVED,
+        resolution="All-null earliest advisory evidence remains unresolved",
+    )
     samekey_reissue = Prediction.objects.create(
         analysis=persisted_analysis,
         listing=listing,
@@ -1981,21 +1996,35 @@ def test_performance_advisory_denominator_excludes_withheld_scenario_rows(
     response = authenticated_client.get(reverse("performance"))
 
     assert response.status_code == 200
-    assert response.context["advisory_matured_count"] == 1
-    advisory_groups = {
-        group["prediction__horizon"]: group for group in response.context["advisory_groups"]
+    advisory_report = response.context["advisory_report"]
+    assert advisory_report["summary_count"] == 2
+    advisory_groups = {group["horizon"]: group for group in _advisory_report_groups(response)}
+    assert set(advisory_groups) == {
+        Prediction.Horizon.SIX_MONTH.value,
+        Prediction.Horizon.TWELVE_MONTH.value,
     }
-    assert Prediction.Horizon.TWELVE_MONTH.value not in advisory_groups
-    assert advisory_groups[Prediction.Horizon.SIX_MONTH.value]["sample_count"] == 1
+    assert advisory_groups[Prediction.Horizon.SIX_MONTH.value]["candidate_cohort_count"] == 1
+    assert advisory_groups[Prediction.Horizon.TWELVE_MONTH.value]["effective_cohort_count"] is None
+    assert (
+        "Malformed target-date evidence — metrics withheld"
+        in advisory_groups[Prediction.Horizon.TWELVE_MONTH.value]["withheld_reasons"]
+    )
     assert "advisory-samekey-v1" not in {
-        group["prediction__method_version"] for group in response.context["advisory_groups"]
+        group["method_version"] for group in _advisory_report_groups(response)
     }
+    content = " ".join(response.content.decode().split())
+    assert "Malformed target-date evidence — metrics withheld" in content
+    assert (
+        "Medium-horizon inclusion reports whether realized price returns fell inside "
+        "the stored analog bear-to-bull ranges."
+    ) in content
+    assert "60%" not in content
 
     status_response = authenticated_client.get(reverse("status"))
     assert status_response.status_code == 200
     # Uncanonicalized, run-scoped count: correctly includes the same-key
     # reissue's own matured advisory outcome (2 = issued_prediction +
-    # samekey_reissue; samekey_withheld_earliest has no outcome yet).
+    # samekey_reissue; samekey_withheld_earliest remains unresolved).
     assert status_response.context["advisory_matured_count"] == 2
 
 
@@ -2273,8 +2302,8 @@ def test_performance_decision_and_advisory_groups_canonicalize_same_key_reissues
         benchmark_return=Decimal("0.06"),
         success=None,
         direction_correct=True,
-        interval_covered=True,
-        signed_error=Decimal("0.02"),
+        interval_covered=False,
+        signed_error=Decimal("0.08"),
         resolution="Observed advisory outcome",
     )
     advisory_reissue = _reportable_prediction(
@@ -2312,13 +2341,250 @@ def test_performance_decision_and_advisory_groups_canonicalize_same_key_reissues
     assert decision_group["sample_count"] == 1
     assert decision_group["mean_return"] == Decimal("0.0500")
 
-    advisory_groups = {
-        group["prediction__horizon"]: group for group in response.context["advisory_groups"]
-    }
+    advisory_groups = {group["horizon"]: group for group in _advisory_report_groups(response)}
     advisory_group = advisory_groups[Prediction.Horizon.SIX_MONTH.value]
-    assert advisory_group["sample_count"] == 1
-    assert advisory_group["direction_sample_count"] == 1
-    assert response.context["advisory_matured_count"] == 1
+    assert advisory_group["candidate_cohort_count"] == 1
+    assert response.context["advisory_report"]["summary_count"] == 1
+
+
+@pytest.mark.django_db
+def test_performance_long_only_advisory_language_stays_distinct(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    snapshot = persisted_analysis.run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    prediction = _reportable_prediction(
+        snapshot,
+        persisted_analysis.listing,
+        generated_at=datetime(2026, 9, 8, 1, tzinfo=UTC),
+        target_date=date(2026, 9, 8),
+        model_version="long-language-v1",
+        method_version="long-language-v1",
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+    )
+    PredictionOutcome.objects.create(
+        prediction=prediction,
+        evaluated_at=datetime(2029, 9, 8, 12, tzinfo=UTC),
+        evaluation_date=date(2029, 9, 8),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.10"),
+        success=None,
+        direction_correct=True,
+        interval_covered=False,
+        signed_error=Decimal("0.08"),
+        resolution="Synthetic long advisory outcome",
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    content = " ".join(response.content.decode().split())
+    medium_section, long_section = content.split(
+        '<section aria-labelledby="advisory-long-title">', maxsplit=1
+    )
+    assert (
+        "Medium-horizon inclusion reports whether realized price returns fell inside "
+        "the stored analog bear-to-bull ranges. Metrics remain withheld until the "
+        "overlap-aware support floors pass."
+    ) in medium_section
+    assert "60%" not in content
+    assert "Scenario-envelope inclusion" in long_section
+    assert "deterministic scenario cases" in long_section
+    assert "coverage" not in long_section.lower()
+    assert "calibration" not in long_section.lower()
+    assert "test-revision" in long_section
+    assert "Invalid code revision — metrics withheld" in long_section
+    assert "recommendation success" not in long_section.lower()
+
+
+@pytest.mark.django_db
+def test_performance_unsupported_advisory_section_stays_explicit_and_withheld(
+    authenticated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disclosure = (
+        "These groups have horizons outside 6m, 12m, 3y, and 5y. "
+        "Their raw identities remain visible, but all metrics stay withheld "
+        "because no support floors or inclusion semantics are defined for them."
+    )
+    monkeypatch.setattr(
+        "stanstock.web.views.advisory_support_report",
+        lambda: {
+            "overflow": False,
+            "summary_count": 1,
+            "has_evidence": True,
+            "sections": [
+                {
+                    "key": "unsupported",
+                    "title": "Unsupported advisory horizons",
+                    "disclosure": disclosure,
+                    "inclusion_label": "Inclusion metric (withheld)",
+                    "groups": [
+                        {
+                            "method_version": "unsupported-short-v1",
+                            "config_hash": "c" * 64,
+                            "price_provider": "synthetic_provider",
+                            "evidence_grade": UniverseSnapshot.Grade.OBSERVED,
+                            "horizon": Prediction.Horizon.SHORT,
+                            "revision_label": "raw unsupported revision",
+                            "candidate_cohort_count": 1,
+                            "effective_cohort_count": 1,
+                            "minimum_effective_cohorts": 0,
+                            "minimum_listings_per_selected_cohort": 0,
+                            "target_span_days": 0,
+                            "minimum_target_span_days": 0,
+                            "publishable": False,
+                            "base_sign_match": None,
+                            "inclusion_rate": None,
+                            "mean_signed_base_error": None,
+                            "status_label": "Metrics withheld",
+                            "withheld_reasons": (
+                                "Unsupported advisory horizon — metrics withheld",
+                            ),
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    content = " ".join(response.content.decode().split())
+    unsupported = content.split(
+        '<section aria-labelledby="advisory-unsupported-title">', maxsplit=1
+    )[1].split("</section>", maxsplit=1)[0]
+    assert '<h3 id="advisory-unsupported-title">Unsupported advisory horizons</h3>' in unsupported
+    assert disclosure in unsupported
+    assert '<th scope="col">Inclusion metric (withheld)</th>' in unsupported
+    assert "Horizon: short" in unsupported
+    assert "Metrics withheld" in unsupported
+    assert "Unsupported advisory horizon — metrics withheld" in unsupported
+    for forbidden in (
+        "analog",
+        "nominal",
+        "scenario-envelope",
+        "deterministic scenario",
+        "recommendation success",
+    ):
+        assert forbidden not in unsupported.lower()
+
+
+@pytest.mark.django_db
+def test_performance_publishable_medium_uses_qualified_nominal_disclosure(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def publishable_report() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "overflow": False,
+            "summary_count": 1,
+            "has_evidence": True,
+            "sections": [
+                {
+                    "key": "medium",
+                    "title": "Medium-horizon advisory support",
+                    "disclosure": (
+                        "The 6- and 12-month analog ranges have a nominal 60% "
+                        "analog-range target. This is not a calibration claim or "
+                        "a coverage guarantee."
+                    ),
+                    "inclusion_label": "Analog-range inclusion",
+                    "groups": [
+                        {
+                            "method_version": "synthetic-medium-v1",
+                            "config_hash": "c" * 64,
+                            "price_provider": "synthetic_provider",
+                            "evidence_grade": UniverseSnapshot.Grade.OBSERVED,
+                            "horizon": Prediction.Horizon.SIX_MONTH,
+                            "revision_label": "a1" * 20,
+                            "candidate_cohort_count": 8,
+                            "effective_cohort_count": 8,
+                            "minimum_effective_cohorts": 8,
+                            "minimum_listings_per_selected_cohort": 30,
+                            "target_span_days": 1095,
+                            "minimum_target_span_days": 1095,
+                            "publishable": True,
+                            "base_sign_match": Decimal("0.75"),
+                            "inclusion_rate": Decimal("0.625"),
+                            "mean_signed_base_error": Decimal("0.01"),
+                            "status_label": "Metrics published",
+                            "withheld_reasons": (),
+                        }
+                    ],
+                },
+                {
+                    "key": "long",
+                    "title": "Long-horizon advisory support",
+                    "disclosure": (
+                        "The 3- and 5-year bear, base, and bull values are deterministic "
+                        "scenario cases. Inclusion reports whether the realized price "
+                        "return fell inside that scenario envelope."
+                    ),
+                    "inclusion_label": "Scenario-envelope inclusion",
+                    "groups": [],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "stanstock.web.views.advisory_support_report",
+        publishable_report,
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert calls == 1
+    content = " ".join(response.content.decode().split())
+    assert (
+        "The 6- and 12-month analog ranges have a nominal 60% analog-range target. "
+        "This is not a calibration claim or a coverage guarantee."
+    ) in content
+    assert "Metrics published" in content
+
+
+@pytest.mark.django_db
+def test_performance_advisory_overflow_notice_has_no_partial_rows_and_calls_once(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def overflow_report() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "overflow": True,
+            "summary_count": None,
+            "has_evidence": True,
+            "sections": [],
+        }
+
+    monkeypatch.setattr(
+        "stanstock.web.views.advisory_support_report",
+        overflow_report,
+    )
+
+    response = authenticated_client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert calls == 1
+    content = response.content.decode()
+    assert "Advisory support report withheld." in content
+    assert "More than 50,000 grouped target-date summaries" in content
+    assert "Exact evidence identity" not in content
+    assert "Base-case sign match" not in content
 
 
 @pytest.mark.django_db
