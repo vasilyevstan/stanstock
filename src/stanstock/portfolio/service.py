@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal
 from uuid import UUID
@@ -100,6 +100,14 @@ class PortfolioSnapshotBatch:
     #: verification) needs to independently re-fetch *the* snapshot this
     #: run stands behind, rather than an arbitrary latest same-date row.
     snapshot_ids: tuple[tuple[str, str], ...] = ()
+    #: Private in-process evidence of the actual ``get_or_create`` result for
+    #: every successful snapshot. Scheduled attestation consumes this exact
+    #: action instead of trying to infer it from timestamps. It deliberately
+    #: is not projected into the public ``JobRun.details`` contract.
+    _snapshot_actions: tuple[tuple[str, str, str], ...] = field(
+        default=(),
+        repr=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,6 +745,7 @@ def snapshot_all_portfolios(
     unchanged = 0
     failures: list[str] = []
     snapshot_ids: list[tuple[str, str]] = []
+    snapshot_actions: list[tuple[str, str, str]] = []
     portfolios = Portfolio.objects.filter(archived_at__isnull=True).order_by("owner_id", "name")
     for portfolio in portfolios:
         try:
@@ -748,6 +757,13 @@ def snapshot_all_portfolios(
             failures.append(f"{portfolio.name}: {exc}")
             continue
         snapshot_ids.append((str(portfolio.pk), str(snapshot.pk)))
+        snapshot_actions.append(
+            (
+                str(portfolio.pk),
+                str(snapshot.pk),
+                "created" if was_created else "reused",
+            )
+        )
         if was_created:
             created += 1
         else:
@@ -757,6 +773,7 @@ def snapshot_all_portfolios(
         unchanged=unchanged,
         failures=tuple(failures),
         snapshot_ids=tuple(snapshot_ids),
+        _snapshot_actions=tuple(snapshot_actions),
     )
 
 

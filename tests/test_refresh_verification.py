@@ -544,7 +544,7 @@ def test_sec_required_and_present_verifies(monkeypatch: pytest.MonkeyPatch, tmp_
 # filing asset alone does not fail a data-stage-only verified refresh.
 
 
-def test_portfolio_nonzero_requires_target_date_snapshot(
+def test_zero_active_portfolio_skip_remains_self_contained_after_later_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     stages, config = _build_verified_state(monkeypatch, tmp_path)
@@ -553,18 +553,18 @@ def test_portfolio_nonzero_requires_target_date_snapshot(
         name="Test Portfolio",
         base_currency="USD",
     )
-    # The real portfolio stage already ran (recorded as a zero-active skip);
-    # a portfolio created afterwards must make verification fail closed
-    # rather than silently accept the stale zero-active skip as evidence.
-    with pytest.raises(RefreshVerificationError) as excinfo:
-        verify_scheduled_refresh(
-            target_date=TARGET_DATE,
-            universe_config=config,
-            code_revision=CODE_REVISION,
-            stages=stages,
-            sec_required=False,
-        )
-    assert excinfo.value.reason_code == "portfolio_stage_not_success"
+    # The exact zero-active child is a self-contained proof-free skip. A
+    # portfolio created after that child linearized is later state and must
+    # not retroactively invalidate the completed target.
+    result = verify_scheduled_refresh(
+        target_date=TARGET_DATE,
+        universe_config=config,
+        code_revision=CODE_REVISION,
+        stages=stages,
+        sec_required=False,
+    )
+    assert result["portfolio"]["active_portfolios"] == 0
+    assert result["portfolio"]["skip_reason"] == "no_active_portfolios"
 
 
 def test_portfolio_nonzero_with_real_snapshot_verifies(
@@ -1452,7 +1452,7 @@ def test_portfolio_stale_unrelated_snapshot_is_not_silently_accepted(
             stages=stages,
             sec_required=False,
         )
-    assert excinfo.value.reason_code == "portfolio_snapshot_missing"
+    assert excinfo.value.reason_code == "portfolio_verification_report_mismatch"
 
 
 # --- R3 F-1/F-3: evaluation binds to its own execution boundary, and a
@@ -2508,7 +2508,7 @@ def test_portfolio_snapshot_derived_field_fabrication_fails_closed(
             stages=stages,
             sec_required=False,
         )
-    assert excinfo.value.reason_code == "portfolio_snapshot_totals_mismatch"
+    assert excinfo.value.reason_code == "portfolio_report_contract_invalid"
 
 
 @pytest.mark.parametrize(
@@ -2613,7 +2613,7 @@ def test_portfolio_snapshot_holding_field_fabrication_fails_closed(
             stages=stages,
             sec_required=False,
         )
-    assert excinfo.value.reason_code == "portfolio_snapshot_holding_mismatch"
+    assert excinfo.value.reason_code == "portfolio_report_contract_invalid"
 
 
 def _create_prior_generation_holding(
@@ -2787,28 +2787,18 @@ def test_portfolio_snapshot_two_generation_corporate_action_flag(
     }
     JobRun.objects.filter(pk=portfolio_run.pk).update(details=details)
 
-    if expect_pass:
-        result = verify_scheduled_refresh(
+    # This row was inserted after the authoritative child wrote its proof.
+    # Even a semantically genuine immutable row is later state and cannot be
+    # spliced into that child's report after the fact.
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
             target_date=TARGET_DATE,
             universe_config=config,
             code_revision=CODE_REVISION,
             stages=stages,
             sec_required=False,
         )
-        assert result["status"] == "verified"
-    else:
-        with pytest.raises(RefreshVerificationError) as excinfo:
-            verify_scheduled_refresh(
-                target_date=TARGET_DATE,
-                universe_config=config,
-                code_revision=CODE_REVISION,
-                stages=stages,
-                sec_required=False,
-            )
-        assert excinfo.value.reason_code in (
-            "portfolio_snapshot_holding_mismatch",
-            "portfolio_snapshot_totals_mismatch",
-        )
+    assert excinfo.value.reason_code == "portfolio_report_contract_invalid"
 
 
 def test_portfolio_snapshot_fabricated_input_hash_fails_closed(
@@ -2883,7 +2873,7 @@ def test_portfolio_snapshot_fabricated_input_hash_fails_closed(
             stages=stages,
             sec_required=False,
         )
-    assert excinfo.value.reason_code == "portfolio_snapshot_input_hash_mismatch"
+    assert excinfo.value.reason_code == "portfolio_verification_report_mismatch"
 
 
 # --- R3 F-7: catalog assets are cutoff-bound and target-scoped; unrelated

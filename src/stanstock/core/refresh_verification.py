@@ -59,11 +59,8 @@ from stanstock.data.refresh_validation import (
 from stanstock.data.sec_jobs import JOB_NAME as SEC_JOB_NAME
 from stanstock.data.sec_refresh_validation import verify_sec_stage
 from stanstock.portfolio.jobs import SCHEDULED_JOB_NAME as PORTFOLIO_JOB_NAME
-from stanstock.portfolio.models import Portfolio, PortfolioSnapshot, PortfolioSnapshotHolding
-from stanstock.portfolio.service import (
-    _corporate_action_suspected,
-    calculate_portfolio_valuation,
-    compute_snapshot_input_hash,
+from stanstock.portfolio.refresh_validation import (
+    verify_portfolio_snapshot_stage,
 )
 from stanstock.research import config as research_config
 from stanstock.research.forecast_config import (
@@ -458,7 +455,8 @@ def verify_scheduled_refresh(
         target_date=target_date,
     )
     portfolio_summary, portfolio_asset_ids = _verify_portfolio(
-        portfolio, target_date=target_date, code_revision=code_revision
+        portfolio,
+        target_date=target_date,
     )
 
     asset_ids = (
@@ -1085,219 +1083,12 @@ def _verify_portfolio(
     portfolio: JobRun,
     *,
     target_date: date,
-    code_revision: str,
 ) -> tuple[dict[str, Any], set[UUID]]:
-    details = _details_dict(portfolio)
-    active_portfolios = list(Portfolio.objects.filter(archived_at__isnull=True))
-    if not active_portfolios:
-        if not (
-            portfolio.status == JobRun.Status.SKIPPED
-            and details.get("reason") == "no_active_portfolios"
-        ):
-            raise RefreshVerificationError(
-                "portfolio_active_zero_mismatch",
-                "No active portfolios exist but the portfolio stage was not an explicit skip",
-            )
-        return (
-            {
-                "job_run_id": str(portfolio.pk),
-                "active_portfolios": 0,
-                "skip_reason": "no_active_portfolios",
-            },
-            set(),
-        )
-    if portfolio.status != JobRun.Status.SUCCESS:
-        raise RefreshVerificationError(
-            "portfolio_stage_not_success",
-            "Active portfolios exist but the portfolio stage did not succeed",
-        )
-    recorded = details.get("portfolios")
-    if recorded != len(active_portfolios):
-        raise RefreshVerificationError(
-            "portfolio_count_mismatch",
-            "Portfolio stage portfolio count does not match the active portfolio set",
-        )
-    raw_snapshot_ids = details.get("snapshot_ids")
-    if not isinstance(raw_snapshot_ids, dict):
-        raise RefreshVerificationError(
-            "portfolio_snapshot_ids_missing",
-            "Portfolio stage details have no exact snapshot identities",
-        )
-    if len(raw_snapshot_ids) != len(active_portfolios):
-        raise RefreshVerificationError(
-            "portfolio_snapshot_ids_extraneous",
-            "Portfolio stage recorded snapshot references do not match the active portfolio set",
-        )
-    asset_ids: set[UUID] = set()
-    seen_snapshot_ids: set[UUID] = set()
-    for active_portfolio in active_portfolios:
-        raw_snapshot_id = raw_snapshot_ids.get(str(active_portfolio.pk))
-        if not raw_snapshot_id:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_reference_missing",
-                f"Active portfolio {active_portfolio.pk} has no recorded snapshot reference",
-            )
-        try:
-            snapshot_id = uuid.UUID(str(raw_snapshot_id))
-        except (TypeError, ValueError) as exc:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_reference_malformed",
-                f"Active portfolio {active_portfolio.pk}'s recorded snapshot reference "
-                "is not a valid identifier",
-            ) from exc
-        if snapshot_id in seen_snapshot_ids:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_reference_duplicated",
-                "Two active portfolios reference the same recorded snapshot",
-            )
-        seen_snapshot_ids.add(snapshot_id)
-        snapshot_row = PortfolioSnapshot.objects.filter(pk=snapshot_id).first()
-        if snapshot_row is None:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_missing",
-                f"Active portfolio {active_portfolio.pk}'s recorded snapshot no longer exists",
-            )
-        if snapshot_row.portfolio_id != active_portfolio.pk:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_owner_mismatch",
-                "A recorded snapshot does not belong to its referenced active portfolio",
-            )
-        if snapshot_row.as_of_date != target_date:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_target_mismatch",
-                f"Active portfolio {active_portfolio.pk}'s recorded snapshot is not dated "
-                "the scheduled target date",
-            )
-        if snapshot_row.code_revision != code_revision:
-            raise RefreshVerificationError(
-                "portfolio_snapshot_code_revision_mismatch",
-                f"Active portfolio {active_portfolio.pk}'s recorded snapshot code revision "
-                "does not match the scheduled refresh revision",
-            )
-        asset_ids.update(
-            _require_bound_portfolio_snapshot(
-                active_portfolio, snapshot_row, target_date=target_date
-            )
-        )
-    return (
-        {
-            "job_run_id": str(portfolio.pk),
-            "active_portfolios": len(active_portfolios),
-            "snapshots_verified": len(active_portfolios),
-        },
-        asset_ids,
+    result = verify_portfolio_snapshot_stage(
+        portfolio,
+        target_date=target_date,
     )
-
-
-def _require_bound_portfolio_snapshot(
-    portfolio: Portfolio,
-    snapshot_row: PortfolioSnapshot,
-    *,
-    target_date: date,
-) -> set[UUID]:
-    """Prove one persisted `PortfolioSnapshot` from its own live inputs.
-
-    An exact snapshot id is necessary but not sufficient: this independently
-    recomputes the pure, read-only `calculate_portfolio_valuation` against
-    the portfolio's *current* holdings (never mutating or creating a
-    snapshot here) and requires its derived totals, `input_hash`, and every
-    `PortfolioSnapshotHolding` row (listing set, quantity, average cost,
-    price/session/asset binding) to match -- rejecting a fabricated
-    same-date snapshot whose totals were never actually derived from those
-    inputs.
-
-    `before_recorded_at=snapshot_row.recorded_at` makes the split-warning
-    recomputation historically reproducible: without it, the very snapshot
-    being reconstructed (already persisted) would be its own most-recent
-    "previous" row, letting a fabricated `corporate_action_suspected`/
-    `corporate_action_warnings` value trivially confirm itself. The strict
-    boundary excludes this snapshot and any later one from that lookup.
-    """
-    valuation = calculate_portfolio_valuation(
-        portfolio, expected_as_of_date=target_date, before_recorded_at=snapshot_row.recorded_at
-    )
-    if not valuation.complete:
-        raise RefreshVerificationError(
-            "portfolio_snapshot_valuation_incomplete",
-            f"Portfolio {portfolio.pk}'s current holdings can no longer be cleanly valued",
-        )
-    if compute_snapshot_input_hash(portfolio, valuation) != snapshot_row.input_hash:
-        raise RefreshVerificationError(
-            "portfolio_snapshot_input_hash_mismatch",
-            f"Portfolio {portfolio.pk}'s recorded snapshot inputs do not match its "
-            "current holdings",
-        )
-    if (
-        snapshot_row.oldest_price_date != valuation.oldest_price_date
-        or snapshot_row.newest_price_date != valuation.newest_price_date
-        or snapshot_row.base_currency != portfolio.base_currency
-        or snapshot_row.cash_balance != valuation.cash_balance
-        or snapshot_row.securities_value != valuation.securities_value
-        or snapshot_row.total_value != valuation.total_value
-        or snapshot_row.cost_basis != valuation.cost_basis
-        or snapshot_row.unrealized_gain != valuation.unrealized_gain
-        or snapshot_row.return_pct != valuation.return_pct
-        or snapshot_row.return_definition != valuation.return_definition
-        or snapshot_row.dividends_included != valuation.dividends_included
-        or snapshot_row.corporate_action_warnings != valuation.corporate_action_warnings
-    ):
-        raise RefreshVerificationError(
-            "portfolio_snapshot_totals_mismatch",
-            f"Portfolio {portfolio.pk}'s recorded snapshot totals do not match its "
-            "recomputed valuation",
-        )
-    expected_positions = {
-        position.holding.listing_id: position
-        for position in valuation.positions
-        if position.market_data is not None
-    }
-    holding_rows = list(
-        PortfolioSnapshotHolding.objects.filter(snapshot=snapshot_row).values(
-            "listing_id",
-            "quantity",
-            "average_cost",
-            "price",
-            "source_session_date",
-            "source_asset_id",
-            "cost_basis",
-            "market_value",
-            "unrealized_gain",
-            "corporate_action_suspected",
-        )
-    )
-    if len(holding_rows) != len(expected_positions):
-        raise RefreshVerificationError(
-            "portfolio_snapshot_holding_count_mismatch",
-            f"Portfolio {portfolio.pk}'s recorded snapshot holdings do not match its "
-            "current valuable positions",
-        )
-    asset_ids: set[UUID] = set()
-    for holding_row in holding_rows:
-        position = expected_positions.get(holding_row["listing_id"])
-        market_data = position.market_data if position is not None else None
-        if (
-            position is None
-            or market_data is None
-            or position.market_value is None
-            or position.unrealized_gain is None
-            or holding_row["quantity"] != position.holding.quantity
-            or holding_row["average_cost"] != position.holding.average_cost
-            or holding_row["price"] != market_data.close
-            or holding_row["source_session_date"] != market_data.session_date
-            or holding_row["source_asset_id"] != market_data.source_asset_id
-            or holding_row["cost_basis"] != position.cost_basis
-            or holding_row["market_value"] != position.market_value
-            or holding_row["unrealized_gain"] != position.unrealized_gain
-            or holding_row["corporate_action_suspected"]
-            != _corporate_action_suspected(position, before_recorded_at=snapshot_row.recorded_at)
-        ):
-            raise RefreshVerificationError(
-                "portfolio_snapshot_holding_mismatch",
-                f"Portfolio {portfolio.pk}'s recorded snapshot holding does not match "
-                "its current bound position",
-            )
-        asset_ids.add(holding_row["source_asset_id"])
-    return asset_ids
+    return result.summary, {ref.id for ref in result.asset_refs}
 
 
 def _iter_source_asset_entries(raw: object, *, context: str) -> Iterable[dict[str, Any]]:

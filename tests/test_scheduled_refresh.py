@@ -7,7 +7,8 @@ from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from uuid import UUID
 
 import polars as pl
 import pytest
@@ -17,9 +18,11 @@ from django.core.management.base import CommandError
 
 import refresh_fixtures
 import test_data_sec_ingestion as sec_fixtures
+from stanstock.core import refresh_verification as refresh_verification_module
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.management.commands import scheduled_refresh
 from stanstock.core.models import JobRun
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data import live_us as live_us_module
 from stanstock.data import sec_jobs as sec_jobs_module
 from stanstock.data.assets import AssetStore
@@ -30,6 +33,15 @@ from stanstock.data.providers import sec as sec_provider
 from stanstock.data.providers.contracts import FundamentalSourcePayload, PriceBar, PriceSeries
 from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.data.sec_evidence import MAPPING_SUBJECT
+from stanstock.portfolio.models import (
+    Portfolio,
+    PortfolioHolding,
+    PortfolioSnapshotHolding,
+)
+from stanstock.portfolio.refresh_validation import (
+    PORTFOLIO_VERIFICATION_KIND,
+    verify_portfolio_snapshot_stage,
+)
 from stanstock.research.jobs import execute_prediction_evaluation_job
 from stanstock.research.models import PredictionOutcome
 from test_refresh_verification import _create_lagging_prediction, _register_lagging_price_history
@@ -201,6 +213,171 @@ def test_scheduled_refresh_records_recoverable_child_stages(
     # observes that same pinned moment on both attempts.
     assert evaluation_times == [prepared.decision_time, prepared.decision_time]
     assert os.environ["STANSTOCK_CODE_REVISION"] == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "append_position",
+    [False, True],
+    ids=["unchanged-proof", "position-appended"],
+)
+def test_nonempty_portfolio_proof_survives_parent_retry_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    append_position: bool,
+) -> None:
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+    )
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    portfolio = Portfolio.objects.create(
+        owner=refresh_fixtures.create_portfolio_owner(username="command-proof-owner"),
+        name="Command proof portfolio",
+        base_currency="USD",
+    )
+    # The real market child creates the LatestMarketData row before the
+    # portfolio child runs. Direct construction here avoids inventing a
+    # pre-refresh mutable quote merely to satisfy the web-service add guard.
+    PortfolioHolding.objects.create(
+        portfolio=portfolio,
+        listing=listing,
+        quantity=Decimal("2"),
+        average_cost=Decimal("50"),
+    )
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "prepare_us_daily_job",
+        lambda **kwargs: prepared,
+    )
+    original_revision = "a" * 40
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "clean_git_revision",
+        lambda root: original_revision,
+    )
+    real_verify = scheduled_refresh.verify_scheduled_refresh
+    verification_attempts = 0
+
+    def fail_parent_once(**kwargs: Any) -> dict[str, Any]:
+        nonlocal verification_attempts
+        verification_attempts += 1
+        if verification_attempts == 1:
+            raise RefreshVerificationError(
+                "forced_post_child_failure",
+                "Synthetic parent verification failure",
+            )
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "verify_scheduled_refresh",
+        fail_parent_once,
+    )
+    with pytest.raises(CommandError, match="Synthetic parent verification failure"):
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    portfolio_child = JobRun.objects.get(
+        pk=first_parent.details["stages"]["portfolio_snapshots"]["job_run_id"]
+    )
+    assert portfolio_child.status == JobRun.Status.SUCCESS
+    proof_asset = DataAsset.objects.get(
+        kind=PORTFOLIO_VERIFICATION_KIND,
+        subject=str(portfolio_child.pk),
+    )
+    assert DataAsset.objects.filter(kind=PORTFOLIO_VERIFICATION_KIND).count() == 1
+
+    # Portfolio-proof acceptance is contract-versioned, not retry-HEAD
+    # versioned. A later process revision cannot reject the recognized old
+    # child proof after its complete immutable replay succeeds.
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", "b" * 40)
+    portfolio_result = verify_portfolio_snapshot_stage(
+        portfolio_child,
+        target_date=TARGET_DATE,
+    )
+
+    def no_credentials(*args: object, **kwargs: object) -> str:
+        pytest.fail("retry must not resolve provider credentials")
+
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.resolve_api_key",
+        no_credentials,
+    )
+    appended: PortfolioSnapshotHolding | None = None
+    if append_position:
+        snapshot_id = portfolio_child.details["snapshot_ids"][str(portfolio.pk)]
+        spy_market = LatestMarketData.objects.get(listing__ticker="SPY")
+        appended = PortfolioSnapshotHolding.objects.create(
+            snapshot_id=snapshot_id,
+            listing_id=spy_market.listing_id,
+            source_asset_id=spy_market.source_asset_id,
+            source_session_date=spy_market.session_date,
+            quantity=Decimal("1"),
+            average_cost=spy_market.close,
+            price=spy_market.close,
+            cost_basis=spy_market.close,
+            market_value=spy_market.close,
+            unrealized_gain=Decimal("0"),
+            corporate_action_suspected=False,
+        )
+    captured_manifests: list[set[UUID]] = []
+    real_manifest = refresh_verification_module._verify_asset_evidence
+
+    def capture_manifest(asset_ids: set[UUID]) -> dict[str, Any]:
+        captured_manifests.append(set(asset_ids))
+        return real_manifest(asset_ids)
+
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "_verify_asset_evidence",
+        capture_manifest,
+    )
+    if append_position:
+        with pytest.raises(CommandError):
+            call_command(
+                "scheduled_refresh",
+                config=tmp_path / "universe.yml",
+                stdout=StringIO(),
+            )
+    else:
+        call_command(
+            "scheduled_refresh",
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == (
+        JobRun.Status.FAILED if append_position else JobRun.Status.SUCCESS
+    )
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert second_parent.details["stages"]["portfolio_snapshots"]["status"] == JobRun.Status.SKIPPED
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
+    assert DataAsset.objects.filter(kind=PORTFOLIO_VERIFICATION_KIND).count() == 1
+    if append_position:
+        assert appended is not None
+        assert PortfolioSnapshotHolding.objects.filter(pk=appended.pk).exists()
+        assert captured_manifests == []
+        return
+
+    assert captured_manifests
+    assert {ref.id for ref in portfolio_result.asset_refs} <= captured_manifests[-1]
+    assert proof_asset.id in captured_manifests[-1]
+
+    proof_path = AssetStore(tmp_path).resolve(proof_asset.relative_path)
+    original = proof_path.read_bytes()
+    proof_path.write_bytes(original + b"tampered")
+    with pytest.raises(RefreshVerificationError):
+        verify_portfolio_snapshot_stage(portfolio_child, target_date=TARGET_DATE)
+    proof_path.write_bytes(original)
+    verify_portfolio_snapshot_stage(portfolio_child, target_date=TARGET_DATE)
 
 
 def test_scheduled_refresh_rejects_changed_machine_timezone(
