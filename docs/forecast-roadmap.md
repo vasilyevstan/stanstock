@@ -515,19 +515,33 @@ forecast only to data available on that date. Parameters are frozen before the
 evaluation window. StanStock will compare each forecast with both the stock's
 realized price return and SPY.
 
-Reported evidence will include:
+The released advisory performance reader now reports:
 
-- canonical observation count and input-evidence coverage;
-- signed base-case error and median absolute base-case error;
+- exact method, configuration, provider, horizon, evidence-grade, and
+  code-revision groups;
+- candidate target-date cohorts, selected non-overlapping cohorts, listing
+  breadth floors, and target-date span;
+- signed base-case error;
 - base-case sign match;
-- bear-to-bull inclusion rate, assessed against its nominal central 60% target
-  only after independent support;
+- 6m/12m analog-range inclusion, compared with its nominal central 60% target
+  only after the reporting support floors pass;
+- 3y/5y deterministic scenario-envelope inclusion without a nominal target;
+- canonical observed, on-time, provider-backed outcomes only. Reconstructed
+  research-grade results remain excluded from this reader.
+
+Each selected target date receives equal weight. Exact code revisions remain
+separate, and malformed evidence or insufficient overlap-aware support
+withholds all three advisory metrics for that group.
+
+Future validation work still includes:
+
+- median absolute base-case error;
 - positive-return reliability by forecast bucket;
 - results by sector, risk class, and market regime;
-- separate research-grade and genuinely on-time live results.
+- benchmark-relative summaries and portfolio-level reporting.
 
-These are planned validation summaries, not claims that current forecasts or
-probability estimates are calibrated.
+Neither the released support floors nor these planned summaries claim that
+current forecasts or probability estimates are calibrated.
 
 Scenario widths will eventually use the 20th and 80th percentiles of historical
 forecast residuals from the same formula version. Until that evidence is
@@ -541,10 +555,12 @@ sufficient, a conservative volatility-based floor remains in force.
 3. **Released:** point-in-time SEC ingestion and canonical US fundamentals.
 4. **Released:** deterministic SEC-backed 3y/5y scenario views and immutable
    advisory predictions.
-5. **Next:** accumulate prospective outcomes and complete integrated
-   base-case error, sign-match, bear-to-bull inclusion, positive-return
-   reliability, benchmark, and portfolio reporting by exact
-   method/configuration version.
+5. **Released:** overlap-aware advisory base-case error, sign-match, and
+   inclusion reporting by exact method/configuration/provider/horizon/
+   evidence/revision group.
+6. **Next:** accumulate prospective outcomes and add positive-return
+   reliability, benchmark-relative, sector/regime, and portfolio reporting
+   without weakening the released support gate.
 
 European long-term forecasts remain out of scope until an equally defensible
 point-in-time filing pipeline exists.

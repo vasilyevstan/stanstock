@@ -291,10 +291,24 @@ unmeasurable.
 - Long-horizon scenarios are explicit fundamental cases, not precise
   statistically validated forecasts.
 - Simulated or reconstructed performance is not live performance.
-- Performance metrics display after 30 canonical row-level prediction
-  observations in the relevant cohort. That fixed threshold does not establish
-  independent support/effective cohort sufficiency, probability calibration,
-  or calibrated interval coverage.
+- Decision metrics display after 30 canonical row-level prediction
+  observations in the relevant cohort. That fixed threshold is presentation
+  policy, not statistical validation.
+- Advisory metrics require non-overlapping target-date cohorts, at least 30
+  listings in every selected cohort, and fixed horizon-specific calendar
+  spans. These floors reduce obvious overlap and concentration; they do not
+  prove independence, calibration, or statistical power.
+- Advisory evidence is separated by exact code revision because StanStock has
+  no independently governed implementation-equivalence digest. Even a
+  documentation-only commit therefore starts a new reporting group. Invalid
+  revisions, malformed outcome evidence, or more than 50,000 grouped
+  target-date summaries withhold metrics rather than being normalized,
+  discarded, or truncated.
+- The 3y floor needs selected targets spanning six years before the last
+  three-year outcome can mature, so publication takes roughly nine years. The
+  5y floor needs targets spanning ten years plus the final five-year outcome,
+  or roughly fifteen years. Exact-revision separation can extend those
+  accumulation periods further.
 - Price returns must not be described as total returns when dividend data is
   absent.
 

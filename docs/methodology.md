@@ -614,21 +614,81 @@ and 252-/756-session meanings. The corresponding canonical maturities are 10,
 126, 252, 756, and 1260 observed sessions; calendar weekends and holidays are
 never manufactured.
 
-Performance reports only matured outcomes and retains unresolved corporate
-events in coverage counts. Metrics display after 30 canonical row-level
-prediction observations in the relevant cohort. This fixed display threshold
-does not establish independent support or effective-cohort sufficiency,
-probability calibration, or calibrated interval coverage. Decision
-predictions use recommendation success: BUY succeeds when actual return is
-greater than 0; AVOID succeeds when actual return is less than or equal to 0;
-HOLD succeeds when actual return lies within the stored bear/bull range,
-inclusive. Recommendation success is not advisory base-case sign match.
+Decision performance reports only matured canonical decision outcomes and
+retains unresolved and corporate-event counts. Decision metrics display after
+30 canonical row-level prediction observations in the current exact
+method/configuration/provider cohort. This is a fixed display threshold, not
+statistical validation. Decision predictions use recommendation success: BUY
+succeeds when actual return is greater than 0; AVOID succeeds when actual
+return is less than or equal to 0; HOLD succeeds when actual return lies within
+the stored bear/bull range, inclusive. Recommendation success is not advisory
+base-case sign match.
+
+Advisory reporting is separate. It uses only matured canonical advisory
+outcomes whose prediction and parent run were issued on time, whose immutable
+evidence grade is observed, whose source mode is provider-backed, and whose
+price provider is non-empty. After selecting the earliest reportable issuance
+for each canonical listing/target/horizon/evidence-role/method/configuration/
+provider observation, it summarizes outcomes by exact target date and keeps
+method version, configuration hash, price provider, evidence grade, horizon,
+and code revision in separate groups. Only an exact lowercase 40-character
+hexadecimal code revision can publish metrics; `working-tree`, empty,
+shortened, uppercase, or otherwise malformed revisions remain visible but
+withheld.
+
+Each valid target-date cohort has a closed support interval from its forecast
+target through its latest evaluation date. Deterministic earliest-finish
+scheduling selects the next cohort only when its target is strictly later than
+the prior selected evaluation date. Every structurally valid target date,
+including a thin one, participates before support is judged; a selected thin
+cohort withholds the group rather than being removed in favor of a broader
+date. Missing or inconsistent dates, scenarios, outcomes, or stored advisory
+metrics withhold the exact group before scheduling.
+
+The reader also checks the stored numerical evidence defensively without
+changing the frozen outcome producer. Actual, bear, base, bull, and signed
+error values must all be present, and their grouped minima, maxima, and signed
+error sum must be finite decimals. PostgreSQL numeric `NaN` is therefore
+malformed evidence; the constrained four-decimal columns reject positive and
+negative infinity at storage.
+
+The producer evaluates direction and scenario inclusion from the raw return,
+then stores actual return and signed error independently at four decimal
+places. That rounding loses information only at specific boundaries: either
+direction Boolean is compatible when stored actual return is zero, and either
+inclusion Boolean is compatible when stored actual return equals the stored
+bear or bull endpoint. Nonzero signs and values strictly inside or outside the
+scenario remain unambiguous. Signed-error consistency requires
+`ROUND(actual_return - signed_error - base_return, 4)` to lie from `-0.0001`
+through `+0.0001`, inclusive; `+/-0.0002` is rejected. This one-quantum rule is
+a storage-compatibility boundary, not an empirical tolerance or calibration
+claim.
+
+| Horizon | Non-overlapping target cohorts | Listings in every selected cohort | Selected target-date span |
+|---|---:|---:|---:|
+| 6m | 8 | 30 | 1,095 days |
+| 12m | 6 | 30 | 1,460 days |
+| 3y | 3 | 30 | 2,190 days |
+| 5y | 3 | 30 | 3,650 days |
+
+Within a selected date, advisory sign match, inclusion, and signed base-case
+error use all applicable listings. The published group value is the arithmetic
+mean of those date-level values, so a large forecast vintage cannot outweigh a
+smaller qualifying vintage. The three metrics share one publication gate.
+Medium-horizon inclusion compares realized returns with the analog bear-to-bull
+range and shows its nominal 60% target only after support qualifies; this is
+not a calibration claim or guarantee. Long-horizon inclusion reports only
+whether the realized return fell inside the deterministic bear/base/bull
+scenario envelope and has no nominal inclusion target. More than 50,000
+grouped target-date summaries withholds the complete advisory report rather
+than publishing a truncated result.
+
 Advisory predictions never receive a decision-success value; they record
-base-case sign match, bear-to-bull inclusion, signed base-case error, and
-benchmark return separately. A withheld advisory prediction (all scenario
-returns null) is non-evaluable:
-evaluation resolves it as unresolved before any price lookup, and reporting
-defensively excludes it from advisory denominators.
+base-case sign match, bear-to-bull or scenario-envelope inclusion, signed
+base-case error, and benchmark return separately. A withheld advisory
+prediction (all scenario returns null) is non-evaluable: evaluation resolves
+it as unresolved before any price lookup, and reporting defensively excludes
+it from advisory denominators.
 
 The decision headline on the performance page aggregates only decision
 outcomes from observed universe snapshots whose individual predictions were
