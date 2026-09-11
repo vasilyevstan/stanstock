@@ -35,6 +35,7 @@ from base_service import (
     _read_base_source,
     base_research_service,
     base_service_available,
+    base_service_checksum,
     base_service_first_party_import_names,
     module_relative_path,
 )
@@ -2573,6 +2574,68 @@ def test_dependency_binding_covers_every_changed_module_base_service_imports() -
     assert changed_and_imported, (
         "expected at least one base-imported module to differ from base in "
         "this slice; found none, which would make the assertion above vacuous"
+    )
+
+
+def test_historical_harness_dependency_order_and_hashes_are_exact() -> None:
+    expected = (
+        (
+            "stanstock.data.assets",
+            "src/stanstock/data/assets.py",
+            "6d40228586ae1279065b404385a6607e2e55902033c12c36091b8e707a34329f",
+        ),
+        (
+            "stanstock.data.asof",
+            "src/stanstock/data/asof.py",
+            "e55552cf8980a53a09dcf7503246de6a76fb3ac928eb66755638435a4df68ca9",
+        ),
+        (
+            "stanstock.research.config",
+            "src/stanstock/research/config.py",
+            "6c7328b71450e9c302fa400c4d087356ac1e3b805182c72f8155346463c1ce12",
+        ),
+        (
+            "stanstock.research.medium_forecasts",
+            "src/stanstock/research/medium_forecasts.py",
+            "b1b3682b8443c85eeb1646a2c1d463cb8321b0b669b9d3595dfb0f975386f62b",
+        ),
+        (
+            "stanstock.research.indicators",
+            "src/stanstock/research/indicators.py",
+            "be2c378da7f33f3669c351696c5ceca5d659e6b8610941ca45a4f370ec1ede92",
+        ),
+        (
+            "stanstock.research.scoring",
+            "src/stanstock/research/scoring.py",
+            "ac6696d0e50f006496b5a23771326c1608592f2e45d3f4386c6a16265b8c7a07",
+        ),
+        (
+            "stanstock.research.affordability",
+            "src/stanstock/research/affordability.py",
+            "a371df555434bd6df81bbcabba2dbbae26a941fa3a4e3ff98dec1d1269e763f2",
+        ),
+        (
+            "stanstock.data.provider_policy",
+            "src/stanstock/data/provider_policy.py",
+            "6cd0302a98eb4015131d286bdf4ece987374254935222cdf9b99e2634a202f69",
+        ),
+        (
+            "stanstock.research.long_forecasts",
+            "src/stanstock/research/long_forecasts.py",
+            "a9ec417e01a318d44da9da8cbc534b108f78ba94a18f412ecc816ccc924024d0",
+        ),
+        (
+            "stanstock.research.service",
+            "src/stanstock/research/service.py",
+            "f47839e55c509c438ef96db4a0bb538915f2f8a0aa8fa6e0a55734f55d23e382",
+        ),
+    )
+
+    assert DEPENDENCY_MODULES == tuple((name, path) for name, path, _digest in expected)
+    for _name, path, digest in expected:
+        assert hashlib.sha256(_read_base_source(path)).hexdigest() == digest
+    assert base_service_checksum() == (
+        "ca686063166cdc5256327a62a9d27e3b9194bdb030acd7ea15723df8abd4c919"
     )
 
 

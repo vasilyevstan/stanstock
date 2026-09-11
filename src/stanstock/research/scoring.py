@@ -4,7 +4,12 @@ import math
 from collections.abc import Callable
 from datetime import date
 
-from stanstock.research.config import COMPONENTS, SCORE_HORIZONS, ScoringConfig
+from stanstock.research.config import (
+    COMPONENTS,
+    SCORE_HORIZONS,
+    ScoringConfig,
+    TransformMapConfig,
+)
 from stanstock.research.indicators import last_observation_date
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.research.types import (
@@ -23,6 +28,8 @@ def score_components(
     fundamentals: ResearchValues,
     config: ScoringConfig,
 ) -> ComponentScores:
+    if config.short_scoring is not None:
+        return _score_v3_components(indicators, config)
     factors: dict[str, float] = {}
     missing: dict[str, str] = {}
 
@@ -278,6 +285,56 @@ def score_components(
     )
 
 
+_V3_FACTOR_INPUTS = {
+    "momentum.return_20d": "return_20d",
+    "momentum.return_63d": "return_63d",
+    "momentum.return_126d": "return_126d",
+    "momentum.sma_50": "close_vs_sma_50",
+    "momentum.sma_200": "close_vs_sma_200",
+    "momentum.rsi": "rsi_14",
+    "momentum.macd": "macd_histogram_pct",
+    "momentum.52w": "52w_position",
+    "risk.annualized_volatility": "annualized_volatility",
+    "risk.downside_volatility": "downside_volatility",
+    "risk.max_drawdown": "max_drawdown",
+    "risk.abnormal_volume": "abnormal_volume_strict",
+    "risk.avg_volume": "avg_dollar_volume_20d",
+    "market.relative_20d": "relative_return_20d",
+    "market.relative_63d": "relative_return_63d",
+    "market.relative_252d": "relative_return_252d",
+}
+
+
+def _score_v3_components(
+    indicators: IndicatorResult,
+    config: ScoringConfig,
+) -> ComponentScores:
+    policy = config.short_scoring
+    if policy is None:
+        raise ValueError("V3 component scoring requires short-scoring policy")
+    factors: dict[str, float] = {}
+    missing: dict[str, str] = {}
+    for factor_name, indicator_name in _V3_FACTOR_INPUTS.items():
+        _add(
+            factors,
+            missing,
+            factor_name,
+            indicators,
+            indicator_name,
+            _transform_scorer(policy.factor_maps[factor_name]),
+            require_finite=True,
+        )
+    components = _component_averages(factors)
+    expected = sum(config.component_factor_counts.values())
+    coverage = min(1.0, len(factors) / expected) if expected > 0 else 0.0
+    return ComponentScores(
+        components=components,
+        factor_scores=factors,
+        missing=missing,
+        coverage=coverage,
+    )
+
+
 def aggregate_score(
     component_scores: ComponentScores,
     config: ScoringConfig,
@@ -311,6 +368,8 @@ def aggregate_score(
 def assess_risk(
     indicators: IndicatorResult, fundamentals: ResearchValues, config: ScoringConfig
 ) -> RiskAssessment:
+    if config.short_scoring is not None:
+        return _assess_v3_risk(indicators, config)
     risk_inputs: list[float] = []
     volatility = indicators.get("annualized_volatility")
     if volatility is not None:
@@ -337,6 +396,52 @@ def assess_risk(
             insufficiency_reason="No supported risk inputs are available",
         )
     score = _clamp(sum(risk_inputs) / len(risk_inputs))
+    if score <= config.risk.low_max:
+        risk_class = RiskClass.LOW.value
+    elif score <= config.risk.medium_max:
+        risk_class = RiskClass.MEDIUM.value
+    elif score <= config.risk.high_max:
+        risk_class = RiskClass.HIGH.value
+    else:
+        risk_class = RiskClass.VERY_HIGH.value
+    return RiskAssessment(score=score, risk_class=risk_class)
+
+
+def _assess_v3_risk(
+    indicators: IndicatorResult,
+    config: ScoringConfig,
+) -> RiskAssessment:
+    policy = config.short_scoring
+    if policy is None:
+        raise ValueError("V3 risk assessment requires short-scoring policy")
+    raw_inputs = {
+        "annualized_volatility": indicators.get("annualized_volatility"),
+        "downside_volatility": indicators.get("downside_volatility"),
+        "max_drawdown_magnitude": (
+            abs(min(indicators.values["max_drawdown"], 0.0))
+            if "max_drawdown" in indicators.values
+            else None
+        ),
+        "absolute_beta": (abs(indicators.values["beta"]) if "beta" in indicators.values else None),
+    }
+    missing = [
+        name for name, value in raw_inputs.items() if value is None or not math.isfinite(value)
+    ]
+    if missing:
+        return RiskAssessment(
+            score=None,
+            risk_class=RiskClass.INSUFFICIENT.value,
+            insufficiency_reason=(
+                "Complete v3 risk requires all four common-window inputs; missing "
+                + ", ".join(missing)
+            ),
+        )
+    penalties = [
+        _clamp(_transform_scorer(policy.risk_penalty_maps[name])(value))
+        for name, value in raw_inputs.items()
+        if value is not None
+    ]
+    score = _clamp(sum(penalties) / 4.0)
     if score <= config.risk.low_max:
         risk_class = RiskClass.LOW.value
     elif score <= config.risk.medium_max:
@@ -474,6 +579,32 @@ def _add(
         missing[score_name] = "Score must be finite"
         return
     factors[score_name] = _clamp(scored)
+
+
+def _transform_scorer(transform: TransformMapConfig) -> Callable[[float], float]:
+    if transform.kind == "linear_higher":
+        assert transform.low is not None and transform.high is not None
+        return _score_higher(transform.low, transform.high)
+    if transform.kind == "linear_lower":
+        assert transform.low is not None and transform.high is not None
+        return _score_lower(transform.low, transform.high)
+    if transform.kind == "positive_target_penalty":
+        assert (
+            transform.target is not None
+            and transform.slope is not None
+            and transform.nonpositive_score is not None
+        )
+        target = transform.target
+        slope = transform.slope
+        nonpositive_score = transform.nonpositive_score
+
+        def score(value: float) -> float:
+            if value <= 0:
+                return nonpositive_score
+            return 100.0 - slope * abs(value - target)
+
+        return score
+    raise ValueError(f"Unsupported transform kind {transform.kind!r}")
 
 
 def _score_higher(low: float, high: float) -> Callable[[float], float]:

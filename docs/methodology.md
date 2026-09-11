@@ -31,7 +31,7 @@ Supported inputs are grouped into:
 An indicator is unavailable when its minimum history or source inputs are
 missing. Unsupported values are never approximated from unrelated fields.
 
-The prospective US price-only v2 policy removes nominal share-price scale from
+The current US price-only v2 policy removes nominal share-price scale from
 its technical and liquidity gates. It scores the MACD histogram only after
 dividing by the latest positive close, and it measures liquidity as the
 20-session mean of `close * volume`. A split-equivalent transformation of
@@ -42,6 +42,187 @@ versioned policy assumptions; they were not selected by optimizing later
 outcomes. Historical v1 predictions retain their original absolute-MACD and
 share-volume configuration and are never recomputed or pooled with v2
 performance.
+
+### Explicit research-only short v3
+
+`us-price-baseline-v3` is prospective and available only by explicit config
+selection. `default_us_scoring_config_path()`, scheduled/live US work, refresh
+verification, and every current medium/long `enabled_scoring_versions` list
+remain v2-only. V3 persists only its supported `short` decision prediction.
+It does not automatically reissue history. Existing generic latest/serving,
+opportunity, stock-detail, prediction-history, watchlist, latest-method
+performance, contribution-planner, and sample-selection readers are
+method-neutral: if a caller explicitly creates a v3 analysis, those readers
+may display or consume it as the latest qualifying row. That is existing
+reader behavior, not production activation.
+
+V3 validates raw evidence before a lossy cast or filter. Asset and supplied
+benchmark frames require unique, non-null dates represented as `Date`,
+`Datetime` (normalized to calendar date), or strict ISO `YYYY-MM-DD`; finite
+positive closes; and, when volume exists, finite nonnegative volume and finite
+`close * volume`. Missing volume is insufficiency, while reported zero volume
+is a valid numeric zero. Accepted rows are sorted ascending once, and the same
+chronological asset frame feeds the existing indicator engine and unchanged
+scenario engine. No exchange-session continuity is inferred.
+
+For finite `x` and `low < high`, define:
+
+```text
+H(x; low, high) = 100 * min(1, max(0, (x - low) / (high - low)))
+L(x; low, high) = 100 - H(x; low, high)
+```
+
+The strict v3 YAML is the only transform authority. It contains exactly these
+16 factor maps:
+
+| Component factor | Raw input | Transform |
+|---|---|---|
+| `momentum.return_20d` | 20-close return | `H(x; -0.10, 0.15)` |
+| `momentum.return_63d` | 63-close return | `H(x; -0.20, 0.30)` |
+| `momentum.return_126d` | 126-close return | `H(x; -0.30, 0.45)` |
+| `momentum.sma_50` | close / 50-close SMA - 1 | `H(x; -0.10, 0.10)` |
+| `momentum.sma_200` | close / 200-close SMA - 1 | `H(x; -0.15, 0.20)` |
+| `momentum.rsi` | Cutler/SMA RSI(14) | `H(x; 30, 70)` |
+| `momentum.macd` | MACD(12,26,9) histogram / latest positive close | `H(x; -0.02, 0.02)` |
+| `momentum.52w` | latest position in 252-close range; flat = 0.5 | `H(x; 0.15, 0.95)` |
+| `risk.annualized_volatility` | common-window sample SD × sqrt(252) | `L(x; 0.12, 0.65)` |
+| `risk.downside_volatility` | common-window RMS of `min(return, 0)` × sqrt(252) | `L(x; 0.08, 0.50)` |
+| `risk.max_drawdown` | common-window minimum drawdown | `H(x; -0.60, -0.05)` |
+| `risk.abnormal_volume` | latest volume / 20-observation mean | piecewise map below |
+| `risk.avg_volume` | 20-observation mean USD `close * volume` | `H(x; 1m, 50m)` |
+| `market.relative_20d` | asset return - benchmark return | `H(x; -0.08, 0.08)` |
+| `market.relative_63d` | asset return - benchmark return | `H(x; -0.15, 0.15)` |
+| `market.relative_252d` | asset return - benchmark return | `H(x; -0.25, 0.25)` |
+
+Counts are exactly 8 momentum/technical, 5 risk/liquidity, and 3 market
+factors. Available factors are averaged within components. Beta is not a
+factor and contributes nothing to a component, horizon score, overall score,
+or conviction.
+
+RSI uses the existing Cutler/SMA convention over the latest 14
+close-to-close changes:
+
+```text
+G = mean(max(change, 0))
+D = mean(max(-change, 0))
+RSI = 50 when G = D = 0
+RSI = 100 when D = 0 < G
+RSI = 0 when G = 0 < D
+otherwise RSI = 100 - 100 / (1 + G / D)
+```
+
+V3 then applies `H(RSI; 30, 70)`, so `30/50/70` maps to `0/50/100`.
+This affine map is bounded, continuous, nondecreasing, and
+2.5-Lipschitz. It is not Wilder smoothing and is not a literature-standard
+RSI score transform.
+
+For positive finite abnormal-volume ratio `x`, v3 preserves v2's
+`clamp(100 - 20 * abs(x - 1))`. At `x <= 0` the score is exactly zero.
+Consequently `A(0) = 0` while the right-hand limit at zero is `80`; this
+intentional discontinuity must not be described as continuous.
+
+### Common-window risk and recommendation independence
+
+V3 intersects the clean asset and benchmark by observed date, requires their
+latest eligible dates to match, selects exactly the latest 252 common closes,
+and computes exactly 251 aligned simple-return pairs. It neither pads, fills,
+interpolates, deduplicates, nor reaches backward around a bad row. The number
+252 is also the fixed annualization constant. Fewer than 252 common closes or
+a latest-date mismatch is explicit common-risk insufficiency. The separate
+252-session relative-return factor needs 253 overlapping closes.
+
+The four mandatory YAML-authoritative penalties are:
+
+```text
+Pvol  = H(annualized volatility; 0.12, 0.65)
+Pdown = H(downside volatility; 0.08, 0.50)
+Pdraw = H(abs(min(max drawdown, 0)); 0.05, 0.60)
+Pbeta = H(abs(beta); 0, 2)
+risk  = (Pvol + Pdown + Pdraw + Pbeta) / 4
+```
+
+Beta is sample covariance of the 251 asset/benchmark return pairs divided by
+sample benchmark-return variance. Absolute beta is symmetric: beta `0`, `1`,
+and absolute beta `>= 2` produce beta penalties `0`, `50`, and `100`.
+Closeness to beta one is not quality or alpha. Zero benchmark variance
+withholds beta; volatility, downside, and drawdown can remain numeric, but the
+complete risk score is null whenever any one penalty is unavailable. Valid
+zero return, downside deviation, drawdown, volume, or beta remains numeric
+zero.
+
+BUY retains the v2 score (`>= 72`), complete risk (`<= 55`), confidence
+(`>= 45`), 20-session dollar-turnover (`>= $5m`), complete short scenario,
+and bear-downside (`>= -8%`) gates. Missing risk, liquidity, or scenario
+blocks BUY. AVOID is still independently triggered by score `<= 38`, numeric
+risk `>= 82`, or confidence `<= 15`; therefore insufficiency does not force
+HOLD. Empirical short scenarios are calculated independently and can remain
+numeric while composite risk is null.
+
+### Price scale and source boundary
+
+A compatible split-equivalent transform multiplies all OHLC/close values by
+finite `k > 0` and divides share volume by `k`. Returns, close/SMA ratios,
+RSI, normalized MACD, range position, abnormal-volume ratio, USD turnover,
+the four common-risk metrics, factors, component/horizon/overall scores,
+coverage, confidence, scenarios, every recommendation gate, and the final
+recommendation remain invariant. Raw OHLC, SMA, EMA, MACD, and ATR values
+scale by `k`; raw share volume scales by `1/k`.
+
+Price multiplied by `k` while volume is fixed is not split-equivalent:
+20-session USD turnover becomes exactly `k` times larger. The configured
+liquidity factor, risk/liquidity component, overall score, `$5m` BUY gate,
+and recommendation may therefore change. Composite risk does not change when
+its four normalized inputs do not change. No override suppresses this normal
+dollar-liquidity effect. Current USD price bands and raw price differences
+remain display/filter/execution metadata, never direct score, risk,
+confidence, or recommendation inputs. Split-only price provenance does not
+prove provider-reported share volume is split-compatible.
+
+For persisted v3 work, each listing and each non-null requested benchmark is
+selected once with `AsOfData.latest_asset`. The exact returned `DataAsset` is
+then physically read once, SHA-256 checked once, clipped through the target,
+and used together with its UUID, checksum, provider, subject,
+`retrieved_at`, and `available_at` provenance. There is no separate
+provenance selection. The source matrix per listing is:
+
+| Benchmark boundary | Selection/read count | Result |
+|---|---:|---|
+| omitted (`None`) | `0/0` | valid common-risk insufficiency |
+| requested and eligible | `1/1` | exact source is used and persisted |
+| requested but unavailable | `1 failed/0` | selection error propagates; rollback |
+| selected but corrupt | `1/1 attempted` | checksum error propagates; rollback |
+
+Listing sources use the corresponding required `1/1`, `1 failed/0`, or
+`1/1 attempted` behavior. Snapshot counts repeat per listing (`N/N` for an
+eligible requested benchmark); no cache, fallback, substitute, reselection,
+or downgrade is used. V1/v2 keep their historical convenience-reader path.
+A source failure leaves no invocation-owned run, analysis, prediction,
+manifest, panel, row, or file; pre-existing immutable source rows/files remain
+untouched. V3 refuses non-USD listings rather than mixing currency or adding
+implicit FX.
+
+Actual generation time, logical target date, historical data cutoff, and
+source retrieval/availability timestamps remain distinct. An exceptional
+observed v3 issuance is a direct
+`analyze_snapshot(..., issued_on_time=True, ...)` service call—not
+`manage.py analyze`, which is research-grade. For that explicit observed-v3
+request, the service enforces the exact v3 config version and effective config hash,
+`provider="twelve_data"`, SPY, and a raw lowercase 40-hex
+`STANSTOCK_CODE_REVISION` equal to the checkout's exact clean committed HEAD.
+The caller still owns reviewed-production-universe selection and independent
+pre-invocation proof of the next-session-open deadline and every source's
+cutoff safety. Existing service deadline and source-cutoff checks remain
+fail-closed. An unsafe explicit observed request raises rather than silently
+downgrading.
+
+The methodology is broadly contextualized by Wilder (1978), whose
+Wilder-smoothed RSI is expressly not used here; Jegadeesh and Titman (1993)
+and Moskowitz, Ooi, and Pedersen (2012) on momentum/trend; Sharpe (1964) on
+beta as market sensitivity; and Amihud (2002) on separate liquidity
+treatment. Dollar turnover is not the Amihud measure. Those works do not
+validate the exact v3 windows, maps, weights, thresholds, risk classes,
+confidence rules, recommendation gates, causal interpretation, profitability,
+or alpha.
 
 ## Horizon weights
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
@@ -10,12 +12,15 @@ from typing import Any
 from uuid import UUID
 
 import polars as pl
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from stanstock.core.revision import clean_git_revision
 from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.asof import AsOfData, PriceFrameChecksumMismatchError
 from stanstock.data.assets import AssetStore, open_asset_store
+from stanstock.data.etfs import INVESTABLE_US_ETF_SYMBOL
 from stanstock.data.models import (
     DataAsset,
     FundamentalFact,
@@ -35,7 +40,14 @@ from stanstock.research.affordability import (
     UNDER_10_BAND,
     classify_price_band,
 )
-from stanstock.research.config import ScoringConfig, code_revision, config_hash, load_scoring_config
+from stanstock.research.config import (
+    V3_EFFECTIVE_CONFIG_HASH,
+    V3_VERSION,
+    ScoringConfig,
+    code_revision,
+    config_hash,
+    load_scoring_config,
+)
 from stanstock.research.eligibility import require_stock_research_listing
 from stanstock.research.explanations import generate_reasons, generate_risks
 from stanstock.research.forecast_config import (
@@ -103,6 +115,7 @@ from stanstock.research.under10 import (
 #: It is written only when a *new* analysis qualifies; an absent key means
 #: "not assessed", never "assessed and failed". Nothing backfills it.
 UNDER10_ASSESSMENT_KEY = "under10_assessment"
+_FULL_LOWERHEX_GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +191,145 @@ class _Under10DecisionEvidence:
     price_entry: Mapping[str, Any]
 
 
+def _validated_observed_v3_revision(
+    *,
+    config: ScoringConfig,
+    config_hash_value: str,
+    provider: str,
+    benchmark_subject: str | None,
+) -> str:
+    if config.version != V3_VERSION:
+        raise ValueError("Observed v3 issuance requires us-price-baseline-v3")
+    if config_hash_value != V3_EFFECTIVE_CONFIG_HASH:
+        raise ValueError("Observed v3 issuance requires the exact reviewed v3 scoring config")
+    if provider != TWELVE_DATA_PROVIDER:
+        raise ValueError("Observed v3 issuance requires the Twelve Data provider")
+    if benchmark_subject != INVESTABLE_US_ETF_SYMBOL:
+        raise ValueError("Observed v3 issuance requires the SPY benchmark subject")
+
+    raw_revision = os.getenv("STANSTOCK_CODE_REVISION")
+    if raw_revision is None:
+        raise ValueError("Observed v3 issuance requires STANSTOCK_CODE_REVISION")
+    if _FULL_LOWERHEX_GIT_REVISION.fullmatch(raw_revision) is None:
+        raise ValueError(
+            "Observed v3 issuance requires a full lowercase 40-hex STANSTOCK_CODE_REVISION"
+        )
+    try:
+        checkout_revision = clean_git_revision(Path(settings.BASE_DIR))
+    except ValueError:
+        raise ValueError(
+            "Observed v3 issuance requires a verifiably clean committed Git revision"
+        ) from None
+    if raw_revision != checkout_revision:
+        raise ValueError(
+            "Observed v3 issuance revision does not match the clean committed Git HEAD"
+        )
+    return raw_revision
+
+
+def _prepare_v3_price_frame(frame: pl.DataFrame, *, source: str) -> pl.DataFrame:
+    """Validate v3 evidence before any lossy cast/filter and sort it once."""
+    missing_columns = [column for column in ("date", "close") if column not in frame.columns]
+    if missing_columns:
+        raise ValueError(f"V3 {source} frame is missing columns: {', '.join(missing_columns)}")
+    if frame.height == 0:
+        raise ValueError(f"V3 {source} frame has no price observations")
+
+    date_column = frame["date"]
+    date_dtype = frame.schema["date"]
+    if date_column.null_count():
+        raise ValueError(f"V3 {source} frame contains null dates")
+    if date_dtype == pl.Date:
+        normalized_dates = date_column
+    elif isinstance(date_dtype, pl.Datetime):
+        normalized_dates = date_column.dt.date()
+    elif date_dtype in (pl.Utf8, pl.String):
+        if not bool(date_column.str.contains(r"^\d{4}-\d{2}-\d{2}$").all()):
+            raise ValueError(f"V3 {source} frame dates must use strict ISO YYYY-MM-DD")
+        try:
+            normalized_dates = date_column.str.strptime(pl.Date, "%Y-%m-%d", strict=True)
+        except pl.exceptions.PolarsError as error:
+            raise ValueError(f"V3 {source} frame contains unparseable dates") from error
+    else:
+        raise ValueError(f"V3 {source} frame has unsupported date dtype {date_dtype!r}")
+    if normalized_dates.null_count():
+        raise ValueError(f"V3 {source} frame contains unparseable dates")
+
+    close_dtype = frame.schema["close"]
+    if close_dtype == pl.Boolean:
+        raise ValueError(f"V3 {source} frame close values must be numeric")
+    try:
+        normalized_close = frame["close"].cast(pl.Float64, strict=False)
+    except pl.exceptions.PolarsError as error:
+        raise ValueError(f"V3 {source} frame close values must be numeric") from error
+    if (
+        normalized_close.null_count()
+        or not bool(normalized_close.is_finite().all())
+        or not bool((normalized_close > 0).all())
+    ):
+        raise ValueError(f"V3 {source} frame closes must be finite and positive")
+
+    expressions = [
+        normalized_dates.alias("date"),
+        normalized_close.alias("close"),
+    ]
+    normalized_volume: pl.Series | None = None
+    if "volume" in frame.columns:
+        if frame.schema["volume"] == pl.Boolean:
+            raise ValueError(f"V3 {source} frame volume values must be numeric")
+        try:
+            normalized_volume = frame["volume"].cast(pl.Float64, strict=False)
+        except pl.exceptions.PolarsError as error:
+            raise ValueError(f"V3 {source} frame volume values must be numeric") from error
+        if (
+            normalized_volume.null_count()
+            or not bool(normalized_volume.is_finite().all())
+            or not bool((normalized_volume >= 0).all())
+        ):
+            raise ValueError(f"V3 {source} frame volumes must be finite and nonnegative")
+        product = normalized_close * normalized_volume
+        if not bool(product.is_finite().all()):
+            raise ValueError(f"V3 {source} frame close-volume products must be finite")
+        expressions.append(normalized_volume.alias("volume"))
+
+    normalized = frame.with_columns(expressions)
+    if normalized["date"].n_unique() != normalized.height:
+        raise ValueError(f"V3 {source} frame contains duplicate normalized dates")
+    return normalized.sort("date")
+
+
+def _v3_factor_policy_payload(config: ScoringConfig) -> dict[str, Any]:
+    policy = config.short_scoring
+    if policy is None:
+        raise ValueError("V3 factor-policy provenance requires a short-scoring policy")
+    return {
+        "schema_version": policy.schema_version,
+        "macd_indicator": config.factor_policy.macd_indicator,
+        "abnormal_volume_indicator": config.factor_policy.abnormal_volume_indicator,
+        "liquidity_indicator": config.factor_policy.liquidity_indicator,
+        "strict_finite_inputs": config.factor_policy.strict_finite_inputs,
+        "rsi": {
+            "convention": policy.rsi.convention,
+            "window_sessions": policy.rsi.window_sessions,
+        },
+        "risk_window": {
+            "sessions": policy.risk_window.sessions,
+            "annualization_sessions": policy.risk_window.annualization_sessions,
+        },
+        "beta_roles": {
+            "factor_score": policy.beta_roles.factor_score,
+            "composite_risk": policy.beta_roles.composite_risk,
+        },
+        "factor_maps": {
+            name: transform.as_dict() for name, transform in policy.factor_maps.items()
+        },
+        "risk_penalty_maps": {
+            name: transform.as_dict() for name, transform in policy.risk_penalty_maps.items()
+        },
+        "buy_min_liquidity_20d": config.recommendation.buy_min_liquidity_20d,
+    }
+
+
 def compute_listing_analysis(
     *,
     listing: Listing,
@@ -191,9 +343,32 @@ def compute_listing_analysis(
     sample_support: dict[str, int] | None = None,
 ) -> AnalysisComputation:
     require_stock_research_listing(listing, operation="Stock analysis")
-    indicators = calculate_indicators(
-        price_frame, benchmark=benchmark_frame, windows=config.windows
-    )
+    calculation_price_frame = price_frame
+    calculation_benchmark_frame = benchmark_frame
+    common_risk_policy = None
+    if config.short_scoring is not None:
+        if listing.currency != "USD":
+            raise ValueError("us-price-baseline-v3 supports USD listings only")
+        calculation_price_frame = _prepare_v3_price_frame(price_frame, source="listing")
+        if benchmark_frame is not None:
+            calculation_benchmark_frame = _prepare_v3_price_frame(
+                benchmark_frame,
+                source="benchmark",
+            )
+        common_risk_policy = config.short_scoring.risk_window
+    if common_risk_policy is None:
+        indicators = calculate_indicators(
+            calculation_price_frame,
+            benchmark=calculation_benchmark_frame,
+            windows=config.windows,
+        )
+    else:
+        indicators = calculate_indicators(
+            calculation_price_frame,
+            benchmark=calculation_benchmark_frame,
+            windows=config.windows,
+            common_risk_policy=common_risk_policy,
+        )
     price = indicators.values.get("last_close")
     if price is None:
         raise ValueError(f"No usable price history for {listing}")
@@ -212,7 +387,7 @@ def compute_listing_analysis(
     )
     risk = assess_risk(indicators, fundamentals, config)
     scenarios = build_scenarios(
-        price_frame,
+        calculation_price_frame,
         indicators,
         fundamentals,
         aggregate,
@@ -230,6 +405,21 @@ def compute_listing_analysis(
     daily_change = indicators.values.get("return_1d")
     assets = _dedupe_assets(source_assets or [])
     asset_payload = [_asset_payload(asset) for asset in assets]
+    factor_policy = (
+        _v3_factor_policy_payload(config)
+        if config.short_scoring is not None
+        else {
+            "macd_indicator": config.factor_policy.macd_indicator,
+            "macd_score_low": config.factor_policy.macd_score_low,
+            "macd_score_high": config.factor_policy.macd_score_high,
+            "abnormal_volume_indicator": config.factor_policy.abnormal_volume_indicator,
+            "liquidity_indicator": config.factor_policy.liquidity_indicator,
+            "liquidity_score_low": config.factor_policy.liquidity_score_low,
+            "liquidity_score_high": config.factor_policy.liquidity_score_high,
+            "strict_finite_inputs": config.factor_policy.strict_finite_inputs,
+            "buy_min_liquidity_20d": config.recommendation.buy_min_liquidity_20d,
+        }
+    )
     data_quality = {
         "indicator_missing": indicators.missing,
         "fundamental_missing": fundamentals.missing,
@@ -244,17 +434,7 @@ def compute_listing_analysis(
         "analysis_mode": config.analysis_mode,
         "fundamentals_used": config.analysis_mode != "price_only_baseline",
         "supported_horizons": list(config.supported_horizons),
-        "factor_policy": {
-            "macd_indicator": config.factor_policy.macd_indicator,
-            "macd_score_low": config.factor_policy.macd_score_low,
-            "macd_score_high": config.factor_policy.macd_score_high,
-            "abnormal_volume_indicator": config.factor_policy.abnormal_volume_indicator,
-            "liquidity_indicator": config.factor_policy.liquidity_indicator,
-            "liquidity_score_low": config.factor_policy.liquidity_score_low,
-            "liquidity_score_high": config.factor_policy.liquidity_score_high,
-            "strict_finite_inputs": config.factor_policy.strict_finite_inputs,
-            "buy_min_liquidity_20d": config.recommendation.buy_min_liquidity_20d,
-        },
+        "factor_policy": factor_policy,
     }
     price_asset_metadata = (
         next(
@@ -309,22 +489,55 @@ def _compute_listing_from_asof(
     sample_support: dict[str, int] | None = None,
     target_date: date | None = None,
 ) -> AnalysisComputation:
+    if config.short_scoring is not None and listing.currency != "USD":
+        raise ValueError("us-price-baseline-v3 supports USD listings only")
     symbol = subject or listing.provider_symbol or listing.ticker
-    price_read = asof.price_frame_with_diagnostics(
-        provider=provider,
-        subject=symbol,
-        through_date=target_date,
-    )
-    price_asset = price_read.asset
-    price_frame = price_read.frame
-    benchmark_frame: pl.DataFrame | None = None
-    source_assets = [price_asset]
-    if benchmark_subject:
-        benchmark_read = asof.price_frame_with_diagnostics(
+    if config.short_scoring is not None:
+        selected_price_asset = asof.latest_asset(
             provider=provider,
-            subject=benchmark_subject,
+            kind="price_history",
+            subject=symbol,
+        )
+        price_read = asof.price_frame_for_asset_with_diagnostics(
+            asset=selected_price_asset,
             through_date=target_date,
         )
+    else:
+        price_read = asof.price_frame_with_diagnostics(
+            provider=provider,
+            subject=symbol,
+            through_date=target_date,
+        )
+    price_asset = price_read.asset
+    price_frame = price_read.frame
+    if config.short_scoring is not None and price_read.invalid_session_date_rows:
+        raise ValueError("V3 listing price history contains invalid session dates")
+    benchmark_frame: pl.DataFrame | None = None
+    source_assets = [price_asset]
+    if (
+        benchmark_subject is not None
+        if config.short_scoring is not None
+        else bool(benchmark_subject)
+    ):
+        assert benchmark_subject is not None
+        if config.short_scoring is not None:
+            selected_benchmark_asset = asof.latest_asset(
+                provider=provider,
+                kind="price_history",
+                subject=benchmark_subject,
+            )
+            benchmark_read = asof.price_frame_for_asset_with_diagnostics(
+                asset=selected_benchmark_asset,
+                through_date=target_date,
+            )
+        else:
+            benchmark_read = asof.price_frame_with_diagnostics(
+                provider=provider,
+                subject=benchmark_subject,
+                through_date=target_date,
+            )
+        if config.short_scoring is not None and benchmark_read.invalid_session_date_rows:
+            raise ValueError("V3 benchmark price history contains invalid session dates")
         benchmark_frame = benchmark_read.frame
         source_assets.append(benchmark_read.asset)
     facts: list[Any] = []
@@ -1116,12 +1329,18 @@ def analyze_listing(
     generated_at = decision_time or timezone.now()
     logical_target_date = target_date or generated_at.date()
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
-    run_issued_on_time = _issued_on_time(
-        universe_snapshot,
-        generated_at=generated_at,
-        target_date=logical_target_date,
-        explicit=issued_on_time,
-    )
+    config = load_scoring_config(config_path)
+    if config.version == V3_VERSION:
+        if issued_on_time is True:
+            raise ValueError("us-price-baseline-v3 on-time issuance requires analyze_snapshot")
+        run_issued_on_time = False
+    else:
+        run_issued_on_time = _issued_on_time(
+            universe_snapshot,
+            generated_at=generated_at,
+            target_date=logical_target_date,
+            explicit=issued_on_time,
+        )
     data_cutoff = _analysis_data_cutoff(
         generated_at,
         logical_target_date,
@@ -1135,7 +1354,6 @@ def analyze_listing(
         raise ValueError(
             f"Listing {listing.pk} is not an eligible member of snapshot {universe_snapshot.pk}"
         )
-    config = load_scoring_config(config_path)
     digest = config_hash(config)
     revision = code_revision()
     asset_store = store or open_asset_store()
@@ -1250,6 +1468,18 @@ def analyze_snapshot(
     generated_at = decision_time or timezone.now()
     if long_forecast_requested is not None and not isinstance(long_forecast_requested, bool):
         raise ValueError("long_forecast_requested must be a boolean")
+    logical_target_date = target_date or generated_at.date()
+    _validate_snapshot_for_target(universe_snapshot, logical_target_date)
+    config = load_scoring_config(config_path)
+    digest = config_hash(config)
+    validated_observed_v3_revision: str | None = None
+    if config.version == V3_VERSION and issued_on_time is True:
+        validated_observed_v3_revision = _validated_observed_v3_revision(
+            config=config,
+            config_hash_value=digest,
+            provider=provider,
+            benchmark_subject=benchmark_subject,
+        )
     # Freeze the mutable provider gate before the AnalysisRun, panel, or any
     # prediction output is written. Scheduled production supplies this
     # explicitly from its target-scoped market JobRun invocation details;
@@ -1259,22 +1489,25 @@ def analyze_snapshot(
         if long_forecast_requested is None
         else long_forecast_requested
     )
-    logical_target_date = target_date or generated_at.date()
-    _validate_snapshot_for_target(universe_snapshot, logical_target_date)
-    run_issued_on_time = _issued_on_time(
-        universe_snapshot,
-        generated_at=generated_at,
-        target_date=logical_target_date,
-        explicit=issued_on_time,
-    )
+    if config.version == V3_VERSION and issued_on_time is not True:
+        run_issued_on_time = False
+    else:
+        run_issued_on_time = _issued_on_time(
+            universe_snapshot,
+            generated_at=generated_at,
+            target_date=logical_target_date,
+            explicit=issued_on_time,
+        )
     data_cutoff = _analysis_data_cutoff(
         generated_at,
         logical_target_date,
         issued_on_time=run_issued_on_time,
     )
-    config = load_scoring_config(config_path)
-    digest = config_hash(config)
-    revision = code_revision()
+    revision = (
+        validated_observed_v3_revision
+        if validated_observed_v3_revision is not None
+        else code_revision()
+    )
     asset_store = store or open_asset_store()
     asof = AsOfData(generated_at, asset_store)
     memberships = list(

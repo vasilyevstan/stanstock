@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
 
+from stanstock.research.config import load_scoring_config
 from stanstock.research.indicators import calculate_indicators, median_dollar_volume
 
 
@@ -194,6 +196,135 @@ def test_invalid_recent_volume_withholds_liquidity_indicators() -> None:
     assert "avg_dollar_volume_20d" not in result.values
     assert "abnormal_volume_strict" not in result.values
     assert result.missing["avg_dollar_volume_20d"] == ("Recent volume observations must be finite")
+
+
+def _v3_risk_policy():
+    config = load_scoring_config(
+        Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v3.yml"
+    )
+    assert config.short_scoring is not None
+    return config.short_scoring.risk_window
+
+
+def _common_frames(rows: int) -> tuple[pl.DataFrame, pl.DataFrame]:
+    dates = [date(2024, 1, 1) + timedelta(days=index) for index in range(rows)]
+    asset = [90.0 + index * 0.08 + ((index % 9) - 4) * 0.17 for index in range(rows)]
+    benchmark = [100.0 + index * 0.05 + ((index % 13) - 6) * 0.11 for index in range(rows)]
+    return (
+        pl.DataFrame({"date": dates, "close": asset}),
+        pl.DataFrame({"date": dates, "close": benchmark}),
+    )
+
+
+def test_v3_common_risk_uses_252_closes_but_relative_252_needs_253() -> None:
+    policy = _v3_risk_policy()
+    asset_251, benchmark_251 = _common_frames(251)
+    asset_252, benchmark_252 = _common_frames(252)
+    asset_253, benchmark_253 = _common_frames(253)
+
+    short = calculate_indicators(
+        asset_251,
+        benchmark=benchmark_251,
+        common_risk_policy=policy,
+    )
+    boundary = calculate_indicators(
+        asset_252,
+        benchmark=benchmark_252,
+        common_risk_policy=policy,
+    )
+    overlap = calculate_indicators(
+        asset_253,
+        benchmark=benchmark_253,
+        common_risk_policy=policy,
+    )
+
+    assert "annualized_volatility" not in short.values
+    assert "beta" not in short.values
+    assert short.missing["annualized_volatility"] == "Need at least 252 common closes"
+    assert {
+        "annualized_volatility",
+        "downside_volatility",
+        "max_drawdown",
+        "beta",
+    } <= set(boundary.values)
+    assert "relative_return_252d" not in boundary.values
+    assert boundary.missing["relative_return_252d"] == "Need 253 overlapping closes"
+    assert "relative_return_252d" in overlap.values
+
+
+def test_v3_common_risk_is_invariant_to_older_noncommon_history() -> None:
+    policy = _v3_risk_policy()
+    asset, benchmark = _common_frames(252)
+    prefix_dates = [date(2023, 11, 1) + timedelta(days=index) for index in range(30)]
+    prefixed_asset = pl.concat(
+        [
+            pl.DataFrame(
+                {
+                    "date": prefix_dates,
+                    "close": [60.0 + index * 0.4 for index in range(30)],
+                }
+            ),
+            asset,
+        ]
+    )
+    prefixed_benchmark = pl.concat(
+        [
+            pl.DataFrame(
+                {
+                    "date": prefix_dates,
+                    "close": [80.0 + index * 0.2 for index in range(30)],
+                }
+            ),
+            benchmark,
+        ]
+    )
+
+    baseline = calculate_indicators(asset, benchmark=benchmark, common_risk_policy=policy)
+    prefixed = calculate_indicators(
+        prefixed_asset,
+        benchmark=prefixed_benchmark,
+        common_risk_policy=policy,
+    )
+
+    for key in ("annualized_volatility", "downside_volatility", "max_drawdown", "beta"):
+        assert prefixed.values[key] == pytest.approx(baseline.values[key])
+
+
+def test_v3_common_risk_latest_misalignment_and_omission_are_insufficient() -> None:
+    policy = _v3_risk_policy()
+    asset, benchmark = _common_frames(253)
+    misaligned = benchmark.head(252)
+
+    mismatch = calculate_indicators(
+        asset,
+        benchmark=misaligned,
+        common_risk_policy=policy,
+    )
+    omitted = calculate_indicators(asset, common_risk_policy=policy)
+
+    for key in ("annualized_volatility", "downside_volatility", "max_drawdown", "beta"):
+        assert key not in mismatch.values
+        assert mismatch.missing[key] == "Asset and benchmark latest dates do not match"
+        assert key not in omitted.values
+        assert omitted.missing[key] == "Common-risk benchmark is omitted"
+
+
+def test_v3_zero_benchmark_variance_withholds_only_beta_metric() -> None:
+    policy = _v3_risk_policy()
+    asset, benchmark = _common_frames(252)
+    benchmark = benchmark.with_columns(pl.lit(100.0).alias("close"))
+
+    result = calculate_indicators(
+        asset,
+        benchmark=benchmark,
+        common_risk_policy=policy,
+    )
+
+    assert "annualized_volatility" in result.values
+    assert "downside_volatility" in result.values
+    assert "max_drawdown" in result.values
+    assert "beta" not in result.values
+    assert result.missing["beta"] == "Benchmark return variance is zero"
 
 
 # ---------------------------------------------------------------------------

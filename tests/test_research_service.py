@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
+from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
@@ -12,19 +13,25 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 from django.test import override_settings
 from django.utils import timezone
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from stanstock.data.asof import AsOfData, PriceFrameChecksumMismatchError
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.management.config_loader import default_us_scoring_config_path
 from stanstock.data.models import (
     Company,
+    DataAsset,
     FundamentalFact,
     Listing,
+    ProviderRecord,
     Region,
     Security,
     Universe,
     UniverseMembership,
     UniverseSnapshot,
 )
+from stanstock.research.config import V3_EFFECTIVE_CONFIG_HASH, load_scoring_config
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -41,6 +48,7 @@ from stanstock.research.service import (
     analyze_listing,
     analyze_snapshot,
     append_predictions,
+    compute_listing_analysis,
 )
 
 
@@ -520,6 +528,1685 @@ def test_price_only_analysis_ignores_fundamentals_and_persists_only_short_predic
     reissued = Prediction.objects.get(model_version="price-only-reissue")
     assert reissued.horizon == Prediction.Horizon.SHORT
     assert reissued.issued_on_time is False
+
+
+@pytest.mark.django_db
+def test_v2_retains_convenience_price_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    calls: list[str] = []
+    original = AsOfData.price_frame_with_diagnostics
+
+    def convenience(self, *, provider, subject, through_date=None):
+        calls.append(subject)
+        return original(
+            self,
+            provider=provider,
+            subject=subject,
+            through_date=through_date,
+        )
+
+    monkeypatch.setattr(AsOfData, "price_frame_with_diagnostics", convenience)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        lambda *_args, **_kwargs: pytest.fail("v2 must retain its convenience reader"),
+    )
+
+    analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        store=store,
+        config_path=default_us_scoring_config_path(),
+    )
+
+    assert calls == [listing.ticker]
+
+
+def _v3_config_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "config/scoring/us-price-baseline-v3.yml"
+
+
+def _stored_file_paths(root: Path) -> set[str]:
+    return {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.django_db
+def test_v3_selects_and_exact_reads_each_requested_source_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    listing_asset = _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    benchmark_asset = _register_price_asset(store, "V3BENCH", now - timedelta(minutes=5))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_with_diagnostics",
+        lambda *_args, **_kwargs: pytest.fail("v3 must not use the convenience reader"),
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        benchmark_subject="V3BENCH",
+        store=store,
+        config_path=_v3_config_path(),
+    )
+
+    assert selections == [listing.ticker, "V3BENCH"]
+    assert reads == [listing.ticker, "V3BENCH"]
+    assert persisted.run.config_version == "us-price-baseline-v3"
+    assert persisted.run.generated_at == now
+    assert persisted.run.data_cutoff == now
+    assert len(persisted.predictions) == 1
+    assert persisted.predictions[0].horizon == Prediction.Horizon.SHORT
+    assert {entry["id"] for entry in persisted.computation.source_assets} == {
+        str(listing_asset.id),
+        str(benchmark_asset.id),
+    }
+    assert {entry["sha256"] for entry in persisted.computation.source_assets} == {
+        listing_asset.sha256,
+        benchmark_asset.sha256,
+    }
+    assert len(persisted.analysis.component_scores["factors"]) == 16
+    assert set(persisted.analysis.data_quality["factor_policy"]) == {
+        "schema_version",
+        "macd_indicator",
+        "abnormal_volume_indicator",
+        "liquidity_indicator",
+        "strict_finite_inputs",
+        "rsi",
+        "risk_window",
+        "beta_roles",
+        "factor_maps",
+        "risk_penalty_maps",
+        "buy_min_liquidity_20d",
+    }
+
+
+@pytest.mark.django_db
+def test_v3_omitted_benchmark_performs_zero_benchmark_source_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        benchmark_subject=None,
+        store=store,
+        config_path=_v3_config_path(),
+    )
+
+    assert selections == [listing.ticker]
+    assert reads == [listing.ticker]
+    assert persisted.computation.risk_score is None
+    assert persisted.computation.risk_class == RiskClass.INSUFFICIENT
+    assert persisted.computation.scenarios["short"].bear is not None
+    assert len(persisted.computation.source_assets) == 1
+    assert "benchmark" in persisted.computation.indicators.missing["annualized_volatility"].lower()
+
+
+@pytest.mark.django_db
+def test_v3_requested_missing_benchmark_propagates_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+
+    with pytest.raises(DataAsset.DoesNotExist):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=now,
+            provider="synthetic",
+            benchmark_subject="MISSING",
+            store=store,
+            config_path=_v3_config_path(),
+        )
+
+    assert selections == [listing.ticker, "MISSING"]
+    assert reads == [listing.ticker]
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="analysis_output_manifest").count() == 0
+
+
+@pytest.mark.django_db
+def test_v3_selected_corrupt_benchmark_attempts_exact_read_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    benchmark_asset = _register_price_asset(
+        store,
+        "CORRUPT",
+        now - timedelta(minutes=5),
+    )
+    corrupt_frame = pl.DataFrame(
+        {
+            "date": [date(2025, 1, 1) + timedelta(days=index) for index in range(280)],
+            "close": [200.0 + index * 0.1 for index in range(280)],
+        }
+    )
+    corrupt_frame.write_parquet(store.resolve(benchmark_asset.relative_path))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+
+    with pytest.raises(PriceFrameChecksumMismatchError):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=now,
+            provider="synthetic",
+            benchmark_subject="CORRUPT",
+            store=store,
+            config_path=_v3_config_path(),
+        )
+
+    assert selections == [listing.ticker, "CORRUPT"]
+    assert reads == [listing.ticker, "CORRUPT"]
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(pk=benchmark_asset.pk).exists()
+    assert store.resolve(benchmark_asset.relative_path).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entry_point", ["listing", "snapshot"])
+@pytest.mark.parametrize("source_state", ["missing", "corrupt"])
+def test_v3_listing_source_failure_matrix_is_atomic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: str,
+    source_state: str,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    source_asset = None
+    if source_state == "corrupt":
+        source_asset = _register_price_asset(
+            store,
+            listing.ticker,
+            now - timedelta(minutes=5),
+        )
+        pl.DataFrame(
+            {
+                "date": [date(2025, 1, 1) + timedelta(days=index) for index in range(280)],
+                "close": [75.0 + index * 0.1 for index in range(280)],
+            }
+        ).write_parquet(store.resolve(source_asset.relative_path))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+    expected_error = (
+        DataAsset.DoesNotExist if source_state == "missing" else PriceFrameChecksumMismatchError
+    )
+
+    with pytest.raises(expected_error):
+        if entry_point == "listing":
+            analyze_listing(
+                listing=listing,
+                universe_snapshot=snapshot,
+                decision_time=now,
+                provider="synthetic",
+                store=store,
+                config_path=_v3_config_path(),
+            )
+        else:
+            analyze_snapshot(
+                universe_snapshot=snapshot,
+                decision_time=now,
+                provider="synthetic",
+                store=store,
+                config_path=_v3_config_path(),
+                long_forecast_requested=False,
+            )
+
+    assert selections == [listing.ticker]
+    assert reads == ([] if source_state == "missing" else [listing.ticker])
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="analysis_output_manifest").count() == 0
+    if source_asset is not None:
+        assert DataAsset.objects.filter(pk=source_asset.pk).exists()
+        assert store.resolve(source_asset.relative_path).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entry_point", ["listing", "snapshot"])
+@pytest.mark.parametrize("source_state", ["missing", "corrupt"])
+def test_v3_requested_benchmark_failure_matrix_is_atomic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: str,
+    source_state: str,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    benchmark_asset = None
+    if source_state == "corrupt":
+        benchmark_asset = _register_price_asset(
+            store,
+            "MATRIXBENCH",
+            now - timedelta(minutes=5),
+        )
+        pl.DataFrame(
+            {
+                "date": [date(2025, 1, 1) + timedelta(days=index) for index in range(280)],
+                "close": [150.0 + index * 0.1 for index in range(280)],
+            }
+        ).write_parquet(store.resolve(benchmark_asset.relative_path))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+    expected_error = (
+        DataAsset.DoesNotExist if source_state == "missing" else PriceFrameChecksumMismatchError
+    )
+
+    with pytest.raises(expected_error):
+        kwargs = {
+            "universe_snapshot": snapshot,
+            "decision_time": now,
+            "provider": "synthetic",
+            "benchmark_subject": "MATRIXBENCH",
+            "store": store,
+            "config_path": _v3_config_path(),
+        }
+        if entry_point == "listing":
+            analyze_listing(listing=listing, **kwargs)
+        else:
+            analyze_snapshot(long_forecast_requested=False, **kwargs)
+
+    assert selections == [listing.ticker, "MATRIXBENCH"]
+    assert reads == (
+        [listing.ticker] if source_state == "missing" else [listing.ticker, "MATRIXBENCH"]
+    )
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="analysis_output_manifest").count() == 0
+    if benchmark_asset is not None:
+        assert DataAsset.objects.filter(pk=benchmark_asset.pk).exists()
+        assert store.resolve(benchmark_asset.relative_path).exists()
+
+
+@pytest.mark.django_db
+def test_v3_snapshot_repeats_benchmark_selection_and_exact_read_per_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing_one, snapshot = _listing_and_snapshot()
+    listing_two = _add_listing_to_snapshot(snapshot)
+    store = AssetStore(tmp_path)
+    now = timezone.now()
+    for listing in (listing_one, listing_two):
+        _register_price_asset(store, listing.ticker, now - timedelta(minutes=5))
+    _register_price_asset(store, "SNAPBENCH", now - timedelta(minutes=5))
+    selections: list[str] = []
+    reads: list[str] = []
+    original_select = AsOfData.latest_asset
+    original_read = AsOfData.price_frame_for_asset_with_diagnostics
+
+    def select(self, *, provider, kind, subject):
+        selections.append(subject)
+        return original_select(self, provider=provider, kind=kind, subject=subject)
+
+    def exact_read(self, *, asset, through_date=None):
+        reads.append(asset.subject)
+        return original_read(self, asset=asset, through_date=through_date)
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        exact_read,
+    )
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=now,
+        provider="synthetic",
+        benchmark_subject="SNAPBENCH",
+        store=store,
+        config_path=_v3_config_path(),
+        long_forecast_requested=False,
+    )
+
+    assert len(results) == 2
+    assert selections.count("SNAPBENCH") == 2
+    assert reads.count("SNAPBENCH") == 2
+    assert len(selections) == len(reads) == 4
+    assert Prediction.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_v3_refuses_non_usd_listing_before_source_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    listing.currency = "EUR"
+    listing.save(update_fields=["currency"])
+    calls = 0
+
+    def select(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("non-USD v3 must fail before persisted-source selection")
+
+    monkeypatch.setattr(AsOfData, "latest_asset", select)
+
+    with pytest.raises(ValueError, match="USD listings only"):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=timezone.now(),
+            provider="synthetic",
+            store=AssetStore(tmp_path),
+            config_path=_v3_config_path(),
+        )
+
+    assert calls == 0
+    assert AnalysisRun.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_v3_direct_validation_normalizes_independent_row_permutations() -> None:
+    listing, _snapshot = _listing_and_snapshot()
+    config = load_scoring_config(_v3_config_path())
+    rows = 300
+    dates = [date(2025, 1, 1) + timedelta(days=index) for index in range(rows)]
+    frame = pl.DataFrame(
+        {
+            "date": dates,
+            "close": [80.0 + index * 0.1 + (index % 7) * 0.03 for index in range(rows)],
+            "volume": [1_000_000.0 + index * 100 for index in range(rows)],
+        }
+    )
+    benchmark = pl.DataFrame(
+        {
+            "date": dates,
+            "close": [100.0 + index * 0.06 + (index % 11) * 0.02 for index in range(rows)],
+        }
+    )
+    decision_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    canonical = compute_listing_analysis(
+        listing=listing,
+        price_frame=frame,
+        benchmark_frame=benchmark,
+        config=config,
+        decision_time=decision_time,
+        sample_support={"short": 100},
+    )
+    permutations = (
+        (frame.reverse(), benchmark),
+        (frame, benchmark.reverse()),
+        (frame.reverse(), benchmark.reverse()),
+    )
+
+    for permuted_frame, permuted_benchmark in permutations:
+        permuted = compute_listing_analysis(
+            listing=listing,
+            price_frame=permuted_frame,
+            benchmark_frame=permuted_benchmark,
+            config=config,
+            decision_time=decision_time,
+            sample_support={"short": 100},
+        )
+        assert permuted.indicators == canonical.indicators
+        assert {key: scenario.as_dict() for key, scenario in permuted.scenarios.items()} == {
+            key: scenario.as_dict() for key, scenario in canonical.scenarios.items()
+        }
+        assert permuted.aggregate == canonical.aggregate
+        assert permuted.risk_score == canonical.risk_score
+        assert permuted.recommendation == canonical.recommendation
+        assert (
+            permuted.data_quality["recommendation_gates"]
+            == (canonical.data_quality["recommendation_gates"])
+        )
+
+
+@pytest.mark.django_db
+def test_v3_passes_the_same_normalized_asset_frame_to_indicators_and_scenarios(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stanstock.research.service as service_module
+
+    listing, _snapshot = _listing_and_snapshot()
+    config = load_scoring_config(_v3_config_path())
+    frame, benchmark = _scale_fixture(base_price=30.0, volume=1_000_000.0)
+    frame = frame.reverse()
+    seen: list[pl.DataFrame] = []
+    original_indicators = service_module.calculate_indicators
+    original_scenarios = service_module.build_scenarios
+
+    def indicators(asset_frame, **kwargs):
+        seen.append(asset_frame)
+        return original_indicators(asset_frame, **kwargs)
+
+    def scenarios(asset_frame, *args, **kwargs):
+        seen.append(asset_frame)
+        return original_scenarios(asset_frame, *args, **kwargs)
+
+    monkeypatch.setattr(service_module, "calculate_indicators", indicators)
+    monkeypatch.setattr(service_module, "build_scenarios", scenarios)
+
+    compute_listing_analysis(
+        listing=listing,
+        price_frame=frame,
+        benchmark_frame=benchmark,
+        config=config,
+        decision_time=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert seen[0]["date"].is_sorted()
+
+
+def _scale_fixture(
+    *,
+    base_price: float,
+    volume: float,
+    rows: int = 300,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    dates = [date(2025, 1, 1) + timedelta(days=index) for index in range(rows)]
+    closes = [
+        base_price * (1.0 + index * 0.0007 + ((index % 9) - 4) * 0.0008) for index in range(rows)
+    ]
+    asset = pl.DataFrame(
+        {
+            "date": dates,
+            "open": [close * 0.997 for close in closes],
+            "high": [close * 1.008 for close in closes],
+            "low": [close * 0.992 for close in closes],
+            "close": closes,
+            "volume": [volume * (1.0 + (index % 7) * 0.01) for index in range(rows)],
+        }
+    )
+    benchmark = pl.DataFrame(
+        {
+            "date": dates,
+            "close": [
+                100.0 * (1.0 + index * 0.0004 + ((index % 11) - 5) * 0.0005)
+                for index in range(rows)
+            ],
+        }
+    )
+    return asset, benchmark
+
+
+def _assert_v3_normalized_outputs_equal(left, right) -> None:
+    for key in (
+        "return_20d",
+        "return_63d",
+        "return_126d",
+        "close_vs_sma_50",
+        "close_vs_sma_200",
+        "rsi_14",
+        "macd_histogram_pct",
+        "52w_position",
+        "abnormal_volume_strict",
+        "avg_dollar_volume_20d",
+        "annualized_volatility",
+        "downside_volatility",
+        "max_drawdown",
+        "beta",
+        "relative_return_20d",
+        "relative_return_63d",
+        "relative_return_252d",
+    ):
+        assert right.indicators.values[key] == pytest.approx(left.indicators.values[key])
+    assert right.indicators.missing == left.indicators.missing
+    assert right.aggregate.component_scores.factor_scores == pytest.approx(
+        left.aggregate.component_scores.factor_scores
+    )
+    assert right.aggregate.component_scores.components == pytest.approx(
+        left.aggregate.component_scores.components
+    )
+    assert right.aggregate.component_scores.coverage == left.aggregate.component_scores.coverage
+    assert right.aggregate.horizon_scores == pytest.approx(left.aggregate.horizon_scores)
+    assert right.aggregate.overall == pytest.approx(left.aggregate.overall)
+    assert right.aggregate.confidence == pytest.approx(left.aggregate.confidence)
+    assert right.aggregate.missingness_penalty == pytest.approx(left.aggregate.missingness_penalty)
+    assert right.aggregate.freshness_penalty == pytest.approx(left.aggregate.freshness_penalty)
+    assert right.risk_score == pytest.approx(left.risk_score)
+    assert right.risk_class == left.risk_class
+    assert right.recommendation == left.recommendation
+    assert right.data_quality["recommendation_gates"] == left.data_quality["recommendation_gates"]
+    assert right.reasons == left.reasons
+    assert right.risks == left.risks
+    for horizon in ("short", "medium", "long"):
+        left_scenario = left.scenarios[horizon]
+        right_scenario = right.scenarios[horizon]
+        for field in ("bear", "base", "bull", "probability_positive", "confidence"):
+            left_value = getattr(left_scenario, field)
+            right_value = getattr(right_scenario, field)
+            if left_value is None:
+                assert right_value is None
+            else:
+                assert right_value == pytest.approx(left_value)
+        assert right_scenario.confidence_status == left_scenario.confidence_status
+        assert right_scenario.insufficiency_reason == left_scenario.insufficiency_reason
+        assert right_scenario.method == left_scenario.method
+
+
+@pytest.mark.django_db
+@settings(max_examples=8, deadline=None)
+@given(
+    k=st.floats(min_value=0.2, max_value=12.0, allow_nan=False, allow_infinity=False),
+    base_price=st.floats(
+        min_value=5.0,
+        max_value=500.0,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
+    volume=st.floats(
+        min_value=100_000.0,
+        max_value=10_000_000.0,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
+)
+def test_v3_compatible_price_volume_transform_preserves_normalized_decision(
+    k: float,
+    base_price: float,
+    volume: float,
+) -> None:
+    listing, _snapshot = _listing_and_snapshot()
+    config = load_scoring_config(_v3_config_path())
+    frame, benchmark = _scale_fixture(base_price=base_price, volume=volume)
+    transformed = frame.with_columns(
+        *((pl.col(column) * k).alias(column) for column in ("open", "high", "low", "close")),
+        (pl.col("volume") / k).alias("volume"),
+    )
+    kwargs = {
+        "listing": listing,
+        "benchmark_frame": benchmark,
+        "config": config,
+        "decision_time": datetime(2026, 1, 1, tzinfo=UTC),
+        "sample_support": {"short": 100},
+    }
+
+    baseline = compute_listing_analysis(price_frame=frame, **kwargs)
+    scaled = compute_listing_analysis(price_frame=transformed, **kwargs)
+
+    _assert_v3_normalized_outputs_equal(baseline, scaled)
+    for key in (
+        "last_close",
+        "sma_20",
+        "sma_50",
+        "sma_100",
+        "sma_200",
+        "ema_12",
+        "ema_20",
+        "ema_26",
+        "macd",
+        "macd_signal",
+        "macd_histogram",
+        "atr_14",
+    ):
+        assert scaled.indicators.values[key] == pytest.approx(baseline.indicators.values[key] * k)
+    assert scaled.indicators.values["avg_volume_20d"] == pytest.approx(
+        baseline.indicators.values["avg_volume_20d"] / k
+    )
+    assert scaled.current_price == pytest.approx(baseline.current_price * k)
+
+
+@pytest.mark.django_db
+@settings(max_examples=8, deadline=None)
+@given(
+    k=st.floats(
+        min_value=1.01,
+        max_value=24.99,
+        allow_nan=False,
+        allow_infinity=False,
+    )
+)
+def test_v3_fixed_volume_price_scale_changes_dollar_turnover_by_k(k: float) -> None:
+    listing, _snapshot = _listing_and_snapshot()
+    config = load_scoring_config(_v3_config_path())
+    provisional, benchmark = _scale_fixture(base_price=40.0, volume=1.0)
+    target_turnover = 5_000_000.0 / (k**0.5)
+    volume = target_turnover / float(provisional["close"].tail(20).mean())
+    frame = provisional.with_columns(pl.lit(volume).alias("volume"))
+    transformed = frame.with_columns(
+        *((pl.col(column) * k).alias(column) for column in ("open", "high", "low", "close"))
+    )
+    kwargs = {
+        "listing": listing,
+        "benchmark_frame": benchmark,
+        "config": config,
+        "decision_time": datetime(2026, 1, 1, tzinfo=UTC),
+        "sample_support": {"short": 100},
+    }
+
+    baseline = compute_listing_analysis(price_frame=frame, **kwargs)
+    scaled = compute_listing_analysis(price_frame=transformed, **kwargs)
+
+    assert baseline.indicators.values["avg_dollar_volume_20d"] == pytest.approx(target_turnover)
+    assert scaled.indicators.values["avg_dollar_volume_20d"] == pytest.approx(target_turnover * k)
+    assert target_turnover < 5_000_000 < target_turnover * k
+    assert (
+        scaled.aggregate.component_scores.factor_scores["risk.avg_volume"]
+        > (baseline.aggregate.component_scores.factor_scores["risk.avg_volume"])
+    )
+    assert (
+        scaled.aggregate.component_scores.components["risk_liquidity"]
+        > (baseline.aggregate.component_scores.components["risk_liquidity"])
+    )
+    assert scaled.aggregate.overall > baseline.aggregate.overall
+    assert baseline.data_quality["recommendation_gates"]["buy_liquidity"] is False
+    assert scaled.data_quality["recommendation_gates"]["buy_liquidity"] is True
+    for key in (
+        "return_20d",
+        "rsi_14",
+        "macd_histogram_pct",
+        "annualized_volatility",
+        "downside_volatility",
+        "max_drawdown",
+        "beta",
+    ):
+        assert scaled.indicators.values[key] == pytest.approx(baseline.indicators.values[key])
+    assert scaled.risk_score == pytest.approx(baseline.risk_score)
+    assert scaled.aggregate.confidence == baseline.aggregate.confidence
+    assert scaled.aggregate.component_scores.coverage == (
+        baseline.aggregate.component_scores.coverage
+    )
+    for horizon in ("short", "medium", "long"):
+        assert scaled.scenarios[horizon].as_dict() == pytest.approx(
+            baseline.scenarios[horizon].as_dict()
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("date", None, "null dates"),
+        ("close", None, "finite and positive"),
+        ("close", 0.0, "finite and positive"),
+        ("close", float("nan"), "finite and positive"),
+        ("volume", -1.0, "finite and nonnegative"),
+        ("volume", float("inf"), "finite and nonnegative"),
+    ],
+)
+def test_v3_direct_validation_rejects_malformed_rows_before_lossy_preparation(
+    column: str,
+    value,
+    message: str,
+) -> None:
+    listing, _snapshot = _listing_and_snapshot()
+    config = load_scoring_config(_v3_config_path())
+    frame = pl.DataFrame(
+        {
+            "date": [date(2026, 1, 1), date(2026, 1, 2)],
+            "close": [10.0, 11.0],
+            "volume": [100.0, 101.0],
+        }
+    ).with_columns(
+        pl.when(pl.int_range(pl.len()) == 0)
+        .then(pl.lit(value))
+        .otherwise(pl.col(column))
+        .alias(column)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        compute_listing_analysis(
+            listing=listing,
+            price_frame=frame,
+            config=config,
+            decision_time=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("frame", "message"),
+    [
+        (
+            pl.DataFrame(
+                {
+                    "date": [date(2026, 1, 1), date(2026, 1, 1)],
+                    "close": [10.0, 11.0],
+                }
+            ),
+            "duplicate normalized dates",
+        ),
+        (
+            pl.DataFrame({"date": [1, 2], "close": [10.0, 11.0]}),
+            "unsupported date dtype",
+        ),
+        (
+            pl.DataFrame(
+                {
+                    "date": ["2026-1-01", "2026-01-02"],
+                    "close": [10.0, 11.0],
+                }
+            ),
+            "strict ISO",
+        ),
+        (
+            pl.DataFrame(
+                {
+                    "date": [date(2026, 1, 1), date(2026, 1, 2)],
+                    "close": [1e308, 1e308],
+                    "volume": [1e308, 1e308],
+                }
+            ),
+            "products must be finite",
+        ),
+    ],
+    ids=["duplicate-date", "unsupported-date", "non-iso-date", "overflow-product"],
+)
+def test_v3_direct_validation_rejects_ambiguous_identity_and_products(
+    frame: pl.DataFrame,
+    message: str,
+) -> None:
+    listing, _snapshot = _listing_and_snapshot()
+
+    with pytest.raises(ValueError, match=message):
+        compute_listing_analysis(
+            listing=listing,
+            price_frame=frame,
+            config=load_scoring_config(_v3_config_path()),
+            decision_time=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.django_db
+def test_v3_preserves_reported_zero_volume_as_numeric_zero() -> None:
+    listing, _snapshot = _listing_and_snapshot()
+    frame, benchmark = _scale_fixture(base_price=20.0, volume=0.0)
+
+    result = compute_listing_analysis(
+        listing=listing,
+        price_frame=frame,
+        benchmark_frame=benchmark,
+        config=load_scoring_config(_v3_config_path()),
+        decision_time=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert result.indicators.values["avg_volume_20d"] == 0.0
+    assert result.indicators.values["avg_dollar_volume_20d"] == 0.0
+    assert result.indicators.values["abnormal_volume_strict"] == 0.0
+    assert result.aggregate.component_scores.factor_scores["risk.avg_volume"] == 0.0
+    assert result.aggregate.component_scores.factor_scores["risk.abnormal_volume"] == 0.0
+    assert result.data_quality["recommendation_gates"]["buy_liquidity_present"] is True
+    assert result.data_quality["recommendation_gates"]["buy_liquidity"] is False
+
+
+@pytest.mark.django_db
+def test_v3_asof_clipping_makes_post_target_rows_irrelevant(tmp_path: Path) -> None:
+    target = date(2026, 1, 31)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    eligible_dates = [target - timedelta(days=299 - index) for index in range(300)]
+    future_dates = [target + timedelta(days=index) for index in range(1, 6)]
+    asset_closes = [50.0 + index * 0.05 + (index % 7) * 0.02 for index in range(300)]
+    benchmark_closes = [100.0 + index * 0.03 + (index % 11) * 0.01 for index in range(300)]
+    available_at = datetime(2026, 2, 5, tzinfo=UTC)
+    _register_explicit_price_asset(
+        store,
+        listing.ticker,
+        available_at,
+        eligible_dates + future_dates,
+        asset_closes + [10_000.0] * len(future_dates),
+    )
+    _register_explicit_price_asset(
+        store,
+        "CLIPBENCH",
+        available_at,
+        eligible_dates + future_dates,
+        benchmark_closes + [1.0] * len(future_dates),
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=datetime(2026, 2, 6, tzinfo=UTC),
+        target_date=target,
+        issued_on_time=False,
+        provider="synthetic",
+        benchmark_subject="CLIPBENCH",
+        store=store,
+        config_path=_v3_config_path(),
+    )
+    direct = compute_listing_analysis(
+        listing=listing,
+        price_frame=pl.DataFrame(
+            {
+                "date": eligible_dates,
+                "open": [close - 0.1 for close in asset_closes],
+                "high": [close + 0.8 for close in asset_closes],
+                "low": [close - 0.8 for close in asset_closes],
+                "close": asset_closes,
+                "volume": [500_000 + index * 1_000 for index in range(300)],
+            }
+        ),
+        benchmark_frame=pl.DataFrame({"date": eligible_dates, "close": benchmark_closes}),
+        config=load_scoring_config(_v3_config_path()),
+        decision_time=datetime.combine(target, datetime.max.time(), tzinfo=UTC),
+    )
+
+    assert persisted.computation.indicators.last_date == target
+    assert persisted.computation.indicators.values == pytest.approx(direct.indicators.values)
+    assert persisted.computation.aggregate.overall == pytest.approx(direct.aggregate.overall)
+    assert persisted.computation.risk_score == pytest.approx(direct.risk_score)
+    assert persisted.computation.recommendation == direct.recommendation
+
+
+@pytest.mark.django_db
+def test_v3_analyze_listing_omitted_flag_is_non_on_time_and_non_reportable(
+    tmp_path: Path,
+) -> None:
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        listing.ticker,
+        generated_at - timedelta(minutes=5),
+        provider="twelve_data",
+    )
+
+    persisted = analyze_listing(
+        listing=listing,
+        universe_snapshot=snapshot,
+        decision_time=generated_at,
+        provider="twelve_data",
+        store=store,
+        config_path=_v3_config_path(),
+    )
+
+    prediction = persisted.predictions[0]
+    assert snapshot.grade == UniverseSnapshot.Grade.OBSERVED
+    assert persisted.run.issued_on_time is False
+    assert prediction.issued_on_time is False
+    assert prediction.source_mode == Prediction.SourceMode.PROVIDER
+    assert not Prediction.objects.filter(reportable_prediction_filter()).exists()
+    assert not Prediction.objects.filter(canonical_reportable_prediction_filter()).exists()
+
+
+@pytest.mark.django_db
+def test_v3_analyze_listing_explicit_true_raises_without_output(tmp_path: Path) -> None:
+    target = date(2026, 9, 4)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+
+    with pytest.raises(ValueError, match="on-time issuance requires analyze_snapshot"):
+        analyze_listing(
+            listing=listing,
+            universe_snapshot=snapshot,
+            decision_time=datetime(2026, 9, 4, 21, tzinfo=UTC),
+            issued_on_time=True,
+            provider="twelve_data",
+            store=AssetStore(tmp_path),
+            config_path=_v3_config_path(),
+        )
+
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="analysis_output_manifest").count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("issued_on_time", [None, False], ids=("omitted", "explicit-false"))
+def test_v3_analyze_snapshot_research_flags_remain_unbound_and_non_on_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    issued_on_time: bool | None,
+) -> None:
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    _register_price_asset(store, listing.ticker, generated_at - timedelta(minutes=5))
+    monkeypatch.delenv("STANSTOCK_CODE_REVISION", raising=False)
+    monkeypatch.setattr(
+        "stanstock.research.service.clean_git_revision",
+        lambda *_args, **_kwargs: pytest.fail("research v3 must not validate a clean revision"),
+    )
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=generated_at,
+        issued_on_time=issued_on_time,
+        provider="synthetic",
+        store=store,
+        config_path=_v3_config_path(),
+        long_forecast_requested=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].run.issued_on_time is False
+    assert all(not prediction.issued_on_time for prediction in results[0].predictions)
+
+
+@pytest.mark.django_db
+def test_v3_analyze_snapshot_explicit_true_can_be_on_time_when_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    for subject in (listing.ticker, "SPY"):
+        _register_price_asset(
+            store,
+            subject,
+            generated_at - timedelta(minutes=5),
+            provider="twelve_data",
+        )
+    revision = "d6374eb8a25361eb813e1ca79086a696588e1585"
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", revision)
+    monkeypatch.setattr("stanstock.research.service.clean_git_revision", lambda _root: revision)
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=generated_at,
+        target_date=target,
+        issued_on_time=True,
+        provider="twelve_data",
+        benchmark_subject="SPY",
+        store=store,
+        config_path=_v3_config_path(),
+        long_forecast_requested=False,
+    )
+
+    assert len(results) == 1
+    persisted = results[0]
+    assert persisted.run.issued_on_time is True
+    assert persisted.run.config_version == "us-price-baseline-v3"
+    assert persisted.run.config_hash == V3_EFFECTIVE_CONFIG_HASH
+    assert persisted.run.code_revision == revision
+    assert persisted.run.universe_snapshot.grade == UniverseSnapshot.Grade.OBSERVED
+    assert len(persisted.predictions) == 1
+    prediction = persisted.predictions[0]
+    assert prediction.horizon == Prediction.Horizon.SHORT
+    assert prediction.issued_on_time is True
+    assert prediction.config_hash == V3_EFFECTIVE_CONFIG_HASH
+    assert prediction.code_revision == revision
+    assert prediction.price_provider == "twelve_data"
+    assert prediction.price_subject == listing.ticker
+    assert prediction.evidence_grade == UniverseSnapshot.Grade.OBSERVED
+    assert prediction.source_mode == Prediction.SourceMode.PROVIDER
+    assert {asset["subject"] for asset in prediction.source_assets} == {
+        listing.ticker,
+        "SPY",
+    }
+    assert {(asset["provider"], asset["subject"]) for asset in prediction.source_assets} == {
+        ("twelve_data", listing.ticker),
+        ("twelve_data", "SPY"),
+    }
+    manifest = DataAsset.objects.get(
+        kind="analysis_output_manifest",
+        subject=str(persisted.run.id),
+    )
+    assert manifest.provider == "stanstock"
+    assert manifest.sha256
+    assert store.resolve(manifest.relative_path).is_file()
+    assert set(
+        Prediction.objects.filter(reportable_prediction_filter()).values_list("id", flat=True)
+    ) == {prediction.id}
+    assert set(
+        Prediction.objects.filter(canonical_reportable_prediction_filter()).values_list(
+            "id", flat=True
+        )
+    ) == {prediction.id}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "provider",
+        "benchmark_subject",
+        "raw_revision",
+        "clean_result",
+        "expected_message",
+    ),
+    (
+        (
+            "synthetic",
+            "SPY",
+            "1" * 40,
+            "1" * 40,
+            "Observed v3 issuance requires the Twelve Data provider",
+        ),
+        (
+            "twelve_data",
+            None,
+            "1" * 40,
+            "1" * 40,
+            "Observed v3 issuance requires the SPY benchmark subject",
+        ),
+        (
+            "twelve_data",
+            "QQQ",
+            "1" * 40,
+            "1" * 40,
+            "Observed v3 issuance requires the SPY benchmark subject",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            None,
+            "1" * 40,
+            "Observed v3 issuance requires STANSTOCK_CODE_REVISION",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "",
+            "1" * 40,
+            "Observed v3 issuance requires a full lowercase 40-hex STANSTOCK_CODE_REVISION",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "working-tree",
+            "1" * 40,
+            "Observed v3 issuance requires a full lowercase 40-hex STANSTOCK_CODE_REVISION",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "A" * 40,
+            "a" * 40,
+            "Observed v3 issuance requires a full lowercase 40-hex STANSTOCK_CODE_REVISION",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "1" * 39,
+            "1" * 39,
+            "Observed v3 issuance requires a full lowercase 40-hex STANSTOCK_CODE_REVISION",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "1" * 40,
+            ValueError("dirty checkout"),
+            "Observed v3 issuance requires a verifiably clean committed Git revision",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "1" * 40,
+            ValueError("Git revision validation failed"),
+            "Observed v3 issuance requires a verifiably clean committed Git revision",
+        ),
+        (
+            "twelve_data",
+            "SPY",
+            "1" * 40,
+            "2" * 40,
+            "Observed v3 issuance revision does not match the clean committed Git HEAD",
+        ),
+    ),
+    ids=(
+        "wrong-provider",
+        "missing-benchmark",
+        "wrong-benchmark",
+        "revision-unset",
+        "revision-blank",
+        "revision-working-tree",
+        "revision-uppercase",
+        "revision-wrong-length",
+        "dirty-checkout",
+        "clean-revision-error",
+        "revision-clean-head-mismatch",
+    ),
+)
+def test_observed_v3_binding_failures_are_pre_source_and_atomic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    benchmark_subject: str | None,
+    raw_revision: str | None,
+    clean_result: str | ValueError,
+    expected_message: str,
+) -> None:
+    import stanstock.research.service as service_module
+
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    source_assets = [
+        _register_price_asset(
+            store,
+            subject,
+            generated_at - timedelta(minutes=5),
+            provider="twelve_data",
+        )
+        for subject in (listing.ticker, "SPY")
+    ]
+    source_ids = {asset.id for asset in source_assets}
+    files_before = _stored_file_paths(tmp_path)
+    reportable_before = Prediction.objects.filter(reportable_prediction_filter()).count()
+    canonical_before = Prediction.objects.filter(canonical_reportable_prediction_filter()).count()
+    if raw_revision is None:
+        monkeypatch.delenv("STANSTOCK_CODE_REVISION", raising=False)
+    else:
+        monkeypatch.setenv("STANSTOCK_CODE_REVISION", raw_revision)
+
+    clean_calls = 0
+
+    def clean_revision(_root):
+        nonlocal clean_calls
+        clean_calls += 1
+        if isinstance(clean_result, ValueError):
+            raise clean_result
+        return clean_result
+
+    source_operations: list[str] = []
+
+    def fail_selection(*_args, **_kwargs):
+        source_operations.append("selection")
+        pytest.fail("invalid observed-v3 binding must fail before source selection")
+
+    def fail_read(*_args, **_kwargs):
+        source_operations.append("read")
+        pytest.fail("invalid observed-v3 binding must fail before source reads")
+
+    monkeypatch.setattr(service_module, "clean_git_revision", clean_revision)
+    monkeypatch.setattr(AsOfData, "latest_asset", fail_selection)
+    monkeypatch.setattr(AsOfData, "price_frame_for_asset_with_diagnostics", fail_read)
+    monkeypatch.setattr(
+        service_module,
+        "_resolve_provider_plan",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid observed-v3 binding must fail before provider-plan resolution"
+        ),
+    )
+
+    with pytest.raises(ValueError) as error:
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=generated_at,
+            target_date=target,
+            issued_on_time=True,
+            provider=provider,
+            benchmark_subject=benchmark_subject,
+            store=store,
+            config_path=_v3_config_path(),
+            long_forecast_requested=False,
+        )
+
+    assert str(error.value) == expected_message
+    assert str(tmp_path) not in str(error.value)
+    assert source_operations == []
+    expected_clean_calls = int(
+        expected_message
+        in {
+            "Observed v3 issuance requires a verifiably clean committed Git revision",
+            "Observed v3 issuance revision does not match the clean committed Git HEAD",
+        }
+    )
+    assert clean_calls == expected_clean_calls
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert (
+        DataAsset.objects.filter(
+            kind__in=("analysis_output_manifest", "medium_forecast_panel")
+        ).count()
+        == 0
+    )
+    assert set(DataAsset.objects.values_list("id", flat=True)) == source_ids
+    assert _stored_file_paths(tmp_path) == files_before
+    assert Prediction.objects.filter(reportable_prediction_filter()).count() == reportable_before
+    assert (
+        Prediction.objects.filter(canonical_reportable_prediction_filter()).count()
+        == canonical_before
+    )
+
+
+@pytest.mark.django_db
+def test_observed_v3_wrong_provider_rejects_before_default_provider_or_output_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stanstock.research.service as service_module
+
+    target = date(2026, 9, 4)
+    _listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    provider_operations: list[str] = []
+    source_operations: list[str] = []
+    output_operations: list[str] = []
+
+    def fail_provider_query(*_args, **_kwargs):
+        provider_operations.append("filter")
+        pytest.fail("observed-v3 admission must precede mutable provider state")
+
+    def fail_source_selection(*_args, **_kwargs):
+        source_operations.append("selection")
+        pytest.fail("observed-v3 admission must precede source selection")
+
+    def fail_source_read(*_args, **_kwargs):
+        source_operations.append("read")
+        pytest.fail("observed-v3 admission must precede source reads")
+
+    def fail_output(*_args, **_kwargs):
+        output_operations.append("output")
+        pytest.fail("observed-v3 admission must precede output operations")
+
+    monkeypatch.setattr(ProviderRecord.objects, "filter", fail_provider_query)
+    monkeypatch.setattr(AsOfData, "latest_asset", fail_source_selection)
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        fail_source_read,
+    )
+    for output_name in (
+        "_create_analysis_run",
+        "build_medium_forecast_panel",
+        "_persist_listing_analysis",
+        "_finalize_observed_manifest",
+    ):
+        monkeypatch.setattr(service_module, output_name, fail_output)
+
+    with pytest.raises(ValueError) as error:
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=datetime(2026, 9, 4, 21, tzinfo=UTC),
+            target_date=target,
+            issued_on_time=True,
+            provider="synthetic",
+            benchmark_subject="SPY",
+            store=store,
+            config_path=_v3_config_path(),
+        )
+
+    assert str(error.value) == "Observed v3 issuance requires the Twelve Data provider"
+    assert str(tmp_path) not in str(error.value)
+    assert provider_operations == []
+    assert source_operations == []
+    assert output_operations == []
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.count() == 0
+    assert _stored_file_paths(tmp_path) == set()
+    assert not Prediction.objects.filter(reportable_prediction_filter()).exists()
+    assert not Prediction.objects.filter(canonical_reportable_prediction_filter()).exists()
+
+
+@pytest.mark.django_db
+def test_observed_v3_rejects_schema_valid_altered_config_before_source_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stanstock.research.service as service_module
+
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    source_assets = [
+        _register_price_asset(
+            store,
+            subject,
+            generated_at - timedelta(minutes=5),
+            provider="twelve_data",
+        )
+        for subject in (listing.ticker, "SPY")
+    ]
+    altered_path = tmp_path / "altered-v3.yml"
+    canonical_text = _v3_config_path().read_text(encoding="utf-8")
+    altered_text = canonical_text.replace("  buy_min_score: 72\n", "  buy_min_score: 71\n", 1)
+    assert altered_text != canonical_text
+    altered_path.write_text(altered_text, encoding="utf-8")
+    files_before = _stored_file_paths(tmp_path)
+    source_ids = {asset.id for asset in source_assets}
+    revision = "1" * 40
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", revision)
+    clean_calls = 0
+
+    def clean_revision(_root):
+        nonlocal clean_calls
+        clean_calls += 1
+        return revision
+
+    monkeypatch.setattr(service_module, "clean_git_revision", clean_revision)
+    monkeypatch.setattr(
+        AsOfData,
+        "latest_asset",
+        lambda *_args, **_kwargs: pytest.fail(
+            "altered observed-v3 config must fail before source selection"
+        ),
+    )
+    monkeypatch.setattr(
+        AsOfData,
+        "price_frame_for_asset_with_diagnostics",
+        lambda *_args, **_kwargs: pytest.fail(
+            "altered observed-v3 config must fail before source reads"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^Observed v3 issuance requires the exact reviewed v3 scoring config$",
+    ):
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=generated_at,
+            target_date=target,
+            issued_on_time=True,
+            provider="twelve_data",
+            benchmark_subject="SPY",
+            store=store,
+            config_path=altered_path,
+            long_forecast_requested=False,
+        )
+
+    assert clean_calls == 0
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert (
+        DataAsset.objects.filter(
+            kind__in=("analysis_output_manifest", "medium_forecast_panel")
+        ).count()
+        == 0
+    )
+    assert set(DataAsset.objects.values_list("id", flat=True)) == source_ids
+    assert _stored_file_paths(tmp_path) == files_before
+    assert not Prediction.objects.filter(reportable_prediction_filter()).exists()
+    assert not Prediction.objects.filter(canonical_reportable_prediction_filter()).exists()
+
+
+@pytest.mark.django_db
+def test_v3_analyze_snapshot_explicit_true_rejects_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = date(2026, 9, 4)
+    _listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    revision = "1" * 40
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", revision)
+    monkeypatch.setattr("stanstock.research.service.clean_git_revision", lambda _root: revision)
+
+    with pytest.raises(ValueError, match="after the next market session opened"):
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=datetime(2026, 9, 8, 14, tzinfo=UTC),
+            target_date=target,
+            issued_on_time=True,
+            provider="twelve_data",
+            benchmark_subject="SPY",
+            store=AssetStore(tmp_path),
+            config_path=_v3_config_path(),
+            long_forecast_requested=False,
+        )
+
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_v3_analyze_snapshot_explicit_true_rejects_cutoff_unsafe_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stanstock.research.service as service_module
+
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    for subject in (listing.ticker, "SPY"):
+        _register_price_asset(
+            store,
+            subject,
+            generated_at - timedelta(minutes=5),
+            provider="twelve_data",
+        )
+    revision = "1" * 40
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", revision)
+    monkeypatch.setattr(service_module, "clean_git_revision", lambda _root: revision)
+    original_asset_payload = service_module._asset_payload
+
+    def cutoff_unsafe_payload(asset):
+        payload = original_asset_payload(asset)
+        payload["available_at"] = (generated_at + timedelta(seconds=1)).isoformat()
+        return payload
+
+    monkeypatch.setattr(service_module, "_asset_payload", cutoff_unsafe_payload)
+
+    with pytest.raises(ValueError, match="available_at after data cutoff"):
+        analyze_snapshot(
+            universe_snapshot=snapshot,
+            decision_time=generated_at,
+            target_date=target,
+            issued_on_time=True,
+            provider="twelve_data",
+            benchmark_subject="SPY",
+            store=store,
+            config_path=_v3_config_path(),
+            long_forecast_requested=False,
+        )
+
+    assert AnalysisRun.objects.count() == 0
+    assert StockAnalysis.objects.count() == 0
+    assert Prediction.objects.count() == 0
+    assert DataAsset.objects.filter(kind="analysis_output_manifest").count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "config_name",
+    ("us-price-baseline-v1.yml", "us-price-baseline-v2.yml"),
+    ids=("v1", "v2"),
+)
+def test_v1_v2_snapshot_explicit_true_behavior_does_not_use_v3_binding_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_name: str,
+) -> None:
+    target = date(2026, 9, 4)
+    generated_at = datetime(2026, 9, 4, 21, tzinfo=UTC)
+    listing, snapshot = _listing_and_snapshot(as_of_date=target)
+    store = AssetStore(tmp_path)
+    _register_price_asset(store, listing.ticker, generated_at - timedelta(minutes=5))
+    monkeypatch.delenv("STANSTOCK_CODE_REVISION", raising=False)
+    monkeypatch.setattr(
+        "stanstock.research.service.clean_git_revision",
+        lambda *_args, **_kwargs: pytest.fail("v1/v2 must not use the observed-v3 binding gate"),
+    )
+
+    results = analyze_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=generated_at,
+        target_date=target,
+        issued_on_time=True,
+        provider="synthetic",
+        store=store,
+        config_path=Path(__file__).resolve().parents[1] / "config/scoring" / config_name,
+        long_forecast_requested=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].run.issued_on_time is True
+    assert all(prediction.issued_on_time for prediction in results[0].predictions)
+
+
+@pytest.mark.django_db
+def test_analyze_command_v3_snapshot_remains_explicitly_non_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing, snapshot = _listing_and_snapshot()
+    store = AssetStore(tmp_path)
+    generated_at = timezone.now()
+    _register_price_asset(store, listing.ticker, generated_at - timedelta(minutes=5))
+    monkeypatch.setenv("STANSTOCK_CODE_REVISION", "working-tree")
+    monkeypatch.setattr(
+        "stanstock.research.service.clean_git_revision",
+        lambda *_args, **_kwargs: pytest.fail(
+            "manage.py analyze v3 must not request observed issuance"
+        ),
+    )
+    stdout = StringIO()
+
+    with override_settings(DATA_DIR=tmp_path):
+        call_command(
+            "analyze",
+            snapshot=str(snapshot.pk),
+            provider="synthetic",
+            config=_v3_config_path(),
+            stdout=stdout,
+        )
+
+    run = AnalysisRun.objects.get()
+    prediction = Prediction.objects.get()
+    assert run.config_version == "us-price-baseline-v3"
+    assert run.issued_on_time is False
+    assert prediction.issued_on_time is False
+    assert "research-grade" in stdout.getvalue()
+    assert "issued_on_time=False" in stdout.getvalue()
 
 
 @pytest.mark.django_db
@@ -1116,7 +2803,12 @@ def _add_listing_to_snapshot(snapshot: UniverseSnapshot) -> Listing:
 
 
 def _register_price_asset(
-    store: AssetStore, subject: str, available_at, *, rows: int = 280
+    store: AssetStore,
+    subject: str,
+    available_at,
+    *,
+    rows: int = 280,
+    provider: str = "synthetic",
 ) -> object:
     dates = [date(2025, 1, 1) + timedelta(days=index) for index in range(rows)]
     closes = [50 + index * 0.08 + (index % 9) * 0.02 for index in range(rows)]
@@ -1132,7 +2824,7 @@ def _register_price_asset(
     )
     stored = store.write_frame(f"research-tests/{uuid4().hex}.parquet", frame)
     return register_asset(
-        provider="synthetic",
+        provider=provider,
         kind="price_history",
         subject=subject,
         stored=stored,
