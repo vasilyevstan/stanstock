@@ -8,6 +8,9 @@ from .base import *  # noqa: F403
 
 DEBUG = False
 
+if not os.getenv("DJANGO_SECRET_KEY", "").strip():
+    raise ImproperlyConfigured("DJANGO_SECRET_KEY is required for production settings")
+
 if not os.getenv("DATABASE_URL", "").strip():
     raise ImproperlyConfigured("DATABASE_URL is required for production settings")
 
