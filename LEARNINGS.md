@@ -50,6 +50,24 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **YAML budgets must cover composed semantics, not surface syntax.** Inspect
+  the composed node graph before construction or flattening: any key-node type
+  can carry the merge tag, and node/edge counts alone do not bound deeper alias
+  paths, so maximum reachable depth must also be enforced cycle-safely.
+- **Observed issuance admission belongs before mutable or output-producing
+  work.** Bind the exact config, provider, benchmark, and clean committed
+  revision before optional provider-state reads, source selection, calculation,
+  or file/database output; an invalid explicit request raises rather than
+  downgrading to research grade.
+- **Scale invariance needs both a boundary proof and a counterexample.**
+  Nominal price is not alpha: normalize price-dimensional signals and measure
+  liquidity as dollar turnover. Test that price times `k` with volume divided
+  by `k` is invariant, while price times `k` at fixed volume legitimately
+  changes measured liquidity.
+- **Composite market risk needs one exact overlapping evidence window.**
+  Volatility, downside volatility, drawdown, and beta must use the same aligned
+  asset/benchmark frame. Missing any required risk input withholds BUY, while
+  independent AVOID evidence remains actionable.
 - **`manage.py analyze` is research-only for every target.** The command
   explicitly requests `issued_on_time=False`; provider/config flags and
   `STANSTOCK_CODE_REVISION` cannot make it an observed issuance path. An
