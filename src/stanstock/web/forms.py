@@ -25,6 +25,10 @@ from stanstock.portfolio.service import (
     SAMPLE_PORTFOLIO_DEFAULT_TOP_N,
     SAMPLE_PORTFOLIO_MAX_TOP_N,
 )
+from stanstock.portfolio.watchlist import (
+    TrackedSymbolValidationError,
+    normalize_tracked_symbol,
+)
 from stanstock.research.affordability import price_band_choices
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
@@ -95,6 +99,27 @@ class OpportunityFilterForm(forms.Form):
                 ("", empty_label),
                 *((value, value) for value in values),
             ]
+
+
+class TrackedSymbolForm(forms.Form):
+    symbol = forms.CharField(
+        max_length=32,
+        label="Symbol",
+        help_text="US common stock or ADR symbol, for example TEST.",
+        widget=forms.TextInput(
+            attrs={
+                "autocomplete": "off",
+                "autocapitalize": "characters",
+                "placeholder": "TEST",
+            }
+        ),
+    )
+
+    def clean_symbol(self) -> str:
+        try:
+            return normalize_tracked_symbol(str(self.cleaned_data["symbol"]))
+        except TrackedSymbolValidationError as exc:
+            raise forms.ValidationError(str(exc)) from exc
 
 
 class PortfolioForm(forms.ModelForm):  # type: ignore[type-arg]

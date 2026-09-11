@@ -42,6 +42,7 @@ from stanstock.data.models import (
 )
 from stanstock.data.provider_policy import (
     PRIVATE_USAGE_SCOPE,
+    provider_plan_allows,
     validate_provider_usage,
 )
 from stanstock.data.providers import twelve_data
@@ -618,7 +619,7 @@ def _resolve_references(
         accessible_candidates = [
             candidate
             for candidate in candidates
-            if _plan_allows(activated_plan, candidate.access_plan)
+            if provider_plan_allows(activated_plan, candidate.access_plan)
         ]
         if len(accessible_candidates) > 1:
             raise ValueError(
@@ -637,15 +638,6 @@ def _resolve_references(
             f"Requires Twelve Data plan {required_plan}; configured plan is {activated_plan}"
         )
     return resolved, exclusion_reasons
-
-
-def _plan_allows(activated_plan: str, required_plan: str | None) -> bool:
-    if required_plan is None or activated_plan == "custom":
-        return True
-    tiers = {"basic": 0, "grow": 1, "pro": 2, "ultra": 3}
-    active_rank = tiers.get(activated_plan.casefold())
-    required_rank = tiers.get(required_plan.casefold())
-    return active_rank is not None and required_rank is not None and active_rank >= required_rank
 
 
 def _price_series_exclusion_reason(

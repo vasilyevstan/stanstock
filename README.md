@@ -325,6 +325,13 @@ costs entered by the owner; cash is excluded from that return, dividends are
 excluded unless the source explicitly includes them, and the value history
 includes holding/cash changes rather than claiming a time-weighted return.
 
+Keep a separate private symbol preference list from `/my-list`. **My list**
+accepts unique active US common-stock/ADR listings and symbols identified by
+the latest checksummed local Twelve Data NASDAQ/NYSE catalogs. It never fetches
+provider data, changes universe membership, runs analysis, or creates a
+portfolio holding. Catalog-valid symbols outside the current research universe
+remain visible with explicit unavailable price/analysis states.
+
 Manual portfolios also support immutable external deposits and recorded
 monthly allocations. The editable monthly preference defaults to $600.
 Previews are side-effect free and target 70% of total NAV in SPY plus at most
@@ -384,6 +391,8 @@ uv run python manage.py snapshot_portfolios
   decision/advisory role and the recorded price provider/subject.
 - `/performance` - decision outcomes with minimum-sample safeguards and a
   separate advisory-error section when advisory outcomes exist.
+- `/my-list` - private owner-scoped symbol preferences validated only from
+  existing listings or checksummed locally stored stock catalogs.
 - `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
   monthly allocation previews, contribution-aware performance, and valuation
   history.

@@ -6,9 +6,43 @@ from typing import Any
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Trim, Upper
 
 from stanstock.data.models import DataAsset, ImmutableEvidenceModel, Listing
 from stanstock.research.models import AnalysisRun
+
+
+class TrackedSymbol(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tracked_symbols",
+    )
+    symbol = models.CharField(max_length=32)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["symbol", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "symbol"],
+                name="unique_owner_tracked_symbol",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(symbol="") & models.Q(symbol=Upper(Trim(models.F("symbol")))),
+                name="tracked_symbol_normalized",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.owner_id}:{self.symbol}"
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        from stanstock.portfolio.watchlist import normalize_tracked_symbol
+
+        self.symbol = normalize_tracked_symbol(self.symbol)
+        super().save(*args, **kwargs)
 
 
 class Portfolio(models.Model):

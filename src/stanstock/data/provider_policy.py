@@ -20,6 +20,12 @@ PRIVATE_USAGE_SCOPE = "personal_internal_display_authorized"
 BASIC_USAGE_SCOPE = "personal_single_user_noncommercial"
 BASIC_PLAN = "basic"
 DISPLAY_PLANS = frozenset({"grow", "pro", "ultra", "custom"})
+PROVIDER_PLAN_RANKS = {
+    "basic": 0,
+    "grow": 1,
+    "pro": 2,
+    "ultra": 3,
+}
 
 #: Named provider capability for split and reverse-split event evidence.
 SPLIT_EVENT_CAPABILITY = "corporate_actions_splits"
@@ -49,6 +55,20 @@ def normalized_provider_plan(plan: str | None) -> str | None:
         return None
     normalized = plan.strip().lower()
     return normalized or None
+
+
+def provider_plan_allows(activated_plan: str, required_plan: str | None) -> bool:
+    """Apply Twelve Data's installed-plan ranking without resolving credentials.
+
+    ``custom`` is the reviewed escape hatch for a separately negotiated
+    agreement. A catalog row with no plan requirement remains accessible,
+    matching the live-ingestion contract.
+    """
+    if required_plan is None or activated_plan == "custom":
+        return True
+    active_rank = PROVIDER_PLAN_RANKS.get(activated_plan.casefold())
+    required_rank = PROVIDER_PLAN_RANKS.get(required_plan.casefold())
+    return active_rank is not None and required_rank is not None and active_rank >= required_rank
 
 
 def split_event_capability(provider: str, plan: str | None = None) -> tuple[str, str]:

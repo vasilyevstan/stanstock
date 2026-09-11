@@ -22,24 +22,30 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import polars as pl
+from django.conf import settings
 
 from stanstock.core.integrity import verify_registered_assets
 from stanstock.core.models import JobRun
 from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.assets import verify_catalog_refs
 from stanstock.data.jobs import JOB_NAME as MARKET_JOB_NAME
+from stanstock.data.jobs import frozen_long_forecast_gate_for_run
 from stanstock.data.live_us import (
     UsUniverseConfig,
     benchmark_asset_for_completed_run,
     is_us_prediction_on_time,
+    load_us_universe_config,
 )
 from stanstock.data.management.config_loader import (
     default_us_scoring_config_path,
+    default_us_universe_config_path,
 )
 from stanstock.data.models import (
     DataAsset,
@@ -116,6 +122,182 @@ _ADVISORY_HORIZONS = _MEDIUM_ADVISORY_HORIZONS | _LONG_ADVISORY_HORIZONS
 #: (`StockAnalysis.data_quality["source_assets"]`/`Prediction.source_assets`)
 #: must carry for `_iter_source_asset_entries` to accept it.
 _SOURCE_ASSET_FIELDS = ("id", "provider", "kind", "subject", "sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayedScheduledRefresh:
+    """Canonical, read-only replay of one persisted scheduled parent."""
+
+    parent: JobRun
+    verification: dict[str, Any]
+    snapshot: UniverseSnapshot
+    analysis_run: AnalysisRun
+    catalog_assets: tuple[DataAsset, ...]
+
+
+def replay_recorded_scheduled_refresh(parent: JobRun) -> ReplayedScheduledRefresh:
+    """Replay and compare one successful parent's complete production proof.
+
+    The persisted ``verification`` document is an output to compare, never
+    authority. The canonical verifier re-reads the parent's exact child
+    identities and all underlying evidence with the installed production US
+    universe configuration. No provider, credential, or quota boundary is
+    consulted.
+    """
+    persisted = JobRun.objects.filter(pk=parent.pk).first()
+    if (
+        persisted is None
+        or persisted.job_name != "scheduled_refresh"
+        or persisted.region != "us"
+        or persisted.status != JobRun.Status.SUCCESS
+    ):
+        raise RefreshVerificationError(
+            "recorded_parent_identity_invalid",
+            "The recorded scheduled-refresh parent is not a successful US refresh",
+        )
+
+    details = _details_dict(persisted)
+    stages = details.get("stages")
+    if not isinstance(stages, dict):
+        raise RefreshVerificationError(
+            "recorded_parent_stages_invalid",
+            "The recorded scheduled-refresh parent has no valid child stage mapping",
+        )
+    # Requiredness comes from independently persisted production evidence,
+    # never from the mutable parent's stage keys or recorded verification.
+    # Deliberately include any same-target success visible at replay time:
+    # historical query timing cannot be reconstructed, and failing closed on
+    # a later recoverable SEC success is safer than accepting an omitted child.
+    market_success = (
+        JobRun.objects.filter(
+            job_name=MARKET_JOB_NAME,
+            region="us",
+            target_date=persisted.target_date,
+            status=JobRun.Status.SUCCESS,
+        )
+        .order_by("pk")
+        .first()
+    )
+    if market_success is None:
+        raise RefreshVerificationError(
+            "recorded_market_success_missing",
+            "No authoritative successful market child exists for the recorded target",
+        )
+    try:
+        authoritative_market_gate = frozen_long_forecast_gate_for_run(market_success)
+    except ValueError:
+        raise RefreshVerificationError(
+            "recorded_market_gate_invalid",
+            "The authoritative market child has no valid frozen long-forecast gate",
+        ) from None
+    sec_success = (
+        JobRun.objects.filter(
+            job_name=SEC_JOB_NAME,
+            region="us",
+            target_date=persisted.target_date,
+            status=JobRun.Status.SUCCESS,
+        )
+        .order_by("pk")
+        .first()
+    )
+    sec_required = authoritative_market_gate or sec_success is not None
+
+    expected_stages = {MARKET_STAGE, EVALUATION_STAGE, PORTFOLIO_STAGE}
+    if sec_required:
+        expected_stages.add(SEC_STAGE)
+    if set(stages) != expected_stages:
+        raise RefreshVerificationError(
+            "recorded_parent_stages_invalid",
+            "The recorded scheduled-refresh parent has an unexpected child stage set",
+        )
+
+    market = _resolve_stage_run(
+        stages,
+        MARKET_STAGE,
+        job_name=MARKET_JOB_NAME,
+        region="us",
+        target_date=persisted.target_date,
+    )
+    _require_success(market, MARKET_STAGE)
+    if market.pk != market_success.pk:
+        raise RefreshVerificationError(
+            "recorded_market_child_mismatch",
+            "The recorded parent does not identify the authoritative market child",
+        )
+    if sec_required:
+        sec_run = _resolve_stage_run(
+            stages,
+            SEC_STAGE,
+            job_name=SEC_JOB_NAME,
+            region="us",
+            target_date=persisted.target_date,
+        )
+        _require_success(sec_run, SEC_STAGE)
+        if sec_success is None or sec_run.pk != sec_success.pk:
+            raise RefreshVerificationError(
+                "recorded_sec_child_mismatch",
+                "The recorded parent does not identify the recoverable SEC child",
+            )
+
+    target_text = persisted.target_date.isoformat()
+    code_revision = details.get("code_revision")
+    if (
+        details.get("target_date") != target_text
+        or details.get("snapshot_grade") != UniverseSnapshot.Grade.OBSERVED
+        or not isinstance(code_revision, str)
+        or not code_revision
+    ):
+        raise RefreshVerificationError(
+            "recorded_parent_details_invalid",
+            "The recorded scheduled-refresh parent does not match its target and grade",
+        )
+
+    data_root = Path(settings.DATA_DIR)
+    try:
+        if not data_root.is_dir():
+            raise OSError
+        universe_config = load_us_universe_config(default_us_universe_config_path())
+    except (OSError, ValueError):
+        raise RefreshVerificationError(
+            "production_verification_input_unavailable",
+            "The production refresh verification inputs are unavailable or invalid",
+        ) from None
+
+    verification = verify_scheduled_refresh(
+        target_date=persisted.target_date,
+        universe_config=universe_config,
+        code_revision=code_revision,
+        stages=stages,
+        sec_required=sec_required,
+    )
+    recorded_verification = details.get("verification")
+    if not isinstance(recorded_verification, dict) or recorded_verification != verification:
+        raise RefreshVerificationError(
+            "recorded_verification_mismatch",
+            "The recorded verification result does not equal its canonical replay",
+        )
+
+    snapshot = UniverseSnapshot.objects.filter(pk=UUID(verification["snapshot_id"])).first()
+    analysis_run = AnalysisRun.objects.filter(pk=UUID(verification["analysis_run_id"])).first()
+    if snapshot is None or analysis_run is None:
+        raise RefreshVerificationError(
+            "recorded_verification_output_missing",
+            "The replayed scheduled-refresh outputs could not be resolved",
+        )
+    catalog_assets = tuple(
+        resolve_catalog_assets(
+            _details_dict(market),
+            universe_config=universe_config,
+            cutoff=analysis_run.data_cutoff,
+        )
+    )
+    return ReplayedScheduledRefresh(
+        parent=persisted,
+        verification=verification,
+        snapshot=snapshot,
+        analysis_run=analysis_run,
+        catalog_assets=catalog_assets,
+    )
 
 
 def verify_scheduled_refresh(
