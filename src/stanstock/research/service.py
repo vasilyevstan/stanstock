@@ -1213,6 +1213,7 @@ def analyze_snapshot(
     long_forecast_config_path: Path | None = None,
     sample_support: dict[str, int] | None = None,
     output_paths: AnalysisOutputPaths | None = None,
+    long_forecast_requested: bool | None = None,
 ) -> list[PersistedAnalysis]:
     """Analyze every eligible member of `universe_snapshot`.
 
@@ -1240,8 +1241,24 @@ def analyze_snapshot(
     its own checks after this function already returned successfully can
     read the exact paths this call owns directly, instead of re-deriving
     them with a separate post-write `DataAsset` query.
+
+    `long_forecast_requested`, when supplied by scheduled production, is
+    the target-scoped provider gate frozen in the market child's JobRun
+    before this function writes output. Other callers retain the existing
+    invocation-time ProviderRecord default.
     """
     generated_at = decision_time or timezone.now()
+    if long_forecast_requested is not None and not isinstance(long_forecast_requested, bool):
+        raise ValueError("long_forecast_requested must be a boolean")
+    # Freeze the mutable provider gate before the AnalysisRun, panel, or any
+    # prediction output is written. Scheduled production supplies this
+    # explicitly from its target-scoped market JobRun invocation details;
+    # direct/research callers retain their established provider-gated default.
+    effective_long_forecast_requested = (
+        ProviderRecord.objects.filter(provider="sec", enabled=True).exists()
+        if long_forecast_requested is None
+        else long_forecast_requested
+    )
     logical_target_date = target_date or generated_at.date()
     _validate_snapshot_for_target(universe_snapshot, logical_target_date)
     run_issued_on_time = _issued_on_time(
@@ -1345,10 +1362,7 @@ def analyze_snapshot(
                 provider == long_config.price_provider == "twelve_data"
                 and long_config.fundamentals_provider == "sec"
                 and config.version in long_config.enabled_scoring_versions
-                and ProviderRecord.objects.filter(
-                    provider=long_config.fundamentals_provider,
-                    enabled=True,
-                ).exists()
+                and effective_long_forecast_requested
                 and memberships
             ):
                 current_prices: dict[str, float] = {}

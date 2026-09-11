@@ -31,6 +31,7 @@ class JobExecutionResult:
 
 
 JobTask = Callable[[JobRun], JobExecutionResult]
+BeforeAttempt = Callable[[], JobRun | None]
 
 
 def execute_target_job(
@@ -39,9 +40,14 @@ def execute_target_job(
     region: str,
     target_date: date,
     task: JobTask,
+    before_attempt: BeforeAttempt | None = None,
 ) -> JobRun:
-    target_key = f"{job_name}:{region}:{target_date.isoformat()}"
-    with _target_lock(target_key):
+    with target_job_lock(
+        job_name=job_name,
+        region=region,
+        target_date=target_date,
+    ):
+        reserved_run = before_attempt() if before_attempt is not None else None
         with transaction.atomic():
             prior_success = (
                 JobRun.objects.select_for_update()
@@ -75,23 +81,45 @@ def execute_target_job(
                 )
                 return skipped
 
-            JobRun.objects.select_for_update().filter(
+            running_attempts = JobRun.objects.select_for_update().filter(
                 job_name=job_name,
                 region=region,
                 target_date=target_date,
                 status=JobRun.Status.RUNNING,
-            ).update(
+            )
+            if reserved_run is not None:
+                running_attempts = running_attempts.exclude(pk=reserved_run.pk)
+            running_attempts.update(
                 status=JobRun.Status.FAILED,
                 finished_at=timezone.now(),
                 error="Stale running attempt superseded by a new target lock holder",
             )
 
-            run = JobRun.objects.create(
-                job_name=job_name,
-                region=region,
-                target_date=target_date,
-                attempt=next_attempt,
-            )
+            if reserved_run is None:
+                run = JobRun.objects.create(
+                    job_name=job_name,
+                    region=region,
+                    target_date=target_date,
+                    attempt=next_attempt,
+                )
+            else:
+                reserved_candidate = (
+                    JobRun.objects.select_for_update()
+                    .filter(
+                        pk=reserved_run.pk,
+                        job_name=job_name,
+                        region=region,
+                        target_date=target_date,
+                        status=JobRun.Status.RUNNING,
+                    )
+                    .first()
+                )
+                if reserved_candidate is None:
+                    raise ValueError(
+                        "Target job reservation is not a running attempt for this target"
+                    )
+                run = reserved_candidate
+                next_attempt = run.attempt
             logger.info(
                 "target_job_started job=%s region=%s target_date=%s attempt=%s",
                 job_name,
@@ -148,6 +176,19 @@ def _next_attempt(job_name: str, region: str, target_date: date) -> int:
         target_date=target_date,
     ).aggregate(max_attempt=Max("attempt"))["max_attempt"]
     return int(latest or 0) + 1
+
+
+@contextmanager
+def target_job_lock(
+    *,
+    job_name: str,
+    region: str,
+    target_date: date,
+) -> Iterator[None]:
+    """Hold the canonical cross-process lock for one target job identity."""
+    target_key = f"{job_name}:{region}:{target_date.isoformat()}"
+    with _target_lock(target_key):
+        yield
 
 
 @contextmanager

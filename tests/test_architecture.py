@@ -50,9 +50,9 @@ def test_verification_types_is_a_zero_domain_dependency_leaf() -> None:
 
 
 def test_refresh_validation_does_not_import_heavy_research_or_live_us_modules() -> None:
-    """`research.refresh_validation` must stay safe for `core` to import in
-    a later slice: it must never import `data.live_us` (the US-only daily
-    job orchestrator) or `research.service` (the full analysis/prediction
+    """`research.refresh_validation` is imported by the production `core`
+    verifier, so it must never import `data.live_us` (the US-only daily job
+    orchestrator) or `research.service` (the full analysis/prediction
     writer), which would create a heavy or cyclical dependency. It uses the
     cycle-safe `research.timing` leaf and `research.refresh_evidence`'s own
     pure helpers instead."""

@@ -364,6 +364,7 @@ def run_us_daily(
     store: AssetStore | None = None,
     enforce_rate_limit: bool = True,
     require_on_time: bool = False,
+    long_forecast_requested: bool | None = None,
 ) -> LiveUsRunResult:
     """Fetch, persist, and analyze one complete US target-date snapshot."""
     # `open_asset_store()` normalizes a default-construction failure (an
@@ -516,6 +517,7 @@ def run_us_daily(
                 store=store,
                 config_path=default_us_scoring_config_path(),
                 output_paths=output_paths,
+                long_forecast_requested=long_forecast_requested,
             )
             if not results:
                 raise ValueError(
@@ -1047,33 +1049,12 @@ def _existing_completed_result(
     target_date: date,
     store: AssetStore,
 ) -> LiveUsRunResult | None:
-    universe = Universe.objects.filter(
-        slug=config.slug,
-        config_version=config.config_version,
-    ).first()
-    if universe is None:
-        return None
-    scoring_config = research_config.load_scoring_config(default_us_scoring_config_path())
-    runs = list(
-        AnalysisRun.objects.select_related("universe_snapshot")
-        .filter(
-            universe_snapshot__universe=universe,
-            universe_snapshot__as_of_date=target_date,
-            target_date=target_date,
-            status="complete",
-            config_version=scoring_config.version,
-            config_hash=research_config.config_hash(scoring_config),
-        )
-        .order_by("-generated_at")
+    run = completed_us_analysis_run(
+        config=config,
+        target_date=target_date,
     )
-    if not runs:
+    if run is None:
         return None
-    if len(runs) > 1:
-        raise ValueError(
-            "Conflicting completed US analysis runs exist for "
-            f"{target_date.isoformat()} and scoring config {scoring_config.version}"
-        )
-    run = runs[0]
     snapshot = run.universe_snapshot
     memberships = UniverseMembership.objects.filter(snapshot=snapshot)
     eligible = memberships.filter(eligible=True).count()
@@ -1107,6 +1088,52 @@ def _existing_completed_result(
         benchmark_symbol=config.benchmark_symbol,
         catalog_asset_ids=catalog_asset_ids,
     )
+
+
+def completed_us_analysis_run(
+    *,
+    config: UsUniverseConfig,
+    target_date: date,
+) -> AnalysisRun | None:
+    """Resolve the exact completed analysis eligible for daily recovery.
+
+    This is deliberately side-effect free: the canonical daily-job gate
+    resolver uses it only to fail closed when output committed without an
+    independently persisted invocation gate. It does not infer that gate
+    from the analysis, predictions, manifest, or mutable provider state.
+    """
+    if not AnalysisRun.objects.filter(
+        target_date=target_date,
+        status="complete",
+    ).exists():
+        return None
+    universe = Universe.objects.filter(
+        slug=config.slug,
+        config_version=config.config_version,
+    ).first()
+    if universe is None:
+        return None
+    scoring_config = research_config.load_scoring_config(default_us_scoring_config_path())
+    runs = list(
+        AnalysisRun.objects.select_related("universe_snapshot")
+        .filter(
+            universe_snapshot__universe=universe,
+            universe_snapshot__as_of_date=target_date,
+            target_date=target_date,
+            status="complete",
+            config_version=scoring_config.version,
+            config_hash=research_config.config_hash(scoring_config),
+        )
+        .order_by("-generated_at")
+    )
+    if not runs:
+        return None
+    if len(runs) > 1:
+        raise ValueError(
+            "Conflicting completed US analysis runs exist for "
+            f"{target_date.isoformat()} and scoring config {scoring_config.version}"
+        )
+    return runs[0]
 
 
 def _catalog_asset_ids_for_completed_run(

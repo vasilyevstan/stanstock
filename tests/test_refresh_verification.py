@@ -25,10 +25,13 @@ import pytest
 from django.conf import settings
 
 import refresh_fixtures
+from stanstock.core import refresh_verification as refresh_verification_module
 from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.models import JobRun
 from stanstock.core.refresh_verification import RefreshVerificationError, verify_scheduled_refresh
+from stanstock.data import live_us as live_us_module
 from stanstock.data import sec_ingestion
+from stanstock.data.asof import raw_price_asset_for
 from stanstock.data.assets import AssetStore, asset_ref_for, register_asset
 from stanstock.data.jobs import PreparedUsDailyJob, execute_us_daily_job
 from stanstock.data.live_us import UsUniverseConfig
@@ -38,6 +41,7 @@ from stanstock.data.models import (
     DataAsset,
     LatestMarketData,
     Listing,
+    ProviderRecord,
     Region,
     Security,
     Universe,
@@ -53,10 +57,18 @@ from stanstock.portfolio.service import (
     compute_snapshot_input_hash,
     upsert_holding,
 )
+from stanstock.research import medium_forecasts as medium_forecasts_module
+from stanstock.research import service as research_service
 from stanstock.research.jobs import execute_prediction_evaluation_job
 from stanstock.research.long_forecast_config import (
     load_long_forecast_config,
     long_forecast_config_hash,
+)
+from stanstock.research.medium_forecasts import (
+    PANEL_KIND,
+    PANEL_SCHEMA,
+    hash_json,
+    serialize_medium_forecast_panel,
 )
 from stanstock.research.models import (
     AnalysisRun,
@@ -67,6 +79,7 @@ from stanstock.research.models import (
     StockAnalysis,
 )
 from stanstock.research.outcomes import evaluate_prediction
+from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND
 
 pytestmark = pytest.mark.django_db
 
@@ -169,6 +182,110 @@ def _build_verified_state(
     stages["portfolio_snapshots"] = _stage_entry(portfolio_run)
 
     return stages, config
+
+
+def _build_state_with_distinct_panel_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[
+    dict[str, dict[str, object]],
+    UsUniverseConfig,
+    set[uuid.UUID],
+    set[uuid.UUID],
+    set[uuid.UUID],
+]:
+    """Make the panel select vintages A, then make analyses select newer B.
+
+    Both vintages remain cutoff-safe. This reproduces the physical-closure
+    gap without mutating any immutable row or relying on provider "latest"
+    state after the run.
+    """
+    earlier_retrieval = DECISION_TIME - timedelta(minutes=5)
+    real_patch_provider = refresh_fixtures.patch_twelve_data_provider
+
+    def patch_provider_with_earlier_vintages(
+        fixture_monkeypatch: pytest.MonkeyPatch,
+        config: UsUniverseConfig,
+        *,
+        target_date: date,
+        retrieved_at: datetime,
+        api_key: str = refresh_fixtures.TEST_API_KEY,
+    ) -> tuple[list[str], list[str]]:
+        return real_patch_provider(
+            fixture_monkeypatch,
+            config,
+            target_date=target_date,
+            retrieved_at=earlier_retrieval,
+            api_key=api_key,
+        )
+
+    monkeypatch.setattr(
+        refresh_fixtures,
+        "patch_twelve_data_provider",
+        patch_provider_with_earlier_vintages,
+    )
+
+    panel_source_ids: set[uuid.UUID] = set()
+    real_build_panel = research_service.build_medium_forecast_panel
+
+    def build_panel_then_advance_listing_vintages(**kwargs: Any) -> Any:
+        panel = real_build_panel(**kwargs)
+        panel_source_ids.update(asset.id for asset in panel.source_assets)
+        store = kwargs["store"]
+        target_date = kwargs["target_date"]
+        for listing in kwargs["listings"]:
+            later_series = refresh_fixtures._series(
+                listing.provider_symbol,
+                target_date=target_date,
+                retrieved_at=DECISION_TIME,
+            )
+            live_us_module._persist_price_series(
+                store=store,
+                series=later_series,
+                listing=listing,
+            )
+        return panel
+
+    monkeypatch.setattr(
+        research_service,
+        "build_medium_forecast_panel",
+        build_panel_then_advance_listing_vintages,
+    )
+    stages, config = _build_verified_state(monkeypatch, tmp_path, symbols=("AAA", "BBB"))
+    analysis_source_ids = {
+        uuid.UUID(str(entry["id"]))
+        for analysis in StockAnalysis.objects.all()
+        for entry in analysis.data_quality["source_assets"]
+        if isinstance(entry, dict) and entry.get("kind") == "price_history"
+    }
+    a_only_ids = panel_source_ids - analysis_source_ids
+    assert len(a_only_ids) == 2
+    panel_raw_ids = {
+        raw_price_asset_for(
+            DataAsset.objects.get(pk=source_id),
+            cutoff=DECISION_TIME,
+        ).id
+        for source_id in panel_source_ids
+    }
+
+    unrelated_series = refresh_fixtures._series(
+        "UNRELATED",
+        target_date=TARGET_DATE,
+        retrieved_at=DECISION_TIME,
+    )
+    unrelated = live_us_module._persist_price_series(
+        store=AssetStore(tmp_path),
+        series=unrelated_series,
+        listing=None,
+    )
+    unrelated_raw = raw_price_asset_for(unrelated, cutoff=DECISION_TIME)
+    return (
+        stages,
+        config,
+        panel_source_ids,
+        panel_raw_ids,
+        {unrelated.id, unrelated_raw.id},
+    )
 
 
 def _create_lagging_prediction(
@@ -322,6 +439,502 @@ def test_happy_path_verifies_and_is_path_free(
     assert result["sec"] == {"required": False}
     assert result["portfolio"]["active_portfolios"] == 0
     assert str(tmp_path) not in repr(result)
+
+
+@pytest.mark.parametrize("retry_time_sec_enabled", [False, True])
+def test_historical_market_child_without_frozen_long_gate_fails_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    retry_time_sec_enabled: bool,
+) -> None:
+    """Legacy rows, predictions, and manifest plans cannot substitute for
+    the independently recorded market invocation gate."""
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    market = JobRun.objects.get(pk=stages["market"]["job_run_id"])
+    details = dict(market.details)
+    details.pop("long_forecast_requested")
+    JobRun.objects.filter(pk=market.pk).update(details=details)
+    ProviderRecord.objects.create(
+        provider=sec.PROVIDER,
+        enabled=retry_time_sec_enabled,
+        status="ok" if retry_time_sec_enabled else "disabled",
+    )
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=retry_time_sec_enabled,
+        )
+
+    assert excinfo.value.reason_code == "market_long_forecast_gate_missing"
+
+
+def test_missing_analysis_output_manifest_fails_scheduled_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A child that otherwise persists a complete-looking output cannot
+    satisfy the parent without its immutable analysis-output manifest."""
+    monkeypatch.setattr(
+        research_service,
+        "_finalize_observed_manifest",
+        lambda **kwargs: None,
+    )
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "analysis_output_manifest_missing"
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+def test_corrupt_analysis_output_manifest_fails_scheduled_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Physical manifest bytes must still match their immutable registered
+    checksum when the parent independently verifies a successful child."""
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    manifest = DataAsset.objects.get(kind=ANALYSIS_OUTPUT_MANIFEST_KIND)
+    AssetStore(tmp_path).resolve(manifest.relative_path).write_bytes(b"corrupt manifest bytes")
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "asset_corrupt"
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    [
+        ("risk_score", Decimal("99.00")),
+        ("confidence", Decimal("1.00")),
+        ("reasons", ["tampered reason"]),
+        ("daily_change", Decimal("9.000000")),
+    ],
+)
+def test_manifest_covered_stock_analysis_content_tamper_fails_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    tampered_value: object,
+) -> None:
+    """Fields absent from the legacy parent projection remain covered by
+    the canonical complete-row manifest digest."""
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    analysis = StockAnalysis.objects.get(listing__ticker="AAA")
+    assert getattr(analysis, field) != tampered_value
+    StockAnalysis.objects.filter(pk=analysis.pk).update(**{field: tampered_value})
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "analysis_output_manifest_diverged"
+
+
+def test_medium_prediction_source_closure_failure_propagates_to_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reviewed medium lane is expected from configuration and the
+    scheduled benchmark argument, not inferred from its persisted rows."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    store = AssetStore(tmp_path)
+    written = store.write_bytes("tests/medium-extra.bin", b"unrelated medium source")
+    extra = register_asset(
+        provider=twelve_data.PROVIDER,
+        kind="raw_price_history",
+        subject="UNRELATED",
+        stored=written,
+        retrieved_at=DECISION_TIME,
+        available_at=DECISION_TIME,
+    )
+    real_append = research_service.append_advisory_predictions
+
+    def append_with_extra_source(**kwargs: Any) -> tuple[Prediction, ...]:
+        source_assets = kwargs["source_assets"]
+        assert isinstance(source_assets, list)
+        return real_append(
+            **{
+                **kwargs,
+                "source_assets": [
+                    *source_assets,
+                    research_service._asset_payload(extra),
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        research_service,
+        "append_advisory_predictions",
+        append_with_extra_source,
+    )
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "medium_prediction_source_assets_mismatch"
+
+
+def _install_semantic_panel_tamper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    mutation: str,
+) -> None:
+    """Alter panel bytes before their immutable DataAsset is registered."""
+    real_register = medium_forecasts_module.register_asset
+    store = AssetStore(tmp_path)
+
+    def register_with_tampered_panel(**kwargs: Any) -> DataAsset:
+        if kwargs.get("kind") != PANEL_KIND:
+            return real_register(**kwargs)
+        stored = kwargs["stored"]
+        frame = pl.read_parquet(store.resolve(stored.relative_path))
+        rows = frame.to_dicts()
+        forecast = next(row for row in rows if bool(row["is_forecast"]))
+        historical = next(
+            (
+                row
+                for row in rows
+                if not bool(row["is_forecast"]) and row["forward_return"] is not None
+            ),
+            None,
+        )
+        if historical is None and mutation in {
+            "historical_label_after_cutoff",
+            "wrong_fixed_epoch_cohort",
+            "fabricated_forward_return",
+        }:
+            historical = dict(forecast)
+            historical.update(
+                {
+                    "anchor_date": TARGET_DATE - timedelta(days=180),
+                    "label_end_date": TARGET_DATE,
+                    "is_forecast": False,
+                    "cohort_id": f"{forecast['horizon']}:fabricated-history",
+                    "forward_return": 0.1,
+                    "benchmark_forward_return": 0.05,
+                    "relative_forward_return": 0.05,
+                }
+            )
+            rows.append(historical)
+        if mutation == "forecast_after_target":
+            forecast["anchor_date"] = TARGET_DATE + timedelta(days=3)
+            tampered_anchor = forecast["anchor_date"]
+            forecast["cohort_id"] = f"{forecast['horizon']}:{tampered_anchor.isoformat()}"
+        elif mutation == "historical_label_after_cutoff":
+            assert historical is not None
+            historical["label_end_date"] = TARGET_DATE + timedelta(days=3)
+        elif mutation == "wrong_fixed_epoch_cohort":
+            assert historical is not None
+            historical["cohort_id"] = f"{historical['horizon']}:wrong-fixed-epoch"
+        elif mutation == "fabricated_forward_return":
+            assert historical is not None
+            historical["forward_return"] = float(historical["forward_return"]) + 0.125
+        elif mutation == "post_anchor_feature":
+            original_feature = forecast["relative_momentum"]
+            forecast["relative_momentum"] = (
+                0.25 if original_feature is None else float(original_feature) + 0.25
+            )
+        elif mutation == "wrong_eligibility_relation":
+            forecast["eligible"] = True
+            forecast["insufficiency_reason"] = ""
+        else:  # pragma: no cover - guards the test table
+            raise AssertionError(f"Unhandled panel mutation {mutation}")
+        tampered_frame = pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row").sort(
+            "horizon",
+            "anchor_date",
+            "listing_id",
+        )
+        payload = serialize_medium_forecast_panel(tampered_frame)
+        path = store.resolve(stored.relative_path)
+        path.unlink()
+        tampered_stored = store.write_bytes(stored.relative_path, payload)
+        metadata = dict(kwargs["metadata"])
+        metadata["row_count"] = tampered_frame.height
+        metadata["content_sha256"] = tampered_stored.sha256
+        metadata["evidence_bundle_hash"] = hash_json(
+            {
+                "calendar_hash": metadata["calendar_hash"],
+                "code_revision": metadata["code_revision"],
+                "content_sha256": metadata["content_sha256"],
+                "forecast_config_hash": metadata["config_hash"],
+                "scoring_config_hash": metadata["scoring_config_hash"],
+                "source_manifest_hash": metadata["source_manifest_hash"],
+                "universe_config_hash": metadata["universe_config_hash"],
+            }
+        )
+        return real_register(
+            **{
+                **kwargs,
+                "stored": tampered_stored,
+                "metadata": metadata,
+            }
+        )
+
+    monkeypatch.setattr(
+        medium_forecasts_module,
+        "register_asset",
+        register_with_tampered_panel,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "forecast_after_target",
+        "historical_label_after_cutoff",
+        "wrong_fixed_epoch_cohort",
+        "fabricated_forward_return",
+        "post_anchor_feature",
+        "wrong_eligibility_relation",
+    ],
+)
+def test_medium_panel_semantic_tamper_fails_scheduled_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _install_semantic_panel_tamper(monkeypatch, tmp_path, mutation=mutation)
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "medium_panel_semantic_replay_mismatch"
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+def test_long_evidence_closure_failure_propagates_to_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A manifest-matched long prediction with an unrelated source asset
+    still fails the parent via the complete calculation-evidence closure."""
+    ProviderRecord.objects.create(provider=sec.PROVIDER, enabled=True, status="ok")
+    real_create = research_service._create_long_advisory_prediction
+
+    def create_with_extra_source(**kwargs: Any) -> Prediction:
+        forecast = kwargs["forecast"]
+        mapping_asset = DataAsset.objects.get(kind=sec_ingestion.MAPPING_KIND)
+        assert mapping_asset not in forecast.source_assets
+        return real_create(
+            **{
+                **kwargs,
+                "forecast": dataclasses.replace(
+                    forecast,
+                    source_assets=(*forecast.source_assets, mapping_asset),
+                ),
+            }
+        )
+
+    monkeypatch.setattr(
+        research_service,
+        "_create_long_advisory_prediction",
+        create_with_extra_source,
+    )
+    stages, config = _build_verified_state(monkeypatch, tmp_path, sec=True)
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=True,
+        )
+
+    assert excinfo.value.reason_code == "long_evidence_source_assets_extra"
+
+
+@pytest.mark.parametrize("long_enabled", [False, True], ids=["medium", "medium-and-long"])
+def test_analysis_output_assets_are_in_final_scoped_integrity_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, long_enabled: bool
+) -> None:
+    """Every asset returned by the complete analysis-output verifier,
+    including its manifest and medium/long source closure, reaches the
+    parent's one final exact physical-integrity set."""
+    if long_enabled:
+        ProviderRecord.objects.create(provider=sec.PROVIDER, enabled=True, status="ok")
+    stages, config = _build_verified_state(monkeypatch, tmp_path, sec=long_enabled)
+    analysis_results = []
+    final_asset_sets: list[set[uuid.UUID]] = []
+    real_analysis_verifier = refresh_verification_module.verify_analysis_output_manifest
+    real_asset_verifier = refresh_verification_module._verify_asset_evidence
+
+    def capture_analysis_assets(**kwargs: Any) -> Any:
+        result = real_analysis_verifier(**kwargs)
+        analysis_results.append(result)
+        return result
+
+    def capture_final_assets(asset_ids: set[uuid.UUID]) -> dict[str, Any]:
+        final_asset_sets.append(set(asset_ids))
+        return real_asset_verifier(asset_ids)
+
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "verify_analysis_output_manifest",
+        capture_analysis_assets,
+    )
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "_verify_asset_evidence",
+        capture_final_assets,
+    )
+
+    result = verify_scheduled_refresh(
+        target_date=TARGET_DATE,
+        universe_config=config,
+        code_revision=CODE_REVISION,
+        stages=stages,
+        sec_required=long_enabled,
+    )
+
+    assert len(analysis_results) == 1
+    assert len(final_asset_sets) == 1
+    analysis_asset_refs = analysis_results[0].asset_refs
+    assert {ref.id for ref in analysis_asset_refs} <= final_asset_sets[0]
+    assert any(ref.kind == ANALYSIS_OUTPUT_MANIFEST_KIND for ref in analysis_asset_refs)
+    assert any(ref.kind == PANEL_KIND for ref in analysis_asset_refs)
+    if long_enabled:
+        assert Prediction.objects.filter(
+            evidence_role=Prediction.EvidenceRole.ADVISORY,
+            horizon__in=[Prediction.Horizon.THREE_YEAR, Prediction.Horizon.FIVE_YEAR],
+        ).exists()
+    assert result["asset_manifest"]["count"] == len(final_asset_sets[0])
+
+
+def test_panel_only_price_and_raw_assets_reach_research_and_parent_closure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Panel vintages A may differ from later analysis vintages B; every A
+    and its exact raw upstream still reaches both scoped integrity sets."""
+    (
+        stages,
+        config,
+        panel_source_ids,
+        panel_raw_ids,
+        unrelated_ids,
+    ) = _build_state_with_distinct_panel_sources(monkeypatch, tmp_path)
+    analysis_results = []
+    final_asset_sets: list[set[uuid.UUID]] = []
+    real_analysis_verifier = refresh_verification_module.verify_analysis_output_manifest
+    real_asset_verifier = refresh_verification_module._verify_asset_evidence
+
+    def capture_analysis_assets(**kwargs: Any) -> Any:
+        result = real_analysis_verifier(**kwargs)
+        analysis_results.append(result)
+        return result
+
+    def capture_final_assets(asset_ids: set[uuid.UUID]) -> dict[str, Any]:
+        final_asset_sets.append(set(asset_ids))
+        return real_asset_verifier(asset_ids)
+
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "verify_analysis_output_manifest",
+        capture_analysis_assets,
+    )
+    monkeypatch.setattr(
+        refresh_verification_module,
+        "_verify_asset_evidence",
+        capture_final_assets,
+    )
+
+    result = verify_scheduled_refresh(
+        target_date=TARGET_DATE,
+        universe_config=config,
+        code_revision=CODE_REVISION,
+        stages=stages,
+        sec_required=False,
+    )
+
+    assert len(analysis_results) == 1
+    assert len(final_asset_sets) == 1
+    research_ids = [ref.id for ref in analysis_results[0].asset_refs]
+    expected_panel_closure = panel_source_ids | panel_raw_ids
+    for asset_id in expected_panel_closure:
+        assert research_ids.count(asset_id) == 1
+        assert asset_id in final_asset_sets[0]
+    assert unrelated_ids.isdisjoint(research_ids)
+    assert unrelated_ids.isdisjoint(final_asset_sets[0])
+    assert result["asset_manifest"]["count"] == len(final_asset_sets[0])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason_code"),
+    [
+        ("corrupt", "asset_corrupt"),
+        ("remove", "asset_unreadable"),
+    ],
+)
+def test_panel_only_price_asset_physical_failure_blocks_scheduled_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+    reason_code: str,
+) -> None:
+    stages, config, panel_source_ids, _panel_raw_ids, _unrelated_ids = (
+        _build_state_with_distinct_panel_sources(monkeypatch, tmp_path)
+    )
+    analysis_source_ids = {
+        uuid.UUID(str(entry["id"]))
+        for analysis in StockAnalysis.objects.all()
+        for entry in analysis.data_quality["source_assets"]
+        if isinstance(entry, dict) and entry.get("kind") == "price_history"
+    }
+    a_only_asset = DataAsset.objects.get(pk=sorted(panel_source_ids - analysis_source_ids)[0])
+    path = AssetStore(tmp_path).resolve(a_only_asset.relative_path)
+    if mutation == "corrupt":
+        path.write_bytes(b"corrupt panel-only normalized price bytes")
+    else:
+        path.unlink()
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == reason_code
+    assert str(tmp_path) not in str(excinfo.value)
 
 
 def test_wrong_child_target_date_fails_closed(
@@ -523,6 +1136,28 @@ def test_sec_required_but_absent_fails_closed(
     assert excinfo.value.reason_code == "stage_details_missing"
 
 
+def test_market_long_gate_cannot_omit_sec_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stages, config = _build_verified_state(monkeypatch, tmp_path)
+    market = JobRun.objects.get(pk=stages["market"]["job_run_id"])
+    JobRun.objects.filter(pk=market.pk).update(
+        details={**market.details, "long_forecast_requested": True}
+    )
+
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+
+    assert excinfo.value.reason_code == "market_long_forecast_gate_requires_sec"
+
+
 def test_sec_required_and_present_verifies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     stages, config = _build_verified_state(monkeypatch, tmp_path, sec=True)
 
@@ -538,10 +1173,10 @@ def test_sec_required_and_present_verifies(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 # NOTE: SEC semantic fact/filing-evidence closure (`_require_sec_fact` in
-# rev-1) is deliberately removed from this data-domain slice per
-# `refresh-output-verification@rev-2` #6; it returns in the research-domain
-# validator (Slice C). Until then, corrupting a `FundamentalFactEvidence`
-# filing asset alone does not fail a data-stage-only verified refresh.
+# rev-1) is deliberately removed from the data-domain validator per
+# `refresh-output-verification@rev-2` #6. Long-forecast evidence closure is
+# owned by `research.refresh_validation`, which the scheduled parent calls
+# after its core run/membership/configuration checks.
 
 
 def test_zero_active_portfolio_skip_remains_self_contained_after_later_state(
@@ -2124,32 +2759,11 @@ def test_decision_horizon_derived_from_scoring_config(
     )
 
     stages, config = _build_verified_state(monkeypatch, tmp_path)
-    template = Prediction.objects.filter(evidence_role=Prediction.EvidenceRole.DECISION).first()
-    assert template is not None
-    medium_scenario = template.analysis.medium_scenario
-
-    def _round(value: float | None, places: int) -> Decimal | None:
-        return None if value is None else Decimal(str(round(value, places)))
-
-    _clone_prediction(
-        template,
-        horizon=Prediction.Horizon.MEDIUM,
-        # Stable, explicit, <=40-char literal: `model_version` is a
-        # `CharField(max_length=40)` enforced by PostgreSQL (though not by
-        # SQLite), so appending a suffix to the real, already
-        # near-40-char production `model_version` can silently overflow
-        # only on PostgreSQL, raising a `DataError` before this test's own
-        # intended assertion ever runs.
-        model_version="test-medium-decision-clone",
-        bear_return=_round(medium_scenario["bear"], 4),
-        base_return=_round(medium_scenario["base"], 4),
-        bull_return=_round(medium_scenario["bull"], 4),
-        probability_positive=_round(medium_scenario.get("probability_positive"), 4),
-        confidence=_round(medium_scenario["confidence"], 2),
-        confidence_status=medium_scenario["confidence_status"],
-        insufficiency_reason=medium_scenario["insufficiency_reason"],
-    )
-    _bump_prediction_count(stages, 1)
+    assert set(
+        Prediction.objects.filter(evidence_role=Prediction.EvidenceRole.DECISION).values_list(
+            "horizon", flat=True
+        )
+    ) == {Prediction.Horizon.SHORT, Prediction.Horizon.MEDIUM}
 
     result = verify_scheduled_refresh(
         target_date=TARGET_DATE,
@@ -3097,7 +3711,7 @@ def test_analysis_run_forged_on_time_flag_after_next_open_fails_closed(
     assert excinfo.value.reason_code == "analysis_run_not_on_time"
 
 
-def test_analysis_run_immediately_before_next_open_verifies(
+def test_analysis_run_pre_open_timestamp_tamper_fails_manifest_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from exchange_calendars import get_calendar
@@ -3112,14 +3726,15 @@ def test_analysis_run_immediately_before_next_open_verifies(
         generated_at=boundary, data_cutoff=boundary, issued_on_time=True
     )
 
-    result = verify_scheduled_refresh(
-        target_date=TARGET_DATE,
-        universe_config=config,
-        code_revision=CODE_REVISION,
-        stages=stages,
-        sec_required=False,
-    )
-    assert result["status"] == "verified"
+    with pytest.raises(RefreshVerificationError) as excinfo:
+        verify_scheduled_refresh(
+            target_date=TARGET_DATE,
+            universe_config=config,
+            code_revision=CODE_REVISION,
+            stages=stages,
+            sec_required=False,
+        )
+    assert excinfo.value.reason_code == "analysis_output_manifest_identity_invalid"
 
 
 def test_prediction_forged_on_time_flag_after_next_open_fails_closed(

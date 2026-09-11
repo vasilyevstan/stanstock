@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import polars as pl
 import pytest
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection, connections
 
 import refresh_fixtures
 import test_data_sec_ingestion as sec_fixtures
@@ -23,12 +26,20 @@ from stanstock.core.jobs import JobExecutionResult, execute_target_job
 from stanstock.core.management.commands import scheduled_refresh
 from stanstock.core.models import JobRun
 from stanstock.core.verification_types import RefreshVerificationError
+from stanstock.data import jobs as data_jobs_module
 from stanstock.data import live_us as live_us_module
 from stanstock.data import sec_jobs as sec_jobs_module
 from stanstock.data.assets import AssetStore
 from stanstock.data.jobs import PreparedUsDailyJob, execute_us_daily_job
 from stanstock.data.live_us import UsUniverseConfig
-from stanstock.data.models import DataAsset, LatestMarketData, ProviderRecord, UniverseSnapshot
+from stanstock.data.management.commands import daily as daily_command
+from stanstock.data.models import (
+    DataAsset,
+    LatestMarketData,
+    ProviderRecord,
+    Universe,
+    UniverseSnapshot,
+)
 from stanstock.data.providers import sec as sec_provider
 from stanstock.data.providers.contracts import FundamentalSourcePayload, PriceBar, PriceSeries
 from stanstock.data.sec_config import load_sec_fundamentals_config
@@ -43,7 +54,8 @@ from stanstock.portfolio.refresh_validation import (
     verify_portfolio_snapshot_stage,
 )
 from stanstock.research.jobs import execute_prediction_evaluation_job
-from stanstock.research.models import PredictionOutcome
+from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome
+from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND
 from test_refresh_verification import _create_lagging_prediction, _register_lagging_price_history
 
 pytestmark = pytest.mark.django_db
@@ -482,7 +494,12 @@ def test_enabled_sec_stage_runs_before_market(
         # Delegate to the real, unmocked production entrypoint so the market
         # stage produces genuine persisted evidence -- ordering is captured
         # here, evidence realism is not sacrificed for it.
-        return execute_us_daily_job(prepared, require_observed=True)
+        return execute_us_daily_job(
+            prepared,
+            require_observed=True,
+            long_forecast_requested=cast(bool, kwargs["long_forecast_requested"]),
+            target_gate_reservation_id=cast(UUID, kwargs["target_gate_reservation_id"]),
+        )
 
     monkeypatch.setattr(scheduled_refresh, "execute_sec_fundamentals_job", execute_sec)
     monkeypatch.setattr(scheduled_refresh, "execute_us_daily_job", execute_market)
@@ -554,6 +571,329 @@ def test_failed_sec_stage_blocks_market(
     parent = JobRun.objects.get(job_name="scheduled_refresh")
     assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.FAILED
     assert "market" not in parent.details["stages"]
+
+
+@pytest.mark.parametrize(
+    ("scheduler_gate", "authoritative_gate"),
+    [(False, True), (True, False)],
+    ids=["scheduler-false-market-true", "scheduler-true-market-false"],
+)
+def test_scheduler_rejects_opposite_gate_success_inserted_before_market_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scheduler_gate: bool,
+    authoritative_gate: bool,
+) -> None:
+    """The locked reservation rejects a success racing the scheduler's
+    read-only proposal before SEC task entry or parent verification."""
+    prepared = _prepared()
+    ProviderRecord.objects.create(
+        provider="sec",
+        enabled=scheduler_gate,
+        status="ok" if scheduler_gate else "disabled",
+    )
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    def propose_then_insert_success(candidate: PreparedUsDailyJob) -> bool:
+        assert candidate is prepared
+        JobRun.objects.create(
+            job_name="daily",
+            region="us",
+            target_date=candidate.target_date,
+            attempt=1,
+            status=JobRun.Status.SUCCESS,
+            finished_at=candidate.decision_time,
+            details={"long_forecast_requested": authoritative_gate},
+        )
+        return scheduler_gate
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "proposed_us_daily_target_gate",
+        propose_then_insert_success,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        lambda **kwargs: pytest.fail("gate mismatch must block SEC task entry"),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda **kwargs: pytest.fail("gate mismatch must block market production"),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "verify_scheduled_refresh",
+        lambda **kwargs: pytest.fail("gate mismatch must block parent verification"),
+    )
+
+    with pytest.raises(CommandError, match="explicit long-forecast invocation gate conflicts"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    authoritative = JobRun.objects.get(job_name="daily")
+    assert parent.status == JobRun.Status.FAILED
+    assert "verification" not in parent.details
+    assert "evaluation" not in parent.details.get("stages", {})
+    assert authoritative.status == JobRun.Status.SUCCESS
+    assert authoritative.details["long_forecast_requested"] is authoritative_gate
+    assert JobRun.objects.filter(job_name="daily").count() == 1
+    assert "sec_fundamentals" not in parent.details.get("stages", {})
+
+
+@pytest.mark.skipif(
+    connection.vendor != "postgresql",
+    reason="PostgreSQL daily-target advisory-lock regression",
+)
+@pytest.mark.django_db(transaction=True)
+def test_postgresql_opposite_daily_completion_wins_before_scheduler_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A false manual completion linearized after a true scheduler proposal
+    is detected under the daily lock before SEC task/budget/fetch entry."""
+    prepared = _prepared()
+    universe = Universe.objects.create(
+        slug="gate-race",
+        name="Gate race",
+        config_version="test-v1",
+    )
+    snapshot = UniverseSnapshot.objects.create(
+        universe=universe,
+        as_of_date=prepared.target_date,
+        grade=UniverseSnapshot.Grade.OBSERVED,
+        config_hash="a" * 64,
+    )
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    real_proposal = scheduled_refresh.proposed_us_daily_target_gate
+    barrier = Barrier(2)
+
+    def paused_true_proposal(candidate: PreparedUsDailyJob) -> bool:
+        proposed = real_proposal(candidate)
+        assert proposed is True
+        barrier.wait(timeout=10)
+        barrier.wait(timeout=10)
+        return proposed
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "proposed_us_daily_target_gate",
+        paused_true_proposal,
+    )
+    provider_entries: list[str] = []
+
+    def no_sec_entry(**kwargs: object) -> JobRun:
+        provider_entries.append("sec")
+        pytest.fail("opposite-gate mismatch must block SEC task entry")
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        no_sec_entry,
+    )
+    monkeypatch.setattr(
+        data_jobs_module,
+        "run_us_daily",
+        lambda **kwargs: live_us_module.LiveUsRunResult(
+            snapshot=snapshot,
+            analysis_run_id=uuid4(),
+            analyses=1,
+            predictions=1,
+            eligible=1,
+            excluded=0,
+            price_assets=0,
+            raw_assets=0,
+            credits_used=0,
+            benchmark_symbol="SPY",
+            catalog_asset_ids=(),
+        ),
+    )
+
+    def run_scheduler() -> Exception | None:
+        connections.close_all()
+        try:
+            call_command(
+                "scheduled_refresh",
+                config=tmp_path / "universe.yml",
+                stdout=StringIO(),
+            )
+        except CommandError as exc:
+            return exc
+        finally:
+            connections.close_all()
+        return None
+
+    def complete_manual_false() -> JobRun:
+        connections.close_all()
+        try:
+            barrier.wait(timeout=10)
+            run = execute_us_daily_job(
+                prepared,
+                long_forecast_requested=False,
+            )
+            barrier.wait(timeout=10)
+            return run
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        scheduler_future = executor.submit(run_scheduler)
+        manual_future = executor.submit(complete_manual_false)
+        manual = manual_future.result(timeout=20)
+        scheduler_error = scheduler_future.result(timeout=20)
+
+    assert manual.status == JobRun.Status.SUCCESS
+    assert manual.details["long_forecast_requested"] is False
+    assert isinstance(scheduler_error, CommandError)
+    assert "conflicts with the frozen market target gate" in str(scheduler_error)
+    assert provider_entries == []
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    assert parent.status == JobRun.Status.FAILED
+    assert "sec_fundamentals" not in parent.details.get("stages", {})
+
+
+def test_scheduler_retry_keeps_gate_reserved_before_sec_or_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared()
+    record = ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+    real_reserve = scheduled_refresh.reserve_us_daily_target_gate
+    reserved_gates: list[tuple[UUID | None, bool]] = []
+
+    def reserve_then_fail(*args: object, **kwargs: object) -> object:
+        gate = real_reserve(*args, **kwargs)
+        reserved_gates.append((gate.reservation_id, gate.long_forecast_requested))
+        raise ValueError("simulated failure after gate persistence")
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "reserve_us_daily_target_gate",
+        reserve_then_fail,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        lambda **kwargs: pytest.fail("failure occurs before SEC stage entry"),
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_us_daily_job",
+        lambda *args, **kwargs: pytest.fail("market must not run after SEC setup failure"),
+    )
+
+    with pytest.raises(CommandError, match="after gate persistence"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    reservation = JobRun.objects.get(job_name="daily")
+    assert reservation.status == JobRun.Status.RUNNING
+    assert reservation.details["target_gate_reservation"] is True
+    assert reservation.details["long_forecast_requested"] is True
+
+    record.enabled = False
+    record.status = "disabled"
+    record.save(update_fields=["enabled", "status"])
+    monkeypatch.setattr(
+        data_jobs_module,
+        "_sample_current_long_forecast_requested",
+        lambda: pytest.fail("retry must not resample mutable provider state"),
+    )
+
+    with pytest.raises(CommandError, match="after gate persistence"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    reservation.refresh_from_db()
+    assert reservation.status == JobRun.Status.RUNNING
+    assert reservation.details["long_forecast_requested"] is True
+    assert JobRun.objects.filter(job_name="daily").count() == 1
+    assert {
+        run.details["long_forecast_requested"] for run in JobRun.objects.filter(job_name="daily")
+    } == {True}
+    assert reserved_gates == [(reservation.pk, True), (reservation.pk, True)]
+
+
+def test_manual_long_market_without_sec_child_fails_before_provider_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    refresh_fixtures.build_sec_evidence(
+        store=AssetStore(tmp_path),
+        company=listing.security.company,
+        available_before=prepared.decision_time,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    manual = execute_us_daily_job(
+        prepared,
+        require_observed=True,
+        long_forecast_requested=True,
+    )
+    assert manual.status == JobRun.Status.SUCCESS
+    assert not JobRun.objects.filter(job_name="sec_fundamentals").exists()
+
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+    access_calls = 0
+
+    def no_provider_access(*args: object, **kwargs: object) -> str:
+        nonlocal access_calls
+        access_calls += 1
+        pytest.fail("committed market output must fail before provider access")
+
+    monkeypatch.setattr(
+        data_jobs_module,
+        "_sample_current_long_forecast_requested",
+        no_provider_access,
+    )
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        no_provider_access,
+    )
+    monkeypatch.setattr(live_us_module.twelve_data, "resolve_api_key", no_provider_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_stock_catalog", no_provider_access)
+    monkeypatch.setattr(
+        live_us_module.twelve_data,
+        "fetch_daily_price_series",
+        no_provider_access,
+    )
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "preflight", no_provider_access)
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "consume", no_provider_access)
+    monkeypatch.setattr(sec_provider, "build_user_agent", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_ticker_exchange_mapping", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_submissions", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_companyfacts", no_provider_access)
+
+    with pytest.raises(CommandError, match="no same-target successful SEC child"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    parent = JobRun.objects.get(job_name="scheduled_refresh")
+    market_stage = parent.details["stages"]["market"]
+    assert market_stage["status"] == JobRun.Status.SKIPPED
+    assert market_stage["job_run_id"] != str(manual.pk)
+    assert "sec_fundamentals" not in parent.details["stages"]
+    assert access_calls == 0
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
 
 
 def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
@@ -638,6 +978,398 @@ def test_retry_recovers_successful_sec_child_even_if_provider_is_disabled(
     assert parent.details["stages"]["sec_fundamentals"]["status"] == JobRun.Status.SKIPPED
     assert parent.details["verification"]["status"] == "verified"
     assert parent.details["verification"]["sec"]["job_run_id"] == str(prior_sec_success.pk)
+
+
+@pytest.mark.parametrize("entrypoint", ["execute", "command"])
+@pytest.mark.parametrize(
+    "original_gate",
+    [False, True],
+    ids=["disabled-to-enabled", "enabled-to-disabled"],
+)
+def test_daily_retry_after_post_analysis_etf_failure_keeps_original_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    entrypoint: str,
+    original_gate: bool,
+) -> None:
+    """Both canonical and manual-command retries recover the exact output
+    under the pre-write gate without consulting any retry-time provider
+    capability, credential, fetch, or quota boundary."""
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    sec_record = ProviderRecord.objects.create(
+        provider="sec",
+        enabled=original_gate,
+        status="ok" if original_gate else "disabled",
+    )
+    if original_gate:
+        refresh_fixtures.build_sec_evidence(
+            store=AssetStore(tmp_path),
+            company=listing.security.company,
+            available_before=prepared.decision_time,
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+        )
+    monkeypatch.setattr(daily_command, "prepare_us_daily_job", lambda **kwargs: prepared)
+
+    real_sync = live_us_module.sync_investable_spy_from_asset
+    sync_calls = 0
+
+    def fail_first_sync(**kwargs: object) -> object:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise ValueError("simulated post-analysis ETF projection failure")
+        return real_sync(**kwargs)
+
+    monkeypatch.setattr(live_us_module, "sync_investable_spy_from_asset", fail_first_sync)
+
+    def invoke() -> JobRun | None:
+        if entrypoint == "execute":
+            return execute_us_daily_job(prepared)
+        call_command(
+            "daily",
+            region="us",
+            target_date=prepared.target_date.isoformat(),
+            config=tmp_path / "universe.yml",
+            stdout=StringIO(),
+        )
+        return None
+
+    expected_error = CommandError if entrypoint == "command" else ValueError
+    with pytest.raises(expected_error, match="post-analysis ETF projection failure"):
+        invoke()
+
+    failed = JobRun.objects.get(job_name="daily", attempt=1)
+    assert failed.status == JobRun.Status.FAILED
+    assert failed.details["long_forecast_requested"] is original_gate
+    analysis = AnalysisRun.objects.get(status="complete")
+    manifest = DataAsset.objects.get(
+        kind=ANALYSIS_OUTPUT_MANIFEST_KIND,
+        subject=str(analysis.id),
+    )
+    prediction_ids = set(Prediction.objects.values_list("id", flat=True))
+
+    sec_record.enabled = not original_gate
+    sec_record.status = "ok" if sec_record.enabled else "disabled"
+    sec_record.save(update_fields=["enabled", "status"])
+
+    access_calls = 0
+
+    def no_provider_access(*args: object, **kwargs: object) -> str:
+        nonlocal access_calls
+        access_calls += 1
+        pytest.fail("retry must recover before provider enablement, credentials, fetch, or quota")
+
+    monkeypatch.setattr(
+        data_jobs_module,
+        "_sample_current_long_forecast_requested",
+        no_provider_access,
+    )
+    monkeypatch.setattr(live_us_module.twelve_data, "resolve_api_key", no_provider_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_stock_catalog", no_provider_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_daily_price_series", no_provider_access)
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "preflight", no_provider_access)
+    monkeypatch.setattr(live_us_module.ProviderCreditBudget, "consume", no_provider_access)
+    monkeypatch.setattr(sec_provider, "build_user_agent", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_ticker_exchange_mapping", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_submissions", no_provider_access)
+    monkeypatch.setattr(sec_provider, "fetch_companyfacts", no_provider_access)
+
+    result = invoke()
+    succeeded = JobRun.objects.get(job_name="daily", attempt=2)
+    if result is not None:
+        assert result.pk == succeeded.pk
+    assert succeeded.status == JobRun.Status.SUCCESS
+    assert succeeded.details["long_forecast_requested"] is original_gate
+    assert succeeded.details["analysis_run_id"] == str(analysis.id)
+    assert AnalysisRun.objects.get(status="complete").id == analysis.id
+    assert (
+        DataAsset.objects.get(
+            kind=ANALYSIS_OUTPUT_MANIFEST_KIND,
+            subject=str(analysis.id),
+        ).id
+        == manifest.id
+    )
+    assert set(Prediction.objects.values_list("id", flat=True)) == prediction_ids
+    assert {
+        run.details["long_forecast_requested"] for run in JobRun.objects.filter(job_name="daily")
+    } == {original_gate}
+    assert sync_calls == 2
+    assert access_calls == 0
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
+
+
+def test_daily_retry_fails_closed_when_completed_output_has_no_gate_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    ProviderRecord.objects.create(provider="sec", enabled=False, status="disabled")
+    monkeypatch.setattr(
+        live_us_module,
+        "sync_investable_spy_from_asset",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("ETF projection failure")),
+    )
+    with pytest.raises(ValueError, match="ETF projection failure"):
+        execute_us_daily_job(prepared)
+
+    failed = JobRun.objects.get(job_name="daily")
+    JobRun.objects.filter(pk=failed.pk).update(details={})
+    monkeypatch.setattr(
+        data_jobs_module,
+        "_sample_current_long_forecast_requested",
+        lambda: pytest.fail(
+            "completed output without gate evidence must not sample provider state"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Completed US analysis output exists without"):
+        execute_us_daily_job(prepared)
+
+    assert JobRun.objects.filter(job_name="daily").count() == 1
+    assert AnalysisRun.objects.filter(status="complete").count() == 1
+    assert DataAsset.objects.filter(kind=ANALYSIS_OUTPUT_MANIFEST_KIND).count() == 1
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
+
+
+def test_retry_uses_original_enabled_long_gate_without_provider_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The successful market child's pre-write SEC gate, not mutable retry
+    state, keeps its committed long output required and recoverable."""
+    listing = refresh_fixtures.pre_create_stock_listing("AAA")
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    sec_record = ProviderRecord.objects.create(provider="sec", enabled=True, status="ok")
+    sec_evidence = refresh_fixtures.build_sec_evidence(
+        store=AssetStore(tmp_path),
+        company=listing.security.company,
+        available_before=prepared.decision_time,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    sec_task_calls = 0
+
+    def execute_sec(**kwargs: object) -> JobRun:
+        def task(run: JobRun) -> JobExecutionResult:
+            nonlocal sec_task_calls
+            sec_task_calls += 1
+            return JobExecutionResult(
+                details={
+                    "mapping_asset_id": sec_evidence.mapping_asset_id,
+                    "mapping_sha256": sec_evidence.mapping_sha256,
+                    "cik_config_version": sec_evidence.cik_config_version,
+                    "cik_config_hash": sec_evidence.cik_config_hash,
+                    "config_version": sec_evidence.fundamentals_config_version,
+                    "config_hash": sec_evidence.fundamentals_config_hash,
+                    "asset_refs": [ref.to_json() for ref in sec_evidence.asset_refs],
+                }
+            )
+
+        return execute_target_job(
+            job_name="sec_fundamentals",
+            region="us",
+            target_date=prepared.target_date,
+            task=task,
+        )
+
+    monkeypatch.setattr(scheduled_refresh, "execute_sec_fundamentals_job", execute_sec)
+
+    evaluation_attempts = 0
+
+    def flaky_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        flaky_evaluation,
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    original_sec_id = first_parent.details["stages"]["sec_fundamentals"]["job_run_id"]
+    original_market_id = first_parent.details["stages"]["market"]["job_run_id"]
+    original_long_ids = set(
+        Prediction.objects.filter(horizon__in=["3y", "5y"]).values_list("id", flat=True)
+    )
+    assert len(original_long_ids) == 2
+    original_analysis_id = JobRun.objects.get(pk=original_market_id).details["analysis_run_id"]
+    assert JobRun.objects.get(pk=original_market_id).details["long_forecast_requested"] is True
+    assert sec_task_calls == 1
+
+    sec_record.enabled = False
+    sec_record.status = "disabled"
+    sec_record.save(update_fields=["enabled", "status"])
+
+    access_calls = 0
+
+    def no_access(*args: object, **kwargs: object) -> str:
+        nonlocal access_calls
+        access_calls += 1
+        pytest.fail("retry must not resolve credentials or fetch provider data")
+
+    monkeypatch.setattr("stanstock.data.providers.twelve_data.resolve_api_key", no_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_stock_catalog", no_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_daily_price_series", no_access)
+    monkeypatch.setattr(sec_provider, "build_user_agent", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_ticker_exchange_mapping", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_submissions", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_companyfacts", no_access)
+
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    sec_skip = JobRun.objects.get(
+        pk=second_parent.details["stages"]["sec_fundamentals"]["job_run_id"]
+    )
+    market_skip = JobRun.objects.get(pk=second_parent.details["stages"]["market"]["job_run_id"])
+    assert second_parent.status == JobRun.Status.SUCCESS
+    assert sec_skip.details["successful_run_id"] == original_sec_id
+    assert market_skip.details["successful_run_id"] == original_market_id
+    assert second_parent.details["verification"]["analysis_run_id"] == original_analysis_id
+    assert second_parent.details["verification"]["child_job_run_ids"]["sec_fundamentals"] == (
+        original_sec_id
+    )
+    assert second_parent.details["verification"]["child_job_run_ids"]["market"] == (
+        original_market_id
+    )
+    assert (
+        set(Prediction.objects.filter(horizon__in=["3y", "5y"]).values_list("id", flat=True))
+        == original_long_ids
+    )
+    assert sec_task_calls == 1
+    assert access_calls == 0
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
+
+
+def test_retry_uses_original_disabled_long_gate_without_provider_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Enabling SEC after a decision/medium-only market success cannot
+    retroactively add an SEC child or make the verifier require long rows."""
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(
+        monkeypatch,
+        tmp_path,
+        symbols=("AAA",),
+        minimum_eligible=1,
+    )
+    sec_record = ProviderRecord.objects.create(provider="sec", enabled=False, status="disabled")
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    evaluation_attempts = 0
+
+    def flaky_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        flaky_evaluation,
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    original_market_id = first_parent.details["stages"]["market"]["job_run_id"]
+    market_success = JobRun.objects.get(pk=original_market_id)
+    assert market_success.details["long_forecast_requested"] is False
+    assert not Prediction.objects.filter(horizon__in=["3y", "5y"]).exists()
+
+    sec_record.enabled = True
+    sec_record.status = "ok"
+    sec_record.save(update_fields=["enabled", "status"])
+
+    access_calls = 0
+
+    def no_access(*args: object, **kwargs: object) -> str:
+        nonlocal access_calls
+        access_calls += 1
+        pytest.fail("retry must not resolve credentials or fetch provider data")
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_sec_fundamentals_job",
+        no_access,
+    )
+    monkeypatch.setattr("stanstock.data.providers.twelve_data.resolve_api_key", no_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_stock_catalog", no_access)
+    monkeypatch.setattr(live_us_module.twelve_data, "fetch_daily_price_series", no_access)
+    monkeypatch.setattr(sec_provider, "build_user_agent", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_ticker_exchange_mapping", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_submissions", no_access)
+    monkeypatch.setattr(sec_provider, "fetch_companyfacts", no_access)
+
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    market_skip = JobRun.objects.get(pk=second_parent.details["stages"]["market"]["job_run_id"])
+    assert second_parent.status == JobRun.Status.SUCCESS
+    assert "sec_fundamentals" not in second_parent.details["stages"]
+    assert second_parent.details["verification"]["sec"] == {"required": False}
+    assert market_skip.details["successful_run_id"] == original_market_id
+    assert second_parent.details["verification"]["child_job_run_ids"]["market"] == (
+        original_market_id
+    )
+    assert not Prediction.objects.filter(horizon__in=["3y", "5y"]).exists()
+    assert access_calls == 0
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "SPY"]
 
 
 def test_verification_failure_after_real_success_fails_closed_without_refetch(
@@ -863,6 +1595,94 @@ def test_missing_bound_price_file_fails_path_free_and_recovers_without_refetch(
     third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
     assert third_parent.status == JobRun.Status.SUCCESS
     assert third_parent.details["verification"]["status"] == "verified"
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+
+def test_manifest_corruption_retry_is_credential_free_and_recovers_without_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A prior-success market child with a corrupt output manifest fails
+    parent verification, then recovers from the same local bytes without
+    resolving credentials or spending another provider credit."""
+    prepared, _config, (catalog_calls, price_calls) = _real_prepared(monkeypatch, tmp_path)
+    monkeypatch.delenv("STANSTOCK_SCHEDULE_TIMEZONE", raising=False)
+    monkeypatch.setattr(scheduled_refresh, "prepare_us_daily_job", lambda **kwargs: prepared)
+    monkeypatch.setattr(scheduled_refresh, "clean_git_revision", lambda root: "a" * 40)
+
+    evaluation_attempts = 0
+
+    def flaky_once_evaluation(**kwargs: object) -> JobRun:
+        nonlocal evaluation_attempts
+        evaluation_attempts += 1
+        if evaluation_attempts == 1:
+
+            def task(run: JobRun) -> JobExecutionResult:
+                raise ValueError("temporary evaluation failure")
+
+            return execute_target_job(
+                job_name="evaluate_predictions",
+                region="us",
+                target_date=prepared.target_date,
+                task=task,
+            )
+        return execute_prediction_evaluation_job(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_refresh,
+        "execute_prediction_evaluation_job",
+        flaky_once_evaluation,
+    )
+
+    with pytest.raises(CommandError, match="temporary evaluation failure"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+    first_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=1)
+    assert first_parent.status == JobRun.Status.FAILED
+    assert first_parent.details["stages"]["market"]["status"] == JobRun.Status.SUCCESS
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    manifest = DataAsset.objects.get(kind=ANALYSIS_OUTPUT_MANIFEST_KIND)
+    manifest_path = AssetStore(tmp_path).resolve(manifest.relative_path)
+    original_bytes = manifest_path.read_bytes()
+    manifest_path.write_bytes(b"corrupt manifest bytes")
+
+    credential_resolutions = 0
+
+    def no_credentials(*args: object, **kwargs: object) -> str:
+        nonlocal credential_resolutions
+        credential_resolutions += 1
+        pytest.fail("prior-success retry must not resolve provider credentials")
+
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.resolve_api_key",
+        no_credentials,
+    )
+
+    with pytest.raises(CommandError, match="Scheduled refresh failed"):
+        call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    second_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=2)
+    assert second_parent.status == JobRun.Status.FAILED
+    assert second_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    verification = second_parent.details["verification"]
+    assert verification["status"] == "failed"
+    assert verification["reason_code"] == "asset_corrupt"
+    assert "checks" not in verification
+    assert not any(str(tmp_path) in str(value) for value in verification.values())
+    assert credential_resolutions == 0
+    assert catalog_calls == ["NASDAQ"]
+    assert price_calls == ["AAA", "BBB", "SPY"]
+
+    manifest_path.write_bytes(original_bytes)
+    call_command("scheduled_refresh", config=tmp_path / "universe.yml", stdout=StringIO())
+
+    third_parent = JobRun.objects.get(job_name="scheduled_refresh", attempt=3)
+    assert third_parent.status == JobRun.Status.SUCCESS
+    assert third_parent.details["stages"]["market"]["status"] == JobRun.Status.SKIPPED
+    assert third_parent.details["verification"]["status"] == "verified"
+    assert credential_resolutions == 0
     assert catalog_calls == ["NASDAQ"]
     assert price_calls == ["AAA", "BBB", "SPY"]
 

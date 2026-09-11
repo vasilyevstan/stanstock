@@ -48,6 +48,7 @@ never letting a cleanup-step fault itself replace the original error.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import uuid
 from dataclasses import dataclass
@@ -62,6 +63,7 @@ from django.conf import settings
 from django.db import DatabaseError, connection
 
 from stanstock.core.verification_types import AssetRef, RefreshVerificationError
+from stanstock.data.asof import AsOfData, raw_price_asset_for
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.management.config_loader import default_us_scoring_config_path
 from stanstock.data.models import (
@@ -93,10 +95,13 @@ from stanstock.research.medium_forecasts import (
     PANEL_PROVIDER,
     PANEL_SCHEMA,
     PANEL_SCHEMA_VERSION,
+    MediumPanelPriceInput,
     asset_identity,
     calendar_sessions_through,
     dedupe_assets,
     hash_json,
+    reconstruct_medium_forecast_panel,
+    serialize_medium_forecast_panel,
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.refresh_evidence import (
@@ -217,6 +222,20 @@ def _write_subject_price_asset(store: AssetStore, subject: str, *, close: float)
         },
         schema_overrides={"date": pl.Date, "close": pl.Float64, "volume": pl.Int64},
     )
+    raw_stored = store.write_bytes(
+        f"long-tests/{subject}-{uuid4().hex}-raw.json",
+        f'{{"symbol":"{subject}","source":"synthetic-test"}}'.encode(),
+    )
+    raw_asset = register_asset(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=subject,
+        stored=raw_stored,
+        retrieved_at=DECISION_TIME,
+        available_at=DECISION_TIME,
+        period_start=sessions[0],
+        period_end=sessions[-1],
+    )
     stored = store.write_frame(f"long-tests/{subject}.parquet", frame)
     return register_asset(
         provider="twelve_data",
@@ -230,6 +249,8 @@ def _write_subject_price_asset(store: AssetStore, subject: str, *, close: float)
         metadata={
             "return_definition": "split_adjusted_price_return",
             "dividends_included": False,
+            "raw_asset_id": str(raw_asset.id),
+            "raw_sha256": raw_asset.sha256,
         },
     )
 
@@ -248,7 +269,7 @@ def _medium_active_snapshot(
     listings = [_long_listing(f"MED{index}") for index in range(listing_count)]
     for index, listing in enumerate(listings):
         UniverseMembership.objects.create(snapshot=snapshot, listing=listing)
-        _write_price_asset(store, listing, close=40.0 + index * 5)
+        _write_subject_price_asset(store, listing.ticker, close=40.0 + index * 5)
     _write_subject_price_asset(store, "SPY", close=300.0)
     return store, snapshot, listings
 
@@ -650,6 +671,19 @@ def test_verify_analysis_output_manifest_succeeds_for_real_medium_producer_run(
 
     assert outcome.summary["analysis_run_id"] == str(run.id)
     assert any(ref.kind == PANEL_KIND for ref in outcome.asset_refs)
+    panel = DataAsset.objects.get(kind=PANEL_KIND, subject=str(run.id))
+    panel_source_ids = {
+        UUID(str(entry["id"]))
+        for entry in panel.metadata["source_assets"]
+        if isinstance(entry, dict)
+    }
+    panel_raw_ids = {
+        raw_price_asset_for(DataAsset.objects.get(pk=source_id), cutoff=run.data_cutoff).id
+        for source_id in panel_source_ids
+    }
+    result_ids = [ref.id for ref in outcome.asset_refs]
+    for source_id in panel_source_ids | panel_raw_ids:
+        assert result_ids.count(source_id) == 1
 
 
 def test_verify_analysis_output_manifest_succeeds_for_real_long_producer_run(
@@ -1473,10 +1507,20 @@ def _medium_lane_expectation(
         benchmark_subject=benchmark_subject,
         return_basis=medium_config.return_basis,
         dividends_included=medium_config.dividends_included,
+        config=medium_config,
     )
 
 
 def _price_source_asset(*, subject: str, retrieved_at: datetime) -> DataAsset:
+    raw_asset = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=subject,
+        relative_path=f"tests/manifest/{uuid4().hex}",
+        sha256=uuid4().hex * 2,
+        retrieved_at=retrieved_at,
+        available_at=retrieved_at,
+    )
     return DataAsset.objects.create(
         provider="twelve_data",
         kind="price_history",
@@ -1485,16 +1529,21 @@ def _price_source_asset(*, subject: str, retrieved_at: datetime) -> DataAsset:
         sha256=uuid4().hex * 2,
         retrieved_at=retrieved_at,
         available_at=retrieved_at,
+        metadata={
+            "raw_asset_id": str(raw_asset.id),
+            "raw_sha256": raw_asset.sha256,
+        },
     )
 
 
 def _panel_test_row(
     *, horizon: str, listing: Listing, price_asset: DataAsset, target_date
 ) -> dict[str, object]:
-    """One schema-conforming, semantically-arbitrary forecast-anchor row.
-    Only shape and identity fields (`listing_id`/`price_asset_id`) matter
-    to the validator under test; the numeric feature values are fixed
-    placeholders, never independently recomputed or asserted on."""
+    """One schema-conforming, deliberately arbitrary forecast-anchor row.
+
+    Structural failure tests use it only when their named check runs before
+    semantic replay; positive/replay tests use the exact shared constructor.
+    """
     return {
         "horizon": horizon,
         "anchor_date": target_date,
@@ -1533,6 +1582,39 @@ def _panel_frame_bytes(rows: list[dict[str, object]]) -> bytes:
     return buffer.getvalue()
 
 
+def _reconstruct_test_medium_frame(
+    store: AssetStore,
+    *,
+    run: AnalysisRun,
+    medium: MediumLaneExpectation,
+    listings: list[Listing],
+    price_assets: dict[uuid.UUID, DataAsset],
+    benchmark_asset: DataAsset,
+) -> pl.DataFrame:
+    asof = AsOfData(run.data_cutoff, store)
+    benchmark_frame = asof.price_frame_for_asset_with_diagnostics(
+        asset=benchmark_asset,
+        through_date=run.target_date,
+    ).frame
+    return reconstruct_medium_forecast_panel(
+        benchmark_asset=benchmark_asset,
+        benchmark_frame=benchmark_frame,
+        listing_inputs=[
+            MediumPanelPriceInput(
+                listing=listing,
+                asset=price_assets[listing.id],
+                frame=asof.price_frame_for_asset_with_diagnostics(
+                    asset=price_assets[listing.id],
+                    through_date=run.target_date,
+                ).frame,
+            )
+            for listing in listings
+        ],
+        target_date=run.target_date,
+        config=medium.config,
+    )
+
+
 def _build_test_medium_panel(
     store: AssetStore,
     *,
@@ -1556,17 +1638,17 @@ def _build_test_medium_panel(
     if payload is None:
         rows = row_overrides
         if rows is None:
-            rows = [
-                _panel_test_row(
-                    horizon=horizon,
-                    listing=listing,
-                    price_asset=price_assets[listing.id],
-                    target_date=run.target_date,
-                )
-                for listing in listings
-                for horizon in sorted(_MEDIUM_HORIZONS)
-            ]
-        payload = _panel_frame_bytes(rows)
+            frame = _reconstruct_test_medium_frame(
+                store,
+                run=run,
+                medium=medium,
+                listings=listings,
+                price_assets=price_assets,
+                benchmark_asset=benchmark_asset,
+            )
+            payload = serialize_medium_forecast_panel(frame)
+        else:
+            payload = _panel_frame_bytes(rows)
     stored = store.write_bytes(f"medium-tests/{uuid4().hex}.parquet", payload)
     sessions = calendar_sessions_through(
         calendar_name=medium.calendar, fixed_epoch=medium.fixed_epoch, target_date=run.target_date
@@ -1651,10 +1733,14 @@ def _medium_lane_fixture(
     run = _bare_run()
     listings = [_long_listing(f"MED{index}") for index in range(listing_count)]
     price_assets = {
-        listing.id: _price_source_asset(subject=listing.ticker, retrieved_at=run.generated_at)
-        for listing in listings
+        listing.id: _write_subject_price_asset(
+            store,
+            listing.ticker,
+            close=40.0 + index * 5,
+        )
+        for index, listing in enumerate(listings)
     }
-    benchmark_asset = _price_source_asset(subject="SPY", retrieved_at=run.generated_at)
+    benchmark_asset = _write_subject_price_asset(store, "SPY", close=300.0)
     return store, run, listings, price_assets, benchmark_asset
 
 
@@ -1727,6 +1813,189 @@ def test_medium_panel_binding_succeeds_for_matching_panel(tmp_path: Path) -> Non
     )
     panel_id = _bind_and_verify_medium_panel(run=run, medium=medium, listings=listings, panel=panel)
     assert panel_id == panel.id
+
+
+def _semantically_tampered_medium_rows(
+    frame: pl.DataFrame,
+    *,
+    mutation: str,
+    target_date: date,
+) -> list[dict[str, object]]:
+    rows = frame.to_dicts()
+    forecast = next(row for row in rows if bool(row["is_forecast"]))
+    historical = next(
+        row for row in rows if not bool(row["is_forecast"]) and row["forward_return"] is not None
+    )
+    if mutation == "forecast_after_target":
+        forecast["anchor_date"] = target_date + timedelta(days=3)
+        forecast["cohort_id"] = f"{forecast['horizon']}:{forecast['anchor_date'].isoformat()}"
+    elif mutation == "historical_label_after_cutoff":
+        historical["label_end_date"] = target_date + timedelta(days=3)
+    elif mutation == "wrong_fixed_epoch_cohort":
+        historical["cohort_id"] = f"{historical['horizon']}:wrong-fixed-epoch"
+    elif mutation == "fabricated_forward_return":
+        historical["forward_return"] = float(historical["forward_return"]) + 0.125
+    elif mutation == "post_anchor_feature":
+        forecast["relative_momentum"] = float(forecast["relative_momentum"]) + 0.25
+    elif mutation == "wrong_eligibility_relation":
+        forecast["eligible"] = False
+        forecast["insufficiency_reason"] = "Insufficient medium forecast inputs: fabricated"
+    else:  # pragma: no cover - guards the test table
+        raise AssertionError(f"Unhandled panel mutation {mutation}")
+    return (
+        pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row")
+        .sort("horizon", "anchor_date", "listing_id")
+        .to_dicts()
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "forecast_after_target",
+        "historical_label_after_cutoff",
+        "wrong_fixed_epoch_cohort",
+        "fabricated_forward_return",
+        "post_anchor_feature",
+        "wrong_eligibility_relation",
+    ],
+)
+def test_medium_panel_replay_rejects_semantic_tamper(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store, run, listings, price_assets, benchmark_asset = _medium_lane_fixture(
+        tmp_path,
+        listing_count=2,
+    )
+    medium = _medium_lane_expectation()
+    expected = _reconstruct_test_medium_frame(
+        store,
+        run=run,
+        medium=medium,
+        listings=listings,
+        price_assets=price_assets,
+        benchmark_asset=benchmark_asset,
+    )
+    rows = _semantically_tampered_medium_rows(
+        expected,
+        mutation=mutation,
+        target_date=run.target_date,
+    )
+    panel = _build_test_medium_panel(
+        store,
+        run=run,
+        medium=medium,
+        scoring_config_version=run.config_version,
+        listings=listings,
+        price_assets=price_assets,
+        benchmark_asset=benchmark_asset,
+        row_overrides=rows,
+    )
+
+    with pytest.raises(RefreshVerificationError) as exc_info:
+        _bind_and_verify_medium_panel(
+            run=run,
+            medium=medium,
+            listings=listings,
+            panel=panel,
+        )
+
+    assert _reason(exc_info) == "medium_panel_semantic_replay_mismatch"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "extra", "reordered", "duplicate", "field_divergent"],
+)
+def test_medium_panel_requires_exact_declared_source_asset_list(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store, run, listings, price_assets, benchmark_asset = _medium_lane_fixture(
+        tmp_path,
+        listing_count=2,
+    )
+    medium = _medium_lane_expectation()
+    expected_frame = _reconstruct_test_medium_frame(
+        store,
+        run=run,
+        medium=medium,
+        listings=listings,
+        price_assets=price_assets,
+        benchmark_asset=benchmark_asset,
+    )
+    payload = serialize_medium_forecast_panel(expected_frame)
+    canonical_sources = [
+        asset_identity(asset)
+        for asset in dedupe_assets(
+            [benchmark_asset, *(price_assets[listing.id] for listing in listings)]
+        )
+    ]
+    declared_sources = [dict(entry) for entry in canonical_sources]
+    listing_entry_index = next(
+        index
+        for index, entry in enumerate(declared_sources)
+        if entry["subject"] == listings[0].ticker
+    )
+    if mutation == "missing":
+        declared_sources.pop(listing_entry_index)
+    elif mutation == "extra":
+        extra = _write_subject_price_asset(store, "EXTRA", close=25.0)
+        declared_sources.append(asset_identity(extra))
+    elif mutation == "reordered":
+        declared_sources.reverse()
+    elif mutation == "duplicate":
+        declared_sources.append(dict(declared_sources[listing_entry_index]))
+    elif mutation == "field_divergent":
+        declared_sources[listing_entry_index]["relative_path"] = "forged/source.parquet"
+    else:  # pragma: no cover - guards the test table
+        raise AssertionError(f"Unhandled source-list mutation {mutation}")
+
+    source_manifest_hash = hash_json(declared_sources)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=medium.calendar,
+        fixed_epoch=medium.fixed_epoch,
+        target_date=run.target_date,
+    )
+    calendar_hash = hash_json([session.isoformat() for session in calendar_sessions])
+    content_sha256 = hashlib.sha256(payload).hexdigest()
+    evidence_bundle_hash = hash_json(
+        {
+            "calendar_hash": calendar_hash,
+            "code_revision": run.code_revision,
+            "content_sha256": content_sha256,
+            "forecast_config_hash": medium.config_hash,
+            "scoring_config_hash": run.config_hash,
+            "source_manifest_hash": source_manifest_hash,
+            "universe_config_hash": run.universe_snapshot.config_hash,
+        }
+    )
+    panel = _build_test_medium_panel(
+        store,
+        run=run,
+        medium=medium,
+        scoring_config_version=run.config_version,
+        listings=listings,
+        price_assets=price_assets,
+        benchmark_asset=benchmark_asset,
+        payload=payload,
+        metadata_overrides={
+            "source_assets": declared_sources,
+            "source_manifest_hash": source_manifest_hash,
+            "evidence_bundle_hash": evidence_bundle_hash,
+        },
+    )
+
+    with pytest.raises(RefreshVerificationError) as exc_info:
+        _bind_and_verify_medium_panel(
+            run=run,
+            medium=medium,
+            listings=listings,
+            panel=panel,
+        )
+
+    assert _reason(exc_info) == "medium_panel_source_assets_mismatch"
 
 
 def test_medium_panel_binding_rejects_ambiguous_authoritative_panel(tmp_path: Path) -> None:
@@ -2348,6 +2617,15 @@ def test_medium_panel_binding_rejects_late_price_source_asset(tmp_path: Path) ->
             subject=late_listing.ticker, retrieved_at=run.data_cutoff + timedelta(days=1)
         )
     }
+    rows = [
+        _panel_test_row(
+            horizon=horizon,
+            listing=late_listing,
+            price_asset=price_assets[late_listing.id],
+            target_date=run.target_date,
+        )
+        for horizon in sorted(_MEDIUM_HORIZONS)
+    ]
     panel = _build_test_medium_panel(
         store,
         run=run,
@@ -2356,10 +2634,57 @@ def test_medium_panel_binding_rejects_late_price_source_asset(tmp_path: Path) ->
         listings=listings,
         price_assets=price_assets,
         benchmark_asset=benchmark_asset,
+        row_overrides=rows,
     )
     with pytest.raises(RefreshVerificationError) as exc_info:
         _bind_and_verify_medium_panel(run=run, medium=medium, listings=listings, panel=panel)
     assert _reason(exc_info) == "medium_panel_row_price_asset_not_cutoff_safe"
+
+
+def test_medium_panel_binding_requires_each_price_source_raw_upstream(tmp_path: Path) -> None:
+    store, run, listings, price_assets, benchmark_asset = _medium_lane_fixture(
+        tmp_path, listing_count=1
+    )
+    listing = listings[0]
+    price_assets[listing.id] = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject=listing.ticker,
+        relative_path=f"tests/manifest/{uuid4().hex}",
+        sha256=uuid4().hex * 2,
+        retrieved_at=run.generated_at,
+        available_at=run.generated_at,
+        metadata={},
+    )
+    rows = [
+        _panel_test_row(
+            horizon=horizon,
+            listing=listing,
+            price_asset=price_assets[listing.id],
+            target_date=run.target_date,
+        )
+        for horizon in sorted(_MEDIUM_HORIZONS)
+    ]
+    panel = _build_test_medium_panel(
+        store,
+        run=run,
+        medium=_medium_lane_expectation(),
+        scoring_config_version=run.config_version,
+        listings=listings,
+        price_assets=price_assets,
+        benchmark_asset=benchmark_asset,
+        row_overrides=rows,
+    )
+
+    with pytest.raises(RefreshVerificationError) as exc_info:
+        _bind_and_verify_medium_panel(
+            run=run,
+            medium=_medium_lane_expectation(),
+            listings=listings,
+            panel=panel,
+        )
+
+    assert _reason(exc_info) == "price_asset_raw_link_missing"
 
 
 def _fact_and_filing(

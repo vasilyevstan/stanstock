@@ -93,6 +93,15 @@ class MediumPanel:
 
 
 @dataclass(frozen=True, slots=True)
+class MediumPanelPriceInput:
+    """One exact normalized price vintage and its cutoff-clipped rows."""
+
+    listing: Listing
+    asset: DataAsset
+    frame: pl.DataFrame
+
+
+@dataclass(frozen=True, slots=True)
 class MediumForecast:
     scenario: Scenario
     calculation: dict[str, Any]
@@ -154,22 +163,12 @@ def build_medium_forecast_panel(
     code_revision: str,
     store: AssetStore,
 ) -> MediumPanel:
-    calendar_sessions = calendar_sessions_through(
-        calendar_name=config.calendar, fixed_epoch=config.fixed_epoch, target_date=target_date
-    )
-    session_index = {session: index for index, session in enumerate(calendar_sessions)}
-    calendar_hash = hash_json([session.isoformat() for session in calendar_sessions])
-
     benchmark_read = asof.price_frame_with_diagnostics(
         provider=provider,
         subject=benchmark_subject,
         through_date=target_date,
     )
-    _validate_price_basis(benchmark_read.asset)
-    benchmark_prices = _price_observations(benchmark_read.frame)
-
-    source_assets = [benchmark_read.asset]
-    listing_inputs: list[tuple[Listing, DataAsset, dict[date, tuple[float, float | None]]]] = []
+    listing_inputs: list[MediumPanelPriceInput] = []
     for listing in sorted(listings, key=lambda item: str(item.pk)):
         subject = listing.provider_symbol or listing.ticker
         read = asof.price_frame_with_diagnostics(
@@ -177,61 +176,25 @@ def build_medium_forecast_panel(
             subject=subject,
             through_date=target_date,
         )
-        _validate_price_basis(read.asset)
-        source_assets.append(read.asset)
-        listing_inputs.append((listing, read.asset, _price_observations(read.frame)))
-
-    rows: list[dict[str, object]] = []
-    for horizon in MEDIUM_FORECAST_HORIZONS:
-        horizon_config = config.horizons[horizon]
-        historical_anchors = _historical_anchors(
-            benchmark_prices=benchmark_prices,
-            calendar_sessions=calendar_sessions,
-            session_index=session_index,
-            horizon_sessions=horizon_config.sessions,
-            feature_lookback=config.feature_windows.maximum,
-            target_date=target_date,
-        )
-        for anchor_date, label_end_date in historical_anchors:
-            for listing, asset, prices in listing_inputs:
-                rows.append(
-                    _panel_row(
-                        horizon=horizon,
-                        anchor_date=anchor_date,
-                        label_end_date=label_end_date,
-                        is_forecast=False,
-                        listing=listing,
-                        price_asset=asset,
-                        prices=prices,
-                        benchmark_prices=benchmark_prices,
-                        calendar_sessions=calendar_sessions,
-                        session_index=session_index,
-                        config=config,
-                    )
-                )
-        for listing, asset, prices in listing_inputs:
-            rows.append(
-                _panel_row(
-                    horizon=horizon,
-                    anchor_date=target_date,
-                    label_end_date=None,
-                    is_forecast=True,
-                    listing=listing,
-                    price_asset=asset,
-                    prices=prices,
-                    benchmark_prices=benchmark_prices,
-                    calendar_sessions=calendar_sessions,
-                    session_index=session_index,
-                    config=config,
-                )
+        listing_inputs.append(
+            MediumPanelPriceInput(
+                listing=listing,
+                asset=read.asset,
+                frame=read.frame,
             )
-
-    frame = pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row").sort(
-        "horizon",
-        "anchor_date",
-        "listing_id",
+        )
+    frame = reconstruct_medium_forecast_panel(
+        benchmark_asset=benchmark_read.asset,
+        benchmark_frame=benchmark_read.frame,
+        listing_inputs=listing_inputs,
+        target_date=target_date,
+        config=config,
     )
-    payload = _parquet_bytes(frame)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=config.calendar, fixed_epoch=config.fixed_epoch, target_date=target_date
+    )
+    calendar_hash = hash_json([session.isoformat() for session in calendar_sessions])
+    payload = serialize_medium_forecast_panel(frame)
     content_hash = hashlib.sha256(payload).hexdigest()
     relative_path = (
         f"derived/forecast/medium/{target_date.isoformat()}/"
@@ -263,7 +226,9 @@ def build_medium_forecast_panel(
             "medium_forecast_panel_write_failed",
             "The medium-forecast panel could not be written",
         ) from None
-    deduped_sources = dedupe_assets(source_assets)
+    deduped_sources = dedupe_assets(
+        [benchmark_read.asset, *(item.asset for item in listing_inputs)]
+    )
     source_manifest = [asset_identity(asset) for asset in deduped_sources]
     source_manifest_hash = hash_json(source_manifest)
     evidence_bundle_hash = hash_json(
@@ -277,11 +242,11 @@ def build_medium_forecast_panel(
             "universe_config_hash": universe_config_hash,
         }
     )
-    anchor_dates: list[date] = []
-    for row in rows:
-        raw_anchor_date = row["anchor_date"]
-        if isinstance(raw_anchor_date, date):
-            anchor_dates.append(raw_anchor_date)
+    anchor_dates = [
+        anchor_date
+        for anchor_date in frame["anchor_date"].to_list()
+        if isinstance(anchor_date, date)
+    ]
     try:
         with transaction.atomic():
             asset = register_asset(
@@ -336,6 +301,86 @@ def build_medium_forecast_panel(
         frame=frame,
         asset=asset,
         source_assets=tuple(deduped_sources),
+    )
+
+
+def reconstruct_medium_forecast_panel(
+    *,
+    benchmark_asset: DataAsset,
+    benchmark_frame: pl.DataFrame,
+    listing_inputs: list[MediumPanelPriceInput],
+    target_date: date,
+    config: MediumForecastConfig,
+) -> pl.DataFrame:
+    """Purely reconstruct the versioned panel from exact normalized inputs.
+
+    The producer and verifier both call this function. It performs no ORM,
+    provider, filesystem, or asset writes, so verification can replay every
+    cohort, feature, label, eligibility relation, row, and float without
+    creating a second methodology implementation.
+    """
+    _validate_price_basis(benchmark_asset)
+    benchmark_prices = _price_observations(benchmark_frame)
+    calendar_sessions = calendar_sessions_through(
+        calendar_name=config.calendar,
+        fixed_epoch=config.fixed_epoch,
+        target_date=target_date,
+    )
+    session_index = {session: index for index, session in enumerate(calendar_sessions)}
+    normalized_inputs: list[tuple[Listing, DataAsset, dict[date, tuple[float, float | None]]]] = []
+    for item in sorted(listing_inputs, key=lambda value: str(value.listing.pk)):
+        _validate_price_basis(item.asset)
+        normalized_inputs.append((item.listing, item.asset, _price_observations(item.frame)))
+
+    rows: list[dict[str, object]] = []
+    for horizon in MEDIUM_FORECAST_HORIZONS:
+        horizon_config = config.horizons[horizon]
+        historical_anchors = _historical_anchors(
+            benchmark_prices=benchmark_prices,
+            calendar_sessions=calendar_sessions,
+            session_index=session_index,
+            horizon_sessions=horizon_config.sessions,
+            feature_lookback=config.feature_windows.maximum,
+            target_date=target_date,
+        )
+        for anchor_date, label_end_date in historical_anchors:
+            for listing, asset, prices in normalized_inputs:
+                rows.append(
+                    _panel_row(
+                        horizon=horizon,
+                        anchor_date=anchor_date,
+                        label_end_date=label_end_date,
+                        is_forecast=False,
+                        listing=listing,
+                        price_asset=asset,
+                        prices=prices,
+                        benchmark_prices=benchmark_prices,
+                        calendar_sessions=calendar_sessions,
+                        session_index=session_index,
+                        config=config,
+                    )
+                )
+        for listing, asset, prices in normalized_inputs:
+            rows.append(
+                _panel_row(
+                    horizon=horizon,
+                    anchor_date=target_date,
+                    label_end_date=None,
+                    is_forecast=True,
+                    listing=listing,
+                    price_asset=asset,
+                    prices=prices,
+                    benchmark_prices=benchmark_prices,
+                    calendar_sessions=calendar_sessions,
+                    session_index=session_index,
+                    config=config,
+                )
+            )
+
+    return pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row").sort(
+        "horizon",
+        "anchor_date",
+        "listing_id",
     )
 
 
@@ -1345,7 +1390,8 @@ def _validate_price_basis(asset: DataAsset) -> None:
         )
 
 
-def _parquet_bytes(frame: pl.DataFrame) -> bytes:
+def serialize_medium_forecast_panel(frame: pl.DataFrame) -> bytes:
+    """Serialize a canonical panel with the producer's frozen byte contract."""
     buffer = io.BytesIO()
     frame.write_parquet(buffer)
     return buffer.getvalue()

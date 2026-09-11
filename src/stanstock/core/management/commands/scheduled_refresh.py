@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -16,10 +17,16 @@ from stanstock.core.models import JobRun
 from stanstock.core.refresh_verification import verify_scheduled_refresh
 from stanstock.core.revision import clean_git_revision
 from stanstock.core.verification_types import RefreshVerificationError
-from stanstock.data.jobs import execute_us_daily_job, prepare_us_daily_job
+from stanstock.data.jobs import (
+    PreparedUsDailyJob,
+    execute_us_daily_job,
+    frozen_long_forecast_gate_for_run,
+    prepare_us_daily_job,
+    proposed_us_daily_target_gate,
+    reserve_us_daily_target_gate,
+)
 from stanstock.data.management.config_loader import default_us_universe_config_path
-from stanstock.data.models import ProviderRecord
-from stanstock.data.providers import sec, twelve_data
+from stanstock.data.providers import twelve_data
 from stanstock.data.providers.exceptions import ProviderError
 from stanstock.data.sec_jobs import JOB_NAME as SEC_JOB_NAME
 from stanstock.data.sec_jobs import execute_sec_fundamentals_job
@@ -67,19 +74,36 @@ class Command(BaseCommand):
                 os.environ["STANSTOCK_CODE_REVISION"] = revision
                 details["code_revision"] = revision
 
-                sec_required = (
-                    ProviderRecord.objects.filter(
-                        provider=sec.PROVIDER,
-                        enabled=True,
-                    ).exists()
-                    or JobRun.objects.filter(
-                        job_name=SEC_JOB_NAME,
-                        region="us",
-                        target_date=prepared.target_date,
-                        status=JobRun.Status.SUCCESS,
-                    ).exists()
+                proposed_gate = proposed_us_daily_target_gate(prepared)
+                target_gate = reserve_us_daily_target_gate(
+                    prepared,
+                    explicit_long_forecast_requested=proposed_gate,
+                    reservation_owner=str(parent.pk),
                 )
+                long_forecast_requested = target_gate.long_forecast_requested
+                market: JobRun | None = None
+                if target_gate.market_output_committed:
+                    market = _run_market_stage(
+                        parent=parent,
+                        details=details,
+                        prepared=prepared,
+                        long_forecast_requested=long_forecast_requested,
+                        target_gate_reservation_id=target_gate.reservation_id,
+                    )
+                    _require_market_gate(market, long_forecast_requested)
+                recoverable_sec_success = JobRun.objects.filter(
+                    job_name=SEC_JOB_NAME,
+                    region="us",
+                    target_date=prepared.target_date,
+                    status=JobRun.Status.SUCCESS,
+                ).exists()
+                sec_required = long_forecast_requested or recoverable_sec_success
                 if sec_required:
+                    if target_gate.market_output_committed and not recoverable_sec_success:
+                        raise ValueError(
+                            "Committed market output requires SEC evidence, but no "
+                            "same-target successful SEC child can be recovered locally"
+                        )
                     sec_run = _run_stage(
                         parent=parent,
                         details=details,
@@ -95,17 +119,15 @@ class Command(BaseCommand):
                     if sec_run is None or sec_run.status not in SATISFIED_STAGE_STATUSES:
                         raise ValueError("Required SEC fundamentals stage was not satisfied")
 
-                market = _run_stage(
-                    parent=parent,
-                    details=details,
-                    stage_name="market",
-                    job_name="daily",
-                    region="us",
-                    target_date=prepared.target_date,
-                    task=lambda: execute_us_daily_job(prepared, require_observed=True),
-                )
-                if market is None or market.status not in SATISFIED_STAGE_STATUSES:
-                    raise ValueError("Required market stage was not satisfied")
+                if market is None:
+                    market = _run_market_stage(
+                        parent=parent,
+                        details=details,
+                        prepared=prepared,
+                        long_forecast_requested=long_forecast_requested,
+                        target_gate_reservation_id=target_gate.reservation_id,
+                    )
+                    _require_market_gate(market, long_forecast_requested)
 
                 failures: list[str] = []
                 evaluation = _run_stage(
@@ -216,6 +238,40 @@ def _run_stage(
         return failed_run
     _record_stage(parent, details, stage_name, run)
     return run
+
+
+def _run_market_stage(
+    *,
+    parent: JobRun,
+    details: dict[str, object],
+    prepared: PreparedUsDailyJob,
+    long_forecast_requested: bool,
+    target_gate_reservation_id: UUID | None,
+) -> JobRun | None:
+    return _run_stage(
+        parent=parent,
+        details=details,
+        stage_name="market",
+        job_name="daily",
+        region="us",
+        target_date=prepared.target_date,
+        task=lambda: execute_us_daily_job(
+            prepared,
+            require_observed=True,
+            long_forecast_requested=long_forecast_requested,
+            target_gate_reservation_id=target_gate_reservation_id,
+        ),
+    )
+
+
+def _require_market_gate(market: JobRun | None, frozen_gate: bool) -> None:
+    if market is None or market.status not in SATISFIED_STAGE_STATUSES:
+        raise ValueError("Required market stage was not satisfied")
+    authoritative_market_gate = frozen_long_forecast_gate_for_run(market)
+    if authoritative_market_gate != frozen_gate:
+        raise ValueError(
+            "Authoritative market child gate does not match the scheduler's frozen target gate"
+        )
 
 
 def _record_stage(

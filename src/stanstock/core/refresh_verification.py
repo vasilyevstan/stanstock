@@ -47,7 +47,7 @@ from stanstock.data.models import (
     UniverseMembership,
     UniverseSnapshot,
 )
-from stanstock.data.providers import twelve_data
+from stanstock.data.providers import sec, twelve_data
 from stanstock.data.refresh_validation import (
     assert_no_etf_in_membership,
     require_bound_market_data,
@@ -82,6 +82,11 @@ from stanstock.research.long_forecast_config import (
 from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
 from stanstock.research.outcome_refresh_validation import verify_prediction_outcome
 from stanstock.research.provenance import DATA_MODE_PROVIDER, source_data_mode
+from stanstock.research.refresh_validation import (
+    LongLaneExpectation,
+    MediumLaneExpectation,
+    verify_analysis_output_manifest,
+)
 from stanstock.research.service import _decimal, _optional_decimal
 
 MARKET_STAGE = "market"
@@ -173,6 +178,55 @@ def verify_scheduled_refresh(
     long_config = load_long_forecast_config()
     medium_config_hash = medium_forecast_config_hash(medium_config)
     long_config_hash = long_forecast_config_hash(long_config)
+    long_forecast_requested = market_details.get("long_forecast_requested")
+    if not isinstance(long_forecast_requested, bool):
+        raise RefreshVerificationError(
+            "market_long_forecast_gate_missing",
+            "Market stage details do not record a frozen long-forecast invocation gate",
+        )
+    if long_forecast_requested and not sec_required:
+        raise RefreshVerificationError(
+            "market_long_forecast_gate_requires_sec",
+            "Market stage requested long forecasts but SEC-stage verification was omitted",
+        )
+    # Replay the exact production lane gates from `analyze_snapshot` using
+    # independently reviewed configuration and the market child's frozen
+    # run-specific invocation input. Persisted Prediction rows and the output
+    # manifest are outputs under verification, while retry-time provider
+    # state is mutable, so none may decide which advisory rows were expected.
+    medium_lane = (
+        MediumLaneExpectation(
+            config_hash=medium_config_hash,
+            method_version=medium_config.version,
+            calendar=medium_config.calendar,
+            fixed_epoch=medium_config.fixed_epoch,
+            provider=twelve_data.PROVIDER,
+            benchmark_subject=universe_config.benchmark_symbol,
+            return_basis=medium_config.return_basis,
+            dividends_included=medium_config.dividends_included,
+            config=medium_config,
+        )
+        if (
+            universe_config.benchmark_symbol
+            and scoring_config.version in medium_config.enabled_scoring_versions
+            and eligible_memberships
+        )
+        else None
+    )
+    long_lane = (
+        LongLaneExpectation(
+            config_hash=long_config_hash,
+            method_version=long_config.version,
+        )
+        if (
+            long_config.price_provider == twelve_data.PROVIDER
+            and long_config.fundamentals_provider == sec.PROVIDER
+            and scoring_config.version in long_config.enabled_scoring_versions
+            and long_forecast_requested
+            and eligible_memberships
+        )
+        else None
+    )
 
     run = _verify_analysis_run(
         market_details,
@@ -347,21 +401,14 @@ def verify_scheduled_refresh(
             cutoffs=asset_cutoffs,
         )
 
-    # Every eligible analysis must carry *exactly* the configured decision
-    # horizon set -- not merely however many prediction rows happen to
-    # exist or an aggregate child count, which a same-cardinality horizon
-    # swap could satisfy undetected. Medium (6m/12m) and long (3y/5y)
-    # advisory issuance is an all-or-nothing decision made once for the
-    # whole run (`_persist_listing_analysis`'s `advisory_context`/
-    # `long_context`), never per-listing, so whether either was used for
-    # *this* run is inferred from whether any verified prediction carries
-    # one of their horizons at all.
-    medium_used = any(row["horizon"] in _MEDIUM_ADVISORY_HORIZONS for row in prediction_rows)
-    long_used = any(row["horizon"] in _LONG_ADVISORY_HORIZONS for row in prediction_rows)
+    # Every eligible analysis must carry *exactly* the independently
+    # configured decision/advisory horizon set -- not merely however many
+    # prediction rows happen to exist or an aggregate child count, which a
+    # same-cardinality horizon swap could satisfy undetected.
     expected_horizon_set = {str(value) for value in decision_horizons}
-    if medium_used:
+    if medium_lane is not None:
         expected_horizon_set |= {str(value) for value in _MEDIUM_ADVISORY_HORIZONS}
-    if long_used:
+    if long_lane is not None:
         expected_horizon_set |= {str(value) for value in _LONG_ADVISORY_HORIZONS}
     for analysis_row in stock_rows:
         if horizons_by_analysis.get(analysis_row["id"], set()) != expected_horizon_set:
@@ -459,6 +506,31 @@ def verify_scheduled_refresh(
         target_date=target_date,
     )
 
+    # Preserve the established data/C2, outcome, and portfolio verifier
+    # ordering (and their public reason codes), then require the complete
+    # immutable research output before admitting any asset to the one final
+    # exact integrity set.
+    analysis_output = verify_analysis_output_manifest(
+        run=run,
+        eligible_listing_ids=eligible_listing_ids,
+        listings_by_id=listings_by_id,
+        code_revision=code_revision,
+        scoring_config_version=scoring_config.version,
+        scoring_config_hash=scoring_config_hash,
+        decision_horizons=frozenset(str(value) for value in decision_horizons),
+        medium=medium_lane,
+        long=long_lane,
+        physical_integrity_deferred_to_parent=frozenset(
+            market_asset_ids
+            | sec_asset_ids
+            | set(asset_registry)
+            | portfolio_asset_ids
+            | catalog_asset_ids
+            | evaluation_asset_ids
+        ),
+    )
+    analysis_output_asset_ids = {ref.id for ref in analysis_output.asset_refs}
+
     asset_ids = (
         market_asset_ids
         | sec_asset_ids
@@ -466,6 +538,7 @@ def verify_scheduled_refresh(
         | portfolio_asset_ids
         | catalog_asset_ids
         | evaluation_asset_ids
+        | analysis_output_asset_ids
     )
     manifest = _verify_asset_evidence(asset_ids)
 

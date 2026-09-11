@@ -118,6 +118,7 @@ jobs:
             tests/test_immutability_migrations.py::test_postgresql_immutability_sql_escapes_psycopg_placeholders \
             tests/test_research_refresh_validation.py \
             tests/test_research_outcome_refresh_validation.py \
+            tests/test_scheduled_refresh.py::test_postgresql_opposite_daily_completion_wins_before_scheduler_reservation \
             tests/test_scheduled_refresh.py::test_nonempty_portfolio_proof_survives_parent_retry_without_refetch \
             tests/test_scheduled_refresh.py::test_scheduled_refresh_outcome_tamper_retry_without_refetch \
             --ds=stanstock.settings.dev

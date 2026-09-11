@@ -7,13 +7,10 @@ panel's declared source closure, and every long-forecast fact/
 classification/filing-evidence binding named anywhere in a prediction's
 `calculation` payload.
 
-Deliberately **not** called from `core.refresh_verification` yet (Slice
-C1). `core`'s existing `_verify_analysis_run`/`_verify_prediction_row`/
-`_verify_prediction_matches_analysis`/`_iter_source_asset_entries`/
-`_merge_asset_identity`/`_require_registered_asset_identity_matches`
-remain untouched and still run as the current production safety net; the
-exact minimal integration hook for retiring them in favor of this module
-is documented in this slice's handoff report, not implemented here.
+Called from `core.refresh_verification` after the parent has independently
+bound and replayed the scheduled run, eligible membership, reviewed
+configuration, and existing data/outcome/portfolio contracts, and before
+their combined evidence is admitted to the parent's final scoped asset set.
 
 Unlike that legacy path, this module never infers whether medium/long
 advisory issuance was "used" for a run from which prediction rows happen
@@ -40,6 +37,11 @@ from stanstock.core.verification_types import (
     RefreshVerificationError,
     StageVerificationResult,
 )
+from stanstock.data.asof import (
+    AsOfData,
+    PriceFrameChecksumMismatchError,
+    raw_price_asset_for,
+)
 from stanstock.data.assets import (
     asset_ref_for,
     open_asset_store,
@@ -55,6 +57,7 @@ from stanstock.data.models import (
 )
 from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER
 from stanstock.research.config import SCORE_HORIZONS
+from stanstock.research.forecast_config import MediumForecastConfig
 from stanstock.research.forecasting import FORECAST_SCENARIO_SCHEMA_VERSION, infer_price_source
 from stanstock.research.long_forecasts import (
     classification_payload,
@@ -67,10 +70,13 @@ from stanstock.research.medium_forecasts import (
     PANEL_PROVIDER,
     PANEL_SCHEMA,
     PANEL_SCHEMA_VERSION,
+    MediumPanelPriceInput,
     asset_identity,
     calendar_sessions_through,
     dedupe_assets,
     hash_json,
+    reconstruct_medium_forecast_panel,
+    serialize_medium_forecast_panel,
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.provenance import DATA_MODE_PROVIDER, source_data_mode
@@ -157,6 +163,7 @@ class MediumLaneExpectation:
     benchmark_subject: str
     return_basis: str
     dividends_included: bool
+    config: MediumForecastConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +172,12 @@ class LongLaneExpectation:
 
     config_hash: str
     method_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedMediumPanel:
+    asset: DataAsset
+    source_assets: tuple[DataAsset, ...]
 
 
 def _require_manifest_matches_current_rows(
@@ -982,14 +995,17 @@ def _require_medium_panel_content(
     metadata: Mapping[str, Any],
     medium: MediumLaneExpectation,
     eligible_listings: Mapping[UUID, Listing],
+    target_date: date,
     cutoff: datetime,
-) -> None:
+) -> tuple[DataAsset, ...]:
     """Physically checksum-read and parse the panel's own Parquet bytes,
     then prove its schema, row count, per-listing forecast-row coverage,
     and every declared `price_asset_id` against the run's own authoritative
     eligible membership -- never against the panel's own metadata -- and
     only then compare the source-manifest/evidence-bundle hashes against
-    that independently derived closure."""
+    that independently derived closure. Returns every normalized source and
+    its exact required raw upstream for registration in the run-wide asset
+    closure."""
     store = open_asset_store()
     payload = read_checksummed_bytes(store, panel_asset)
     try:
@@ -1048,19 +1064,26 @@ def _require_medium_panel_content(
                 "medium horizon for one of its own eligible listings",
             )
     benchmark_asset = _require_medium_panel_benchmark_asset(metadata, medium=medium, cutoff=cutoff)
-    price_assets = [
-        _require_medium_panel_row_price_asset(
+    price_assets_by_listing = {
+        uuid.UUID(listing_id): _require_medium_panel_row_price_asset(
             price_asset_id,
             listing=eligible_listings[uuid.UUID(listing_id)],
             medium=medium,
             cutoff=cutoff,
         )
         for listing_id, price_asset_id in per_listing_price_asset.items()
-    ]
-    closure = [benchmark_asset, *price_assets]
-    recomputed_manifest_hash = hash_json(
-        [asset_identity(asset) for asset in dedupe_assets(closure)]
-    )
+    }
+    closure = [benchmark_asset, *price_assets_by_listing.values()]
+    normalized_sources = dedupe_assets(closure)
+    expected_source_assets = [asset_identity(asset) for asset in normalized_sources]
+    if metadata.get("source_assets") != expected_source_assets:
+        raise RefreshVerificationError(
+            "medium_panel_source_assets_mismatch",
+            "A medium forecast panel's declared source_assets do not exactly match the "
+            "canonical ordered identities independently derived from its reviewed benchmark "
+            "and every physical listing row",
+        )
+    recomputed_manifest_hash = hash_json(expected_source_assets)
     if metadata.get("source_manifest_hash") != recomputed_manifest_hash:
         raise RefreshVerificationError(
             "medium_panel_source_manifest_hash_mismatch",
@@ -1085,6 +1108,60 @@ def _require_medium_panel_content(
             "A medium forecast panel's evidence bundle hash does not match its own "
             "recomputed inputs",
         )
+    raw_sources = [
+        raw_price_asset_for(source_asset, cutoff=cutoff) for source_asset in normalized_sources
+    ]
+
+    # Re-read the exact immutable normalized vintages selected above and
+    # replay the producer's pure/versioned panel construction. No provider,
+    # ORM writer, or asset-registration path is reachable from this helper.
+    asof = AsOfData(cutoff, store)
+    try:
+        benchmark_read = asof.price_frame_for_asset_with_diagnostics(
+            asset=benchmark_asset,
+            through_date=target_date,
+        )
+        listing_inputs = [
+            MediumPanelPriceInput(
+                listing=eligible_listings[listing_id],
+                asset=price_assets_by_listing[listing_id],
+                frame=asof.price_frame_for_asset_with_diagnostics(
+                    asset=price_assets_by_listing[listing_id],
+                    through_date=target_date,
+                ).frame,
+            )
+            for listing_id in sorted(eligible_listings, key=str)
+        ]
+        expected_frame = reconstruct_medium_forecast_panel(
+            benchmark_asset=benchmark_asset,
+            benchmark_frame=benchmark_read.frame,
+            listing_inputs=listing_inputs,
+            target_date=target_date,
+            config=medium.config,
+        )
+        expected_payload = serialize_medium_forecast_panel(expected_frame)
+    except PriceFrameChecksumMismatchError:
+        raise RefreshVerificationError(
+            "asset_corrupt",
+            "A medium forecast panel source file does not match its registered checksum",
+        ) from None
+    except OSError:
+        raise RefreshVerificationError(
+            "asset_unreadable",
+            "A medium forecast panel source file could not be read",
+        ) from None
+    except (ValueError, pl.exceptions.PolarsError):
+        raise RefreshVerificationError(
+            "medium_panel_replay_failed",
+            "The exact medium forecast panel sources could not be replayed",
+        ) from None
+    if payload != expected_payload or not frame.equals(expected_frame):
+        raise RefreshVerificationError(
+            "medium_panel_semantic_replay_mismatch",
+            "A medium forecast panel does not exactly replay from its reviewed "
+            "configuration, calendar, target, and checksum-read normalized sources",
+        )
+    return tuple(dedupe_assets([*normalized_sources, *raw_sources]))
 
 
 def _require_authoritative_medium_panel(
@@ -1093,7 +1170,7 @@ def _require_authoritative_medium_panel(
     medium: MediumLaneExpectation,
     scoring_config_version: str,
     eligible_listings: Mapping[UUID, Listing],
-) -> DataAsset:
+) -> _VerifiedMediumPanel:
     """Resolve and fully prove this run's one authoritative medium
     forecast panel: identity, complete metadata shape/values (including an
     independently recomputed calendar hash), physical Parquet content, and
@@ -1110,14 +1187,15 @@ def _require_authoritative_medium_panel(
     metadata = _require_medium_panel_metadata(
         panel_asset, medium=medium, run=run, scoring_config_version=scoring_config_version
     )
-    _require_medium_panel_content(
+    source_assets = _require_medium_panel_content(
         panel_asset,
         metadata=metadata,
         medium=medium,
         eligible_listings=eligible_listings,
+        target_date=run.target_date,
         cutoff=run.data_cutoff,
     )
-    return panel_asset
+    return _VerifiedMediumPanel(asset=panel_asset, source_assets=source_assets)
 
 
 def _require_medium_source_closure_exact(
@@ -1142,7 +1220,7 @@ def _require_medium_panel_binding(
     scoring_config_version: str,
     eligible_listings: Mapping[UUID, Listing],
     registry: _AssetRegistry,
-    panel_cache: dict[UUID, DataAsset],
+    panel_cache: dict[UUID, _VerifiedMediumPanel],
 ) -> UUID:
     calculation = prediction.calculation
     panel_asset_id = calculation.get("panel_asset_id")
@@ -1159,15 +1237,16 @@ def _require_medium_panel_binding(
             "medium_panel_reference_malformed",
             "A medium advisory prediction's panel asset reference is not a valid identifier",
         ) from exc
-    authoritative = panel_cache.get(run.id)
-    if authoritative is None:
-        authoritative = _require_authoritative_medium_panel(
+    verified_panel = panel_cache.get(run.id)
+    if verified_panel is None:
+        verified_panel = _require_authoritative_medium_panel(
             run=run,
             medium=medium,
             scoring_config_version=scoring_config_version,
             eligible_listings=eligible_listings,
         )
-        panel_cache[run.id] = authoritative
+        panel_cache[run.id] = verified_panel
+    authoritative = verified_panel.asset
     if declared_id != authoritative.id or panel_sha256 != authoritative.sha256:
         raise RefreshVerificationError(
             "medium_panel_not_authoritative",
@@ -1189,6 +1268,8 @@ def _require_medium_panel_binding(
             "declared source_assets",
         )
     registry.resolve(ref, cutoff=prediction.data_cutoff)
+    for source_asset in verified_panel.source_assets:
+        registry.add(asset_ref_for(source_asset), source_asset)
     return ref.id
 
 
@@ -1885,14 +1966,18 @@ def verify_analysis_output_manifest(
     decision_horizons: frozenset[str],
     medium: MediumLaneExpectation | None,
     long: LongLaneExpectation | None,
+    physical_integrity_deferred_to_parent: frozenset[UUID] = frozenset(),
 ) -> StageVerificationResult:
     """Prove one observed `AnalysisRun`'s complete, immutable output.
 
-    `run` is assumed already bound to its snapshot/target date/on-time
-    status/code revision/scoring configuration by the caller (mirroring
-    `core.refresh_verification._verify_analysis_run`, not reproduced here
-    to avoid a duplicate, possibly-diverging binding check -- see this
-    slice's handoff report for the deferred integration point).
+    `run` is already bound to its snapshot/target date/on-time status/code
+    revision/scoring configuration by
+    `core.refresh_verification._verify_analysis_run`; those checks are not
+    duplicated here so the two validators cannot diverge. The scheduled
+    parent may defer checksum reads for assets already in its established
+    C2/outcome/portfolio set so their public failure ordering is preserved;
+    those refs remain registered and are checksum-read in the parent's one
+    final exact union. Standalone callers defer nothing.
     """
     manifest_ref, manifest_run_id, manifest_plan, manifest_entries = _resolve_manifest(run)
 
@@ -1940,7 +2025,7 @@ def verify_analysis_output_manifest(
 
     analyses_by_id = {analysis.id: analysis for analysis in stock_analyses}
     asset_registry = _AssetRegistry()
-    medium_panel_cache: dict[UUID, DataAsset] = {}
+    medium_panel_cache: dict[UUID, _VerifiedMediumPanel] = {}
     for analysis in stock_analyses:
         _require_scenario_document_shape(
             analysis, medium_active=medium is not None, long_active=long is not None
@@ -2013,7 +2098,8 @@ def verify_analysis_output_manifest(
 
     store = open_asset_store()
     for asset_id in sorted(asset_registry.rows, key=str):
-        read_checksummed_bytes(store, asset_registry.rows[asset_id])
+        if asset_id not in physical_integrity_deferred_to_parent:
+            read_checksummed_bytes(store, asset_registry.rows[asset_id])
 
     return StageVerificationResult(
         summary={
