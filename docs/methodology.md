@@ -4,6 +4,19 @@ StanStock v1 uses deterministic, versioned rules. It does not fit a predictive
 machine-learning model and does not permit generated text to alter a score,
 scenario, risk class, or recommendation.
 
+## Principles versus fixed policy
+
+StanStock uses broad literature-supported principles: momentum and trend,
+explicit risk treatment, base rates and shrinkage, the sustainable-growth
+accounting identity, valuation mean reversion, and point-in-time evaluation.
+Those principles do not validate StanStock's exact implementation constants.
+
+Lookbacks, factor maps, the RSI score transform, horizon weights, state
+buckets, caps, confidence and support formulas, fallback order, thresholds,
+and publication/recommendation gates are fixed StanStock policy choices. They
+must not be described as literature-standard, optimized, causal, or
+statistically calibrated.
+
 ## Inputs
 
 Supported inputs are grouped into:
@@ -43,16 +56,32 @@ The initial hypothesis weights are:
 | Risk and liquidity | 25 | 15 | 15 |
 | Market and sector regime | 20 | 10 | 5 |
 
-Weights, thresholds, coverage requirements, and scenario parameters live in
-versioned YAML. Every issued prediction stores the configuration hash and code
-revision. These weights are starting assumptions; they are not optimized
-against the period later used to report performance.
+Horizon weights and some bounds, thresholds, coverage requirements, and
+scenario parameters live in versioned YAML. YAML/config policy is bound by the
+stored configuration hash; code-defined transforms are identified by the
+stored `code_revision`. Scheduled observed production automatically binds an
+exact clean commit SHA. Demo and direct research can record `working-tree`
+unless an exact committed revision is explicitly supplied. Not every threshold
+is configurable in YAML. These weights are starting assumptions; they are not
+optimized against the period later used to report performance.
 
-## Normalization and missingness
+## Fixed factor maps and missingness
 
-Cross-sectional factors use robust ranks or winsorized standardized values
-within an appropriate region/sector peer group. Annual European fundamentals
-are not treated as equally fresh to US quarterly facts.
+Active scoring does not cross-sectionally rank or winsorize factors. Each
+available raw value is independently transformed to 0-100 by a fixed affine
+or piecewise policy map and clamped to that range. Available factor scores are
+then averaged within each component, and versioned horizon weights combine the
+available component averages. The completed overall score also applies the
+configured missingness and freshness penalties.
+
+The opportunities page orders completed analyses by that completed overall
+score. This presentation ranking is downstream of factor scoring; it is not a
+factor-normalization step.
+
+`rsi_14` is Cutler/SMA-style RSI: it uses simple averages of the gains and
+losses over the latest 14 close-to-close changes, not Wilder smoothing. The
+subsequent RSI-to-score piecewise transform is a fixed StanStock heuristic,
+not a literature-standard RSI transform.
 
 Missingness reduces coverage and confidence. A configured minimum coverage can
 block a BUY result entirely. A missing value is never converted to zero.
@@ -280,8 +309,10 @@ forecast.
   fixed-epoch, non-overlapping 126- and 252-session cohorts. Matching uses
   SPY-relative 12-month momentum, 52-week drawdown, trailing volatility, and
   SPY trend/volatility regimes. Each cohort receives equal aggregate weight
-  before p20/p50/p80 estimation, and sparse conditional ranges shrink toward
-  the unconditional horizon distribution.
+  in both the matched and unconditional distributions. The matched and
+  unconditional p20, p50, and p80 estimates are each shrinkage blended. The
+  published base is the matched/unconditional blended p50; bear and bull are
+  the corresponding blended p20 and p80.
 - **3 years and 5 years:** separate deterministic advisory cases using
   point-in-time SEC facts, current point-in-time SIC peers, and the exact
   split-adjusted Twelve Data price asset. Positive compatible FCF/share takes
@@ -289,18 +320,31 @@ forecast.
   unavailable; negative, inconsistent, or incomplete FCF cannot trigger a
   more favorable fallback.
 
-Bear, base, and bull are ordered ranges, not precise target prices.
-Medium-horizon probability of positive return is omitted with an insufficiency
+For medium forecasts, bear-to-bull is a nominal central 60% analog-return
+range. It is not a calibrated prediction interval, credible interval, or
+confidence interval and provides no coverage guarantee.
+
+The medium-horizon positive-return estimate is omitted with an insufficiency
 reason until non-overlapping cohort support, listing diversity, calendar span,
-matched market-regime breadth, and frozen walk-forward calibration gates
-all pass. Walk-forward calibration compares the conditional range midpoint
-with both the unconditional median and a SPY-relative decomposition baseline:
-the historical SPY median for the matching market regime plus the historical
-excess-return median for the matching relative-momentum bucket.
+matched market-regime breadth, and the frozen probability-publication gate all
+pass. That gate compares base-case mean absolute error with both the
+unconditional baseline and a SPY-relative decomposition baseline (the
+historical SPY median for the matching market regime plus the historical
+excess-return median for the matching relative-momentum bucket), and applies
+the configured absolute Brier-score threshold.
+
+The persisted `empirical_calibrated` status means only that those
+support/diversity, base-case error, and Brier-threshold checks passed. It does
+not establish calibrated probabilities or interval coverage. Presentation
+therefore labels it `Probability gate passed — not calibrated`;
+`empirical_range_only` is labeled
+`Analog range only — probability withheld`. A published positive-return value
+is a shrinkage-weighted analog estimate, not a calibrated probability claim.
+
 Because the narrowest fallback levels explicitly condition on market regime,
 they may yield a useful range while still failing the matched-regime breadth
-gate for probability. StanStock does not switch to a broader fallback merely
-to publish a probability.
+gate for the estimate. StanStock does not switch to a broader fallback merely
+to publish that value.
 
 The medium panel stores 50/200-session trend, downside volatility, and dollar
 liquidity for eligibility and explanation, but those values do not add hidden
@@ -311,10 +355,10 @@ before the current forecast target.
 The long engine requires at least three contiguous annual per-share periods,
 compatible TTM metric and diluted-share periods, reported diluted-EPS
 share-basis checks for every selected annual period, TTM diluted shares
-within 15% of the latest overlapping annual share basis, a bounded cash tax
-rate, beginning and ending invested capital using identical canonical and
-source concept definitions, and a same-family SIC peer set meeting frozen
-floors. The default `us-sec-long-v2` configuration additionally checks
+within 15% of the latest overlapping annual share basis, a bounded GAAP
+accrual tax proxy, beginning and ending invested capital using identical
+canonical and source concept definitions, and a same-family SIC peer set
+meeting frozen floors. The default `us-sec-long-v2` configuration additionally checks
 diluted-share basis continuity between every adjacent pair of selected
 annual periods (same 15% tolerance); the frozen `us-sec-long-v1`
 configuration never evaluates that adjacent check and remains reproducible
@@ -510,19 +554,27 @@ cumulative_price_return =
     - 1
 ```
 
-NOPAT uses TTM operating income and a bounded tax expense/pretax-income rate.
-Invested capital is compatible debt plus equity minus cash, averaged between
-the TTM boundaries; reinvestment is its change divided by NOPAT. Both
-snapshots must use identical canonical and source concepts for equity, cash,
-and every debt component. A raw current multiple below its configured family
-floor is outside long-v1 and is withheld; high multiples retain the actual
-price denominator while using the bounded value only as a conservative
-reversion anchor. Bear, base, and bull vary only the frozen growth delta,
-reinvestment multiplier, and peer multiple multiplier. Annualized 3y/5y
-values are derived for display from the stored cumulative return. Dividends
-and cash yield are excluded, and positive-return probability remains
-unavailable until genuinely qualifying prospective outcomes exist. SEC
-continuity checks verify the share basis only through the latest metric
+NOPAT uses TTM operating income and a bounded GAAP accrual tax proxy: TTM
+income-tax expense divided by TTM pretax income. This is not cash taxes paid
+and must not be described as a cash tax rate. Invested capital is compatible
+debt plus equity minus cash, averaged between the TTM boundaries;
+reinvestment is the compatible balance-sheet invested-capital change divided
+by NOPAT. It is an accounting proxy, not directly observed capital
+expenditure and not a proven causal reinvestment rate. Both snapshots must use
+identical canonical and source concepts for equity, cash, and every debt
+component.
+
+The 3-year and 5-year forecasts use separate frozen horizon-specific fade
+sequences and multiple-reversion settings. Neither is a slice or extrapolation
+of one coherent shared 5-year path. A raw current multiple below its
+configured family floor is outside long-v1 and is withheld; high multiples
+retain the actual price denominator while using the bounded value only as a
+conservative reversion anchor. Bear, base, and bull vary only the frozen
+growth delta, reinvestment multiplier, and peer multiple multiplier.
+Annualized 3y/5y values are derived for display from the stored cumulative
+return. Dividends and cash yield are excluded, and positive-return probability
+remains unavailable until genuinely qualifying prospective outcomes exist.
+SEC continuity checks verify the share basis only through the latest metric
 period. The remaining days through the forecast target are stored as
 machine-readable `unverified_post_period_split` exposure and shown beside the
 forecast; StanStock does not claim that an adjusted-price series proves no
@@ -563,12 +615,18 @@ and 252-/756-session meanings. The corresponding canonical maturities are 10,
 never manufactured.
 
 Performance reports only matured outcomes and retains unresolved corporate
-events in coverage counts. Aggregate return, hit-rate, or calibration metrics
-are withheld below the configured minimum sample. Decision predictions keep
-the existing BUY/HOLD/AVOID success semantics. Advisory predictions never
-receive a decision-success value; they record direction correctness, bear/bull
-interval coverage, signed base-case error, and benchmark return separately. A
-withheld advisory prediction (all scenario returns null) is non-evaluable:
+events in coverage counts. Metrics display after 30 canonical row-level
+prediction observations in the relevant cohort. This fixed display threshold
+does not establish independent support or effective-cohort sufficiency,
+probability calibration, or calibrated interval coverage. Decision
+predictions use recommendation success: BUY succeeds when actual return is
+greater than 0; AVOID succeeds when actual return is less than or equal to 0;
+HOLD succeeds when actual return lies within the stored bear/bull range,
+inclusive. Recommendation success is not advisory base-case sign match.
+Advisory predictions never receive a decision-success value; they record
+base-case sign match, bear-to-bull inclusion, signed base-case error, and
+benchmark return separately. A withheld advisory prediction (all scenario
+returns null) is non-evaluable:
 evaluation resolves it as unresolved before any price lookup, and reporting
 defensively excludes it from advisory denominators.
 
@@ -597,7 +655,7 @@ contribute observed advisory outcomes.
 The evaluator also compares the target-date close in the evaluation vintage
 with the immutable prediction source price. A material mismatch is classified
 as a corporate event/adjusted-history revision and is excluded from ordinary
-return and directional-accuracy calculations.
+return, recommendation-success, and advisory outcome calculations.
 
 ## Simulations
 

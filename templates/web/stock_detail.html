@@ -17,7 +17,7 @@
         {% endif %}
         <span class="recommendation recommendation-{{ analysis.recommendation }}">{{ analysis.get_recommendation_display }}</span>
         <strong>{{ analysis.overall_score }}/100</strong>
-        <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence|floatformat:"0" }}% heuristic confidence</small>
+        <small>{{ analysis.get_risk_class_display }} risk · {{ analysis.confidence|floatformat:"0" }}% heuristic evidence score</small>
         {% if current_price_band %}
           <small>{{ current_price_band.label }} · latest close {{ current_price_band.price_date }}</small>
         {% endif %}
@@ -67,8 +67,8 @@
         <strong>{{ current_price_band.label }}.</strong>
         Based on the latest valid USD close of
         {{ current_price_band.close|price }} on {{ current_price_band.price_date }}.
-        This affordability band does not change score, confidence, valuation,
-        or recommendation. Policy: {{ price_band_policy_version }}.
+        This affordability band does not change score, heuristic evidence
+        score, valuation, or recommendation. Policy: {{ price_band_policy_version }}.
         {% if not current_price_band.new_allocation_eligible %}
           New allocation remains 0%; existing holdings remain visible and are
           not forced to liquidate.
@@ -112,7 +112,7 @@
             (data cutoff {{ under10_panel.decision_data_cutoff }}); reference close
             {{ under10_panel.reference_close }} USD. Policy
             {{ under10_panel.policy_version }}. These diagnostics do not change score,
-            confidence, recommendation, forecasts, or allocation.
+            heuristic evidence score, recommendation, forecasts, or allocation.
           </p>
           <h3>Solvency and obligation</h3>
           <p><strong>{{ under10_panel.solvency.headline }}</strong></p>
@@ -234,7 +234,7 @@
           </span>
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
-        {% if scenario.probability_positive is not None %}<span>Positive probability {{ scenario.probability_positive|percentage }}</span>{% endif %}
+        {% if scenario.probability_positive is not None %}<span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>{% endif %}
         {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
         {% endwith %}
         </article>
@@ -270,7 +270,7 @@
           </span>
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
-        {% if scenario.probability_positive is not None %}<span>Positive probability {{ scenario.probability_positive|percentage }}</span>{% endif %}
+        {% if scenario.probability_positive is not None %}<span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>{% endif %}
         {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
         {% endwith %}
         </article>

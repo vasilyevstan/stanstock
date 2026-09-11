@@ -10,6 +10,25 @@ or recommendations, and forecasts are never presented as guarantees. The
 math-only medium-horizon implementation and long-horizon plan are documented in
 [`docs/forecast-roadmap.md`](docs/forecast-roadmap.md).
 
+Scoring independently maps each available raw factor to 0-100 with fixed
+affine or piecewise policy maps, clamps it, averages factors into components,
+and applies versioned horizon weights. It does not cross-sectionally rank or
+winsorize factors; opportunity ordering uses the completed overall score
+after scoring. YAML/config policy is bound by the stored configuration hash;
+code-defined transforms are identified by the stored `code_revision`.
+Scheduled observed production automatically binds an exact clean commit SHA.
+Demo and direct research can record `working-tree` unless an exact committed
+revision is explicitly supplied. `rsi_14` is Cutler/SMA-style RSI using simple
+averages of the latest 14 gains and losses, and its RSI-to-score transform is a
+StanStock heuristic rather than a literature-standard transform.
+
+Broad literature-supported principles include momentum/trend, explicit risk,
+base rates and shrinkage, sustainable-growth accounting, valuation mean
+reversion, and point-in-time evaluation. Exact lookbacks, maps, weights,
+buckets, caps, confidence/support formulas, fallbacks, thresholds, and gates
+are fixed StanStock policy choices—not literature-standard, optimized,
+causal, or statistically calibrated constants.
+
 ## Current data boundary
 
 The original free-provider gate remains **NO_GO for broad US/European
@@ -158,12 +177,17 @@ session, analyzes eligible listings, appends the supported short-horizon
 decision prediction, and issues separate 6- and 12-month price-only advisory
 forecasts. When SEC is enabled, the same immutable run also issues separate
 3- and 5-year advisory forecasts or an explicit insufficiency reason. The
-medium engine writes one private immutable Parquet panel per analysis run,
-uses fixed-epoch non-overlapping cohorts, weights each market cohort equally,
-and shrinks conditional p20/p50/p80 returns toward the unconditional
-distribution. Probability stays hidden until effective support, listing
-diversity, calendar span, matched market-regime breadth, and walk-forward
-calibration all pass.
+medium engine writes one private immutable Parquet panel per analysis run and
+uses fixed-epoch non-overlapping cohorts. Matched and unconditional
+cohort-weighted p20/p50/p80 estimates are each shrinkage blended: published
+base is blended p50, with bear/bull at blended p20/p80. Bear-to-bull is a
+nominal central 60% analog-return range, not a calibrated interval, and has no
+coverage guarantee. The shrinkage-weighted positive-return estimate stays
+hidden until support/diversity checks, base-case MAE comparisons against
+unconditional and SPY-relative baselines, and the configured absolute Brier
+threshold pass. The retained internal `empirical_calibrated` status records
+only that publication-gate result; it does not prove calibrated probabilities
+or interval coverage.
 
 The single SPY benchmark response supplies both regime evidence for those
 forecasts and the investable ETF market row; it is not fetched twice.
@@ -185,6 +209,13 @@ negative, incompatible, stale, or unsupported inputs stay `Insufficient
 evidence`; probability remains unavailable. Because there is no verified
 split-event feed, each prediction also records and discloses the bounded
 period after its latest SEC share evidence as residual post-period split risk.
+The bounded tax input is a GAAP accrual proxy—TTM income-tax expense divided
+by TTM pretax income—not cash taxes paid or a cash tax rate. Reinvestment is
+compatible balance-sheet invested-capital change divided by NOPAT, an
+accounting proxy rather than directly observed capex or a proven causal rate.
+The 3y and 5y forecasts use separate frozen horizon-specific fade and
+multiple-reversion paths; neither is a slice or extrapolation of one shared
+5y path.
 These advisory rows cannot change BUY/HOLD/AVOID, opportunity ranking, or
 decision hit rates. A withheld advisory forecast (all scenario returns null)
 stays unresolved when evaluated and is excluded from advisory reporting
@@ -389,8 +420,11 @@ uv run python manage.py snapshot_portfolios
   identity, and provenance without a stock recommendation.
 - `/predictions` - the append-only prediction ledger, including explicit
   decision/advisory role and the recorded price provider/subject.
-- `/performance` - decision outcomes with minimum-sample safeguards and a
-  separate advisory-error section when advisory outcomes exist.
+- `/performance` - decision outcomes with a fixed display threshold and a
+  separate advisory-outcome section when advisory outcomes exist. Metrics
+  display after 30 canonical row-level prediction observations in a cohort;
+  that threshold does not establish independent support, effective-cohort
+  sufficiency, probability calibration, or calibrated interval coverage.
 - `/my-list` - private owner-scoped symbol preferences validated only from
   existing listings or checksummed locally stored stock catalogs.
 - `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
