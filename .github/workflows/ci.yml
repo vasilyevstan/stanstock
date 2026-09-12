@@ -107,6 +107,9 @@ jobs:
             tests/test_portfolio_planner.py::test_confirmation_does_not_block_on_snapshot_foreign_key_locks \
             tests/test_portfolio_refresh_validation.py \
             tests/test_portfolio_tracking.py::test_snapshot_and_snapshot_positions_are_immutable \
+            tests/test_medium_forecast_v2.py::test_postgresql_v2_writer_locks_complete_authority_through_prediction_create[append] \
+            tests/test_medium_forecast_v2.py::test_postgresql_v2_writer_locks_complete_authority_through_prediction_create[create] \
+            tests/test_medium_forecast_v2.py::test_postgresql_analyze_snapshot_holds_advisory_parent_locks_to_outer_commit \
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \
             tests/test_research_outcomes.py::test_outcome_role_integrity_triggers_are_installed \

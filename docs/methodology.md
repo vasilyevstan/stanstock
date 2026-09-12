@@ -527,6 +527,59 @@ they may yield a useful range while still failing the matched-regime breadth
 gate for the estimate. StanStock does not switch to a broader fallback merely
 to publish that value.
 
+### Explicit research-only medium v2
+
+`us-price-medium-v1` is frozen and remains the default and scheduled medium
+method. `us-price-medium-v2` is an explicit research-only service path. It
+requires literal `issued_on_time=False`, a research-grade current-universe
+snapshot, exact `us-price-baseline-v2`, SPY, and stock-research-eligible US/USD
+listings (common stock or depositary receipt).
+
+For a support set `S`, each of its `K` origin cohorts contributes total mass
+`1/K`; each row in cohort `c` receives `1/(K*n_c)`. The matched and
+unconditional CDFs are normalized separately. For a conditional fallback:
+
+```text
+w = matched_cohorts / (matched_cohorts + 4)
+F_v2(x) = w * F_matched(x) + (1 - w) * F_unconditional(x)
+```
+
+The unconditional fallback uses `w=0`. Quantiles are the first support value
+whose cumulative mass is at least `q`, without interpolation. Bear/base/bull
+are p20/p50/p80 from this one mixture, and strict positive-return probability
+is `1 - F_v2(0)`; zero return is non-positive. A finite support return below
+`-1.0` aborts the run before panel serialization or persistence, with no
+floor, clip, tolerance, or omission. Exactly `-1.0` is valid.
+
+At historical origin `o`, training includes only eligible prior rows with
+`label_end_date <= o`; equality is admitted and a later-ending label is
+excluded from model and reference support and every gate. Range/base/interval
+evidence uses every prior-only range forecast at an origin. Probability
+evidence uses only the subset whose prior-only matched support also passes its
+cohort, listing, span, and regime floors. Metrics average listings within each
+origin and then average origins equally.
+
+The probability reference is the origin's prior-only unconditional event
+rate. Raw Brier skill is `1 - BS_model / BS_reference`; a zero reference score
+has null skill, and probability publication requires every current support
+floor plus raw `BSS > 0` with at least four evaluable origins. Base p50 MAE is
+reported independently against prior-only unconditional p50 and the existing
+SPY-relative baseline. The nominal central-60% p20-p80 interval reports
+inclusive coverage, strict lower/upper miss rates, date-equal mean width, and
+the alpha-0.40 interval score:
+
+```text
+(upper - lower)
++ 5 * (lower - actual) when actual < lower
++ 5 * (actual - upper) when actual > upper
+```
+
+These results use a current-universe reconstruction and are
+survivorship-biased. They are descriptive research evidence, not calibrated
+probabilities, statistical significance, profitability, alpha, or observed
+live skill. V2 does not report bootstrap intervals, CRPS, reliability bins,
+median width, or a coverage publication gate.
+
 The medium panel stores 50/200-session trend, downside volatility, and dollar
 liquidity for eligibility and explanation, but those values do not add hidden
 matching dimensions. All panel inputs are capped at their historical anchor,

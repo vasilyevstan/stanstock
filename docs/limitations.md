@@ -229,6 +229,17 @@ unmeasurable.
   bear/bull are blended p20/p80. Bear-to-bull is a nominal central 60%
   analog-return range, not a calibrated prediction/credible/confidence
   interval, and it has no coverage guarantee.
+- `us-price-medium-v1` remains the default and scheduled implementation.
+  Explicit `us-price-medium-v2` runs are research-only and require the current
+  eligible US/USD stock universe, so their reconstructed evidence remains
+  survivorship-biased. V2's one-CDF p20/p50/p80 range, positive-return
+  estimate, prequential Brier skill, base MAE comparisons, coverage, strict
+  miss rates, mean width, and interval scores are descriptive historical
+  evidence. Positive Brier skill is not proof of calibrated probabilities,
+  statistical significance, profitability, alpha, or observed live skill.
+  No bootstrap, significance test, reliability calibration, CRPS, or median
+  width is reported. See
+  [`docs/methodology.md`](methodology.md#explicit-research-only-medium-v2).
 - Point-in-time SEC facts are available for the configured US universe, but
   Companyfacts excludes custom issuer concepts and segment dimensions. Current
   SIC snapshots are not historical classifications, ambiguous taxonomies stay

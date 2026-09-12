@@ -68,6 +68,16 @@ This command validates settings; it does not prove the database is reachable.
   historical-anchor leakage exclusion, equal cohort weighting, shrinkage,
   support/diversity/calibration withholding, immutable panel provenance, and
   advisory isolation from recommendations and opportunities;
+- frozen medium-v1 base-object execution and a base-produced compressed golden
+  covering config/parser behavior, complete panel rows/bytes/metadata,
+  calculation/scenario/persisted payloads, default service selection, source
+  behavior, and rendering labels; plus explicit medium-v2 literal/effective
+  identity, strict YAML rejection, pre-output admission, two-phase
+  select/check/read cutoff refusal, checksum and return-domain failures,
+  coherent cohort-equal CDF math, matured-only prequential Brier/base/interval
+  evidence, exact 14-/20-key payload states, both writer guards, fail-closed
+  nested UI validation, authenticated persistence-to-template flow, outcome
+  semantics, and decision/opportunity/simulation isolation;
 - deterministic 3y/5y FCF/share and separately eligible EPS/share branches,
   negative/partial-FCF fallback refusal, selected-period and near-zero-EPS
   share-basis checks, config-gated adjacent-selected-period diluted-share
@@ -361,23 +371,21 @@ one checkout and pins their effective hashes. Relevant regressions include
 `test_medium_forecast_config_is_versioned_and_stable`.
 
 Those same-revision tests do not prove that a frozen version stayed unchanged
-across a material edit. `tests/test_long_frozen_differential.py` now automates
-that comparison for `us-sec-long-v1`/`v2` by executing the base revision's own
-sources, so the reviewer's byte-for-byte base-versus-head reproduction is a
-`pytest` job rather than a hand-run artifact for those versions. It is not yet
-automated for any other frozen methodology or configuration version; there the
-reviewer still runs the explicit base-versus-head reproduction against the two
-checkouts and compares the frozen version's effective hash, eligibility,
-reason wording, and successful and withheld calculation payloads byte-for-byte
-as required release evidence.
+across a material edit. `tests/test_long_frozen_differential.py` automates that
+comparison for `us-sec-long-v1`/`v2`, and
+`tests/test_medium_frozen_differential.py` does so for
+`us-price-medium-v1`, by executing each sealed base revision's own sources.
+Their committed goldens are base-produced and comparisons cover complete
+normalized outputs rather than head-authored expected values.
 
 The automated differential has one environment dependency: reading the base
 revision's sources needs that revision in the local git object database. A
 shallow clone -- including the default `actions/checkout` depth of 1 -- does
 not contain it, so the live base comparison skips and only the committed
-golden in `tests/data/long_frozen_base_payloads.json` is compared. Keeping the
-exact-base differential live in CI therefore requires the quality job to check
-out full history (`fetch-depth: 0`); without it, CI proves the golden but not
+goldens in `tests/data/long_frozen_base_payloads.json` and
+`tests/data/medium_v1_frozen_base_payloads.json` are compared. Keeping the
+exact-base differentials live in CI therefore requires the quality job to
+check out full history (`fetch-depth: 0`); without it, CI proves the goldens but not
 the base execution that produced it.
 
 ## Browser checks

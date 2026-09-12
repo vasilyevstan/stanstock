@@ -95,6 +95,33 @@ calendar, configuration, content, and code hashes. This stage is explicitly
 labeled `price-only` and cannot produce a fundamental long-term forecast or
 alter recommendation policy.
 
+### Explicit research-only medium v2
+
+`us-price-medium-v1` is frozen and remains the sole default and scheduled
+method. The prospective `us-price-medium-v2` lane is selected only by an
+explicit service-level config path and only for a research-grade US/USD stock
+snapshot, SPY, exact `us-price-baseline-v2`, and literal
+`issued_on_time=False`.
+
+V2 keeps the same panel/features/fallback support boundary but uses one
+cohort-equal empirical CDF mixture: matched and unconditional components are
+normalized independently, conditional weight is `K / (K + 4)`, quantiles use
+the generalized left inverse, and `P(return > 0) = 1 - F(0)`. It refuses a
+finite historical return below `-1.0`; exactly `-1.0` remains valid.
+Prequential evidence trains at origin `o` only on labels ending on or before
+`o`, uses a prior-only unconditional probability reference, and gives each
+test date equal aggregate weight. Probability requires current support plus
+strictly positive raw Brier skill. Base MAE and descriptive central-60%
+coverage, miss rates, mean width, and alpha-0.40 interval scores remain
+independent evidence.
+
+Every selected panel source must have `available_at <= AnalysisRun.data_cutoff`
+before any source file is read; a late selected vintage causes zero physical
+reads and no fallback. V2 remains current-universe/survivorship-biased
+research evidence. It makes no calibration, statistical-significance,
+profitability, alpha, or live-skill claim. See
+[`docs/methodology.md`](methodology.md#explicit-research-only-medium-v2).
+
 ## Stage 2: point-in-time US fundamentals
 
 **Released.** The current 100-stock US universe now uses the official SEC
