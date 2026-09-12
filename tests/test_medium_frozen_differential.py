@@ -6,6 +6,7 @@ import base64
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import sys
@@ -93,6 +94,15 @@ def _normalize(
         return str(value)
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Frozen capture cannot normalize a non-finite float")
+        # Numerical libraries can expose platform-specific binary tails even
+        # when the meaningful result is identical. Fifteen significant decimal
+        # digits are stable across those float round trips while retaining
+        # materially different captured values.
+        normalized = float(format(value, ".15g"))
+        return 0.0 if normalized == 0.0 else normalized
     if isinstance(value, str):
         normalized = UUID_TEXT.sub(
             lambda match: _identity_alias(match.group(0), aliases),
@@ -668,6 +678,65 @@ def _first_difference(left: Any, right: Any, path: str = "capture") -> str:
                 return difference
         return ""
     return "" if left == right else f"{path}: {left!r} != {right!r}"
+
+
+def test_frozen_float_normalization_is_platform_stable_across_nested_payloads() -> None:
+    linux_value = 96.9674184132452
+    macos_value = 96.96741841324523
+
+    def nested_capture(value: float) -> dict[str, Any]:
+        return {
+            "calculation": {"risk": {"beta": value}},
+            "scenario": [{"probability_positive": value}],
+            "panel_rows": [{"relative_forward_return": value}],
+        }
+
+    linux = _normalize(nested_capture(linux_value))
+    macos = _normalize(nested_capture(macos_value))
+
+    assert linux == macos
+    assert linux["calculation"]["risk"]["beta"] == 96.9674184132452
+    assert linux["scenario"][0]["probability_positive"] == 96.9674184132452
+    assert linux["panel_rows"][0]["relative_forward_return"] == 96.9674184132452
+    assert _normalize(nested_capture(96.9674184132462)) != linux
+
+
+def test_frozen_float_normalization_preserves_other_scalar_handling() -> None:
+    identity = UUID("ca05db92-12eb-4634-aa95-52f5005543e0")
+    aliases = _IdentityAliases(by_uuid={str(identity): "<fixture>"}, run_aliases={})
+
+    normalized = _normalize(
+        {
+            "negative_zero": -0.0,
+            "integer": 7,
+            "boolean": False,
+            "decimal": Decimal("96.9674184132452300"),
+            "date": date(2026, 9, 4),
+            "identity": identity,
+        },
+        aliases,
+    )
+
+    assert normalized == {
+        "negative_zero": 0.0,
+        "integer": 7,
+        "boolean": False,
+        "decimal": "96.9674184132452300",
+        "date": "2026-09-04",
+        "identity": "<fixture>",
+    }
+    assert math.copysign(1.0, normalized["negative_zero"]) == 1.0
+    assert type(normalized["integer"]) is int
+    assert type(normalized["boolean"]) is bool
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_frozen_float_normalization_rejects_non_finite_values(value: float) -> None:
+    with pytest.raises(
+        ValueError,
+        match="^Frozen capture cannot normalize a non-finite float$",
+    ):
+        _normalize({"nested": [{"value": value}]})
 
 
 @pytest.mark.django_db
