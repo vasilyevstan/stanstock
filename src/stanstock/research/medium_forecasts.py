@@ -5,10 +5,11 @@ import io
 import json
 import math
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from importlib.metadata import version as package_version
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import numpy as np
@@ -23,8 +24,10 @@ from stanstock.data.models import DataAsset, Listing
 from stanstock.research.forecast_config import (
     MATCH_DIMENSIONS,
     MEDIUM_FORECAST_HORIZONS,
+    MEDIUM_V2_VERSION,
     ForecastHorizonConfig,
     MediumForecastConfig,
+    MediumForecastV2Config,
 )
 from stanstock.research.types import Scenario
 
@@ -90,6 +93,7 @@ class MediumPanel:
     frame: pl.DataFrame
     asset: DataAsset
     source_assets: tuple[DataAsset, ...]
+    file_created_by_invocation: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +111,21 @@ class MediumForecast:
     calculation: dict[str, Any]
 
     def scenario_payload(self) -> dict[str, Any]:
+        if self.calculation.get("schema_version") == 2:
+            return {
+                **self.scenario.as_dict(),
+                "method_version": self.calculation["method_version"],
+                "calculation_schema_version": 2,
+                "current_state": self.calculation["current_state"],
+                "support": self.calculation["support"],
+                "probability_evidence": self.calculation["probability_evidence"],
+                "predictive_distribution": self.calculation["predictive_distribution"],
+                "evidence": self.calculation["evidence"],
+                "formula_inputs": self.calculation["formula_inputs"],
+                "return_basis": self.calculation["return_basis"],
+                "dividends_included": self.calculation["dividends_included"],
+                "training_evidence": self.calculation["training_evidence"],
+            }
         return {
             **self.scenario.as_dict(),
             "method_version": self.calculation["method_version"],
@@ -153,7 +172,7 @@ def build_medium_forecast_panel(
     target_date: date,
     generated_at: datetime,
     run_id: UUID,
-    config: MediumForecastConfig,
+    config: MediumForecastConfig | MediumForecastV2Config,
     config_hash: str,
     scoring_config_version: str,
     scoring_config_hash: str,
@@ -162,27 +181,69 @@ def build_medium_forecast_panel(
     universe_config_hash: str,
     code_revision: str,
     store: AssetStore,
+    data_cutoff: datetime | None = None,
 ) -> MediumPanel:
-    benchmark_read = asof.price_frame_with_diagnostics(
-        provider=provider,
-        subject=benchmark_subject,
-        through_date=target_date,
-    )
-    listing_inputs: list[MediumPanelPriceInput] = []
-    for listing in sorted(listings, key=lambda item: str(item.pk)):
-        subject = listing.provider_symbol or listing.ticker
-        read = asof.price_frame_with_diagnostics(
+    if isinstance(config, MediumForecastV2Config):
+        if data_cutoff is None:
+            raise ValueError("us-price-medium-v2 requires the owning AnalysisRun.data_cutoff")
+        selected_benchmark = _select_v2_price_asset(
+            asof=asof,
             provider=provider,
-            subject=subject,
+            subject=benchmark_subject,
+            data_cutoff=data_cutoff,
+        )
+        selected_listings: list[tuple[Listing, DataAsset]] = []
+        for listing in sorted(listings, key=lambda item: str(item.pk)):
+            subject = listing.provider_symbol or listing.ticker
+            selected_listings.append(
+                (
+                    listing,
+                    _select_v2_price_asset(
+                        asof=asof,
+                        provider=provider,
+                        subject=subject,
+                        data_cutoff=data_cutoff,
+                    ),
+                )
+            )
+        benchmark_read = asof.price_frame_for_asset_with_diagnostics(
+            asset=selected_benchmark,
             through_date=target_date,
         )
-        listing_inputs.append(
-            MediumPanelPriceInput(
-                listing=listing,
-                asset=read.asset,
-                frame=read.frame,
+        listing_inputs = []
+        for listing, selected_asset in selected_listings:
+            read = asof.price_frame_for_asset_with_diagnostics(
+                asset=selected_asset,
+                through_date=target_date,
             )
+            listing_inputs.append(
+                MediumPanelPriceInput(
+                    listing=listing,
+                    asset=read.asset,
+                    frame=read.frame,
+                )
+            )
+    else:
+        benchmark_read = asof.price_frame_with_diagnostics(
+            provider=provider,
+            subject=benchmark_subject,
+            through_date=target_date,
         )
+        listing_inputs = []
+        for listing in sorted(listings, key=lambda item: str(item.pk)):
+            subject = listing.provider_symbol or listing.ticker
+            read = asof.price_frame_with_diagnostics(
+                provider=provider,
+                subject=subject,
+                through_date=target_date,
+            )
+            listing_inputs.append(
+                MediumPanelPriceInput(
+                    listing=listing,
+                    asset=read.asset,
+                    frame=read.frame,
+                )
+            )
     frame = reconstruct_medium_forecast_panel(
         benchmark_asset=benchmark_read.asset,
         benchmark_frame=benchmark_read.frame,
@@ -190,6 +251,8 @@ def build_medium_forecast_panel(
         target_date=target_date,
         config=config,
     )
+    if isinstance(config, MediumForecastV2Config):
+        _validate_v2_support_returns(frame.to_dicts())
     calendar_sessions = calendar_sessions_through(
         calendar_name=config.calendar, fixed_epoch=config.fixed_epoch, target_date=target_date
     )
@@ -301,7 +364,29 @@ def build_medium_forecast_panel(
         frame=frame,
         asset=asset,
         source_assets=tuple(deduped_sources),
+        file_created_by_invocation=not file_already_existed,
     )
+
+
+def _select_v2_price_asset(
+    *,
+    asof: AsOfData,
+    provider: str,
+    subject: str,
+    data_cutoff: datetime,
+) -> DataAsset:
+    asset = asof.latest_asset(
+        provider=provider,
+        kind="price_history",
+        subject=subject,
+    )
+    if asset.provider != provider or asset.kind != "price_history" or asset.subject != subject:
+        raise ValueError("us-price-medium-v2 selected price asset identity mismatch")
+    if asset.available_at > data_cutoff:
+        raise ValueError(
+            "us-price-medium-v2 refuses price assets available after AnalysisRun.data_cutoff"
+        )
+    return asset
 
 
 def reconstruct_medium_forecast_panel(
@@ -310,7 +395,7 @@ def reconstruct_medium_forecast_panel(
     benchmark_frame: pl.DataFrame,
     listing_inputs: list[MediumPanelPriceInput],
     target_date: date,
-    config: MediumForecastConfig,
+    config: MediumForecastConfig | MediumForecastV2Config,
 ) -> pl.DataFrame:
     """Purely reconstruct the versioned panel from exact normalized inputs.
 
@@ -386,9 +471,12 @@ def reconstruct_medium_forecast_panel(
 
 def build_medium_forecasts(
     panel: pl.DataFrame,
-    config: MediumForecastConfig,
+    config: MediumForecastConfig | MediumForecastV2Config,
 ) -> dict[str, dict[str, MediumForecast]]:
     records = panel.to_dicts()
+    if isinstance(config, MediumForecastV2Config):
+        _validate_v2_support_returns(records)
+        return _build_medium_forecasts_v2(records, config)
     calibrations = {
         horizon: _calibrate_horizon(records, horizon=horizon, config=config)
         for horizon in MEDIUM_FORECAST_HORIZONS
@@ -416,6 +504,998 @@ def build_medium_forecasts(
                 calibration=calibrations[horizon],
             )
     return forecasts
+
+
+@dataclass(frozen=True, slots=True)
+class _V2Distribution:
+    masses: tuple[tuple[float, float], ...]
+    raw_matches: int
+    effective_cohorts: int
+    distinct_listings: int
+    calendar_start: str | None
+    calendar_end: str | None
+    regimes: tuple[str, ...]
+    dispersion: float | None
+
+    @property
+    def p20(self) -> float | None:
+        return _v2_quantile(self.masses, 0.2)
+
+    @property
+    def p50(self) -> float | None:
+        return _v2_quantile(self.masses, 0.5)
+
+    @property
+    def p80(self) -> float | None:
+        return _v2_quantile(self.masses, 0.8)
+
+    @property
+    def probability_positive(self) -> float | None:
+        if not self.masses:
+            return None
+        cdf_at_zero = math.fsum(mass for value, mass in self.masses if value <= 0.0)
+        probability = 1.0 - cdf_at_zero
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("us-price-medium-v2 produced an invalid probability")
+        return probability
+
+
+@dataclass(frozen=True, slots=True)
+class _V2Estimate:
+    fallback_level: str
+    shrinkage_weight: float
+    matched: _V2Distribution
+    unconditional: _V2Distribution
+    mixture: _V2Distribution
+
+
+def _validate_v2_support_returns(records: list[dict[str, Any]]) -> None:
+    for row in records:
+        if bool(row.get("is_forecast")) or row.get("forward_return") is None:
+            continue
+        raw_value = row["forward_return"]
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise ValueError("us-price-medium-v2 requires finite support returns")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError("us-price-medium-v2 requires finite support returns")
+        if value < -1.0:
+            raise ValueError("us-price-medium-v2 refuses support returns below -1.0")
+
+
+def _build_medium_forecasts_v2(
+    records: list[dict[str, Any]],
+    config: MediumForecastV2Config,
+) -> dict[str, dict[str, MediumForecast]]:
+    evidence = {
+        horizon: _v2_prequential_evidence(records, horizon=horizon, config=config)
+        for horizon in MEDIUM_FORECAST_HORIZONS
+    }
+    listing_ids = sorted({str(row["listing_id"]) for row in records if bool(row["is_forecast"])})
+    forecasts: dict[str, dict[str, MediumForecast]] = {}
+    for listing_id in listing_ids:
+        forecasts[listing_id] = {}
+        for horizon in MEDIUM_FORECAST_HORIZONS:
+            current = next(
+                (
+                    row
+                    for row in records
+                    if str(row["listing_id"]) == listing_id
+                    and str(row["horizon"]) == horizon
+                    and bool(row["is_forecast"])
+                ),
+                None,
+            )
+            forecasts[listing_id][horizon] = _v2_forecast_for_state(
+                records,
+                current=current,
+                horizon=horizon,
+                config=config,
+                evidence=evidence[horizon],
+            )
+    return forecasts
+
+
+def _v2_forecast_for_state(
+    records: list[dict[str, Any]],
+    *,
+    current: dict[str, Any] | None,
+    horizon: str,
+    config: MediumForecastV2Config,
+    evidence: dict[str, Any],
+) -> MediumForecast:
+    horizon_config = config.horizons[horizon]
+    empty_support = _v2_support_payload(
+        _v2_distribution([]),
+        fallback_level="unavailable",
+        shrinkage_weight=0.0,
+    )
+    if current is None:
+        return _v2_missing_forecast(
+            horizon=horizon,
+            config=config,
+            reason="Current forecast state is missing from the immutable panel",
+            evidence=evidence,
+            current_state=_v2_current_state(None),
+            support=empty_support,
+        )
+    current_state = _v2_current_state(current)
+    if not bool(current["eligible"]):
+        return _v2_missing_forecast(
+            horizon=horizon,
+            config=config,
+            reason=str(current["insufficiency_reason"]),
+            evidence=evidence,
+            current_state=current_state,
+            support=empty_support,
+        )
+    origin = current.get("anchor_date")
+    if not isinstance(origin, date):
+        return _v2_missing_forecast(
+            horizon=horizon,
+            config=config,
+            reason="Current forecast state has no valid anchor date",
+            evidence=evidence,
+            current_state=current_state,
+            support=empty_support,
+        )
+    training = _v2_training_rows(records, horizon=horizon, origin=origin)
+    estimate = _v2_estimate_distribution(
+        training,
+        current=current,
+        horizon_config=horizon_config,
+        config=config,
+    )
+    if estimate is None:
+        unconditional = _v2_distribution(training)
+        support = _v2_support_payload(
+            unconditional,
+            fallback_level="unavailable",
+            shrinkage_weight=0.0,
+        )
+        return _v2_missing_forecast(
+            horizon=horizon,
+            config=config,
+            reason=_v2_support_failure_reason(horizon, unconditional, horizon_config),
+            evidence=evidence,
+            current_state=current_state,
+            support=support,
+        )
+
+    raw_probability = estimate.mixture.probability_positive
+    p20 = estimate.mixture.p20
+    p50 = estimate.mixture.p50
+    p80 = estimate.mixture.p80
+    if None in (p20, p50, p80, raw_probability):
+        raise ValueError("us-price-medium-v2 produced an incomplete predictive distribution")
+    assert p20 is not None
+    assert p50 is not None
+    assert p80 is not None
+    assert raw_probability is not None
+    probability_reasons = _v2_probability_support_reasons(
+        estimate.matched,
+        horizon_config,
+    )
+    probability_skill = evidence["probability_skill"]
+    probability_reasons.extend(
+        _v2_probability_skill_reasons(
+            probability_skill,
+            required=config.walk_forward.minimum_test_cohorts,
+        )
+    )
+    published_probability = raw_probability if not probability_reasons else None
+    confidence = min(80.0, 20.0 + 60.0 * estimate.shrinkage_weight)
+    scenario = Scenario(
+        bear=p20,
+        base=p50,
+        bull=p80,
+        probability_positive=published_probability,
+        confidence=confidence,
+        confidence_status=(
+            "empirical_skill_supported"
+            if published_probability is not None
+            else "empirical_range_only"
+        ),
+        insufficiency_reason=(
+            ""
+            if published_probability is not None
+            else "Probability withheld: " + "; ".join(probability_reasons)
+        ),
+        method=METHOD_NAME,
+    )
+    probability_evidence = _v2_probability_evidence(
+        estimate,
+        horizon_config=horizon_config,
+        reasons=probability_reasons,
+        published=published_probability is not None,
+    )
+    calculation = _v2_calculation(
+        horizon=horizon,
+        config=config,
+        current_state=current_state,
+        support=_v2_support_payload(
+            estimate.matched,
+            fallback_level=estimate.fallback_level,
+            shrinkage_weight=estimate.shrinkage_weight,
+        ),
+        probability_evidence=probability_evidence,
+        predictive_distribution=_v2_predictive_distribution(
+            estimate,
+            published_probability=published_probability,
+        ),
+        evidence=evidence,
+        scenario={
+            "bear": p20,
+            "base": p50,
+            "bull": p80,
+            "probability_positive": published_probability,
+        },
+    )
+    return MediumForecast(scenario=scenario, calculation=calculation)
+
+
+def _v2_missing_forecast(
+    *,
+    horizon: str,
+    config: MediumForecastV2Config,
+    reason: str,
+    evidence: dict[str, Any],
+    current_state: dict[str, Any],
+    support: dict[str, Any],
+) -> MediumForecast:
+    scenario = Scenario(
+        bear=None,
+        base=None,
+        bull=None,
+        probability_positive=None,
+        confidence=0.0,
+        confidence_status="insufficient_evidence",
+        insufficiency_reason=reason,
+        method=METHOD_NAME,
+    )
+    calculation = _v2_calculation(
+        horizon=horizon,
+        config=config,
+        current_state=current_state,
+        support=support,
+        probability_evidence=_v2_empty_probability_evidence(config.horizons[horizon]),
+        predictive_distribution=_v2_empty_predictive_distribution(),
+        evidence=evidence,
+        scenario={
+            "bear": None,
+            "base": None,
+            "bull": None,
+            "probability_positive": None,
+        },
+    )
+    return MediumForecast(scenario=scenario, calculation=calculation)
+
+
+def _v2_calculation(
+    *,
+    horizon: str,
+    config: MediumForecastV2Config,
+    current_state: dict[str, Any],
+    support: dict[str, Any],
+    probability_evidence: dict[str, Any],
+    predictive_distribution: dict[str, Any],
+    evidence: dict[str, Any],
+    scenario: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "method": METHOD_NAME,
+        "method_version": MEDIUM_V2_VERSION,
+        "forecast_horizon": horizon,
+        "horizon_sessions": config.horizons[horizon].sessions,
+        "current_state": current_state,
+        "support": support,
+        "probability_evidence": probability_evidence,
+        "predictive_distribution": predictive_distribution,
+        "evidence": evidence,
+        "formula_inputs": {"scenario": scenario},
+        "return_basis": config.return_basis,
+        "dividends_included": config.dividends_included,
+        "training_evidence": {
+            "grade": "research",
+            "current_universe_survivorship_bias": True,
+            "label_policy": "training_label_end_date_lte_origin",
+            "test_policy": "test_outcome_never_enters_its_origin_training_or_gates",
+            "cohort_policy": "fixed_epoch_non_overlapping",
+            "aggregation_policy": "date_equal_listing_equal_within_origin",
+            "calibration_claim": False,
+            "significance_claim": False,
+            "profitability_claim": False,
+            "alpha_claim": False,
+        },
+    }
+
+
+def _v2_distribution(rows: list[dict[str, Any]]) -> _V2Distribution:
+    usable = sorted(
+        (row for row in rows if bool(row["eligible"]) and row["forward_return"] is not None),
+        key=_v2_row_identity_value,
+    )
+    if not usable:
+        return _V2Distribution((), 0, 0, 0, None, None, (), None)
+    cohort_counts = Counter(str(row["cohort_id"]) for row in usable)
+    cohort_count = len(cohort_counts)
+    contributions_by_value: dict[float, list[float]] = {}
+    for row in usable:
+        value = float(row["forward_return"])
+        mass = 1.0 / (cohort_count * cohort_counts[str(row["cohort_id"])])
+        contributions_by_value.setdefault(value, []).append(mass)
+    mass_by_value = tuple(
+        (value, math.fsum(contributions_by_value[value]))
+        for value in sorted(contributions_by_value)
+    )
+    total_mass = math.fsum(mass for _value, mass in mass_by_value)
+    if not math.isfinite(total_mass) or total_mass <= 0:
+        raise ValueError("us-price-medium-v2 produced invalid component mass")
+    masses = tuple((value, mass / total_mass) for value, mass in mass_by_value)
+    weighted_mean = math.fsum(value * mass for value, mass in masses)
+    dispersion = math.sqrt(
+        math.fsum(((value - weighted_mean) ** 2) * mass for value, mass in masses)
+    )
+    dates = sorted({row["anchor_date"] for row in usable if isinstance(row["anchor_date"], date)})
+    regimes = tuple(
+        sorted(
+            {f"{row['market_trend_bucket']}:{row['market_volatility_bucket']}" for row in usable}
+        )
+    )
+    return _V2Distribution(
+        masses=masses,
+        raw_matches=len(usable),
+        effective_cohorts=cohort_count,
+        distinct_listings=len({str(row["listing_id"]) for row in usable}),
+        calendar_start=dates[0].isoformat() if dates else None,
+        calendar_end=dates[-1].isoformat() if dates else None,
+        regimes=regimes,
+        dispersion=dispersion,
+    )
+
+
+def _v2_row_identity_value(row: Mapping[str, Any]) -> tuple[str, str, float, str, str]:
+    anchor = row.get("anchor_date")
+    label_end = row.get("label_end_date")
+    return (
+        str(row.get("cohort_id")),
+        str(row.get("listing_id")),
+        float(row["forward_return"]),
+        anchor.isoformat() if isinstance(anchor, date) else str(anchor),
+        label_end.isoformat() if isinstance(label_end, date) else str(label_end),
+    )
+
+
+def _v2_estimate_distribution(
+    training: list[dict[str, Any]],
+    *,
+    current: dict[str, Any],
+    horizon_config: ForecastHorizonConfig,
+    config: MediumForecastV2Config,
+) -> _V2Estimate | None:
+    unconditional = _v2_distribution(training)
+    if not _support_sufficient_v2(unconditional, horizon_config):
+        return None
+    for fallback in config.fallback_order:
+        matched_rows = [
+            row
+            for row in training
+            if all(row[dimension] == current[dimension] for dimension in fallback.dimensions)
+        ]
+        matched = _v2_distribution(matched_rows)
+        if not _support_sufficient_v2(matched, horizon_config):
+            continue
+        weight = (
+            0.0
+            if not fallback.dimensions
+            else matched.effective_cohorts
+            / (matched.effective_cohorts + horizon_config.shrinkage_prior_cohorts)
+        )
+        mixture = _v2_mix_distributions(
+            matched,
+            unconditional,
+            matched_mass=weight,
+        )
+        return _V2Estimate(
+            fallback_level=fallback.name,
+            shrinkage_weight=weight,
+            matched=matched,
+            unconditional=unconditional,
+            mixture=mixture,
+        )
+    return None
+
+
+def _v2_mix_distributions(
+    matched: _V2Distribution,
+    unconditional: _V2Distribution,
+    *,
+    matched_mass: float,
+) -> _V2Distribution:
+    if not 0.0 <= matched_mass <= 1.0:
+        raise ValueError("us-price-medium-v2 produced invalid mixture mass")
+    contributions: dict[float, list[float]] = {}
+    for value, mass in matched.masses:
+        contributions.setdefault(value, []).append(matched_mass * mass)
+    for value, mass in unconditional.masses:
+        contributions.setdefault(value, []).append((1.0 - matched_mass) * mass)
+    masses = tuple(
+        (value, math.fsum(contributions[value]))
+        for value in sorted(contributions)
+        if math.fsum(contributions[value]) > 0.0
+    )
+    total = math.fsum(mass for _value, mass in masses)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("us-price-medium-v2 produced invalid mixture mass")
+    normalized = tuple((value, mass / total) for value, mass in masses)
+    mean = math.fsum(value * mass for value, mass in normalized)
+    dispersion = math.sqrt(math.fsum(((value - mean) ** 2) * mass for value, mass in normalized))
+    return _V2Distribution(
+        masses=normalized,
+        raw_matches=matched.raw_matches,
+        effective_cohorts=matched.effective_cohorts,
+        distinct_listings=matched.distinct_listings,
+        calendar_start=matched.calendar_start,
+        calendar_end=matched.calendar_end,
+        regimes=matched.regimes,
+        dispersion=dispersion,
+    )
+
+
+def _v2_quantile(
+    masses: tuple[tuple[float, float], ...],
+    quantile: float,
+) -> float | None:
+    seen: list[float] = []
+    for value, mass in masses:
+        seen.append(mass)
+        if math.fsum(seen) >= quantile:
+            return value
+    return masses[-1][0] if masses else None
+
+
+def _support_sufficient_v2(
+    distribution: _V2Distribution,
+    config: ForecastHorizonConfig,
+) -> bool:
+    return (
+        distribution.raw_matches >= config.minimum_raw_matches
+        and distribution.effective_cohorts >= config.minimum_effective_cohorts
+        and distribution.distinct_listings >= config.minimum_distinct_listings
+    )
+
+
+def _v2_training_rows(
+    records: list[dict[str, Any]],
+    *,
+    horizon: str,
+    origin: date,
+) -> list[dict[str, Any]]:
+    training: list[dict[str, Any]] = []
+    for row in records:
+        anchor = row.get("anchor_date")
+        label_end = row.get("label_end_date")
+        if (
+            str(row.get("horizon")) != horizon
+            or bool(row.get("is_forecast"))
+            or not bool(row.get("eligible"))
+            or row.get("forward_return") is None
+            or not isinstance(anchor, date)
+            or not isinstance(label_end, date)
+            or anchor >= origin
+            or label_end > origin
+        ):
+            continue
+        training.append(row)
+    return training
+
+
+def _v2_prequential_evidence(
+    records: list[dict[str, Any]],
+    *,
+    horizon: str,
+    config: MediumForecastV2Config,
+) -> dict[str, Any]:
+    historical = [
+        row
+        for row in records
+        if str(row.get("horizon")) == horizon
+        and not bool(row.get("is_forecast"))
+        and bool(row.get("eligible"))
+        and row.get("forward_return") is not None
+        and isinstance(row.get("anchor_date"), date)
+        and isinstance(row.get("label_end_date"), date)
+    ]
+    origins = sorted({row["anchor_date"] for row in historical})
+    range_by_origin: list[dict[str, list[float]]] = []
+    probability_by_origin: list[dict[str, list[float]]] = []
+    horizon_config = config.horizons[horizon]
+    for origin in origins:
+        assert isinstance(origin, date)
+        prior = _v2_training_rows(records, horizon=horizon, origin=origin)
+        if (
+            len({str(row["cohort_id"]) for row in prior})
+            < config.walk_forward.minimum_training_cohorts
+        ):
+            continue
+        test_rows = sorted(
+            (row for row in historical if row["anchor_date"] == origin),
+            key=_v2_row_identity_value,
+        )
+        range_metrics: dict[str, list[float]] = {
+            "model_error": [],
+            "unconditional_error": [],
+            "relative_error": [],
+            "covered": [],
+            "below": [],
+            "above": [],
+            "width": [],
+            "model_interval_score": [],
+            "reference_interval_score": [],
+        }
+        probability_metrics: dict[str, list[float]] = {
+            "model_brier": [],
+            "reference_brier": [],
+        }
+        for row in test_rows:
+            estimate = _v2_estimate_distribution(
+                prior,
+                current=row,
+                horizon_config=horizon_config,
+                config=config,
+            )
+            if estimate is None:
+                continue
+            p20 = estimate.mixture.p20
+            p50 = estimate.mixture.p50
+            p80 = estimate.mixture.p80
+            ref20 = estimate.unconditional.p20
+            ref50 = estimate.unconditional.p50
+            ref80 = estimate.unconditional.p80
+            if None in (p20, p50, p80, ref20, ref50, ref80):
+                continue
+            assert p20 is not None
+            assert p50 is not None
+            assert p80 is not None
+            assert ref20 is not None
+            assert ref50 is not None
+            assert ref80 is not None
+            actual = float(row["forward_return"])
+            range_metrics["model_error"].append(abs(actual - p50))
+            range_metrics["unconditional_error"].append(abs(actual - ref50))
+            range_metrics["relative_error"].append(
+                abs(actual - _v2_spy_relative_baseline(prior, row))
+            )
+            range_metrics["covered"].append(float(p20 <= actual <= p80))
+            range_metrics["below"].append(float(actual < p20))
+            range_metrics["above"].append(float(actual > p80))
+            range_metrics["width"].append(p80 - p20)
+            range_metrics["model_interval_score"].append(_v2_interval_score(p20, p80, actual))
+            range_metrics["reference_interval_score"].append(
+                _v2_interval_score(ref20, ref80, actual)
+            )
+            if not _v2_probability_support_reasons(estimate.matched, horizon_config):
+                model_probability = estimate.mixture.probability_positive
+                reference_probability = estimate.unconditional.probability_positive
+                if model_probability is None or reference_probability is None:
+                    continue
+                observed = 1.0 if actual > 0.0 else 0.0
+                probability_metrics["model_brier"].append((model_probability - observed) ** 2)
+                probability_metrics["reference_brier"].append(
+                    (reference_probability - observed) ** 2
+                )
+        if range_metrics["model_error"]:
+            range_by_origin.append(range_metrics)
+        if probability_metrics["model_brier"]:
+            probability_by_origin.append(probability_metrics)
+    return {
+        "base_accuracy": _v2_base_evidence(
+            range_by_origin,
+            config=config,
+        ),
+        "probability_skill": _v2_probability_skill_evidence(
+            probability_by_origin,
+            config=config,
+        ),
+        "interval": _v2_interval_evidence(
+            range_by_origin,
+            config=config,
+        ),
+    }
+
+
+def _v2_spy_relative_baseline(
+    training: list[dict[str, Any]],
+    current: dict[str, Any],
+) -> float:
+    benchmark_matches = [
+        row
+        for row in training
+        if row["benchmark_forward_return"] is not None
+        and row["market_trend_bucket"] == current["market_trend_bucket"]
+        and row["market_volatility_bucket"] == current["market_volatility_bucket"]
+    ]
+    if not benchmark_matches:
+        benchmark_matches = [row for row in training if row["benchmark_forward_return"] is not None]
+    relative_matches = [
+        row
+        for row in training
+        if row["relative_forward_return"] is not None
+        and row["relative_momentum_bucket"] == current["relative_momentum_bucket"]
+    ]
+    if not relative_matches:
+        relative_matches = [row for row in training if row["relative_forward_return"] is not None]
+    benchmark = _v2_distribution(
+        [{**row, "forward_return": row["benchmark_forward_return"]} for row in benchmark_matches]
+    )
+    relative = _v2_distribution(
+        [{**row, "forward_return": row["relative_forward_return"]} for row in relative_matches]
+    )
+    if benchmark.p50 is None or relative.p50 is None:
+        raise ValueError("us-price-medium-v2 SPY-relative baseline is unavailable")
+    return math.fsum((benchmark.p50, relative.p50))
+
+
+def _v2_date_equal_mean(
+    origins: list[dict[str, list[float]]],
+    key: str,
+) -> float | None:
+    values = sorted(
+        math.fsum(sorted(origin[key])) / len(origin[key]) for origin in origins if origin[key]
+    )
+    return math.fsum(values) / len(values) if values else None
+
+
+def _v2_base_evidence(
+    origins: list[dict[str, list[float]]],
+    *,
+    config: MediumForecastV2Config,
+) -> dict[str, Any]:
+    origin_count = len(origins)
+    predictions = sum(len(origin["model_error"]) for origin in origins)
+    model = _v2_date_equal_mean(origins, "model_error")
+    unconditional = _v2_date_equal_mean(origins, "unconditional_error")
+    relative = _v2_date_equal_mean(origins, "relative_error")
+    if origin_count == 0:
+        status = "not_evaluable"
+    elif origin_count < config.walk_forward.minimum_test_cohorts:
+        status = "insufficient_support"
+    else:
+        assert model is not None and unconditional is not None and relative is not None
+        ratio = config.walk_forward.maximum_baseline_mae_ratio
+        status = (
+            "passed" if model <= unconditional * ratio and model <= relative * ratio else "failed"
+        )
+    return {
+        "status": status,
+        "test_origins": origin_count,
+        "test_predictions": predictions,
+        "weighting": "date_equal_listing_equal_within_origin",
+        "mean_absolute_error": model,
+        "unconditional_mean_absolute_error": unconditional,
+        "spy_relative_mean_absolute_error": relative,
+        "spy_relative_baseline_method": (
+            "market_regime_benchmark_median_plus_relative_momentum_excess_median"
+        ),
+        "maximum_baseline_mae_ratio": config.walk_forward.maximum_baseline_mae_ratio,
+    }
+
+
+def _v2_probability_skill_evidence(
+    origins: list[dict[str, list[float]]],
+    *,
+    config: MediumForecastV2Config,
+) -> dict[str, Any]:
+    origin_count = len(origins)
+    predictions = sum(len(origin["model_brier"]) for origin in origins)
+    model = _v2_date_equal_mean(origins, "model_brier")
+    reference = _v2_date_equal_mean(origins, "reference_brier")
+    bss = None if reference in (None, 0.0) else 1.0 - cast(float, model) / reference
+    if origin_count == 0:
+        status = "not_evaluable"
+    elif origin_count < config.walk_forward.minimum_test_cohorts:
+        status = "insufficient_support"
+    elif reference == 0.0:
+        status = "reference_zero"
+    else:
+        assert model is not None and reference is not None
+        if model < reference:
+            status = "positive_skill"
+        elif model == reference:
+            status = "zero_skill"
+        else:
+            status = "negative_skill"
+    return {
+        "status": status,
+        "test_origins": origin_count,
+        "test_predictions": predictions,
+        "weighting": "date_equal_listing_equal_within_origin",
+        "event": "return_gt_0",
+        "model_brier_score": model,
+        "reference_brier_score": reference,
+        "brier_skill_score": bss,
+        "reference_method": "prequential_unconditional",
+        "minimum_brier_skill_exclusive": (config.walk_forward.minimum_brier_skill_exclusive),
+        "zero_reference_policy": "null_no_epsilon",
+    }
+
+
+def _v2_interval_evidence(
+    origins: list[dict[str, list[float]]],
+    *,
+    config: MediumForecastV2Config,
+) -> dict[str, Any]:
+    origin_count = len(origins)
+    if origin_count == 0:
+        status = "not_evaluable"
+    elif origin_count < config.walk_forward.minimum_test_cohorts:
+        status = "preliminary"
+    else:
+        status = "descriptive"
+    alpha = config.walk_forward.interval_alpha
+    return {
+        "status": status,
+        "test_origins": origin_count,
+        "test_predictions": sum(len(origin["covered"]) for origin in origins),
+        "weighting": "date_equal_listing_equal_within_origin",
+        "alpha": alpha,
+        "nominal_coverage": 1.0 - alpha,
+        "endpoint_policy": "inclusive",
+        "empirical_coverage": _v2_date_equal_mean(origins, "covered"),
+        "below_rate": _v2_date_equal_mean(origins, "below"),
+        "above_rate": _v2_date_equal_mean(origins, "above"),
+        "mean_width": _v2_date_equal_mean(origins, "width"),
+        "model_mean_interval_score": _v2_date_equal_mean(origins, "model_interval_score"),
+        "reference_mean_interval_score": _v2_date_equal_mean(origins, "reference_interval_score"),
+        "reference_method": "prequential_unconditional",
+    }
+
+
+def _v2_interval_score(lower: float, upper: float, actual: float) -> float:
+    terms = [upper - lower]
+    if actual < lower:
+        terms.append(5.0 * (lower - actual))
+    if actual > upper:
+        terms.append(5.0 * (actual - upper))
+    return math.fsum(terms)
+
+
+def _v2_probability_support_reasons(
+    distribution: _V2Distribution,
+    config: ForecastHorizonConfig,
+) -> list[str]:
+    span = _v2_calendar_span_days(distribution)
+    reasons: list[str] = []
+    if distribution.effective_cohorts < config.probability_minimum_effective_cohorts:
+        reasons.append(
+            "effective cohorts "
+            f"{distribution.effective_cohorts}/"
+            f"{config.probability_minimum_effective_cohorts}"
+        )
+    if distribution.distinct_listings < config.probability_minimum_distinct_listings:
+        reasons.append(
+            "distinct listings "
+            f"{distribution.distinct_listings}/"
+            f"{config.probability_minimum_distinct_listings}"
+        )
+    if span < config.probability_minimum_calendar_span_days:
+        reasons.append(f"calendar span {span}/{config.probability_minimum_calendar_span_days} days")
+    if len(distribution.regimes) < config.probability_minimum_distinct_market_regimes:
+        reasons.append(
+            "matched market regimes "
+            f"{len(distribution.regimes)}/"
+            f"{config.probability_minimum_distinct_market_regimes}"
+        )
+    return reasons
+
+
+def _v2_probability_skill_reasons(
+    evidence: dict[str, Any],
+    *,
+    required: int,
+) -> list[str]:
+    status = evidence["status"]
+    if status == "positive_skill" and cast(float, evidence["brier_skill_score"]) > 0.0:
+        return []
+    if status in {"not_evaluable", "insufficient_support"}:
+        return [
+            "prequential Brier skill insufficient "
+            f"({evidence['test_origins']}/{required} test origins)"
+        ]
+    if status == "reference_zero":
+        return ["prequential unconditional reference Brier score is zero"]
+    if status == "zero_skill":
+        return ["prequential Brier skill is zero"]
+    return ["prequential Brier skill is negative"]
+
+
+def _v2_probability_evidence(
+    estimate: _V2Estimate,
+    *,
+    horizon_config: ForecastHorizonConfig,
+    reasons: list[str],
+    published: bool,
+) -> dict[str, Any]:
+    return {
+        "status": "published" if published else "withheld",
+        "reasons": reasons,
+        "calendar_span_days": _v2_calendar_span_days(estimate.matched),
+        "distinct_matched_market_regimes": len(estimate.matched.regimes),
+        "distinct_panel_market_regimes": len(estimate.unconditional.regimes),
+        "minimum_effective_cohorts": (horizon_config.probability_minimum_effective_cohorts),
+        "minimum_distinct_listings": (horizon_config.probability_minimum_distinct_listings),
+        "minimum_calendar_span_days": (horizon_config.probability_minimum_calendar_span_days),
+        "minimum_distinct_market_regimes": (
+            horizon_config.probability_minimum_distinct_market_regimes
+        ),
+    }
+
+
+def _v2_empty_probability_evidence(
+    horizon_config: ForecastHorizonConfig,
+) -> dict[str, Any]:
+    return {
+        "status": "not_evaluable",
+        "reasons": [],
+        "calendar_span_days": None,
+        "distinct_matched_market_regimes": None,
+        "distinct_panel_market_regimes": None,
+        "minimum_effective_cohorts": (horizon_config.probability_minimum_effective_cohorts),
+        "minimum_distinct_listings": (horizon_config.probability_minimum_distinct_listings),
+        "minimum_calendar_span_days": (horizon_config.probability_minimum_calendar_span_days),
+        "minimum_distinct_market_regimes": (
+            horizon_config.probability_minimum_distinct_market_regimes
+        ),
+    }
+
+
+def _v2_component_payload(
+    distribution: _V2Distribution | None,
+    *,
+    component_mass: float | None,
+) -> dict[str, Any]:
+    if distribution is None or not distribution.masses:
+        return {
+            "component_mass": component_mass,
+            "normalized_mass": None,
+            "p20": None,
+            "p50": None,
+            "p80": None,
+            "probability_positive_raw": None,
+            "raw_observations": 0,
+            "effective_cohorts": 0,
+            "distinct_listings": 0,
+            "calendar_start": None,
+            "calendar_end": None,
+            "market_regimes": [],
+            "dispersion": None,
+        }
+    return {
+        "component_mass": component_mass,
+        "normalized_mass": 1.0,
+        "p20": distribution.p20,
+        "p50": distribution.p50,
+        "p80": distribution.p80,
+        "probability_positive_raw": distribution.probability_positive,
+        "raw_observations": distribution.raw_matches,
+        "effective_cohorts": distribution.effective_cohorts,
+        "distinct_listings": distribution.distinct_listings,
+        "calendar_start": distribution.calendar_start,
+        "calendar_end": distribution.calendar_end,
+        "market_regimes": list(distribution.regimes),
+        "dispersion": distribution.dispersion,
+    }
+
+
+def _v2_predictive_distribution(
+    estimate: _V2Estimate,
+    *,
+    published_probability: float | None,
+) -> dict[str, Any]:
+    weight = estimate.shrinkage_weight
+    return {
+        "kind": "cohort_equal_empirical_cdf_mixture",
+        "cdf_event": "return_lte_x",
+        "positive_event": "return_gt_0",
+        "quantile_convention": "left_inverse_first_cdf_ge_q",
+        "overlap_policy": "matched_rows_receive_mass_in_both_normalized_components",
+        "matched": _v2_component_payload(
+            estimate.matched,
+            component_mass=weight,
+        ),
+        "unconditional": _v2_component_payload(
+            estimate.unconditional,
+            component_mass=1.0 - weight,
+        ),
+        "p20": estimate.mixture.p20,
+        "p50": estimate.mixture.p50,
+        "p80": estimate.mixture.p80,
+        "probability_positive_raw": estimate.mixture.probability_positive,
+        "probability_positive_published": published_probability,
+    }
+
+
+def _v2_empty_predictive_distribution() -> dict[str, Any]:
+    return {
+        "kind": "cohort_equal_empirical_cdf_mixture",
+        "cdf_event": "return_lte_x",
+        "positive_event": "return_gt_0",
+        "quantile_convention": "left_inverse_first_cdf_ge_q",
+        "overlap_policy": "matched_rows_receive_mass_in_both_normalized_components",
+        "matched": _v2_component_payload(None, component_mass=None),
+        "unconditional": _v2_component_payload(None, component_mass=None),
+        "p20": None,
+        "p50": None,
+        "p80": None,
+        "probability_positive_raw": None,
+        "probability_positive_published": None,
+    }
+
+
+def _v2_support_payload(
+    distribution: _V2Distribution,
+    *,
+    fallback_level: str,
+    shrinkage_weight: float,
+) -> dict[str, Any]:
+    return {
+        "raw_matches": distribution.raw_matches,
+        "effective_cohorts": distribution.effective_cohorts,
+        "distinct_listings": distribution.distinct_listings,
+        "calendar_start": distribution.calendar_start,
+        "calendar_end": distribution.calendar_end,
+        "market_regimes": list(distribution.regimes),
+        "fallback_level": fallback_level,
+        "shrinkage_weight": shrinkage_weight,
+        "dispersion": distribution.dispersion,
+    }
+
+
+def _v2_current_state(row: dict[str, Any] | None) -> dict[str, Any]:
+    keys = (
+        "relative_momentum",
+        "drawdown",
+        "volatility",
+        "market_trend",
+        "market_volatility",
+        "relative_momentum_bucket",
+        "drawdown_bucket",
+        "volatility_bucket",
+        "market_trend_bucket",
+        "market_volatility_bucket",
+        "close_vs_sma_50",
+        "close_vs_sma_200",
+        "downside_volatility",
+        "average_dollar_volume",
+    )
+    anchor = None if row is None else row.get("anchor_date")
+    return {
+        "anchor_date": anchor.isoformat() if isinstance(anchor, date) else None,
+        **{key: None if row is None else row.get(key) for key in keys},
+    }
+
+
+def _v2_calendar_span_days(distribution: _V2Distribution) -> int:
+    if distribution.calendar_start is None or distribution.calendar_end is None:
+        return 0
+    return (
+        date.fromisoformat(distribution.calendar_end)
+        - date.fromisoformat(distribution.calendar_start)
+    ).days
+
+
+def _v2_support_failure_reason(
+    horizon: str,
+    support: _V2Distribution,
+    config: ForecastHorizonConfig,
+) -> str:
+    return (
+        f"Insufficient non-overlapping {horizon} evidence: "
+        f"{support.raw_matches}/{config.minimum_raw_matches} observations, "
+        f"{support.effective_cohorts}/{config.minimum_effective_cohorts} cohorts, "
+        f"{support.distinct_listings}/{config.minimum_distinct_listings} listings"
+    )
 
 
 def _forecast_for_state(
@@ -628,7 +1708,7 @@ def _panel_row(
     benchmark_prices: dict[date, tuple[float, float | None]],
     calendar_sessions: tuple[date, ...],
     session_index: dict[date, int],
-    config: MediumForecastConfig,
+    config: MediumForecastConfig | MediumForecastV2Config,
 ) -> dict[str, object]:
     state, missing = _state_at(
         anchor_date=anchor_date,
@@ -686,7 +1766,7 @@ def _state_at(
     benchmark_prices: dict[date, tuple[float, float | None]],
     calendar_sessions: tuple[date, ...],
     session_index: dict[date, int],
-    config: MediumForecastConfig,
+    config: MediumForecastConfig | MediumForecastV2Config,
 ) -> tuple[dict[str, object], list[str]]:
     windows = config.feature_windows
     anchor_index = session_index[anchor_date]

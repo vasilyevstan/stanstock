@@ -2595,6 +2595,11 @@ def test_historical_harness_dependency_order_and_hashes_are_exact() -> None:
             "6c7328b71450e9c302fa400c4d087356ac1e3b805182c72f8155346463c1ce12",
         ),
         (
+            "stanstock.research.forecast_config",
+            "src/stanstock/research/forecast_config.py",
+            "52f6c67a48beecd690ec7377133d56d00399ce607e1d7c251fe96b7115f53421",
+        ),
+        (
             "stanstock.research.medium_forecasts",
             "src/stanstock/research/medium_forecasts.py",
             "b1b3682b8443c85eeb1646a2c1d463cb8321b0b669b9d3595dfb0f975386f62b",
@@ -2635,7 +2640,7 @@ def test_historical_harness_dependency_order_and_hashes_are_exact() -> None:
     for _name, path, digest in expected:
         assert hashlib.sha256(_read_base_source(path)).hexdigest() == digest
     assert base_service_checksum() == (
-        "ca686063166cdc5256327a62a9d27e3b9194bdb030acd7ea15723df8abd4c919"
+        "13ae7ca3d78a18149ca06d967b7897e9664a6abe9895ab7a659b44daeb000c22"
     )
 
 

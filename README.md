@@ -269,6 +269,25 @@ threshold pass. The retained internal `empirical_calibrated` status records
 only that publication-gate result; it does not prove calibrated probabilities
 or interval coverage.
 
+`us-price-medium-v1` remains byte-for-byte frozen and is still the only
+default and scheduled medium method. `us-price-medium-v2` is available only
+through an explicit `analyze_snapshot(..., medium_forecast_config_path=...)`
+research invocation with `issued_on_time=False`, a research-grade US/USD
+stock universe, exact `us-price-baseline-v2` scoring, and SPY. V2 selects all
+panel source vintages at generation time, refuses the run before any source
+read when a selected asset became available after the run's historical data
+cutoff, then checksum-reads each accepted exact asset once.
+
+V2 derives p20/p50/p80 and strict `P(return > 0)` from one cohort-equal
+matched/unconditional empirical-CDF mixture. Probability is published only
+when current support floors pass and matured-only, prior-only prequential
+Brier skill against the unconditional reference is strictly positive. Its
+central p20-p80 range and coverage, miss-rate, width, and interval-score
+summaries are descriptive. V2 is current-universe and survivorship-biased,
+research-only evidence—not calibrated probability, statistical significance,
+profitability, alpha, or observed live skill. See
+[`docs/methodology.md`](docs/methodology.md#explicit-research-only-medium-v2).
+
 The single SPY benchmark response supplies both regime evidence for those
 forecasts and the investable ETF market row; it is not fetched twice.
 Current-universe historical panels are explicitly labeled survivorship-biased

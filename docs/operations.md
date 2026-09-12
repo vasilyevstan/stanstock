@@ -106,6 +106,21 @@ already-persisted assets rather than refetching from the live provider. Do not
 copy a demo command into a live context or assume a reissue is on time because
 an earlier version was.
 
+`us-price-medium-v2` is not selected by `daily`, `scheduled_refresh`,
+`refresh_demo`, or `manage.py analyze`; all continue to use frozen
+`us-price-medium-v1`. V2 is accepted only through an explicit service call
+that supplies its exact config path, `issued_on_time=False`, a research-grade
+US/USD stock snapshot, exact `us-price-baseline-v2`, and SPY. Before creating
+an asset store, run, panel, analysis, or prediction, the service rejects any
+other admission state. During the transaction it selects every panel source
+once at generation time and requires each selected row's
+`available_at <= AnalysisRun.data_cutoff` before reading any file. One late
+source aborts with zero physical reads and no fallback to an older vintage.
+Accepted rows are checksum-read once and retain actual retrieval timestamps.
+Future default, scheduled, provider-production, or observed v2 activation is
+a separate material decision; positive historical Brier skill is not
+calibration, significance, profitability, alpha, or live-skill evidence.
+
 ### SEC EDGAR fundamentals
 
 SEC EDGAR is unauthenticated and requires no API key. Put only an identifying

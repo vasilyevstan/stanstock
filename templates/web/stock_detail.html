@@ -203,8 +203,11 @@
       </article>
       {% if analysis.has_explicit_medium_forecasts %}
         <article>
-        {% with scenario=analysis.six_month_forecast_scenario %}
+        {% with scenario=analysis.six_month_forecast_scenario|validated_medium_forecast_scenario:"6m" %}
         <small>6-month advisory forecast</small>
+        {% if scenario.medium_v2_invalid %}
+        <strong>Insufficient evidence</strong>
+        {% else %}
         <strong>{{ scenario|scenario_range }}</strong>
         <span>
           {% if scenario.method_version %}
@@ -234,13 +237,51 @@
           </span>
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
-        {% if scenario.probability_positive is not None %}<span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>{% endif %}
+        {% if scenario.method_version == "us-price-medium-v2" %}
+          <span>Research-only · current-universe reconstruction with survivorship bias</span>
+          <span>Nominal central 60% p20–p80 interval · not calibrated, significant, profitable, or alpha evidence</span>
+          {% if scenario.probability_positive is not None %}
+            <span>Published positive-return estimate {{ scenario.probability_positive|percentage }} · Positive prequential probability skill — not calibrated</span>
+          {% elif scenario.predictive_distribution.probability_positive_raw is not None %}
+            <span>Unpublished raw positive-return evidence {{ scenario.predictive_distribution.probability_positive_raw|percentage }}</span>
+          {% endif %}
+          <span>
+            Base accuracy {{ scenario.evidence.base_accuracy.status|display_label }}
+            · {{ scenario.evidence.base_accuracy.test_origins }} origin{{ scenario.evidence.base_accuracy.test_origins|pluralize }}
+            · model MAE {{ scenario.evidence.base_accuracy.mean_absolute_error|percentage }}
+            · unconditional MAE {{ scenario.evidence.base_accuracy.unconditional_mean_absolute_error|percentage }}
+            · SPY-relative MAE {{ scenario.evidence.base_accuracy.spy_relative_mean_absolute_error|percentage }}
+          </span>
+          <span>
+            Probability skill {{ scenario.evidence.probability_skill.status|display_label }}
+            · model Brier {{ scenario.evidence.probability_skill.model_brier_score|floatformat:"4" }}
+            · reference Brier {{ scenario.evidence.probability_skill.reference_brier_score|floatformat:"4" }}
+            · raw BSS {{ scenario.evidence.probability_skill.brier_skill_score|floatformat:"4" }}
+          </span>
+          <span>
+            Interval evidence {{ scenario.evidence.interval.status|display_label }}
+            · {{ scenario.evidence.interval.test_origins }} origin{{ scenario.evidence.interval.test_origins|pluralize }}
+            · {{ scenario.evidence.interval.test_predictions }} prediction{{ scenario.evidence.interval.test_predictions|pluralize }}
+            · coverage {{ scenario.evidence.interval.empirical_coverage|percentage }}
+            · lower misses {{ scenario.evidence.interval.below_rate|percentage }}
+            · upper misses {{ scenario.evidence.interval.above_rate|percentage }}
+            · date-equal mean width {{ scenario.evidence.interval.mean_width|percentage }}
+            · model/reference interval score {{ scenario.evidence.interval.model_mean_interval_score|floatformat:"4" }}/{{ scenario.evidence.interval.reference_mean_interval_score|floatformat:"4" }}
+          </span>
+          {% if scenario.evidence.interval.status == "preliminary" %}<span>Preliminary descriptive interval evidence; fewer than four evaluable origins.</span>{% endif %}
+        {% elif scenario.probability_positive is not None %}
+          <span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>
+        {% endif %}
         {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
+        {% endif %}
         {% endwith %}
         </article>
         <article>
-        {% with scenario=analysis.twelve_month_forecast_scenario %}
+        {% with scenario=analysis.twelve_month_forecast_scenario|validated_medium_forecast_scenario:"12m" %}
         <small>12-month advisory forecast</small>
+        {% if scenario.medium_v2_invalid %}
+        <strong>Insufficient evidence</strong>
+        {% else %}
         <strong>{{ scenario|scenario_range }}</strong>
         <span>
           {% if scenario.method_version %}
@@ -270,8 +311,43 @@
           </span>
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
-        {% if scenario.probability_positive is not None %}<span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>{% endif %}
+        {% if scenario.method_version == "us-price-medium-v2" %}
+          <span>Research-only · current-universe reconstruction with survivorship bias</span>
+          <span>Nominal central 60% p20–p80 interval · not calibrated, significant, profitable, or alpha evidence</span>
+          {% if scenario.probability_positive is not None %}
+            <span>Published positive-return estimate {{ scenario.probability_positive|percentage }} · Positive prequential probability skill — not calibrated</span>
+          {% elif scenario.predictive_distribution.probability_positive_raw is not None %}
+            <span>Unpublished raw positive-return evidence {{ scenario.predictive_distribution.probability_positive_raw|percentage }}</span>
+          {% endif %}
+          <span>
+            Base accuracy {{ scenario.evidence.base_accuracy.status|display_label }}
+            · {{ scenario.evidence.base_accuracy.test_origins }} origin{{ scenario.evidence.base_accuracy.test_origins|pluralize }}
+            · model MAE {{ scenario.evidence.base_accuracy.mean_absolute_error|percentage }}
+            · unconditional MAE {{ scenario.evidence.base_accuracy.unconditional_mean_absolute_error|percentage }}
+            · SPY-relative MAE {{ scenario.evidence.base_accuracy.spy_relative_mean_absolute_error|percentage }}
+          </span>
+          <span>
+            Probability skill {{ scenario.evidence.probability_skill.status|display_label }}
+            · model Brier {{ scenario.evidence.probability_skill.model_brier_score|floatformat:"4" }}
+            · reference Brier {{ scenario.evidence.probability_skill.reference_brier_score|floatformat:"4" }}
+            · raw BSS {{ scenario.evidence.probability_skill.brier_skill_score|floatformat:"4" }}
+          </span>
+          <span>
+            Interval evidence {{ scenario.evidence.interval.status|display_label }}
+            · {{ scenario.evidence.interval.test_origins }} origin{{ scenario.evidence.interval.test_origins|pluralize }}
+            · {{ scenario.evidence.interval.test_predictions }} prediction{{ scenario.evidence.interval.test_predictions|pluralize }}
+            · coverage {{ scenario.evidence.interval.empirical_coverage|percentage }}
+            · lower misses {{ scenario.evidence.interval.below_rate|percentage }}
+            · upper misses {{ scenario.evidence.interval.above_rate|percentage }}
+            · date-equal mean width {{ scenario.evidence.interval.mean_width|percentage }}
+            · model/reference interval score {{ scenario.evidence.interval.model_mean_interval_score|floatformat:"4" }}/{{ scenario.evidence.interval.reference_mean_interval_score|floatformat:"4" }}
+          </span>
+          {% if scenario.evidence.interval.status == "preliminary" %}<span>Preliminary descriptive interval evidence; fewer than four evaluable origins.</span>{% endif %}
+        {% elif scenario.probability_positive is not None %}
+          <span>Positive-return estimate {{ scenario.probability_positive|percentage }} · shrinkage-weighted analog estimate</span>
+        {% endif %}
         {% if scenario.insufficiency_reason %}<span>{{ scenario.insufficiency_reason }}</span>{% endif %}
+        {% endif %}
         {% endwith %}
         </article>
       {% else %}
