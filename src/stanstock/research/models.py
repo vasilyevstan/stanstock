@@ -55,6 +55,33 @@ class AnalysisRun(models.Model):
     def __str__(self) -> str:
         return f"{self.target_date}:{self.config_version}:{self.status}"
 
+    def clean(self) -> None:
+        super().clean()
+        if not self.pk:
+            return
+        original = (
+            type(self)
+            .objects.filter(pk=self.pk)
+            .values(
+                "config_version",
+                "config_hash",
+            )
+            .first()
+        )
+        if not original or not self.stocks.exists():
+            return
+        original_touches_product = original["config_version"] == PRODUCT_VERSION
+        current_touches_product = self.config_version == PRODUCT_VERSION
+        if original_touches_product or current_touches_product:
+            if (
+                original["config_version"] != self.config_version
+                or original["config_hash"] != self.config_hash
+            ):
+                raise ValidationError(
+                    "Research-product analysis runs with stock analyses cannot "
+                    "change config_version or config_hash."
+                )
+
 
 class StockAnalysis(models.Model):
     run = models.ForeignKey(AnalysisRun, on_delete=models.CASCADE, related_name="stocks")
@@ -127,9 +154,47 @@ class StockAnalysis(models.Model):
 
     def clean(self) -> None:
         super().clean()
+        if self.pk:
+            original = type(self).objects.filter(pk=self.pk).values("run_id").first()
+            if original and original["run_id"] != self.run_id:
+                original_parent = (
+                    AnalysisRun.objects.filter(pk=original["run_id"])
+                    .values(
+                        "config_version",
+                    )
+                    .first()
+                )
+                current_parent = (
+                    AnalysisRun.objects.filter(pk=self.run_id)
+                    .values(
+                        "config_version",
+                    )
+                    .first()
+                )
+                if (original_parent and original_parent["config_version"] == PRODUCT_VERSION) or (
+                    current_parent and current_parent["config_version"] == PRODUCT_VERSION
+                ):
+                    raise ValidationError(
+                        {
+                            "run": (
+                                "Persisted stock analyses cannot be reparented "
+                                "into or out of research-product-v1."
+                            )
+                        }
+                    )
         if not self.run_id:
             return
-        prospective = self.run.config_version == PRODUCT_VERSION
+        run = (
+            AnalysisRun.objects.filter(pk=self.run_id)
+            .values(
+                "config_version",
+                "config_hash",
+            )
+            .first()
+        )
+        if run is None:
+            return
+        prospective = run["config_version"] == PRODUCT_VERSION
         if prospective:
             errors: dict[str, str] = {}
             if self.overall_score is not None:
@@ -442,7 +507,17 @@ class Prediction(models.Model):
         super().clean()
         if not self.analysis_id:
             return
-        run_version = self.analysis.run.config_version
+        run = (
+            StockAnalysis.objects.filter(pk=self.analysis_id)
+            .values(
+                "run__config_version",
+                "run__config_hash",
+            )
+            .first()
+        )
+        if run is None:
+            return
+        run_version = run["run__config_version"]
         prospective_method = self.method_version in {
             MOMENTUM_METHOD_VERSION,
             FHS_METHOD_VERSION,
@@ -463,6 +538,14 @@ class Prediction(models.Model):
         if not prospective_method:
             raise ValidationError(
                 {"method_version": "research-product-v1 permits only its reviewed methods."}
+            )
+        if self.config_hash != run["run__config_hash"]:
+            raise ValidationError(
+                {
+                    "config_hash": (
+                        "Prospective predictions must match the owning AnalysisRun config_hash."
+                    )
+                }
             )
         if self.overall_score is not None or self.confidence is not None:
             raise ValidationError(

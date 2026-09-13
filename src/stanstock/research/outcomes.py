@@ -281,12 +281,19 @@ def resolve_outcome(
                 metadata={"provider": provider, "subject": subject},
             )
 
-        evaluation_baseline = _close_at_or_before(price_frame, prediction.target_date)
+        momentum = prediction.method_version == MOMENTUM_METHOD_VERSION
+        evaluation_baseline = (
+            _close_on_date(price_frame, prediction.target_date)
+            if momentum
+            else _close_at_or_before(price_frame, prediction.target_date)
+        )
         if evaluation_baseline is None:
             return _unresolved_outcome(
                 evaluation_date=session.observation_date,
                 resolution=(
-                    "Evaluation price history has no baseline close at or before target date"
+                    "Momentum evaluation requires an exact target-date stock close"
+                    if momentum
+                    else "Evaluation price history has no baseline close at or before target date"
                 ),
                 metadata={"provider": provider, "subject": subject},
             )

@@ -535,6 +535,43 @@ def test_momentum_outcome_refuses_caller_selected_benchmark(
 
 
 @pytest.mark.django_db
+def test_momentum_stock_baseline_cannot_fall_back_to_an_equal_prior_close():
+    listing, run = _context(PRODUCT_VERSION)
+    prediction = _prospective_prediction(
+        _prospective_analysis(listing, run),
+        method_version=MOMENTUM_METHOD_VERSION,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        recommendation=Recommendation.BUY,
+        model_version="missing-exact-stock-target",
+    )
+    sessions = tuple(run.target_date + timedelta(days=index) for index in range(127))
+    stock = pl.DataFrame(
+        {
+            "date": (run.target_date - timedelta(days=1), *sessions[1:]),
+            "close": [25.0, *[25.0] * 125, 30.0],
+        },
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+    benchmark = pl.DataFrame(
+        {"date": sessions, "close": [100.0, *[100.0] * 125, 110.0]},
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+    result = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=run.generated_at + timedelta(days=127),
+        benchmark_subject="SPY",
+        price_loader=lambda subject, _through: benchmark if subject == "SPY" else stock,
+    )
+    assert result.status == PredictionOutcome.Status.UNRESOLVED
+    assert result.success is None
+    assert result.actual_return is None
+    assert result.resolution == "Momentum evaluation requires an exact target-date stock close"
+
+
+@pytest.mark.django_db
 def test_prediction_immutability_survives_nullable_table_rebuild() -> None:
     listing, run = _context(PRODUCT_VERSION)
     analysis = _prospective_analysis(listing, run)

@@ -198,6 +198,7 @@ class PriceProductConfig:
             (name, _literal_int(horizon_raw, name, sessions))
             for name, sessions in expected_horizons
         )
+        _literal_text(simulation_raw, "quantile_method", "linear")
         simulation = SimulationConfig(
             method_version=_literal_text(simulation_raw, "method_version", FHS_METHOD_VERSION),
             return_observations=_literal_int(simulation_raw, "return_observations", 756),

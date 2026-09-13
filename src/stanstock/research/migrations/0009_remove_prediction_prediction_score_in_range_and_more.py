@@ -7,9 +7,7 @@ from django.db import migrations, models
 _immutability = import_module(
     "stanstock.research.migrations.0005_reinstate_prediction_immutability"
 )
-_outcome_roles = import_module(
-    "stanstock.research.migrations.0008_explicit_forecast_horizons"
-)
+_outcome_roles = import_module("stanstock.research.migrations.0008_explicit_forecast_horizons")
 
 PRODUCT_VERSION = "research-product-v1"
 MOMENTUM_METHOD = "us-relative-momentum-v1"
@@ -25,9 +23,7 @@ def reject_unsafe_reverse(apps, schema_editor):
             models.Q(method_version__in=(MOMENTUM_METHOD, FHS_METHOD))
             | models.Q(analysis__run__config_version=PRODUCT_VERSION)
         ).exists()
-        or StockAnalysis.objects.filter(
-            run__config_version=PRODUCT_VERSION
-        ).exists()
+        or StockAnalysis.objects.filter(run__config_version=PRODUCT_VERSION).exists()
     ):
         raise RuntimeError(
             "Cannot reverse prospective research schema after research-product-v1 rows exist"
@@ -43,15 +39,14 @@ def install_product_guards(apps, schema_editor):
     if vendor == "postgresql":
         _install_postgresql_guards(schema_editor)
         return
-    raise RuntimeError(
-        f"Unsupported database vendor for research product guards: {vendor}"
-    )
+    raise RuntimeError(f"Unsupported database vendor for research product guards: {vendor}")
 
 
 def uninstall_product_guards(apps, schema_editor):
     vendor = schema_editor.connection.vendor
     if vendor == "sqlite":
         for name in (
+            "research_analysisrun_product_update",
             "research_stockanalysis_product_insert",
             "research_stockanalysis_product_update",
             "research_prediction_product_insert",
@@ -62,31 +57,68 @@ def uninstall_product_guards(apps, schema_editor):
             schema_editor.execute(f"DROP TRIGGER IF EXISTS {name}")
     elif vendor == "postgresql":
         schema_editor.execute(
-            "DROP TRIGGER IF EXISTS research_stockanalysis_product_guard "
-            "ON research_stockanalysis"
+            "DROP TRIGGER IF EXISTS research_analysisrun_product_guard ON research_analysisrun"
         )
         schema_editor.execute(
-            "DROP TRIGGER IF EXISTS research_prediction_product_guard "
-            "ON research_prediction"
+            "DROP TRIGGER IF EXISTS research_stockanalysis_product_guard ON research_stockanalysis"
+        )
+        schema_editor.execute(
+            "DROP TRIGGER IF EXISTS research_prediction_product_guard ON research_prediction"
         )
         schema_editor.execute(
             "DROP TRIGGER IF EXISTS research_predictionoutcome_role_guard "
             "ON research_predictionoutcome"
         )
         for function in (
+            "stanstock_validate_analysisrun_product",
             "stanstock_validate_stockanalysis_product",
             "stanstock_validate_prediction_product",
             "stanstock_validate_prediction_outcome_role",
         ):
             schema_editor.execute(f"DROP FUNCTION IF EXISTS {function}()")
     else:
-        raise RuntimeError(
-            f"Unsupported database vendor for research product guards: {vendor}"
-        )
+        raise RuntimeError(f"Unsupported database vendor for research product guards: {vendor}")
 
 
 def _install_sqlite_guards(schema_editor):
     analysis_invalid = f"""
+      EXISTS (
+        SELECT 1
+        FROM research_stockanalysis
+        WHERE run_id = NEW.id
+      )
+      AND (
+        OLD.config_version = '{PRODUCT_VERSION}'
+        OR NEW.config_version = '{PRODUCT_VERSION}'
+      )
+      AND (
+        OLD.config_version <> NEW.config_version
+        OR OLD.config_hash <> NEW.config_hash
+      )
+    """
+    stockanalysis_reparent_invalid = f"""
+      (
+        OLD.run_id <> NEW.run_id
+        AND (
+          (SELECT config_version FROM research_analysisrun WHERE id = OLD.run_id)
+            = '{PRODUCT_VERSION}'
+          OR (SELECT config_version FROM research_analysisrun WHERE id = NEW.run_id)
+            = '{PRODUCT_VERSION}'
+        )
+      )
+    """
+    schema_editor.execute(
+        f"""
+        CREATE TRIGGER research_analysisrun_product_update
+        BEFORE UPDATE OF config_version, config_hash ON research_analysisrun
+        FOR EACH ROW
+        WHEN {analysis_invalid}
+        BEGIN
+          SELECT RAISE(ABORT, 'product parent cannot change config_version or config_hash');
+        END;
+        """
+    )
+    stockanalysis_shape_invalid = f"""
       (
         (SELECT config_version FROM research_analysisrun WHERE id = NEW.run_id)
           = '{PRODUCT_VERSION}'
@@ -108,14 +140,28 @@ def _install_sqlite_guards(schema_editor):
         )
       )
     """
+    stockanalysis_update_invalid = f"""
+      (
+        {stockanalysis_reparent_invalid}
+      )
+      OR
+      {stockanalysis_shape_invalid}
+    """
+    prediction_parent_config = (
+        "SELECT run.config_version "
+        "FROM research_stockanalysis analysis "
+        "JOIN research_analysisrun run ON run.id = analysis.run_id "
+        "WHERE analysis.id = NEW.analysis_id"
+    )
+    prediction_parent_hash = (
+        "SELECT run.config_hash "
+        "FROM research_stockanalysis analysis "
+        "JOIN research_analysisrun run ON run.id = analysis.run_id "
+        "WHERE analysis.id = NEW.analysis_id"
+    )
     prediction_invalid = f"""
       (
-        (
-          SELECT run.config_version
-          FROM research_stockanalysis analysis
-          JOIN research_analysisrun run ON run.id = analysis.run_id
-          WHERE analysis.id = NEW.analysis_id
-        ) = '{PRODUCT_VERSION}'
+        ({prediction_parent_config}) = '{PRODUCT_VERSION}'
         AND NOT (
           (
             NEW.method_version = '{MOMENTUM_METHOD}'
@@ -128,6 +174,7 @@ def _install_sqlite_guards(schema_editor):
             AND NEW.bear_return IS NULL
             AND NEW.base_return IS NULL
             AND NEW.bull_return IS NULL
+            AND NEW.config_hash = ({prediction_parent_hash})
             AND (
               (
                 NEW.recommendation IS NOT NULL
@@ -149,17 +196,13 @@ def _install_sqlite_guards(schema_editor):
             AND NEW.confidence_status = 'not_estimated'
             AND NEW.recommendation IS NULL
             AND NEW.probability_positive IS NULL
+            AND NEW.config_hash = ({prediction_parent_hash})
           )
         )
       )
       OR
       (
-        (
-          SELECT run.config_version
-          FROM research_stockanalysis analysis
-          JOIN research_analysisrun run ON run.id = analysis.run_id
-          WHERE analysis.id = NEW.analysis_id
-        ) <> '{PRODUCT_VERSION}'
+        ({prediction_parent_config}) <> '{PRODUCT_VERSION}'
         AND (
           NEW.method_version IN ('{MOMENTUM_METHOD}', '{FHS_METHOD}')
           OR NEW.overall_score IS NULL
@@ -216,19 +259,13 @@ def _install_sqlite_guards(schema_editor):
     """
     for table, name, condition, columns in (
         (
-            "research_stockanalysis",
-            "research_stockanalysis_product",
-            analysis_invalid,
-            "run_id, overall_score, confidence, risk_score, recommendation, confidence_status",
-        ),
-        (
             "research_prediction",
             "research_prediction_product",
             prediction_invalid,
             (
                 "analysis_id, method_version, evidence_role, horizon, overall_score, "
                 "confidence, confidence_status, recommendation, probability_positive, "
-                "bear_return, base_return, bull_return, insufficiency_reason"
+                "bear_return, base_return, bull_return, insufficiency_reason, config_hash"
             ),
         ),
         (
@@ -265,20 +302,90 @@ def _install_sqlite_guards(schema_editor):
             END;
             """
         )
+    schema_editor.execute(
+        f"""
+        CREATE TRIGGER research_stockanalysis_product_insert
+        BEFORE INSERT ON research_stockanalysis
+        FOR EACH ROW
+        WHEN {stockanalysis_shape_invalid}
+        BEGIN
+          SELECT RAISE(ABORT, 'research product row does not match parent method/config ownership');
+        END;
+        """
+    )
+    schema_editor.execute(
+        f"""
+        CREATE TRIGGER research_stockanalysis_product_update
+        BEFORE UPDATE OF
+          run_id, overall_score, confidence, risk_score, recommendation, confidence_status
+        ON research_stockanalysis
+        FOR EACH ROW
+        WHEN {stockanalysis_update_invalid}
+        BEGIN
+          SELECT RAISE(ABORT, 'research product row does not match parent method/config ownership');
+        END;
+        """
+    )
 
 
 def _install_postgresql_guards(schema_editor):
     schema_editor.execute(
         f"""
+        CREATE OR REPLACE FUNCTION stanstock_validate_analysisrun_product()
+        RETURNS trigger AS $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1
+            FROM research_stockanalysis
+            WHERE run_id = NEW.id
+          ) AND (
+            OLD.config_version = '{PRODUCT_VERSION}'
+            OR NEW.config_version = '{PRODUCT_VERSION}'
+          ) AND (
+            OLD.config_version <> NEW.config_version
+            OR OLD.config_hash <> NEW.config_hash
+          ) THEN
+            RAISE EXCEPTION
+              'product parent cannot change config_version or config_hash'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    schema_editor.execute(
+        """
+        CREATE TRIGGER research_analysisrun_product_guard
+        BEFORE UPDATE OF config_version, config_hash ON research_analysisrun
+        FOR EACH ROW EXECUTE FUNCTION stanstock_validate_analysisrun_product();
+        """
+    )
+    schema_editor.execute(
+        f"""
         CREATE OR REPLACE FUNCTION stanstock_validate_stockanalysis_product()
         RETURNS trigger AS $$
         DECLARE
-          parent_config text;
+          new_parent_config text;
+          old_parent_config text;
         BEGIN
-          SELECT config_version INTO parent_config
+          SELECT config_version INTO new_parent_config
           FROM research_analysisrun WHERE id = NEW.run_id;
+          IF TG_OP = 'UPDATE' THEN
+            SELECT config_version INTO old_parent_config
+            FROM research_analysisrun WHERE id = OLD.run_id;
+            IF OLD.run_id <> NEW.run_id
+               AND (
+                 old_parent_config = '{PRODUCT_VERSION}'
+                 OR new_parent_config = '{PRODUCT_VERSION}'
+               ) THEN
+              RAISE EXCEPTION
+                'research product row does not match parent method/config ownership'
+                USING ERRCODE = '23514';
+            END IF;
+          END IF;
           IF (
-            parent_config = '{PRODUCT_VERSION}'
+            new_parent_config = '{PRODUCT_VERSION}'
             AND NOT (
               NEW.overall_score IS NULL
               AND NEW.confidence IS NULL
@@ -286,7 +393,7 @@ def _install_postgresql_guards(schema_editor):
               AND NEW.confidence_status = 'not_estimated'
             )
           ) OR (
-            parent_config <> '{PRODUCT_VERSION}'
+            new_parent_config <> '{PRODUCT_VERSION}'
             AND (
               NEW.overall_score IS NULL
               OR NEW.confidence IS NULL
@@ -317,9 +424,11 @@ def _install_postgresql_guards(schema_editor):
         RETURNS trigger AS $$
         DECLARE
           parent_config text;
+          parent_config_hash text;
           valid_product boolean;
         BEGIN
-          SELECT run.config_version INTO parent_config
+          SELECT run.config_version, run.config_hash
+            INTO parent_config, parent_config_hash
           FROM research_stockanalysis analysis
           JOIN research_analysisrun run ON run.id = analysis.run_id
           WHERE analysis.id = NEW.analysis_id;
@@ -335,6 +444,7 @@ def _install_postgresql_guards(schema_editor):
               AND NEW.bear_return IS NULL
               AND NEW.base_return IS NULL
               AND NEW.bull_return IS NULL
+              AND NEW.config_hash = parent_config_hash
               AND (
                 (
                   NEW.recommendation IS NOT NULL
@@ -353,6 +463,7 @@ def _install_postgresql_guards(schema_editor):
               AND NEW.confidence_status = 'not_estimated'
               AND NEW.recommendation IS NULL
               AND NEW.probability_positive IS NULL
+              AND NEW.config_hash = parent_config_hash
             )
           );
           IF (
@@ -381,7 +492,7 @@ def _install_postgresql_guards(schema_editor):
         BEFORE INSERT OR UPDATE OF
           analysis_id, method_version, evidence_role, horizon, overall_score,
           confidence, confidence_status, recommendation, probability_positive,
-          bear_return, base_return, bull_return, insufficiency_reason
+          bear_return, base_return, bull_return, insufficiency_reason, config_hash
         ON research_prediction
         FOR EACH ROW EXECUTE FUNCTION stanstock_validate_prediction_product();
         """
@@ -438,11 +549,11 @@ def _install_postgresql_guards(schema_editor):
         """
     )
 
-class Migration(migrations.Migration):
 
+class Migration(migrations.Migration):
     dependencies = [
-        ('data', '0008_source_observation_event'),
-        ('research', '0008_explicit_forecast_horizons'),
+        ("data", "0008_source_observation_event"),
+        ("research", "0008_explicit_forecast_horizons"),
     ]
 
     operations = [
@@ -455,82 +566,196 @@ class Migration(migrations.Migration):
             _outcome_roles.install_outcome_role_guards,
         ),
         migrations.RemoveConstraint(
-            model_name='prediction',
-            name='prediction_score_in_range',
+            model_name="prediction",
+            name="prediction_score_in_range",
         ),
         migrations.RemoveConstraint(
-            model_name='prediction',
-            name='prediction_confidence_in_range',
+            model_name="prediction",
+            name="prediction_confidence_in_range",
         ),
         migrations.RemoveConstraint(
-            model_name='prediction',
-            name='prediction_horizon_role_valid',
+            model_name="prediction",
+            name="prediction_horizon_role_valid",
         ),
         migrations.RemoveConstraint(
-            model_name='stockanalysis',
-            name='analysis_score_in_range',
+            model_name="stockanalysis",
+            name="analysis_score_in_range",
         ),
         migrations.RemoveConstraint(
-            model_name='stockanalysis',
-            name='analysis_confidence_in_range',
+            model_name="stockanalysis",
+            name="analysis_confidence_in_range",
         ),
         migrations.AlterField(
-            model_name='prediction',
-            name='confidence',
+            model_name="prediction",
+            name="confidence",
             field=models.DecimalField(decimal_places=2, max_digits=6, null=True),
         ),
         migrations.AlterField(
-            model_name='prediction',
-            name='overall_score',
+            model_name="prediction",
+            name="overall_score",
             field=models.DecimalField(decimal_places=2, max_digits=6, null=True),
         ),
         migrations.AlterField(
-            model_name='prediction',
-            name='recommendation',
-            field=models.CharField(choices=[('buy', 'BUY'), ('hold', 'HOLD'), ('avoid', 'AVOID')], max_length=8, null=True),
+            model_name="prediction",
+            name="recommendation",
+            field=models.CharField(
+                choices=[("buy", "BUY"), ("hold", "HOLD"), ("avoid", "AVOID")],
+                max_length=8,
+                null=True,
+            ),
         ),
         migrations.AlterField(
-            model_name='stockanalysis',
-            name='confidence',
+            model_name="stockanalysis",
+            name="confidence",
             field=models.DecimalField(decimal_places=2, max_digits=6, null=True),
         ),
         migrations.AlterField(
-            model_name='stockanalysis',
-            name='overall_score',
+            model_name="stockanalysis",
+            name="overall_score",
             field=models.DecimalField(decimal_places=2, max_digits=6, null=True),
         ),
         migrations.AlterField(
-            model_name='stockanalysis',
-            name='recommendation',
-            field=models.CharField(choices=[('buy', 'BUY'), ('hold', 'HOLD'), ('avoid', 'AVOID')], max_length=8, null=True),
+            model_name="stockanalysis",
+            name="recommendation",
+            field=models.CharField(
+                choices=[("buy", "BUY"), ("hold", "HOLD"), ("avoid", "AVOID")],
+                max_length=8,
+                null=True,
+            ),
         ),
         migrations.AddConstraint(
-            model_name='prediction',
-            constraint=models.CheckConstraint(condition=models.Q(('overall_score__isnull', True), models.Q(('overall_score__gte', 0), ('overall_score__lte', 100)), _connector='OR'), name='prediction_score_in_range'),
+            model_name="prediction",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("overall_score__isnull", True),
+                    models.Q(("overall_score__gte", 0), ("overall_score__lte", 100)),
+                    _connector="OR",
+                ),
+                name="prediction_score_in_range",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='prediction',
-            constraint=models.CheckConstraint(condition=models.Q(('confidence__isnull', True), models.Q(('confidence__gte', 0), ('confidence__lte', 100)), _connector='OR'), name='prediction_confidence_in_range'),
+            model_name="prediction",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("confidence__isnull", True),
+                    models.Q(("confidence__gte", 0), ("confidence__lte", 100)),
+                    _connector="OR",
+                ),
+                name="prediction_confidence_in_range",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='prediction',
-            constraint=models.CheckConstraint(condition=models.Q(models.Q(('evidence_role', 'decision'), ('horizon__in', ('short', 'medium', 'long'))), models.Q(('evidence_role', 'decision'), ('horizon', '6m'), ('method_version', 'us-relative-momentum-v1')), models.Q(('evidence_role', 'advisory'), ('horizon__in', ('6m', '12m', '3y', '5y'))), _connector='OR'), name='prediction_horizon_role_valid'),
+            model_name="prediction",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(
+                        ("evidence_role", "decision"), ("horizon__in", ("short", "medium", "long"))
+                    ),
+                    models.Q(
+                        ("evidence_role", "decision"),
+                        ("horizon", "6m"),
+                        ("method_version", "us-relative-momentum-v1"),
+                    ),
+                    models.Q(
+                        ("evidence_role", "advisory"), ("horizon__in", ("6m", "12m", "3y", "5y"))
+                    ),
+                    _connector="OR",
+                ),
+                name="prediction_horizon_role_valid",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='prediction',
-            constraint=models.CheckConstraint(condition=models.Q(models.Q(('base_return__isnull', True), ('bear_return__isnull', True), ('bull_return__isnull', True), ('confidence__isnull', True), ('confidence_status', 'not_estimated'), ('evidence_role', 'decision'), ('horizon', '6m'), ('method_version', 'us-relative-momentum-v1'), ('overall_score__isnull', True), ('probability_positive__isnull', True), models.Q(models.Q(('recommendation__in', ('buy', 'hold', 'avoid')), ('recommendation__isnull', False)), models.Q(('recommendation__isnull', True), models.Q(('insufficiency_reason', ''), _negated=True)), _connector='OR')), models.Q(('confidence__isnull', True), ('confidence_status', 'not_estimated'), ('evidence_role', 'advisory'), ('horizon__in', ('6m', '12m', '3y', '5y')), ('method_version', 'us-price-fhs-v1'), ('overall_score__isnull', True), ('probability_positive__isnull', True), ('recommendation__isnull', True)), models.Q(models.Q(('method_version__in', ('us-relative-momentum-v1', 'us-price-fhs-v1')), _negated=True), ('confidence__isnull', False), ('overall_score__isnull', False), ('recommendation__isnull', False)), _connector='OR'), name='prediction_prospective_shape_valid'),
+            model_name="prediction",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(
+                        ("base_return__isnull", True),
+                        ("bear_return__isnull", True),
+                        ("bull_return__isnull", True),
+                        ("confidence__isnull", True),
+                        ("confidence_status", "not_estimated"),
+                        ("evidence_role", "decision"),
+                        ("horizon", "6m"),
+                        ("method_version", "us-relative-momentum-v1"),
+                        ("overall_score__isnull", True),
+                        ("probability_positive__isnull", True),
+                        models.Q(
+                            models.Q(
+                                ("recommendation__in", ("buy", "hold", "avoid")),
+                                ("recommendation__isnull", False),
+                            ),
+                            models.Q(
+                                ("recommendation__isnull", True),
+                                models.Q(("insufficiency_reason", ""), _negated=True),
+                            ),
+                            _connector="OR",
+                        ),
+                    ),
+                    models.Q(
+                        ("confidence__isnull", True),
+                        ("confidence_status", "not_estimated"),
+                        ("evidence_role", "advisory"),
+                        ("horizon__in", ("6m", "12m", "3y", "5y")),
+                        ("method_version", "us-price-fhs-v1"),
+                        ("overall_score__isnull", True),
+                        ("probability_positive__isnull", True),
+                        ("recommendation__isnull", True),
+                    ),
+                    models.Q(
+                        models.Q(
+                            ("method_version__in", ("us-relative-momentum-v1", "us-price-fhs-v1")),
+                            _negated=True,
+                        ),
+                        ("confidence__isnull", False),
+                        ("overall_score__isnull", False),
+                        ("recommendation__isnull", False),
+                    ),
+                    _connector="OR",
+                ),
+                name="prediction_prospective_shape_valid",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='stockanalysis',
-            constraint=models.CheckConstraint(condition=models.Q(('overall_score__isnull', True), models.Q(('overall_score__gte', 0), ('overall_score__lte', 100)), _connector='OR'), name='analysis_score_in_range'),
+            model_name="stockanalysis",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("overall_score__isnull", True),
+                    models.Q(("overall_score__gte", 0), ("overall_score__lte", 100)),
+                    _connector="OR",
+                ),
+                name="analysis_score_in_range",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='stockanalysis',
-            constraint=models.CheckConstraint(condition=models.Q(('confidence__isnull', True), models.Q(('confidence__gte', 0), ('confidence__lte', 100)), _connector='OR'), name='analysis_confidence_in_range'),
+            model_name="stockanalysis",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("confidence__isnull", True),
+                    models.Q(("confidence__gte", 0), ("confidence__lte", 100)),
+                    _connector="OR",
+                ),
+                name="analysis_confidence_in_range",
+            ),
         ),
         migrations.AddConstraint(
-            model_name='stockanalysis',
-            constraint=models.CheckConstraint(condition=models.Q(models.Q(('confidence__isnull', True), ('confidence_status', 'not_estimated'), ('overall_score__isnull', True)), models.Q(('confidence__isnull', False), ('overall_score__isnull', False), ('recommendation__isnull', False)), _connector='OR'), name='analysis_nullable_shape_valid'),
+            model_name="stockanalysis",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(
+                        ("confidence__isnull", True),
+                        ("confidence_status", "not_estimated"),
+                        ("overall_score__isnull", True),
+                    ),
+                    models.Q(
+                        ("confidence__isnull", False),
+                        ("overall_score__isnull", False),
+                        ("recommendation__isnull", False),
+                    ),
+                    _connector="OR",
+                ),
+                name="analysis_nullable_shape_valid",
+            ),
         ),
         migrations.RunPython(
             _immutability.protect_predictions,

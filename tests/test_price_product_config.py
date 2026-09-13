@@ -4,12 +4,14 @@ import hashlib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
     MOMENTUM_METHOD_VERSION,
     PRODUCT_CONFIG_FILE_SHA256,
     PRODUCT_EFFECTIVE_CONFIG_HASH,
+    PriceProductConfig,
     default_price_product_config_path,
     load_price_product_config,
     price_product_config_hash,
@@ -86,4 +88,16 @@ def test_price_product_config_rejects_yaml_aliases(tmp_path: Path) -> None:
     path.write_text("schema_version: &schema 1\ncopy: *schema\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="anchors, aliases"):
+        load_price_product_config(path)
+
+
+@pytest.mark.parametrize("method", ["nearest", None, 1, True, ["linear"]])
+def test_quantile_convention_is_validated_in_mappings_and_explicit_files(tmp_path, method):
+    mapping = yaml.safe_load(default_price_product_config_path().read_text())
+    mapping["simulation"]["quantile_method"] = method
+    with pytest.raises(ValueError, match="quantile_method"):
+        PriceProductConfig.from_mapping(mapping)
+    path = tmp_path / "candidate.yml"
+    path.write_text(yaml.safe_dump(mapping))
+    with pytest.raises(ValueError, match="quantile_method"):
         load_price_product_config(path)
