@@ -50,6 +50,13 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **A pull request is a durable release record, not a placeholder.** Use
+  specific, outcome-focused commit subjects and PR titles. Complete the PR
+  template with what changed, why it was needed, how it works, exact
+  revisions and validation, compatibility and data/methodology impact,
+  security/operations impact, risks and rollback, and the required agent
+  results. Correct stale hashes, revisions, and review statuses before merge
+  so the release evidence remains independently auditable.
 - **YAML budgets must cover composed semantics, not surface syntax.** Inspect
   the composed node graph before construction or flattening: any key-node type
   can carry the merge tag, and node/edge counts alone do not bound deeper alias

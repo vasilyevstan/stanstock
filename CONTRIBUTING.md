@@ -3,6 +3,14 @@
 ## Workflow
 
 - Work on a focused branch and open a pull request into protected `main`.
+- Use specific, outcome-focused commit subjects and pull-request titles; avoid
+  vague labels such as "updates", "changes", or "fixes".
+- Complete every applicable pull-request template section with enough detail
+  to explain what changed, why it was needed, and how it works. Include exact
+  revision and validation evidence, compatibility and data/methodology
+  impact, security/operations impact, risks and rollback, and the required
+  agent-chain results. Use `N/A: <factual reason>` instead of omitting an
+  inapplicable field, and update stale evidence before merge.
 - Do not commit provider keys, market-data downloads, private prediction
   history, database dumps, or session artifacts.
 - Keep the application runnable locally and use synthetic fixtures in tests.
