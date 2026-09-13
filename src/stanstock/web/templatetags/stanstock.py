@@ -11,6 +11,18 @@ from django import template
 
 register = template.Library()
 
+_MAX_DISPLAY_ADJUSTED_EXPONENT = 308
+_CANONICAL_FORECAST_CONFIGS = {
+    "us-price-baseline-v1",
+    "us-price-baseline-v2",
+    "us-price-baseline-v3",
+}
+_LONG_METHODS_WITHOUT_PROBABILITY = {
+    "us-sec-long-v1",
+    "us-sec-long-v2",
+    "us-sec-long-v4",
+}
+
 DISPLAY_LABELS = {
     "12m": "12 months",
     "3y": "3 years",
@@ -39,13 +51,15 @@ DISPLAY_LABELS = {
 
 
 def _display_decimal(value: object) -> Decimal | None:
-    if value is None or value == "":
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
         number = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
+    except (InvalidOperation, OverflowError, TypeError, ValueError):
         return None
-    return number if number.is_finite() else None
+    if not number.is_finite() or abs(number.adjusted()) > _MAX_DISPLAY_ADJUSTED_EXPONENT:
+        return None
+    return number
 
 
 def _format_percentage(number: Decimal, digits: int) -> str:
@@ -105,14 +119,101 @@ def label_list(value: object, separator: str = ", ") -> str:
 
 @register.filter
 def scenario_range(value: object) -> str:
-    if not isinstance(value, Mapping):
+    presentation = forecast_availability(value)
+    if not presentation["range_available"]:
         return "Insufficient evidence"
+    return cast(str, presentation["display_range"])
+
+
+@register.filter
+def forecast_availability(value: object) -> dict[str, object]:
     values = tuple(
-        _display_decimal(_first(value, key, f"{key}_return")) for key in ("bear", "base", "bull")
+        _display_decimal(_forecast_value(value, key, f"{key}_return"))
+        for key in ("bear", "base", "bull")
     )
-    if any(item is None for item in values):
-        return "Insufficient evidence"
-    return " / ".join(_format_percentage(cast(Decimal, item), 1) for item in values)
+    complete = not any(item is None for item in values)
+    ordered = bool(
+        complete
+        and cast(Decimal, values[0]) >= Decimal("-1")
+        and cast(Decimal, values[0]) <= cast(Decimal, values[1]) <= cast(Decimal, values[2])
+    )
+    reason = _forecast_value(value, "insufficiency_reason")
+    safe_reason = reason.strip() if isinstance(reason, str) else ""
+    return {
+        "range_available": ordered,
+        "display_range": (
+            " / ".join(_format_percentage(cast(Decimal, item), 1) for item in values)
+            if ordered
+            else ""
+        ),
+        "reason": safe_reason,
+    }
+
+
+@register.filter
+def prediction_forecast(value: object) -> dict[str, object]:
+    presentation = forecast_availability(value)
+    method_version = _forecast_value(value, "method_version")
+    horizon = _forecast_value(value, "horizon")
+    calculation = _forecast_value(value, "calculation")
+    schema_version = calculation.get("schema_version") if isinstance(calculation, Mapping) else None
+    is_v4 = (
+        method_version == "us-sec-long-v4"
+        and not isinstance(schema_version, bool)
+        and schema_version == 2
+    )
+    probability = _display_decimal(_forecast_value(value, "probability_positive"))
+    probability_available = probability is not None and Decimal("0") <= probability <= Decimal("1")
+    probability_not_estimated = bool(
+        presentation["range_available"]
+        and horizon in {"3y", "5y"}
+        and method_version in _LONG_METHODS_WITHOUT_PROBABILITY
+    )
+
+    if not presentation["range_available"]:
+        probability_label = "Forecast unavailable"
+    elif probability_not_estimated:
+        probability_label = "Not estimated by this method"
+    elif probability_available:
+        probability_label = _format_percentage(cast(Decimal, probability), 1)
+    else:
+        probability_label = "Range available; probability withheld"
+
+    return {
+        **presentation,
+        "is_v4": is_v4,
+        "probability_available": probability_available and not probability_not_estimated,
+        "probability_label": probability_label,
+    }
+
+
+@register.filter
+def forecast_detail_anchor(config_version: object, horizon: object) -> str:
+    if not isinstance(config_version, str) or not isinstance(horizon, str):
+        return ""
+    if config_version == "default-v1":
+        return "legacy-default-v1-title"
+    if config_version not in _CANONICAL_FORECAST_CONFIGS:
+        return ""
+    if horizon == "short":
+        return "short-decision-title"
+    if horizon in {"medium", "6m", "12m"}:
+        return "medium-advisory-title"
+    if horizon in {"long", "3y", "5y"}:
+        return "long-advisory-title"
+    return ""
+
+
+def _forecast_value(value: object, *keys: str) -> object | None:
+    if isinstance(value, Mapping):
+        return _first(value, *keys)
+    for key in keys:
+        try:
+            attribute: object = getattr(value, key)
+        except (AttributeError, TypeError):
+            continue
+        return attribute
+    return None
 
 
 @register.filter

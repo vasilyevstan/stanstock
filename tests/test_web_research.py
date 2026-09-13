@@ -94,9 +94,14 @@ def _create_prediction(
     horizon: Prediction.Horizon,
     evidence_role: Prediction.EvidenceRole,
     model_version: str,
-    bear_return: Decimal,
-    base_return: Decimal,
-    bull_return: Decimal,
+    bear_return: Decimal | None,
+    base_return: Decimal | None,
+    bull_return: Decimal | None,
+    probability_positive: Decimal | None = None,
+    confidence_status: str = "deterministic_point_in_time",
+    insufficiency_reason: str = "",
+    method_version: str = "us-sec-long-v2",
+    calculation: dict[str, object] | None = None,
 ) -> Prediction:
     decision = Prediction.objects.get(
         analysis=analysis,
@@ -117,19 +122,19 @@ def _create_prediction(
         bear_return=bear_return,
         base_return=base_return,
         bull_return=bull_return,
-        probability_positive=None,
+        probability_positive=probability_positive,
         confidence=decision.confidence,
-        confidence_status="deterministic_point_in_time",
-        insufficiency_reason="",
+        confidence_status=confidence_status,
+        insufficiency_reason=insufficiency_reason,
         recommendation=decision.recommendation,
         overall_score=decision.overall_score,
         component_scores=decision.component_scores,
         model_version=model_version,
-        method_version="us-sec-long-v2",
+        method_version=method_version,
         config_hash=decision.config_hash,
         data_cutoff=decision.data_cutoff,
         source_assets=decision.source_assets,
-        calculation={"evidence_role": evidence_role},
+        calculation=calculation or {"evidence_role": evidence_role},
         code_revision=decision.code_revision,
     )
 
@@ -164,6 +169,15 @@ def _forecast_card(content: str, title: str) -> str:
         if title in card:
             return card
     raise AssertionError(f"Forecast card not found for {title}")
+
+
+def _prediction_table_row(content: str, marker: str) -> str:
+    normalized_content = " ".join(content.split())
+    for row in normalized_content.split("<tr>")[1:]:
+        row = row.split("</tr>", maxsplit=1)[0]
+        if marker in row:
+            return row
+    raise AssertionError(f"Prediction table row not found for {marker}")
 
 
 def _medium_v1_training_evidence() -> dict[str, object]:
@@ -347,6 +361,38 @@ def test_percentage_and_scenario_range_preserve_finite_rendering() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"bear": True, "base": 0.1, "bull": 0.3}, id="boolean"),
+        pytest.param({"bear": -0.1, "base": 10**400, "bull": 10**401}, id="giant"),
+        pytest.param({"bear": -0.1, "base": 0.3, "bull": 0.2}, id="unordered"),
+        pytest.param({"bear": -1.01, "base": 0.1, "bull": 0.3}, id="below-total-loss"),
+    ],
+)
+def test_forecast_availability_rejects_malformed_ranges(scenario: dict[str, object]) -> None:
+    presentation = stanstock_tags.forecast_availability(scenario)
+
+    assert presentation["range_available"] is False
+    assert presentation["display_range"] == ""
+
+
+def test_forecast_detail_anchor_only_names_sections_rendered_for_the_selected_method() -> None:
+    assert stanstock_tags.forecast_detail_anchor("default-v1", "3y") == "legacy-default-v1-title"
+    assert (
+        stanstock_tags.forecast_detail_anchor("us-price-baseline-v2", "short")
+        == "short-decision-title"
+    )
+    assert (
+        stanstock_tags.forecast_detail_anchor("us-price-baseline-v2", "6m")
+        == "medium-advisory-title"
+    )
+    assert (
+        stanstock_tags.forecast_detail_anchor("us-price-baseline-v2", "5y") == "long-advisory-title"
+    )
+    assert stanstock_tags.forecast_detail_anchor("unknown-method", "3y") == ""
+
+
 def test_medium_v2_validation_boundary_returns_invalid_on_overflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -509,6 +555,96 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     assert "Legacy medium decision scenario — 6–12 months" in content
     assert "Legacy long decision scenario — 3+ years" in content
     assert "Reconstructed training evidence." not in content
+
+
+@pytest.mark.django_db
+def test_opportunities_distinguish_ranges_from_withheld_forecasts_and_link_real_sections(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    persisted_analysis.short_scenario = {
+        "bear": None,
+        "base": 0.03,
+        "bull": 0.09,
+        "insufficiency_reason": "Short reason <check>",
+    }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            "6m": {
+                "bear": -0.20,
+                "base": 0.10,
+                "bull": 0.40,
+                "insufficiency_reason": "Probability support is still below threshold",
+            },
+            "12m": {
+                "bear": None,
+                "base": None,
+                "bull": None,
+                "insufficiency_reason": "Stored reason <must escape>",
+            },
+            "3y": {
+                "bear": None,
+                "base": None,
+                "bull": None,
+                "insufficiency_reason": "Long evidence unavailable",
+                "method_version": "us-sec-long-v2",
+            },
+            "5y": {
+                "bear": -0.30,
+                "base": 0.50,
+                "bull": 1.20,
+                "method_version": "us-sec-long-v2",
+            },
+        },
+    }
+    persisted_analysis.save(update_fields=["short_scenario", "forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "50_to_300"},
+    )
+
+    assert response.status_code == 200
+    content = " ".join(response.content.decode().split())
+    detail_url = reverse("stock-detail", args=[persisted_analysis.listing_id])
+    assert "-20.0% / +10.0% / +40.0%" in content
+    assert "-30.0% / +50.0% / +120.0%" in content
+    assert "Probability support is still below threshold" not in content
+    assert "Stored reason &lt;must escape&gt;" in content
+    assert "Short reason &lt;check&gt;" in content
+    assert f'href="{detail_url}#short-decision-title"' in content
+    assert f'href="{detail_url}#medium-advisory-title"' in content
+    assert f'href="{detail_url}#long-advisory-title"' in content
+
+    persisted_analysis.run.config_version = "default-v1"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    persisted_analysis.long_scenario = {
+        "bear": None,
+        "base": None,
+        "bull": None,
+        "insufficiency_reason": "Legacy long unavailable",
+    }
+    persisted_analysis.save(update_fields=["long_scenario"])
+    legacy_response = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "50_to_300"},
+    )
+    legacy_content = legacy_response.content.decode()
+    assert f'href="{detail_url}#legacy-default-v1-title"' in legacy_content
+    assert f'href="{detail_url}#long-advisory-title"' not in legacy_content
+
+    persisted_analysis.run.config_version = "unknown-method"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    unknown_response = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "50_to_300"},
+    )
+    unknown_content = unknown_response.content.decode()
+    assert "Forecast unavailable" in unknown_content
+    assert f'href="{detail_url}#' not in unknown_content
 
 
 @pytest.mark.django_db
@@ -1037,6 +1173,10 @@ def test_opportunities_display_every_price_band_including_empty_bands(
     persisted_analysis: StockAnalysis,
 ) -> None:
     response = authenticated_client.get(reverse("opportunities"))
+    filtered_response = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "under_10", "q": "no-match"},
+    )
 
     assert response.status_code == 200
     groups = response.context["price_band_groups"]
@@ -1051,7 +1191,123 @@ def test_opportunities_display_every_price_band_including_empty_bands(
     assert "$10-$50" in content
     assert "$50-$300" in content
     assert "$300+" in content
-    assert content.count("No persisted analysis in this price band") == 3
+    assert content.count("No persisted analysis in this price band") == 2
+    assert (
+        "No analyzed listings in this band are present in the selected research universe."
+        in content
+    )
+    assert "Only listings with a stored analysis in the selected research universe" in content
+    assert "My List</a> tracks symbols locally" in content
+    assert "it does not fetch prices or expand the research universe" in content
+    assert "0% new-allocation policy is separate from whether candidates are present" in content
+    assert "provider database is empty" not in content.lower()
+
+    filtered_content = " ".join(filtered_response.content.decode().split())
+    assert filtered_response.status_code == 200
+    assert "No analyzed listings in this band match the active filters." in filtered_content
+    assert f'href="{reverse("opportunities")}">Clear filters</a>' in filtered_content
+    assert f'href="{reverse("my-list")}">My List</a>' in filtered_content
+    assert persisted_analysis.listing.ticker not in filtered_content
+
+
+@pytest.mark.django_db
+def test_under_10_empty_state_does_not_mix_an_older_synthetic_universe_into_provider_results(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    synthetic_market = LatestMarketData.objects.get(listing=persisted_analysis.listing)
+    synthetic_market.close = Decimal("5.00")
+    synthetic_market.save(update_fields=["close"])
+
+    provider_company = Company.objects.create(
+        name="Provider Fixture Company",
+        country="US",
+        sector="Industrials",
+    )
+    provider_security = Security.objects.create(
+        company=provider_company,
+        name="Provider Fixture Common",
+    )
+    provider_listing = Listing.objects.create(
+        security=provider_security,
+        ticker="PRV-A",
+        exchange_mic="XNYS",
+        currency="USD",
+        region=Region.US,
+    )
+    provider_universe = Universe.objects.create(
+        slug="provider-fixture",
+        name="Provider fixture universe",
+        config_version="provider-fixture-v1",
+    )
+    provider_snapshot = UniverseSnapshot.objects.create(
+        universe=provider_universe,
+        as_of_date=persisted_analysis.run.target_date,
+        grade=UniverseSnapshot.Grade.OBSERVED,
+        config_hash="e" * 64,
+    )
+    UniverseMembership.objects.create(snapshot=provider_snapshot, listing=provider_listing)
+    generated_at = persisted_analysis.run.generated_at + timedelta(minutes=1)
+    provider_asset = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject="PRV-A",
+        relative_path="tests/provider-fixture.parquet",
+        sha256="d" * 64,
+        retrieved_at=generated_at,
+        available_at=generated_at,
+    )
+    LatestMarketData.objects.create(
+        listing=provider_listing,
+        observed_at=generated_at,
+        session_date=persisted_analysis.run.target_date,
+        close=Decimal("25.00"),
+        previous_close=Decimal("24.50"),
+        volume=1_000_000,
+        source_asset=provider_asset,
+    )
+    provider_run = AnalysisRun.objects.create(
+        generated_at=generated_at,
+        data_cutoff=generated_at,
+        target_date=persisted_analysis.run.target_date,
+        issued_on_time=True,
+        universe_snapshot=provider_snapshot,
+        config_version="us-price-baseline-v2",
+        config_hash="f" * 64,
+        code_revision="provider-fixture-revision",
+    )
+    StockAnalysis.objects.create(
+        run=provider_run,
+        listing=provider_listing,
+        current_price=Decimal("25.00"),
+        overall_score=Decimal("55"),
+        recommendation=Recommendation.HOLD,
+        risk_score=Decimal("45"),
+        risk_class=RiskClass.MEDIUM,
+        confidence=Decimal("50"),
+        data_quality={
+            "source_assets": [
+                {
+                    "provider": "twelve_data",
+                    "kind": "price_history",
+                    "subject": "PRV-A",
+                }
+            ]
+        },
+    )
+
+    response = authenticated_client.get(
+        reverse("opportunities"),
+        {"price_band": "under_10"},
+    )
+
+    assert response.status_code == 200
+    assert response.context["latest_run"] == provider_run
+    assert response.context["price_band_groups"][0]["count"] == 0
+    content = " ".join(response.content.decode().split())
+    assert persisted_analysis.listing.ticker not in content
+    assert "selected research universe" in content
+    assert "provider database" not in content.lower()
 
 
 @pytest.mark.django_db
@@ -2962,7 +3218,8 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     assert predictions.status_code == 200
     prediction_content = predictions.content.decode()
     assert persisted_analysis.listing.ticker in prediction_content
-    assert "Insufficient evidence" in prediction_content
+    assert "Range available; probability withheld" in prediction_content
+    assert "Insufficient comparable observations" in prediction_content
     assert "Research-grade reconstruction" in prediction_content
     assert "Decision" in prediction_content
     assert "Legacy provider not proven" in prediction_content
@@ -2976,6 +3233,132 @@ def test_prediction_and_performance_pages_are_truthful_about_small_samples(
     assert "30 canonical row-level prediction observations" in performance_content
     assert "does not establish statistical validity" in performance_content
     assert "meaningful evidence" not in performance_content
+
+
+@pytest.mark.django_db
+def test_prediction_page_separates_range_probability_and_method_availability(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="medium-range-only-v1",
+        bear_return=Decimal("-0.10"),
+        base_return=Decimal("0.08"),
+        bull_return=Decimal("0.25"),
+        confidence_status="empirical_range_only",
+        insufficiency_reason="Medium support < threshold",
+        method_version="us-price-medium-v2",
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="medium-probability-v1",
+        bear_return=Decimal("-0.12"),
+        base_return=Decimal("0.09"),
+        bull_return=Decimal("0.27"),
+        probability_positive=Decimal("0.625"),
+        confidence_status="empirical_skill_supported",
+        method_version="us-price-medium-v2",
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.TWELVE_MONTH,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="medium-withheld-v1",
+        bear_return=None,
+        base_return=None,
+        bull_return=None,
+        confidence_status="insufficient_evidence",
+        insufficiency_reason="No safe range <script>alert(1)</script>",
+        method_version="us-price-medium-v2",
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="long-v2-range-v1",
+        bear_return=Decimal("-0.22"),
+        base_return=Decimal("0.44"),
+        bull_return=Decimal("0.88"),
+        insufficiency_reason="Deterministic long range only",
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.FIVE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="long-v2-withheld-v1",
+        bear_return=None,
+        base_return=None,
+        bull_return=None,
+        confidence_status="insufficient_evidence",
+        insufficiency_reason="Required long inputs are missing",
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        model_version="long-v4-range-v1",
+        bear_return=Decimal("-0.30"),
+        base_return=Decimal("0.55"),
+        bull_return=Decimal("1.10"),
+        confidence_status="not_estimated",
+        insufficiency_reason="V4 probability is unavailable",
+        method_version="us-sec-long-v4",
+        calculation={"schema_version": 2, "split_basis": {}},
+    )
+
+    def forbidden_provider_call(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("render-only GET must not call a provider")
+
+    monkeypatch.setattr("stanstock.data.providers.twelve_data.fetch", forbidden_provider_call)
+    monkeypatch.setattr("stanstock.data.providers.sec.fetch", forbidden_provider_call)
+    prediction_count = Prediction.objects.count()
+    analysis_count = StockAnalysis.objects.count()
+    asset_count = DataAsset.objects.count()
+
+    response = authenticated_client.get(reverse("predictions"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    medium_row = _prediction_table_row(content, "Medium support &lt; threshold")
+    assert "-10.0% / +8.0% / +25.0%" in medium_row
+    assert "Range available; probability withheld" in medium_row
+    assert "64%<small>Analog range only — probability withheld</small>" in medium_row
+    assert "-12.0% / +9.0% / +27.0%" in content
+    assert "+62.5%" in content
+
+    unavailable_row = _prediction_table_row(
+        content,
+        "No safe range &lt;script&gt;alert(1)&lt;/script&gt;",
+    )
+    assert unavailable_row.count("Forecast unavailable") == 2
+    assert "Range available; probability withheld" not in unavailable_row
+    assert "<script>alert(1)</script>" not in unavailable_row
+
+    long_v2_row = _prediction_table_row(content, "Deterministic long range only")
+    assert "-22.0% / +44.0% / +88.0%" in long_v2_row
+    assert "Not estimated by this method" in long_v2_row
+    assert "Forecast unavailable" not in long_v2_row
+
+    missing_long_row = _prediction_table_row(content, "Required long inputs are missing")
+    assert missing_long_row.count("Forecast unavailable") == 2
+    assert "Not estimated by this method" not in missing_long_row
+
+    v4_row = _prediction_table_row(content, "V4 probability is unavailable")
+    assert "-30.0% / +55.0% / +110.0%" in v4_row
+    assert "Research-only / unactivated" in v4_row
+    assert "Not estimated by this method" in v4_row
+    assert "Not estimated / unavailable" in v4_row
+    assert ">0.0%<" not in v4_row
+
+    assert Prediction.objects.count() == prediction_count
+    assert StockAnalysis.objects.count() == analysis_count
+    assert DataAsset.objects.count() == asset_count
 
 
 @pytest.mark.django_db
