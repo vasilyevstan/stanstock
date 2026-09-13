@@ -1198,7 +1198,9 @@ def test_opportunities_display_every_price_band_including_empty_bands(
     )
     assert "Only listings with a stored analysis in the selected research universe" in content
     assert "My List</a> tracks symbols locally" in content
-    assert "it does not fetch prices or expand the research universe" in content
+    assert "browsing or adding symbols there does not refresh prices" in content
+    assert "expand the research universe" in content
+    assert "<code>refresh_my_list_prices</code>" in content
     assert "0% new-allocation policy is separate from whether candidates are present" in content
     assert "provider database is empty" not in content.lower()
 

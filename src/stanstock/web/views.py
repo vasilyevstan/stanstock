@@ -74,7 +74,9 @@ from stanstock.portfolio.service import (
 from stanstock.portfolio.watchlist import (
     TrackedSymbolValidationError,
     add_tracked_symbol,
+    normalize_tracked_symbol_filter,
     selected_watchlist_analysis_run,
+    tracked_symbol_filter_choices,
     tracked_symbol_states,
 )
 from stanstock.research.affordability import (
@@ -942,6 +944,7 @@ def simulation_detail_page(request: HttpRequest, run_id: UUID) -> HttpResponse:
 def my_list_page(request: HttpRequest) -> HttpResponse:
     owner = cast(User, request.user)
     selected_analysis_run = selected_watchlist_analysis_run()
+    price_filter = normalize_tracked_symbol_filter(request.GET.get("price_filter"))
     form = TrackedSymbolForm()
     invalid_form = False
     if request.method == "POST":
@@ -970,9 +973,14 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
         {
             "form": form,
             "selected_analysis_run": selected_analysis_run,
+            "tracked_symbol_filter": price_filter,
+            "tracked_symbol_filter_choices": tracked_symbol_filter_choices(
+                current=price_filter,
+            ),
             "tracked_symbols": tracked_symbol_states(
                 owner=owner,
                 selected_run=selected_analysis_run,
+                price_filter=price_filter,
             ),
         },
         status=HTTPStatus.BAD_REQUEST if invalid_form else HTTPStatus.OK,

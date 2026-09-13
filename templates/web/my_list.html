@@ -82,6 +82,18 @@
         <h2>Tracked symbols</h2>
       </div>
     </div>
+    {% with active_filter=tracked_symbol_filter|default:"all" %}
+      <nav class="filter-tabs" aria-label="Tracked symbol price filters">
+        <a href="{% url 'my-list' %}?price_filter=all" class="{% if active_filter == 'all' %}active{% endif %}">All tracked</a>
+        <a href="{% url 'my-list' %}?price_filter=under_10_provider" class="{% if active_filter == 'under_10_provider' %}active{% endif %}">Under $10 provider-backed</a>
+        <a href="{% url 'my-list' %}?price_filter=no_live_price" class="{% if active_filter == 'no_live_price' %}active{% endif %}">No live persisted price</a>
+      </nav>
+      <p class="muted">
+        Under-$10 monitoring uses only persisted Twelve Data USD close evidence
+        for the latest completed XNYS session. It is a speculative watchlist
+        view with a 0% new-allocation cap, not a forecast or recommendation.
+      </p>
+    {% endwith %}
     {% if tracked_symbols %}
       <div class="table-scroll" tabindex="0" aria-label="My tracked symbols">
         <table class="compact-table">
@@ -124,9 +136,17 @@
                     <span class="muted">Unavailable while listing identity is ambiguous</span>
                   {% elif item.market_data %}
                     <strong>{{ item.market_data.close|price }} {{ item.listing.currency }}</strong>
-                    <small>Session {{ item.market_data.session_date }}</small>
+                    {% if item.has_live_provider_price %}
+                      <small>Source Twelve Data · Session {{ item.market_data.session_date }}</small>
+                      {% if item.live_price_under_10 %}
+                        <small>Under $10 watchlist · 0% new allocation</small>
+                      {% endif %}
+                    {% else %}
+                      <small>Session {{ item.market_data.session_date }}</small>
+                      <small>No eligible live Twelve Data USD price for the current session.</small>
+                    {% endif %}
                   {% else %}
-                    <span class="muted">No persisted price</span>
+                    <span class="muted">No live persisted price</span>
                   {% endif %}
                 </td>
                 <td>
@@ -151,7 +171,11 @@
         </table>
       </div>
     {% else %}
-      <p class="empty-state">Your list is empty. Add a supported symbol above.</p>
+      {% if tracked_symbol_filter and tracked_symbol_filter != "all" %}
+        <p class="empty-state">No tracked symbols match this price filter.</p>
+      {% else %}
+        <p class="empty-state">Your list is empty. Add a supported symbol above.</p>
+      {% endif %}
     {% endif %}
   </section>
 {% endblock %}

@@ -5,18 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from time import sleep
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import polars as pl
 from django.db import DatabaseError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
+from stanstock.data.asof import AsOfData, PriceFrameChecksumMismatchError, PriceFrameSchemaError
 from stanstock.data.assets import AssetStore, open_asset_store, register_asset
 from stanstock.data.etfs import (
     INVESTABLE_US_ETF_MIC,
@@ -32,6 +36,7 @@ from stanstock.data.market_state import update_latest_market_data
 from stanstock.data.models import (
     Company,
     DataAsset,
+    LatestMarketData,
     Listing,
     ProviderRecord,
     Region,
@@ -106,6 +111,31 @@ class LiveUsRunResult:
     credits_used: int
     benchmark_symbol: str
     catalog_asset_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MyListPriceRefreshSymbolResult:
+    symbol: str
+    status: str
+    reason: str
+    listing_id: UUID | None = None
+    source_asset_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MyListPriceRefreshResult:
+    target_date: date
+    total: int
+    reused: int
+    fetched: int
+    updated: int
+    failed: int
+    credits_used: int
+    symbols: tuple[MyListPriceRefreshSymbolResult, ...]
+
+    @property
+    def status(self) -> str:
+        return "success" if self.failed == 0 else "partial_failed"
 
 
 class ProviderCreditBudget:
@@ -334,6 +364,424 @@ def is_us_prediction_on_time(*, target_date: date, generated_at: datetime) -> bo
         target_date=target_date,
         generated_at=generated_at,
     )
+
+
+def refresh_my_list_price_evidence(
+    *,
+    symbols: Sequence[str],
+    catalog_references: Mapping[str, StockReference],
+    target_date: date,
+    decision_time: datetime,
+    api_key: str | None = None,
+    store: AssetStore | None = None,
+    enforce_rate_limit: bool = True,
+) -> MyListPriceRefreshResult:
+    """Refresh only current prices for already admitted personal symbols.
+
+    This helper deliberately does not fetch catalogs, build a universe, run
+    analysis, or touch portfolios. The caller supplies the independently
+    verified catalog identities that authorize each symbol. Existing
+    provider-backed evidence for the completed target session is validated and
+    reused before provider credentials, quota, or spacing are consulted.
+    """
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    normalized_symbols = tuple(dict.fromkeys(_normalize_symbol(symbol) for symbol in symbols))
+    if len(normalized_symbols) != len(symbols):
+        raise ValueError("My List price refresh received duplicate symbols")
+    if len(normalized_symbols) > 20:
+        raise ValueError("My List price refresh is limited to at most 20 tracked symbols")
+    store = store or open_asset_store()
+
+    results: list[MyListPriceRefreshSymbolResult] = []
+    pending_fetches: list[tuple[str, StockReference, Listing]] = []
+    for symbol in normalized_symbols:
+        reference = catalog_references.get(symbol)
+        if reference is None:
+            results.append(
+                MyListPriceRefreshSymbolResult(
+                    symbol=symbol,
+                    status="failed",
+                    reason="Verified catalog identity is unavailable.",
+                )
+            )
+            continue
+        try:
+            _validate_my_list_reference(reference)
+            listing = _ensure_my_list_listing(
+                symbol=symbol,
+                reference=reference,
+                target_date=target_date,
+            )
+            reusable = _reusable_my_list_price_evidence(
+                symbol=symbol,
+                reference=reference,
+                listing=listing,
+                target_date=target_date,
+                decision_time=decision_time,
+                store=store,
+            )
+        except ValueError as exc:
+            results.append(
+                MyListPriceRefreshSymbolResult(
+                    symbol=symbol,
+                    status="failed",
+                    reason=_path_free_reason(exc, fallback="Price evidence admission failed."),
+                )
+            )
+            continue
+        if reusable.reused:
+            results.append(
+                MyListPriceRefreshSymbolResult(
+                    symbol=symbol,
+                    status="reused",
+                    reason="Current provider-backed price evidence already exists.",
+                    listing_id=listing.id,
+                    source_asset_id=reusable.source_asset_id,
+                )
+            )
+            continue
+        if reusable.fetch_allowed:
+            pending_fetches.append((symbol, reference, listing))
+            continue
+        results.append(
+            MyListPriceRefreshSymbolResult(
+                symbol=symbol,
+                status="failed",
+                reason=reusable.reason,
+                listing_id=listing.id,
+                source_asset_id=reusable.source_asset_id,
+            )
+        )
+
+    credits_used = 0
+    if pending_fetches:
+        budget = ProviderCreditBudget(enforce_spacing=enforce_rate_limit)
+        budget.preflight(len(pending_fetches))
+        key = twelve_data.resolve_api_key(api_key)
+        previous_session = _previous_us_session_date(target_date)
+        for symbol, reference, listing in pending_fetches:
+            try:
+                budget.consume()
+                credits_used += 1
+                series = twelve_data.fetch_daily_price_series(
+                    symbol,
+                    start_date=previous_session,
+                    end_date=target_date,
+                    outputsize=2,
+                    adjustment="splits",
+                    api_key=key,
+                )
+                _validate_my_list_price_series(
+                    series,
+                    reference=reference,
+                    target_date=target_date,
+                )
+                source_asset = _persist_price_series(
+                    store=store,
+                    series=series,
+                    listing=listing,
+                )
+            except ProviderError as exc:
+                results.append(
+                    MyListPriceRefreshSymbolResult(
+                        symbol=symbol,
+                        status="failed",
+                        reason=_path_free_reason(
+                            exc,
+                            fallback="Provider price request failed.",
+                        ),
+                        listing_id=listing.id,
+                    )
+                )
+            except (
+                DatabaseError,
+                OSError,
+                TypeError,
+                ValueError,
+                PriceFrameChecksumMismatchError,
+                PriceFrameSchemaError,
+            ) as exc:
+                results.append(
+                    MyListPriceRefreshSymbolResult(
+                        symbol=symbol,
+                        status="failed",
+                        reason=_path_free_reason(
+                            exc,
+                            fallback="Provider price evidence was rejected.",
+                        ),
+                        listing_id=listing.id,
+                    )
+                )
+            else:
+                results.append(
+                    MyListPriceRefreshSymbolResult(
+                        symbol=symbol,
+                        status="fetched",
+                        reason="Provider price evidence was persisted.",
+                        listing_id=listing.id,
+                        source_asset_id=source_asset.id,
+                    )
+                )
+
+    reused = sum(1 for result in results if result.status == "reused")
+    fetched = sum(1 for result in results if result.status == "fetched")
+    failed = sum(1 for result in results if result.status == "failed")
+    return MyListPriceRefreshResult(
+        target_date=target_date,
+        total=len(normalized_symbols),
+        reused=reused,
+        fetched=fetched,
+        updated=reused + fetched,
+        failed=failed,
+        credits_used=credits_used,
+        symbols=tuple(results),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ReusableMyListPriceEvidence:
+    reused: bool
+    fetch_allowed: bool
+    reason: str
+    source_asset_id: UUID | None = None
+
+
+def _validate_my_list_reference(reference: StockReference) -> None:
+    if (
+        reference.country != "United States"
+        or reference.currency != "USD"
+        or reference.instrument_type
+        not in {"Common Stock", "ADR", "American Depositary Receipt", "Depositary Receipt"}
+        or reference.exchange not in {"NASDAQ", "NYSE"}
+    ):
+        raise ValueError("Catalog identity is outside the supported US/USD stock-or-ADR scope")
+    supported_mics = {
+        "NASDAQ": {"XNAS", "XNGS", "XNCM", "XNMS"},
+        "NYSE": {"XNYS"},
+    }
+    if reference.mic_code not in supported_mics[reference.exchange]:
+        raise ValueError("Catalog identity has an unsupported exchange MIC")
+
+
+def _ensure_my_list_listing(
+    *,
+    symbol: str,
+    reference: StockReference,
+    target_date: date,
+) -> Listing:
+    security_type = _security_type_for_reference(reference)
+    candidates = list(
+        Listing.objects.select_related("security__company")
+        .filter(is_active=True)
+        .filter(Q(provider_symbol=symbol) | Q(ticker=symbol))
+        .order_by("pk")[:2]
+    )
+    if len(candidates) > 1:
+        raise ValueError("Tracked symbol does not resolve to one unique local listing")
+    if candidates:
+        listing = candidates[0]
+        if (
+            listing.region != Region.US
+            or listing.currency != reference.currency
+            or listing.exchange_mic != reference.mic_code
+            or listing.security.security_type != security_type
+            or (listing.provider_symbol and listing.provider_symbol != symbol)
+        ):
+            raise ValueError("Local listing identity conflicts with verified catalog identity")
+        return listing
+    company = Company.objects.create(name=reference.name, country="US")
+    security = Security.objects.create(
+        company=company,
+        security_type=security_type,
+        name=reference.name,
+    )
+    return Listing.objects.create(
+        security=security,
+        ticker=symbol,
+        exchange_mic=reference.mic_code,
+        provider_symbol=symbol,
+        currency=reference.currency,
+        region=Region.US,
+        valid_from=target_date,
+        is_primary=True,
+        is_active=True,
+    )
+
+
+def _security_type_for_reference(reference: StockReference) -> str:
+    if reference.instrument_type == "Common Stock":
+        return Security.SecurityType.COMMON_STOCK
+    if reference.instrument_type in {"ADR", "American Depositary Receipt", "Depositary Receipt"}:
+        return Security.SecurityType.ADR
+    raise ValueError("Catalog identity is outside the supported stock type scope")
+
+
+def _reusable_my_list_price_evidence(
+    *,
+    symbol: str,
+    reference: StockReference,
+    listing: Listing,
+    target_date: date,
+    decision_time: datetime,
+    store: AssetStore,
+) -> _ReusableMyListPriceEvidence:
+    market_data = (
+        LatestMarketData.objects.select_related("source_asset").filter(listing=listing).first()
+    )
+    if market_data is None:
+        return _ReusableMyListPriceEvidence(False, True, "No persisted live price exists.")
+    if market_data.session_date < target_date:
+        return _ReusableMyListPriceEvidence(
+            False,
+            True,
+            "Persisted live price is stale.",
+            market_data.source_asset_id,
+        )
+    if market_data.session_date > target_date:
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted live price is dated after the completed target session.",
+            market_data.source_asset_id,
+        )
+    if market_data.close <= 0 or not market_data.close.is_finite():
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted live price is invalid.",
+            market_data.source_asset_id,
+        )
+    asset = market_data.source_asset
+    if asset.provider != PROVIDER or asset.kind != "price_history":
+        return _ReusableMyListPriceEvidence(
+            False,
+            True,
+            "No Twelve Data persisted live price exists.",
+            asset.id,
+        )
+    if asset.subject != symbol:
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted price evidence subject conflicts with the tracked symbol.",
+            asset.id,
+        )
+    if asset.available_at > decision_time or asset.retrieved_at > decision_time:
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted price evidence is not yet available.",
+            asset.id,
+        )
+    if asset.period_end != target_date:
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted price evidence does not end at the completed target session.",
+            asset.id,
+        )
+    metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+    if (
+        metadata.get("currency") != reference.currency
+        or metadata.get("mic_code") != reference.mic_code
+        or metadata.get("instrument_type") != reference.instrument_type
+        or metadata.get("interval") != "1day"
+        or metadata.get("adjustment") != "splits"
+    ):
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            "Persisted price evidence metadata conflicts with verified identity.",
+            asset.id,
+        )
+    try:
+        read = AsOfData(
+            decision_time=decision_time,
+            store=store,
+        ).price_frame_for_asset_with_diagnostics(asset=asset, through_date=target_date)
+        if read.invalid_session_date_rows:
+            raise ValueError("Persisted price evidence contains invalid session dates")
+        rows = read.frame.filter(pl.col("date") == target_date)
+        if rows.height != 1:
+            raise ValueError("Persisted price evidence has no exact target-session row")
+        close = _decimal_from_frame_value(rows.item(0, "close"))
+        if close != market_data.close:
+            raise ValueError("Persisted current price conflicts with its evidence asset")
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        PriceFrameChecksumMismatchError,
+        PriceFrameSchemaError,
+    ) as exc:
+        return _ReusableMyListPriceEvidence(
+            False,
+            False,
+            _path_free_reason(exc, fallback="Persisted price evidence could not be verified."),
+            asset.id,
+        )
+    return _ReusableMyListPriceEvidence(
+        True,
+        False,
+        "Current provider-backed price evidence already exists.",
+        asset.id,
+    )
+
+
+def _validate_my_list_price_series(
+    series: PriceSeries,
+    *,
+    reference: StockReference,
+    target_date: date,
+) -> None:
+    if series.provider != PROVIDER:
+        raise ValueError("Price response provider did not match Twelve Data")
+    if series.symbol != reference.symbol:
+        raise ValueError("Price response symbol did not match verified catalog identity")
+    if series.currency != reference.currency:
+        raise ValueError("Price response currency did not match verified catalog identity")
+    if series.mic_code != reference.mic_code:
+        raise ValueError("Price response MIC did not match verified catalog identity")
+    if series.instrument_type != reference.instrument_type:
+        raise ValueError("Price response type did not match verified catalog identity")
+    if series.adjustment != "splits":
+        raise ValueError("Price response adjustment was not split-only")
+    if not series.bars:
+        raise ValueError("Price response did not include any daily bars")
+    if any(bar.trade_date > target_date for bar in series.bars):
+        raise ValueError("Price response included a future daily bar")
+    if series.bars[-1].trade_date != target_date:
+        raise ValueError("Price response did not include the completed target session")
+    for bar in series.bars:
+        if bar.close <= 0 or not bar.close.is_finite():
+            raise ValueError("Price response included a non-positive or non-finite close")
+
+
+def _previous_us_session_date(target_date: date) -> date:
+    calendar = get_calendar("XNYS")
+    if not calendar.is_session(target_date.isoformat()):
+        raise ValueError(f"US target date {target_date.isoformat()} is not an XNYS session")
+    return cast(date, calendar.previous_session(target_date.isoformat()).date())
+
+
+def _decimal_from_frame_value(value: object) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Price evidence close could not be parsed") from exc
+    if parsed <= 0 or not parsed.is_finite():
+        raise ValueError("Price evidence close was not positive and finite")
+    return parsed
+
+
+def _path_free_reason(exc: BaseException, *, fallback: str) -> str:
+    message = str(exc).strip()
+    if not message:
+        return fallback
+    if "/" in message or "\\" in message:
+        return fallback
+    return message[:160]
 
 
 def _best_effort_unlink_if_orphaned(store: AssetStore, relative_path: str) -> None:

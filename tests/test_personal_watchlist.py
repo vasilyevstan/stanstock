@@ -1327,7 +1327,7 @@ def test_renders_listing_price_analysis_and_explicit_unavailable_states(client) 
     assert "Session Sept. 10, 2026" in content
     assert "BUY" in content
     assert "Score 88.50/100" in content
-    assert "No persisted price" in content
+    assert "No live persisted price" in content
     assert "No stored analysis yet" in content
     assert "Not in the selected analysis universe" in content
     assert "Selected analysis universe" in content

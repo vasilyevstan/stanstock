@@ -50,6 +50,14 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Range availability and probability support are separate facts.** A finite
+  bear/base/bull range can remain usable when positive-return probability is
+  withheld. Render these states independently, keep stored reasons visible,
+  and never turn a missing probability into a zero or an absent forecast.
+- **A saved symbol is not a data acquisition or universe admission.** My List
+  preferences alone do not fetch prices. A separately invoked, bounded
+  price-only refresh can reuse verified identity and immutable price evidence
+  without creating analyses, predictions, holdings, or investment eligibility.
 - **A pull request is a durable release record, not a placeholder.** Use
   specific, outcome-focused commit subjects and PR titles. Complete the PR
   template with what changed, why it was needed, how it works, exact

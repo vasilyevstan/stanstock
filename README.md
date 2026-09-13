@@ -525,10 +525,15 @@ includes holding/cash changes rather than claiming a time-weighted return.
 
 Keep a separate private symbol preference list from `/my-list`. **My list**
 accepts unique active US common-stock/ADR listings and symbols identified by
-the latest checksummed local Twelve Data NASDAQ/NYSE catalogs. It never fetches
-provider data, changes universe membership, runs analysis, or creates a
-portfolio holding. Catalog-valid symbols outside the current research universe
-remain visible with explicit unavailable price/analysis states.
+the latest checksummed local Twelve Data NASDAQ/NYSE catalogs. Browsing or
+adding symbols never fetches provider data, changes universe membership, runs
+analysis, or creates a portfolio holding. The separate local
+`refresh_my_list_prices` command can refresh persisted prices for up to 20
+saved symbols using the existing enabled Twelve Data workflow and verified
+local catalog evidence. See [price-only monitoring](docs/operations.md#my-list-price-only-monitoring).
+The page separates all tracked symbols, current provider-backed Under-$10
+prices, and symbols without a current live price. Price monitoring does not
+create a forecast or enable investment: Under-$10 new allocation remains 0%.
 
 Manual portfolios also support immutable external deposits and recorded
 monthly allocations. The editable monthly preference defaults to $600.
@@ -594,7 +599,8 @@ uv run python manage.py snapshot_portfolios
   equal-vintage sign, inclusion, and base-error metrics only after the
   horizon-specific breadth and calendar-span floors pass.
 - `/my-list` - private owner-scoped symbol preferences validated only from
-  existing listings or checksummed locally stored stock catalogs.
+  existing listings or checksummed locally stored stock catalogs, with
+  provider-backed price monitoring and explicit missing-price states.
 - `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
   monthly allocation previews, contribution-aware performance, and valuation
   history.
