@@ -298,7 +298,10 @@ def test_projection_uses_cumulative_expm1_linear_quantiles_and_same_shock_sensit
 
 
 def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
-    product_input = _product_input()
+    product_input = _product_input(
+        stock_closes=tuple(float(64 + index) for index in range(757)),
+        benchmark_closes=tuple(float(512 + 2 * index) for index in range(757)),
+    )
     seed = deterministic_seed(
         method_version=FHS_METHOD_VERSION,
         effective_config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
@@ -308,7 +311,7 @@ def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
 
     assert seed == 138191051323385255095579043285383288333
     assert complete_input_hash(product_input) == (
-        "a6c61f26acd54bb3b16726c5942e314b2c46a9096f9ad86fed5145c9365fbf51"
+        "7d73894d6e47a3fc8365d3025af8157aaa6183ad71e1eab91cfe8ad7fbe2685a"
     )
     changed_asset = replace(
         product_input,
@@ -329,8 +332,15 @@ def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
         product_input,
         source_execution=replace(product_input.source_execution, evidence_grade="observed"),
     )
+    perturbed_closes = list(product_input.stock.closes)
+    perturbed_closes[123] = math.nextafter(perturbed_closes[123], math.inf)
+    changed_one_ulp = replace(
+        product_input,
+        stock=replace(product_input.stock, closes=tuple(perturbed_closes)),
+    )
     assert complete_input_hash(changed_mode) != complete_input_hash(product_input)
     assert complete_input_hash(changed_grade) != complete_input_hash(product_input)
+    assert complete_input_hash(changed_one_ulp) != complete_input_hash(product_input)
     assert (
         deterministic_seed(
             method_version=FHS_METHOD_VERSION,
