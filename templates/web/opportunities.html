@@ -205,12 +205,72 @@
                   <div><dt>Score</dt><dd>{{ stock.overall_score }}/100</dd></div>
                   <div><dt>Risk</dt><dd>{{ stock.get_risk_class_display }}</dd></div>
                   <div><dt>Heuristic evidence score</dt><dd>{{ stock.confidence|floatformat:"0" }}%</dd></div>
-                  <div><dt>1-10 days</dt><dd>{{ stock.short_forecast_scenario|scenario_range }}</dd></div>
+                  {% with scenario=stock.short_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"short" %}
+                    {% with forecast=scenario|forecast_availability %}
+                      <div>
+                        <dt>1-10 days</dt>
+                        <dd>
+                          {% if forecast.range_available %}
+                            {{ forecast.display_range }}
+                          {% else %}
+                            Forecast unavailable
+                            {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                            {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                          {% endif %}
+                        </dd>
+                      </div>
+                    {% endwith %}
+                  {% endwith %}
                   {% if stock.has_explicit_medium_forecasts %}
-                    <div><dt>6 months</dt><dd>{{ stock.six_month_forecast_scenario|scenario_range }}</dd></div>
-                    <div><dt>12 months</dt><dd>{{ stock.twelve_month_forecast_scenario|scenario_range }}</dd></div>
+                    {% with scenario=stock.six_month_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"6m" %}
+                      {% with forecast=scenario|forecast_availability %}
+                        <div>
+                          <dt>6 months</dt>
+                          <dd>
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          </dd>
+                        </div>
+                      {% endwith %}
+                    {% endwith %}
+                    {% with scenario=stock.twelve_month_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"12m" %}
+                      {% with forecast=scenario|forecast_availability %}
+                        <div>
+                          <dt>12 months</dt>
+                          <dd>
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          </dd>
+                        </div>
+                      {% endwith %}
+                    {% endwith %}
                   {% else %}
-                    <div><dt>Legacy 6-12 months</dt><dd>{{ stock.legacy_medium_forecast_scenario|scenario_range }}</dd></div>
+                    {% with scenario=stock.legacy_medium_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"medium" %}
+                      {% with forecast=scenario|forecast_availability %}
+                        <div>
+                          <dt>Legacy 6-12 months</dt>
+                          <dd>
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          </dd>
+                        </div>
+                      {% endwith %}
+                    {% endwith %}
                     <div><dt>12 months</dt><dd>Not issued</dd></div>
                   {% endif %}
                   <div>
@@ -218,16 +278,37 @@
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
+                        {% with anchor=stock.run.config_version|forecast_detail_anchor:"3y" %}
+                          {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                        {% endwith %}
                       {% elif stock.has_explicit_long_forecasts %}
-                        {% with scenario=stock.three_year_forecast_scenario %}
-                          {{ scenario|scenario_range }}
-                          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
-                            <small>Research-only / unactivated.</small>
-                            <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
-                          {% endif %}
+                        {% with scenario=stock.three_year_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"3y" %}
+                          {% with forecast=scenario|forecast_availability %}
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                              {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                                <small>Research-only / unactivated.</small>
+                                <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                              {% endif %}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          {% endwith %}
                         {% endwith %}
                       {% else %}
-                        {{ stock.legacy_long_forecast_scenario|scenario_range }}
+                        {% with scenario=stock.legacy_long_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"long" %}
+                          {% with forecast=scenario|forecast_availability %}
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          {% endwith %}
+                        {% endwith %}
                       {% endif %}
                     </dd>
                   </div>
@@ -236,13 +317,24 @@
                     <dd>
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
+                        {% with anchor=stock.run.config_version|forecast_detail_anchor:"5y" %}
+                          {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                        {% endwith %}
                       {% elif stock.has_explicit_long_forecasts %}
-                        {% with scenario=stock.five_year_forecast_scenario %}
-                          {{ scenario|scenario_range }}
-                          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
-                            <small>Research-only / unactivated.</small>
-                            <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
-                          {% endif %}
+                        {% with scenario=stock.five_year_forecast_scenario anchor=stock.run.config_version|forecast_detail_anchor:"5y" %}
+                          {% with forecast=scenario|forecast_availability %}
+                            {% if forecast.range_available %}
+                              {{ forecast.display_range }}
+                              {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                                <small>Research-only / unactivated.</small>
+                                <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                              {% endif %}
+                            {% else %}
+                              Forecast unavailable
+                              {% if forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+                              {% if anchor %}<small><a href="{% url 'stock-detail' stock.listing_id %}#{{ anchor }}">Forecast details</a></small>{% endif %}
+                            {% endif %}
+                          {% endwith %}
                         {% endwith %}
                       {% else %}
                         Not issued
@@ -259,9 +351,25 @@
               </article>
             {% endwith %}
           {% empty %}
-            <p class="empty-state">
-              No persisted analysis in this price band matches the current filters.
-            </p>
+            {% if group.slug == "under_10" %}
+              <div class="empty-state">
+                {% if request.GET %}
+                  <p>No analyzed listings in this band match the active filters. <a href="{% url 'opportunities' %}">Clear filters</a>.</p>
+                {% else %}
+                  <p>No analyzed listings in this band are present in the selected research universe.</p>
+                {% endif %}
+                <p>
+                  Only listings with a stored analysis in the selected research universe are shown.
+                  <a href="{% url 'my-list' %}">My List</a> tracks symbols locally;
+                  it does not fetch prices or expand the research universe.
+                </p>
+                <p>The 0% new-allocation policy is separate from whether candidates are present.</p>
+              </div>
+            {% else %}
+              <p class="empty-state">
+                No persisted analysis in this price band matches the current filters.
+              </p>
+            {% endif %}
           {% endfor %}
         </div>
       </section>

@@ -66,6 +66,7 @@
       <tbody>
         {% for card in prediction_cards %}
           {% with prediction=card.prediction %}
+          {% with forecast=prediction|prediction_forecast %}
           <tr>
             <td>{{ prediction.generated_at }}<small>Target {{ prediction.target_date }}</small></td>
             <td><a href="{% url 'stock-detail' prediction.listing_id %}"><strong>{{ prediction.listing.ticker }}</strong></a><small>{{ prediction.listing.security.company.name }}</small></td>
@@ -95,7 +96,7 @@
                   Legacy provider not proven
                 {% endif %}
               </small>
-              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
+              {% if forecast.is_v4 %}
                 <small><strong>Research-only / unactivated</strong> · deterministic uncalibrated scenarios</small>
               {% endif %}
             </td>
@@ -107,23 +108,26 @@
                 Not applicable
               {% endif %}
             </td>
-            <td>{{ prediction.bear_return|percentage }} / {{ prediction.base_return|percentage }} / {{ prediction.bull_return|percentage }}</td>
             <td>
-              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
-                Unavailable
-                <small>Separate cutoff-safe historical replay review is required before activation.</small>
-              {% elif prediction.probability_positive is not None %}
-                {{ prediction.probability_positive|percentage }}
-                {% if prediction.horizon == "6m" or prediction.horizon == "12m" %}
-                  <small>Shrinkage-weighted analog estimate</small>
-                {% endif %}
+              {% if forecast.range_available %}
+                {{ forecast.display_range }}
               {% else %}
-                Insufficient evidence
-                {% if prediction.insufficiency_reason %}<small>{{ prediction.insufficiency_reason }}</small>{% endif %}
+                Forecast unavailable
               {% endif %}
             </td>
             <td>
-              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
+              {{ forecast.probability_label }}
+              {% if forecast.is_v4 %}
+                <small>Separate cutoff-safe historical replay review is required before activation.</small>
+              {% elif forecast.probability_available %}
+                {% if prediction.horizon == "6m" or prediction.horizon == "12m" %}
+                  <small>Shrinkage-weighted analog estimate</small>
+                {% endif %}
+              {% endif %}
+              {% if not forecast.probability_available and forecast.reason %}<small>{{ forecast.reason }}</small>{% endif %}
+            </td>
+            <td>
+              {% if forecast.is_v4 %}
                 Not estimated / unavailable
                 <small>{{ prediction.confidence_status|display_label }}</small>
                 {% if prediction.calculation.split_basis.assessed_through %}
@@ -146,6 +150,7 @@
               {% endif %}
             </td>
           </tr>
+          {% endwith %}
           {% endwith %}
         {% empty %}
           <tr><td colspan="10">No predictions have been recorded.</td></tr>
