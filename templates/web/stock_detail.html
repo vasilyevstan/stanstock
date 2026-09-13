@@ -35,7 +35,7 @@
   </section>
 
   {% if analysis %}
-    {% if analysis.data_quality.analysis_mode == "price_only_baseline" %}
+    {% if analysis.run.config_version == "us-price-baseline-v1" or analysis.run.config_version == "us-price-baseline-v2" or analysis.run.config_version == "us-price-baseline-v3" %}
       <div class="notice" role="status">
         <strong>US price-only baseline.</strong>
         The recommendation remains short-horizon and does not use company
@@ -52,15 +52,6 @@
           also cannot change BUY/HOLD/AVOID or opportunity status.
         {% endif %}
       </div>
-      {% if analysis.has_explicit_medium_forecasts %}
-        <div class="notice" role="status">
-          <strong>Reconstructed training evidence.</strong>
-          Medium-horizon ranges use non-overlapping historical states from the
-          current universe, which has survivorship bias. Prospective outcomes
-          are tracked separately; these reconstructed samples are not live-skill
-          evidence.
-        </div>
-      {% endif %}
     {% endif %}
     {% if current_price_band %}
       <div class="notice" role="status">
@@ -180,28 +171,151 @@
         {% endif %}
       </section>
     {% endif %}
-    <section class="metric-grid forecast-grid" aria-label="Current analysis and forecasts">
-      <article>
-        <small>Decision-run price</small>
-        <strong>{{ analysis.current_price|price }} {{ listing.currency }}</strong>
-        <span>{{ analysis.daily_change|percentage }}</span>
-        {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
-          <span>Split-adjusted price return; dividends excluded.</span>
+    {% if analysis.run.config_version == "default-v1" %}
+    <section aria-labelledby="legacy-default-v1-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Legacy decision method</p>
+          <h2 id="legacy-default-v1-title">Legacy default-v1 decision method — medium-weighted, multi-horizon</h2>
+        </div>
+      </div>
+      <p class="muted">
+        The displayed overall score is medium-weighted. Quality, growth,
+        valuation, momentum/technical, risk/liquidity, and market/sector
+        evidence can contribute. BUY evaluated the configured legacy short,
+        medium, and long downside gates. These are horizon inputs to one
+        frozen legacy decision policy, not canonical advisory forecasts or
+        votes. Legacy configuration:
+        <code>{{ analysis.run.config_version }}</code>. Universe-membership
+        grade: {{ analysis.run.universe_snapshot.get_grade_display }}.
+        Selected-run issuance evidence:
+        {% if analysis.run.issued_on_time and analysis.run.universe_snapshot.grade == "observed" %}
+          Observed / on-time.
+        {% else %}
+          Research / non-observed.
         {% endif %}
-      </article>
-      <article>
-        <small>Short scenario</small>
-        <strong>{{ analysis.short_forecast_scenario|scenario_range }}</strong>
-        <span>
-          {% if analysis.short_forecast_scenario.method %}
-            {{ analysis.short_forecast_scenario.method|display_label }}
-          {% else %}
-            Bear / base / bull
+        Observed universe membership alone does not establish
+        observed/live-skill issuance.
+      </p>
+      <div class="metric-grid forecast-grid">
+        <article>
+          <small>Legacy short decision scenario — 1–10 trading days</small>
+          <strong>{{ analysis.short_forecast_scenario|scenario_range }}</strong>
+          <span>
+            Decision-run price {{ analysis.current_price|price }} {{ listing.currency }}
+            · daily change {{ analysis.daily_change|percentage }}
+          </span>
+          <span>
+            {% if analysis.short_forecast_scenario.method %}
+              {{ analysis.short_forecast_scenario.method|display_label }}
+            {% else %}
+              Bear / base / bull
+            {% endif %}
+          </span>
+          {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
+            <span>Split-adjusted price return; dividends excluded.</span>
           {% endif %}
-        </span>
-        {% if analysis.short_forecast_scenario.insufficiency_reason %}<span>{{ analysis.short_forecast_scenario.insufficiency_reason }}</span>{% endif %}
-      </article>
-      {% if analysis.has_explicit_medium_forecasts %}
+          {% if analysis.short_forecast_scenario.insufficiency_reason %}<span>{{ analysis.short_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+        </article>
+        <article>
+          <small>Legacy medium decision scenario — 6–12 months</small>
+          <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
+          <span>
+            {% if analysis.legacy_medium_forecast_scenario.method %}
+              {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
+            {% else %}
+              Historical horizon definition retained
+            {% endif %}
+          </span>
+          {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+        </article>
+        <article>
+          <small>Legacy long decision scenario — 3+ years</small>
+          {% if long_horizon_blocked %}
+            <strong>Forecast unavailable</strong>
+            <span>{{ long_horizon_band_reason }}</span>
+          {% else %}
+            <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
+            <span>
+              {% if analysis.legacy_long_forecast_scenario.method %}
+                {{ analysis.legacy_long_forecast_scenario.method|display_label }}
+              {% else %}
+                Historical horizon definition retained
+              {% endif %}
+            </span>
+            {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+          {% endif %}
+        </article>
+      </div>
+    </section>
+    {% elif analysis.run.config_version == "us-price-baseline-v1" or analysis.run.config_version == "us-price-baseline-v2" or analysis.run.config_version == "us-price-baseline-v3" %}
+    <div class="notice" role="note">
+      These methods answer different horizon-specific questions; they are not
+      votes. No consensus, blended score, or synthetic recommendation is
+      calculated. Apparent disagreement remains visible in each method's own
+      range or unavailable state. Cumulative returns over different horizons
+      are not directly comparable.
+    </div>
+
+    <section aria-labelledby="short-decision-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Decision method</p>
+          <h2 id="short-decision-title">Short decision — 1–10 trading days</h2>
+        </div>
+      </div>
+      <p class="muted">
+        Technical, liquidity, market, and risk evidence is the sole source of
+        BUY/HOLD/AVOID and the displayed score. Short configuration:
+        <code>{{ analysis.run.config_version }}</code>. Universe-membership
+        grade: {{ analysis.run.universe_snapshot.get_grade_display }}.
+        Selected-run issuance evidence:
+        {% if analysis.run.issued_on_time and analysis.run.universe_snapshot.grade == "observed" %}
+          Observed / on-time.
+        {% else %}
+          Research / non-observed.
+        {% endif %}
+        Observed universe membership alone does not establish
+        observed/live-skill issuance.
+      </p>
+      <div class="metric-grid forecast-grid">
+        <article>
+          <small>Decision-run price</small>
+          <strong>{{ analysis.current_price|price }} {{ listing.currency }}</strong>
+          <span>{{ analysis.daily_change|percentage }}</span>
+          {% if analysis.data_quality.return_definition == "split_adjusted_price_return" %}
+            <span>Split-adjusted price return; dividends excluded.</span>
+          {% endif %}
+        </article>
+        <article>
+          <small>Short scenario</small>
+          <strong>{{ analysis.short_forecast_scenario|scenario_range }}</strong>
+          <span>
+            {% if analysis.short_forecast_scenario.method %}
+              {{ analysis.short_forecast_scenario.method|display_label }}
+            {% else %}
+              Bear / base / bull
+            {% endif %}
+          </span>
+          {% if analysis.short_forecast_scenario.insufficiency_reason %}<span>{{ analysis.short_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="medium-advisory-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Advisory method</p>
+          <h2 id="medium-advisory-title">Medium advisory — 6 months and 12 months</h2>
+        </div>
+      </div>
+      <p class="muted">
+        Conditional empirical cumulative split-adjusted price-return forecasts;
+        support, evidence status, MAE, Brier, interval details, and
+        insufficiency remain separate by horizon.
+      </p>
+      <div class="metric-grid forecast-grid">
+        {% if analysis.has_explicit_medium_forecasts %}
         <article>
         {% with scenario=analysis.six_month_forecast_scenario|validated_medium_forecast_scenario:"6m" %}
         <small>6-month advisory forecast</small>
@@ -216,6 +330,31 @@
             {{ scenario.method|display_label }}
           {% else %}
             Not yet issued
+          {% endif %}
+        </span>
+        <span>
+          Training evidence grade:
+          {% if scenario.training_evidence.grade == "research" or scenario.training_evidence.grade == "observed" %}
+            {{ scenario.training_evidence.grade|display_label }}
+          {% else %}
+            Unavailable / insufficient
+          {% endif %}
+        </span>
+        <span>
+          Forecast confidence/status:
+          {% if scenario.confidence_status == "empirical_calibrated" or scenario.confidence_status == "empirical_range_only" or scenario.confidence_status == "empirical_skill_supported" or scenario.confidence_status == "insufficient_evidence" %}
+            {{ scenario.confidence_status|display_label }}
+          {% else %}
+            Unavailable / insufficient
+          {% endif %}
+        </span>
+        <span>
+          Training evidence limitation:
+          {% if scenario.training_evidence.current_universe_survivorship_bias is True %}
+            This evidence is a current-universe reconstruction with
+            survivorship bias and does not establish observed/live skill.
+          {% else %}
+            Unavailable / insufficient.
           {% endif %}
         </span>
         {% if scenario.support %}
@@ -238,7 +377,7 @@
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
         {% if scenario.method_version == "us-price-medium-v2" %}
-          <span>Research-only · current-universe reconstruction with survivorship bias</span>
+          <span>Research-only.</span>
           <span>Nominal central 60% p20–p80 interval · not calibrated, significant, profitable, or alpha evidence</span>
           {% if scenario.probability_positive is not None %}
             <span>Published positive-return estimate {{ scenario.probability_positive|percentage }} · Positive prequential probability skill — not calibrated</span>
@@ -292,6 +431,31 @@
             Not yet issued
           {% endif %}
         </span>
+        <span>
+          Training evidence grade:
+          {% if scenario.training_evidence.grade == "research" or scenario.training_evidence.grade == "observed" %}
+            {{ scenario.training_evidence.grade|display_label }}
+          {% else %}
+            Unavailable / insufficient
+          {% endif %}
+        </span>
+        <span>
+          Forecast confidence/status:
+          {% if scenario.confidence_status == "empirical_calibrated" or scenario.confidence_status == "empirical_range_only" or scenario.confidence_status == "empirical_skill_supported" or scenario.confidence_status == "insufficient_evidence" %}
+            {{ scenario.confidence_status|display_label }}
+          {% else %}
+            Unavailable / insufficient
+          {% endif %}
+        </span>
+        <span>
+          Training evidence limitation:
+          {% if scenario.training_evidence.current_universe_survivorship_bias is True %}
+            This evidence is a current-universe reconstruction with
+            survivorship bias and does not establish observed/live skill.
+          {% else %}
+            Unavailable / insufficient.
+          {% endif %}
+        </span>
         {% if scenario.support %}
           <span>
             {{ scenario.support.effective_cohorts }} non-overlapping cohort{{ scenario.support.effective_cohorts|pluralize }}
@@ -312,7 +476,7 @@
         {% endif %}
         {% if scenario.return_basis %}<span>{{ scenario.return_basis|display_label }} · dividends excluded</span>{% endif %}
         {% if scenario.method_version == "us-price-medium-v2" %}
-          <span>Research-only · current-universe reconstruction with survivorship bias</span>
+          <span>Research-only.</span>
           <span>Nominal central 60% p20–p80 interval · not calibrated, significant, profitable, or alpha evidence</span>
           {% if scenario.probability_positive is not None %}
             <span>Published positive-return estimate {{ scenario.probability_positive|percentage }} · Positive prequential probability skill — not calibrated</span>
@@ -350,21 +514,37 @@
         {% endif %}
         {% endwith %}
         </article>
-      {% else %}
-        <article>
-          <small>Legacy 6-12 month scenario</small>
-          <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
-          <span>
-            {% if analysis.legacy_medium_forecast_scenario.method %}
-              {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
-            {% else %}
-              Historical horizon definition retained
-            {% endif %}
-          </span>
-          {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
-        </article>
-      {% endif %}
-      {% if analysis.has_explicit_long_forecasts %}
+        {% else %}
+          <article>
+            <small>Legacy 6-12 month scenario</small>
+            <strong>{{ analysis.legacy_medium_forecast_scenario|scenario_range }}</strong>
+            <span>
+              {% if analysis.legacy_medium_forecast_scenario.method %}
+                {{ analysis.legacy_medium_forecast_scenario.method|display_label }}
+              {% else %}
+                Historical horizon definition retained
+              {% endif %}
+            </span>
+            {% if analysis.legacy_medium_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_medium_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+          </article>
+        {% endif %}
+      </div>
+    </section>
+
+    <section aria-labelledby="long-advisory-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Advisory method</p>
+          <h2 id="long-advisory-title">Long advisory — 3 years and 5 years</h2>
+        </div>
+      </div>
+      <p class="muted">
+        Reported-GAAP SEC fundamental and valuation forecasts; support,
+        evidence grade, split basis, and insufficiency remain separate by
+        horizon.
+      </p>
+      <div class="metric-grid forecast-grid">
+        {% if analysis.has_explicit_long_forecasts %}
         <article>
           {% with scenario=analysis.three_year_forecast_scenario %}
           <small>3-year advisory forecast</small>
@@ -372,6 +552,7 @@
             <span><strong>Research-only / unactivated.</strong> Deterministic, uncalibrated scenario policy; not a recommendation or probability forecast.</span>
             <span>Confidence: Not estimated / unavailable. Positive-return probability: unavailable pending separate cutoff-safe historical replay review.</span>
             <span>Reported GAAP evidence only; no intangible capitalization or return-on-new-capital claim. SIC peers are coarse.</span>
+            <span>One coherent five-year path; this 3-year view is year 3.</span>
           {% endif %}
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
@@ -461,6 +642,7 @@
             <span><strong>Research-only / unactivated.</strong> Deterministic, uncalibrated scenario policy; not a recommendation or probability forecast.</span>
             <span>Confidence: Not estimated / unavailable. Positive-return probability: unavailable pending separate cutoff-safe historical replay review.</span>
             <span>Reported GAAP evidence only; no intangible capitalization or return-on-new-capital claim. SIC peers are coarse.</span>
+            <span>One coherent five-year path; this 5-year view is year 5.</span>
           {% endif %}
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
@@ -543,26 +725,28 @@
           {% endif %}
           {% endwith %}
         </article>
-      {% else %}
-        <article>
-          <small>Legacy 3+ year scenario</small>
-          {% if long_horizon_blocked %}
-            <strong>Forecast unavailable</strong>
-            <span>{{ long_horizon_band_reason }}</span>
-          {% else %}
-            <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
-            <span>
-              {% if analysis.legacy_long_forecast_scenario.method %}
-                {{ analysis.legacy_long_forecast_scenario.method|display_label }}
-              {% else %}
-                Historical horizon definition retained
-              {% endif %}
-            </span>
-            {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
-          {% endif %}
-        </article>
-      {% endif %}
+        {% else %}
+          <article>
+            <small>Legacy 3+ year scenario</small>
+            {% if long_horizon_blocked %}
+              <strong>Forecast unavailable</strong>
+              <span>{{ long_horizon_band_reason }}</span>
+            {% else %}
+              <strong>{{ analysis.legacy_long_forecast_scenario|scenario_range }}</strong>
+              <span>
+                {% if analysis.legacy_long_forecast_scenario.method %}
+                  {{ analysis.legacy_long_forecast_scenario.method|display_label }}
+                {% else %}
+                  Historical horizon definition retained
+                {% endif %}
+              </span>
+              {% if analysis.legacy_long_forecast_scenario.insufficiency_reason %}<span>{{ analysis.legacy_long_forecast_scenario.insufficiency_reason }}</span>{% endif %}
+            {% endif %}
+          </article>
+        {% endif %}
+      </div>
     </section>
+    {% endif %}
 
     <div class="detail-grid">
       <section class="panel">
@@ -603,6 +787,7 @@
         <h2>Provenance</h2>
         <dl class="key-values">
           <div><dt>Decision date</dt><dd>{{ analysis.run.target_date }}</dd></div>
+          <div><dt>Data cutoff</dt><dd>{{ analysis.run.data_cutoff }}</dd></div>
           <div><dt>Generated</dt><dd>{{ analysis.run.generated_at }}</dd></div>
           <div><dt>Universe grade</dt><dd>{{ analysis.run.universe_snapshot.get_grade_display }}</dd></div>
           <div><dt>Configuration</dt><dd>{{ analysis.run.config_version }}</dd></div>

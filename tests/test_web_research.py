@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import plistlib
+import re
 import sys
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -40,6 +42,8 @@ from stanstock.research.affordability import (
     UNDER_10_SHADOW_DISCLOSURE,
     UNDER_10_UNRELEASED_ACTIVATION_CONTROLS,
 )
+from stanstock.research.forecast_config import load_medium_forecast_config
+from stanstock.research.medium_forecasts import PANEL_SCHEMA, build_medium_forecasts
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -56,6 +60,7 @@ from stanstock.simulation.models import (
     SimulationRun,
     SimulationTrade,
 )
+from stanstock.web.templatetags import stanstock as stanstock_tags
 from stanstock.web.views import STOCK_DETAIL_PREDICTIONS_PER_PAGE
 
 # `authenticated_client`, `scheduler_status`, and `persisted_analysis` are
@@ -146,6 +151,235 @@ def _advisory_report_groups(response) -> list[dict[str, object]]:
     ]
 
 
+def _method_group(content: str, heading_id: str) -> str:
+    opening = f'<section aria-labelledby="{heading_id}">'
+    assert content.count(opening) == 1
+    assert content.count(f'id="{heading_id}"') == 1
+    return content.split(opening, maxsplit=1)[1].split("</section>", maxsplit=1)[0]
+
+
+def _forecast_card(content: str, title: str) -> str:
+    for card in content.split("<article>")[1:]:
+        card = card.split("</article>", maxsplit=1)[0]
+        if title in card:
+            return card
+    raise AssertionError(f"Forecast card not found for {title}")
+
+
+def _medium_v1_training_evidence() -> dict[str, object]:
+    return {
+        "grade": "research",
+        "current_universe_survivorship_bias": True,
+        "label_policy": "complete_horizon_ending_on_or_before_forecast_target",
+        "cohort_policy": "fixed_epoch_non_overlapping",
+    }
+
+
+_MEDIUM_BIAS_DISCLOSURE = (
+    "Training evidence limitation: This evidence is a current-universe "
+    "reconstruction with survivorship bias and does not establish observed/live skill."
+)
+
+
+def _medium_v1_scenarios() -> dict[str, dict[str, object]]:
+    values = {
+        "6m": (-0.10, 0.08, 0.24),
+        "12m": (-0.18, 0.14, 0.38),
+    }
+    return {
+        horizon: {
+            "bear": returns[0],
+            "base": returns[1],
+            "bull": returns[2],
+            "probability_positive": None,
+            "confidence": 50,
+            "confidence_status": "empirical_range_only",
+            "insufficiency_reason": "Probability withheld",
+            "method": "conditional_empirical_price",
+            "method_version": "us-price-medium-v1",
+            "return_basis": "split_adjusted_price_return",
+            "training_evidence": _medium_v1_training_evidence(),
+        }
+        for horizon, returns in values.items()
+    }
+
+
+def _medium_v2_panel_row(
+    *,
+    horizon: str,
+    listing_id: str,
+    anchor_date: date,
+    forward_return: float | None,
+    is_forecast: bool = False,
+    market_regime: int = 1,
+) -> dict[str, object]:
+    return {
+        "horizon": horizon,
+        "anchor_date": anchor_date,
+        "label_end_date": None if is_forecast else anchor_date,
+        "is_forecast": is_forecast,
+        "cohort_id": f"{horizon}:{anchor_date.isoformat()}",
+        "listing_id": listing_id,
+        "ticker": listing_id,
+        "price_asset_id": listing_id,
+        "relative_momentum": 0.1,
+        "drawdown": -0.1,
+        "volatility": 0.2,
+        "market_trend": 0.05,
+        "market_volatility": 0.2,
+        "relative_momentum_bucket": 1,
+        "drawdown_bucket": 1,
+        "volatility_bucket": 1,
+        "market_trend_bucket": market_regime,
+        "market_volatility_bucket": market_regime,
+        "close_vs_sma_50": 0.05,
+        "close_vs_sma_200": 0.1,
+        "downside_volatility": 0.1,
+        "average_dollar_volume": 10_000_000.0,
+        "forward_return": forward_return,
+        "benchmark_forward_return": (None if forward_return is None else forward_return / 2),
+        "relative_forward_return": None if forward_return is None else forward_return / 2,
+        "eligible": True,
+        "insufficiency_reason": "",
+    }
+
+
+@lru_cache(maxsize=1)
+def _medium_v2_scenarios() -> dict[str, dict[str, object]]:
+    rows = []
+    for horizon, returns in {
+        "6m": (-0.10, 0.20),
+        "12m": (-0.20, 0.40),
+    }.items():
+        for cohort in range(8):
+            anchor_date = date(2017 + cohort, 1, 3)
+            for listing_index in range(30):
+                rows.append(
+                    _medium_v2_panel_row(
+                        horizon=horizon,
+                        listing_id=f"support-{listing_index:02d}",
+                        anchor_date=anchor_date,
+                        forward_return=returns[listing_index % 2],
+                        market_regime=cohort % 3,
+                    )
+                )
+        rows.append(
+            _medium_v2_panel_row(
+                horizon=horizon,
+                listing_id="current",
+                anchor_date=date(2026, 9, 4),
+                forward_return=None,
+                is_forecast=True,
+            )
+        )
+    forecasts = build_medium_forecasts(
+        pl.DataFrame(rows, schema=PANEL_SCHEMA, orient="row"),
+        load_medium_forecast_config(Path("config/forecasts/us-price-medium-v2.yml")),
+    )["current"]
+    return {horizon: forecast.scenario_payload() for horizon, forecast in forecasts.items()}
+
+
+def _replace_nested_value(
+    payload: dict[str, object],
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    current = payload
+    for key in path[:-1]:
+        child = current[key]
+        assert isinstance(child, dict)
+        current = child
+    current[path[-1]] = value
+
+
+_NONFINITE_VALUES = (
+    pytest.param("nan", id="string-nan"),
+    pytest.param("inf", id="string-positive-infinity"),
+    pytest.param("-inf", id="string-negative-infinity"),
+    pytest.param(float("nan"), id="float-nan"),
+    pytest.param(float("inf"), id="float-positive-infinity"),
+    pytest.param(float("-inf"), id="float-negative-infinity"),
+)
+
+
+@pytest.mark.parametrize("value", _NONFINITE_VALUES)
+def test_percentage_returns_unavailable_for_nonfinite_values(value: object) -> None:
+    assert stanstock_tags.percentage(value) == "Unavailable"
+
+
+@pytest.mark.parametrize("field", ["bear", "base", "bull"])
+@pytest.mark.parametrize("value", _NONFINITE_VALUES)
+def test_scenario_range_rejects_a_nonfinite_triplet_member(
+    field: str,
+    value: object,
+) -> None:
+    scenario: dict[str, object] = {"bear": -0.1, "base": 0.1, "bull": 0.3}
+    scenario[field] = value
+
+    assert stanstock_tags.scenario_range(scenario) == "Insufficient evidence"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"base": 0.1, "bull": 0.3}, id="missing"),
+        pytest.param({"bear": -0.1, "base": "not-a-number", "bull": 0.3}, id="unparsable"),
+    ],
+)
+def test_scenario_range_rejects_incomplete_or_unparsable_triplets(
+    scenario: dict[str, object],
+) -> None:
+    assert stanstock_tags.scenario_range(scenario) == "Insufficient evidence"
+
+
+def test_percentage_and_scenario_range_preserve_finite_rendering() -> None:
+    assert stanstock_tags.percentage(Decimal("0.01234")) == "+1.2%"
+    assert stanstock_tags.percentage(Decimal("-0.0456"), 2) == "-4.56%"
+    assert (
+        stanstock_tags.scenario_range(
+            {
+                "bear_return": Decimal("-0.10"),
+                "base_return": Decimal("0.08"),
+                "bull_return": Decimal("0.24"),
+            }
+        )
+        == "-10.0% / +8.0% / +24.0%"
+    )
+
+
+def test_medium_v2_validation_boundary_returns_invalid_on_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_overflow(*_args: object, **_kwargs: object) -> None:
+        raise OverflowError
+
+    monkeypatch.setattr(stanstock_tags, "_validate_medium_v2_scenario", raise_overflow)
+
+    assert stanstock_tags.validated_medium_forecast_scenario(
+        {"method_version": "us-price-medium-v2"},
+        "6m",
+    ) == {"medium_v2_invalid": True}
+
+
+def test_medium_v2_validation_boundary_does_not_catch_other_arithmetic_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_arithmetic_error(*_args: object, **_kwargs: object) -> None:
+        raise ArithmeticError
+
+    monkeypatch.setattr(
+        stanstock_tags,
+        "_validate_medium_v2_scenario",
+        raise_arithmetic_error,
+    )
+
+    with pytest.raises(ArithmeticError):
+        stanstock_tags.validated_medium_forecast_scenario(
+            {"method_version": "us-price-medium-v2"},
+            "6m",
+        )
+
+
 def _persist_spy_etf(tmp_path) -> Listing:
     start = date(2025, 12, 1)
     dates = [start + timedelta(days=index) for index in range(260)]
@@ -225,6 +459,8 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    persisted_analysis.run.config_version = "default-v1"
+    persisted_analysis.run.save(update_fields=["config_version"])
     opportunities = authenticated_client.get(
         reverse("opportunities"),
         {
@@ -270,9 +506,372 @@ def test_opportunities_filter_and_stock_detail_render_persisted_analysis(
     assert "Quality is above the configured threshold." in content
     assert "Prediction history" in content
     assert "heuristic evidence score" in content
-    assert "Legacy 6-12 month scenario" in content
-    assert "Legacy 3+ year scenario" in content
+    assert "Legacy medium decision scenario — 6–12 months" in content
+    assert "Legacy long decision scenario — 3+ years" in content
     assert "Reconstructed training evidence." not in content
+
+
+@pytest.mark.django_db
+def test_stock_detail_default_v1_uses_one_frozen_legacy_decision_group(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    persisted_analysis.run.config_version = "default-v1"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+    }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            **_medium_v1_scenarios(),
+            "3y": {"bear": -0.30, "base": 0.40, "bull": 0.90},
+            "5y": {"bear": -0.35, "base": 0.55, "bull": 1.20},
+        },
+    }
+    persisted_analysis.save(update_fields=["data_quality", "forecast_scenarios"])
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.MEDIUM,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        model_version="legacy-medium-history-v1",
+        bear_return=Decimal("-0.16"),
+        base_return=Decimal("0.12"),
+        bull_return=Decimal("0.31"),
+    )
+    _create_prediction(
+        persisted_analysis,
+        horizon=Prediction.Horizon.LONG,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        model_version="legacy-long-history-v1",
+        bear_return=Decimal("-0.25"),
+        base_return=Decimal("0.34"),
+        bull_return=Decimal("0.82"),
+    )
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    normalized = " ".join(content.split())
+    legacy_group = _method_group(content, "legacy-default-v1-title")
+    normalized_legacy = " ".join(legacy_group.split())
+
+    assert legacy_group.count("<article>") == 3
+    assert "Legacy default-v1 decision method — medium-weighted, multi-horizon" in legacy_group
+    assert "Legacy short decision scenario — 1–10 trading days" in legacy_group
+    assert "Legacy medium decision scenario — 6–12 months" in legacy_group
+    assert "Legacy long decision scenario — 3+ years" in legacy_group
+    assert "The displayed overall score is medium-weighted." in normalized_legacy
+    assert (
+        "Quality, growth, valuation, momentum/technical, risk/liquidity, and "
+        "market/sector evidence can contribute." in normalized_legacy
+    )
+    assert (
+        "BUY evaluated the configured legacy short, medium, and long downside gates."
+        in normalized_legacy
+    )
+    assert (
+        "These are horizon inputs to one frozen legacy decision policy, not canonical "
+        "advisory forecasts or votes." in normalized_legacy
+    )
+    assert "<code>default-v1</code>" in legacy_group
+    assert "Research-grade reconstruction" in legacy_group
+    assert "Selected-run issuance evidence: Research / non-observed." in normalized_legacy
+    assert (
+        "Observed universe membership alone does not establish observed/live-skill issuance."
+        in normalized_legacy
+    )
+    assert "-4.0% / +3.0% / +9.0%" in legacy_group
+    assert "-16.0% / +12.0% / +31.0%" in legacy_group
+    assert "-25.0% / +34.0% / +82.0%" in legacy_group
+    assert "Short decision — 1–10 trading days" not in content
+    assert "Medium advisory — 6 months and 12 months" not in content
+    assert "Long advisory — 3 years and 5 years" not in content
+    assert "sole source of BUY/HOLD/AVOID" not in content
+    assert "6-month advisory forecast" not in content
+    assert "12-month advisory forecast" not in content
+    assert "3-year advisory forecast" not in content
+    assert "5-year advisory forecast" not in content
+    assert "US price-only baseline." not in content
+
+    medium_history = _prediction_history_row(content, "legacy-medium-history-v1")
+    long_history = _prediction_history_row(content, "legacy-long-history-v1")
+    assert "Legacy 6-12 months · Decision · BUY" in medium_history
+    assert "Legacy 3+ years · Decision · BUY" in long_history
+    assert "Advisory" not in medium_history
+    assert "Advisory" not in long_history
+
+    provenance = normalized.split("<h2>Provenance</h2>", maxsplit=1)[1].split(
+        "</section>",
+        maxsplit=1,
+    )[0]
+    assert "<dt>Configuration</dt><dd>default-v1</dd>" in provenance
+    decision_index = provenance.index("<dt>Decision date</dt>")
+    cutoff_index = provenance.index("<dt>Data cutoff</dt>")
+    generated_index = provenance.index("<dt>Generated</dt>")
+    assert decision_index < cutoff_index < generated_index
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "config_version",
+    [
+        "us-price-baseline-v1",
+        "us-price-baseline-v2",
+        "us-price-baseline-v3",
+    ],
+)
+def test_stock_detail_exact_price_baselines_use_current_three_lane_framing(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    config_version: str,
+) -> None:
+    persisted_analysis.run.config_version = config_version
+    persisted_analysis.run.save(update_fields=["config_version"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    normalized = " ".join(content.split())
+    short_group = _method_group(content, "short-decision-title")
+    medium_group = _method_group(content, "medium-advisory-title")
+    long_group = _method_group(content, "long-advisory-title")
+
+    assert "Short decision — 1–10 trading days" in short_group
+    assert "Medium advisory — 6 months and 12 months" in medium_group
+    assert "Long advisory — 3 years and 5 years" in long_group
+    assert "Technical, liquidity, market, and risk evidence is the sole source" in short_group
+    assert "BUY/HOLD/AVOID and the displayed score" in short_group
+    assert f"<code>{config_version}</code>" in short_group
+    assert "Research-grade reconstruction" in short_group
+    normalized_short = " ".join(short_group.split())
+    assert "Selected-run issuance evidence: Research / non-observed." in normalized_short
+    assert (
+        "Observed universe membership alone does not establish observed/live-skill issuance."
+        in normalized_short
+    )
+    assert config_version not in medium_group
+    assert config_version not in long_group
+    assert "Conditional empirical cumulative split-adjusted price-return forecasts" in (
+        medium_group
+    )
+    assert "Reported-GAAP SEC fundamental and valuation forecasts" in long_group
+    assert "Legacy 6-12 month scenario" in medium_group
+    assert "Legacy 3+ year scenario" in long_group
+    assert "legacy-default-v1-title" not in content
+
+    assert (
+        "These methods answer different horizon-specific questions; they are not votes."
+        in normalized
+    )
+    assert "No consensus, blended score, or synthetic recommendation is calculated." in normalized
+    assert (
+        "Apparent disagreement remains visible in each method's own range or unavailable state."
+        in normalized
+    )
+    assert "Cumulative returns over different horizons are not directly comparable." in normalized
+
+    provenance = normalized.split("<h2>Provenance</h2>", maxsplit=1)[1].split(
+        "</section>",
+        maxsplit=1,
+    )[0]
+    assert f"<dt>Configuration</dt><dd>{config_version}</dd>" in provenance
+    decision_index = provenance.index("<dt>Decision date</dt>")
+    cutoff_index = provenance.index("<dt>Data cutoff</dt>")
+    generated_index = provenance.index("<dt>Generated</dt>")
+    assert decision_index < cutoff_index < generated_index
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("selected_config", "older_config", "selected_issued_on_time", "expected_status"),
+    [
+        (
+            "default-v1",
+            "us-price-baseline-v2",
+            True,
+            "Observed / on-time.",
+        ),
+        (
+            "us-price-baseline-v2",
+            "default-v1",
+            False,
+            "Research / non-observed.",
+        ),
+    ],
+)
+def test_stock_detail_framing_and_data_come_from_same_latest_selected_analysis(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    *,
+    selected_config: str,
+    older_config: str,
+    selected_issued_on_time: bool,
+    expected_status: str,
+) -> None:
+    older_run = persisted_analysis.run
+    older_run.config_version = older_config
+    older_run.issued_on_time = not selected_issued_on_time
+    older_run.save(update_fields=["config_version", "issued_on_time"])
+    observed_snapshot = UniverseSnapshot.objects.create(
+        universe=older_run.universe_snapshot.universe,
+        as_of_date=older_run.universe_snapshot.as_of_date,
+        grade=UniverseSnapshot.Grade.OBSERVED,
+        config_hash="d" * 64,
+    )
+    UniverseMembership.objects.create(
+        snapshot=observed_snapshot,
+        listing=persisted_analysis.listing,
+    )
+    selected_run = AnalysisRun.objects.create(
+        generated_at=older_run.generated_at + timedelta(minutes=1),
+        data_cutoff=older_run.data_cutoff,
+        target_date=older_run.target_date,
+        issued_on_time=selected_issued_on_time,
+        universe_snapshot=observed_snapshot,
+        config_version=selected_config,
+        config_hash="e" * 64,
+        code_revision="selected-revision",
+    )
+    selected_analysis = StockAnalysis.objects.create(
+        run=selected_run,
+        listing=persisted_analysis.listing,
+        current_price=Decimal("222.22"),
+        daily_change=Decimal("0.02"),
+        overall_score=Decimal("91.25"),
+        recommendation=Recommendation.HOLD,
+        risk_score=Decimal("44.00"),
+        risk_class=RiskClass.MEDIUM,
+        confidence=Decimal("73.00"),
+        confidence_status=persisted_analysis.confidence_status,
+        component_scores={"selected_component": 91},
+        forecast_scenarios={},
+        short_scenario={"bear": -0.07, "base": 0.17, "bull": 0.27},
+        medium_scenario={"bear": -0.22, "base": 0.32, "bull": 0.42},
+        long_scenario={"bear": -0.33, "base": 0.43, "bull": 0.93},
+        reasons=["Selected-analysis reason."],
+        risks=["Selected-analysis risk."],
+        data_quality={
+            "return_definition": "split_adjusted_price_return",
+            "source_assets": [
+                {
+                    "provider": "selected_provider",
+                    "kind": "price_history",
+                    "subject": "SELECTED",
+                    "available_at": "2026-09-01T00:00:00+00:00",
+                    "sha256": "f" * 64,
+                }
+            ],
+        },
+    )
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    assert response.context["analysis"].pk == selected_analysis.pk
+    content = response.content.decode()
+    if selected_config == "default-v1":
+        selected_group = _method_group(content, "legacy-default-v1-title")
+        assert 'aria-labelledby="short-decision-title"' not in content
+        assert "Medium advisory — 6 months and 12 months" not in content
+        assert "Long advisory — 3 years and 5 years" not in content
+    else:
+        selected_group = "".join(
+            (
+                _method_group(content, "short-decision-title"),
+                _method_group(content, "medium-advisory-title"),
+                _method_group(content, "long-advisory-title"),
+            )
+        )
+        assert 'aria-labelledby="legacy-default-v1-title"' not in content
+    normalized_group = " ".join(selected_group.split())
+    assert f"<code>{selected_config}</code>" in selected_group
+    assert "Universe-membership grade: Observed at run time." in normalized_group
+    assert f"Selected-run issuance evidence: {expected_status}" in normalized_group
+    other_status = (
+        "Research / non-observed."
+        if expected_status == "Observed / on-time."
+        else "Observed / on-time."
+    )
+    assert f"Selected-run issuance evidence: {other_status}" not in normalized_group
+    assert older_config not in selected_group
+    assert "Research-grade reconstruction" not in selected_group
+    assert "-7.0% / +17.0% / +27.0%" in selected_group
+    assert "-22.0% / +32.0% / +42.0%" in selected_group
+    assert "-33.0% / +43.0% / +93.0%" in selected_group
+    assert "-4.0% / +3.0% / +9.0%" not in selected_group
+    assert "-16.0% / +12.0% / +31.0%" not in selected_group
+    assert "-25.0% / +34.0% / +82.0%" not in selected_group
+    assert "222.22 USD" in selected_group
+    assert (
+        "Observed universe membership alone does not establish observed/live-skill issuance."
+        in normalized_group
+    )
+    assert "91.25/100" in content
+    assert "Selected-analysis reason." in content
+    assert "Selected-analysis risk." in content
+    assert "Selected Provider · Price history" in content
+    assert "SELECTED" in content
+    assert f"<dt>Configuration</dt><dd>{selected_config}</dd>" in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "config_version",
+    [
+        "default-v1-preview",
+        "us-price-baseline-v2-next",
+        "us-price-baseline-v4",
+        "unrecognized-policy",
+    ],
+)
+def test_stock_detail_unknown_or_near_config_inherits_no_method_framing(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    config_version: str,
+) -> None:
+    persisted_analysis.run.config_version = config_version
+    persisted_analysis.run.save(update_fields=["config_version"])
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+    }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            **_medium_v1_scenarios(),
+            "3y": {"bear": -0.30, "base": 0.40, "bull": 0.90},
+            "5y": {"bear": -0.35, "base": 0.55, "bull": 1.20},
+        },
+    }
+    persisted_analysis.save(update_fields=["data_quality", "forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert 'aria-labelledby="legacy-default-v1-title"' not in content
+    assert 'aria-labelledby="short-decision-title"' not in content
+    assert 'aria-labelledby="medium-advisory-title"' not in content
+    assert 'aria-labelledby="long-advisory-title"' not in content
+    assert "Legacy default-v1 decision method" not in content
+    assert "Short decision — 1–10 trading days" not in content
+    assert "Medium advisory — 6 months and 12 months" not in content
+    assert "Long advisory — 3 years and 5 years" not in content
+    assert "US price-only baseline." not in content
+    assert "No consensus, blended score, or synthetic recommendation" not in content
+    assert f"<dt>Configuration</dt><dd>{config_version}</dd>" in content
 
 
 @pytest.mark.django_db
@@ -371,7 +970,36 @@ def test_methodology_page_discloses_policy_and_uncertainty_boundaries(
     assert "not a calibrated prediction, credible, or confidence interval" in content
     assert "GAAP accrual proxy" in content
     assert "separate frozen horizon-specific fade and multiple-reversion paths" in content
+    assert "Only legacy V1-V3 use" in content
+    assert "us-sec-long-v4" in content
+    assert "reported-GAAP entity FCF" in content
+    assert "genuine-absence-only net-income fallback" in content
+    assert "exactly one diluted-share translation" in content
+    assert "V4 uses one coherent five-year path: 3y is year 3 and 5y is year 5" in content
+    assert "V4 confidence and positive-return probability are unavailable" in content
+    assert "no intangible-capitalization, ROIC/ROIIC, reinvestment, causal-return" in content
+    assert "research-only, unactivated, deterministic, and uncalibrated" in content
+    assert (
+        "These sources do not validate StanStock's constants, forecast accuracy, "
+        "alpha, or profitability" in content
+    )
     assert "not literature-standard, optimized, causal, or statistically calibrated" in content
+    assert (
+        "The exact <code>us-price-baseline-v1</code>, "
+        "<code>us-price-baseline-v2</code>, and "
+        "<code>us-price-baseline-v3</code> configurations use"
+    ) in content
+    assert "plus canonical <strong>Medium advisory" in content
+    assert "<strong>Long advisory — 3 years and 5 years</strong> methods" in content
+    assert "The exact <code>default-v1</code> configuration is a frozen legacy" in content
+    assert "Its displayed overall score is medium-weighted" in content
+    assert "BUY uses configured legacy short, medium, and long downside gates" in content
+    assert "persists legacy medium/long decision evidence" in content
+    assert "The canonical methods are not votes or blends" in content
+    assert "unequal-horizon cumulative returns are not directly comparable" in content
+    assert (
+        "Legacy <code>default-v1</code> evidence is not retrospectively canonical advisory evidence"
+    ) in content
     assert "YAML/config policy is bound by the stored configuration hash" in content
     assert "code-defined transforms are identified by the stored code_revision" in content
     assert "Scheduled observed production automatically binds an exact clean commit SHA" in content
@@ -496,6 +1124,8 @@ def test_under_10_band_blocks_promotion_and_separates_long_horizon_controls(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
     _create_prediction(
         persisted_analysis,
         horizon=Prediction.Horizon.THREE_YEAR,
@@ -921,6 +1551,8 @@ def test_missing_current_usd_price_band_fails_closed(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
     _create_prediction(
         persisted_analysis,
         horizon=Prediction.Horizon.THREE_YEAR,
@@ -1038,7 +1670,7 @@ def test_price_only_analysis_discloses_model_and_return_limits(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
-    persisted_analysis.run.config_version = "renamed-price-baseline-v2"
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
     persisted_analysis.run.save(update_fields=["config_version"])
     persisted_analysis.data_quality = {
         **persisted_analysis.data_quality,
@@ -1075,6 +1707,7 @@ def test_price_only_analysis_discloses_model_and_return_limits(
                     "market_volatility": 0.16,
                 },
                 "return_basis": "split_adjusted_price_return",
+                "training_evidence": _medium_v1_training_evidence(),
             },
             "12m": {
                 "bear": -0.18,
@@ -1101,6 +1734,7 @@ def test_price_only_analysis_discloses_model_and_return_limits(
                     "market_volatility": 0.16,
                 },
                 "return_basis": "split_adjusted_price_return",
+                "training_evidence": _medium_v1_training_evidence(),
             },
         },
     }
@@ -1118,7 +1752,7 @@ def test_price_only_analysis_discloses_model_and_return_limits(
     detail_content = detail.content.decode()
     assert "The recommendation remains short-horizon" in detail_content
     assert "Split-adjusted price return; dividends excluded." in detail_content
-    assert "Reconstructed training evidence." in detail_content
+    assert "Reconstructed training evidence." not in detail_content
     assert "6-month advisory forecast" in detail_content
     assert "12-month advisory forecast" in detail_content
     assert "Legacy 3+ year scenario" in detail_content
@@ -1128,6 +1762,690 @@ def test_price_only_analysis_discloses_model_and_return_limits(
     assert "4 non-overlapping cohorts" in detail_content
     assert "Relative momentum +7.0%" in detail_content
     assert "Split-adjusted price return · dividends excluded" in detail_content
+    short_group = _method_group(detail_content, "short-decision-title")
+    medium_group = _method_group(detail_content, "medium-advisory-title")
+    long_group = _method_group(detail_content, "long-advisory-title")
+    assert "<code>us-price-baseline-v2</code>" in short_group
+    assert "us-price-baseline-v2" not in medium_group
+    assert "us-price-baseline-v2" not in long_group
+    assert medium_group.count("us-price-medium-v1") == 2
+    assert "us-price-medium-v1" not in short_group
+    assert "us-price-medium-v1" not in long_group
+    assert "4 non-overlapping cohorts" in medium_group
+    assert "Probability withheld: effective cohorts 4/8" in medium_group
+    six_month_card = " ".join(_forecast_card(medium_group, "6-month advisory forecast").split())
+    twelve_month_card = " ".join(_forecast_card(medium_group, "12-month advisory forecast").split())
+    for card in (six_month_card, twelve_month_card):
+        assert "Training evidence grade: Research" in card
+        assert "Forecast confidence/status: Analog range only — probability withheld" in card
+        assert _MEDIUM_BIAS_DISCLOSURE in card
+    assert "Legacy 3+ year scenario" in long_group
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method_version", "expected_ranges"),
+    [
+        (
+            "us-price-medium-v1",
+            {
+                "6m": "-10.0% / +8.0% / +24.0%",
+                "12m": "-18.0% / +14.0% / +38.0%",
+            },
+        ),
+        (
+            "us-price-medium-v2",
+            {
+                "6m": "-10.0% / -10.0% / +20.0%",
+                "12m": "-20.0% / -20.0% / +40.0%",
+            },
+        ),
+    ],
+)
+def test_medium_cards_use_each_scenario_bias_on_an_observed_selected_run(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    method_version: str,
+    expected_ranges: dict[str, str],
+) -> None:
+    run = persisted_analysis.run
+    run.issued_on_time = True
+    run.config_version = "us-price-baseline-v2"
+    run.save(update_fields=["issued_on_time", "config_version"])
+    snapshot = run.universe_snapshot
+    snapshot.grade = UniverseSnapshot.Grade.OBSERVED
+    snapshot.save(update_fields=["grade"])
+    scenarios = (
+        _medium_v1_scenarios()
+        if method_version == "us-price-medium-v1"
+        else deepcopy(_medium_v2_scenarios())
+    )
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    short_group = " ".join(_method_group(content, "short-decision-title").split())
+    medium_group = _method_group(content, "medium-advisory-title")
+    normalized_medium_group = " ".join(medium_group.split())
+    assert "Selected-run issuance evidence: Observed / on-time." in short_group
+    assert normalized_medium_group.count(_MEDIUM_BIAS_DISCLOSURE) == 2
+    assert "Research-only · current-universe reconstruction with survivorship bias" not in content
+
+    cards = {
+        "6m": " ".join(_forecast_card(medium_group, "6-month advisory forecast").split()),
+        "12m": " ".join(_forecast_card(medium_group, "12-month advisory forecast").split()),
+    }
+    for horizon, other_horizon in (("6m", "12m"), ("12m", "6m")):
+        card = cards[horizon]
+        assert method_version in card
+        assert expected_ranges[horizon] in card
+        assert expected_ranges[other_horizon] not in card
+        assert "Training evidence grade: Research" in card
+        assert "Training evidence grade: Observed" not in card
+        assert _MEDIUM_BIAS_DISCLOSURE in card
+        if method_version == "us-price-medium-v2":
+            assert card.count("Research-only.") == 1
+        else:
+            assert "Research-only." not in card
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title", "other_title"),
+    [
+        ("6m", "6-month advisory forecast", "12-month advisory forecast"),
+        ("12m", "12-month advisory forecast", "6-month advisory forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bias_mutation",
+    ["missing", "false", "string_true", "integer_one"],
+)
+def test_medium_v1_bias_metadata_fails_closed_per_horizon(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+    other_title: str,
+    bias_mutation: str,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = _medium_v1_scenarios()
+    training_evidence = scenarios[horizon]["training_evidence"]
+    assert isinstance(training_evidence, dict)
+    if bias_mutation == "missing":
+        training_evidence.pop("current_universe_survivorship_bias")
+    elif bias_mutation == "false":
+        training_evidence["current_universe_survivorship_bias"] = False
+    elif bias_mutation == "string_true":
+        training_evidence["current_universe_survivorship_bias"] = "true"
+    else:
+        training_evidence["current_universe_survivorship_bias"] = 1
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    medium_group = _method_group(response.content.decode(), "medium-advisory-title")
+    target_card = " ".join(_forecast_card(medium_group, title).split())
+    other_card = " ".join(_forecast_card(medium_group, other_title).split())
+    assert "Training evidence grade: Research" in target_card
+    assert "Forecast confidence/status: Analog range only — probability withheld" in target_card
+    assert "Training evidence limitation: Unavailable / insufficient." in target_card
+    assert _MEDIUM_BIAS_DISCLOSURE not in target_card
+    assert "unbiased" not in target_card.lower()
+    assert "observed" not in target_card.lower()
+    assert _MEDIUM_BIAS_DISCLOSURE in other_card
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title", "other_title"),
+    [
+        ("6m", "6-month advisory forecast", "12-month advisory forecast"),
+        ("12m", "12-month advisory forecast", "6-month advisory forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bias_mutation",
+    ["missing", "false", "string_true"],
+)
+def test_medium_v2_bias_metadata_fails_closed_per_horizon(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+    other_title: str,
+    bias_mutation: str,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = deepcopy(_medium_v2_scenarios())
+    training_evidence = scenarios[horizon]["training_evidence"]
+    assert isinstance(training_evidence, dict)
+    if bias_mutation == "missing":
+        training_evidence.pop("current_universe_survivorship_bias")
+    elif bias_mutation == "false":
+        training_evidence["current_universe_survivorship_bias"] = False
+    elif bias_mutation == "string_true":
+        training_evidence["current_universe_survivorship_bias"] = "true"
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    medium_group = _method_group(response.content.decode(), "medium-advisory-title")
+    target_card = " ".join(_forecast_card(medium_group, title).split())
+    other_card = " ".join(_forecast_card(medium_group, other_title).split())
+    assert "<strong>Insufficient evidence</strong>" in target_card
+    assert "us-price-medium-v2" not in target_card
+    assert "Training evidence grade:" not in target_card
+    assert "Training evidence limitation:" not in target_card
+    assert "Research-only." not in target_card
+    assert _MEDIUM_BIAS_DISCLOSURE not in target_card
+    assert "unbiased" not in target_card.lower()
+    assert "observed" not in target_card.lower()
+    assert "us-price-medium-v2" in other_card
+    assert "Research-only." in other_card
+    assert _MEDIUM_BIAS_DISCLOSURE in other_card
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title", "other_title"),
+    [
+        ("6m", "6-month advisory forecast", "12-month advisory forecast"),
+        ("12m", "12-month advisory forecast", "6-month advisory forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    "boolean_field",
+    [
+        "dividends_included",
+        "current_universe_survivorship_bias",
+        "calibration_claim",
+        "significance_claim",
+        "profitability_claim",
+        "alpha_claim",
+    ],
+)
+@pytest.mark.parametrize(
+    "numeric_alias",
+    [
+        pytest.param(1, id="integer-one"),
+        pytest.param(1.0, id="float-one"),
+        pytest.param(0, id="integer-zero"),
+    ],
+)
+def test_medium_v2_boolean_fields_reject_numeric_aliases_per_horizon(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+    other_title: str,
+    boolean_field: str,
+    numeric_alias: int | float,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = deepcopy(_medium_v2_scenarios())
+    target = scenarios[horizon]
+    if boolean_field == "dividends_included":
+        target[boolean_field] = numeric_alias
+    else:
+        training_evidence = target["training_evidence"]
+        assert isinstance(training_evidence, dict)
+        training_evidence[boolean_field] = numeric_alias
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    medium_group = _method_group(response.content.decode(), "medium-advisory-title")
+    target_card = " ".join(_forecast_card(medium_group, title).split())
+    sibling_card = " ".join(_forecast_card(medium_group, other_title).split())
+    target_range = {
+        "6m": "-10.0% / -10.0% / +20.0%",
+        "12m": "-20.0% / -20.0% / +40.0%",
+    }[horizon]
+    sibling_range = {
+        "6-month advisory forecast": "-10.0% / -10.0% / +20.0%",
+        "12-month advisory forecast": "-20.0% / -20.0% / +40.0%",
+    }[other_title]
+
+    assert target_card.count("<strong>Insufficient evidence</strong>") == 1
+    assert target_range not in target_card
+    assert "us-price-medium-v2" not in target_card
+    assert "Training evidence grade:" not in target_card
+    assert "Forecast confidence/status:" not in target_card
+    assert "Training evidence limitation:" not in target_card
+    assert "non-overlapping cohort" not in target_card
+    assert "Relative momentum" not in target_card
+    assert "Base accuracy" not in target_card
+    assert "Probability skill" not in target_card
+    assert "Interval evidence" not in target_card
+    assert "Research-only." not in target_card
+
+    assert "<strong>Insufficient evidence</strong>" not in sibling_card
+    assert sibling_range in sibling_card
+    assert "us-price-medium-v2" in sibling_card
+    assert "Training evidence grade: Research" in sibling_card
+    assert _MEDIUM_BIAS_DISCLOSURE in sibling_card
+    assert "non-overlapping cohorts" in sibling_card
+    assert "Base accuracy" in sibling_card
+    assert "Probability skill" in sibling_card
+    assert "Interval evidence" in sibling_card
+    assert sibling_card.count("Research-only.") == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title", "sibling_title"),
+    [
+        ("6m", "6-month advisory forecast", "12-month advisory forecast"),
+        ("12m", "12-month advisory forecast", "6-month advisory forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    "counter_path",
+    [
+        pytest.param(("support", "raw_matches"), id="support"),
+        pytest.param(
+            ("predictive_distribution", "matched", "raw_observations"),
+            id="matched-component",
+        ),
+        pytest.param(
+            ("predictive_distribution", "unconditional", "effective_cohorts"),
+            id="unconditional-component",
+        ),
+        pytest.param(
+            ("probability_evidence", "calendar_span_days"),
+            id="probability-count",
+        ),
+        pytest.param(
+            ("probability_evidence", "minimum_effective_cohorts"),
+            id="probability-floor",
+        ),
+        pytest.param(
+            ("evidence", "base_accuracy", "test_origins"),
+            id="base-evidence",
+        ),
+        pytest.param(
+            ("evidence", "probability_skill", "test_predictions"),
+            id="probability-evidence",
+        ),
+        pytest.param(
+            ("evidence", "interval", "test_origins"),
+            id="interval-evidence",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "oversized_count",
+    [
+        pytest.param(sys.maxsize + 1, id="above-sys-maxsize"),
+        pytest.param(10**1000, id="overflow-scale"),
+    ],
+)
+def test_medium_v2_oversized_counters_fail_closed_per_horizon(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+    sibling_title: str,
+    counter_path: tuple[str, ...],
+    oversized_count: int,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = deepcopy(_medium_v2_scenarios())
+    target = scenarios[horizon]
+    _replace_nested_value(target, counter_path, oversized_count)
+
+    assert stanstock_tags.validated_medium_forecast_scenario(
+        target,
+        horizon,
+    ) == {"medium_v2_invalid": True}
+
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    medium_group = _method_group(response.content.decode(), "medium-advisory-title")
+    target_card = " ".join(_forecast_card(medium_group, title).split())
+    sibling_card = " ".join(_forecast_card(medium_group, sibling_title).split())
+    expected_ranges = {
+        "6-month advisory forecast": "-10.0% / -10.0% / +20.0%",
+        "12-month advisory forecast": "-20.0% / -20.0% / +40.0%",
+    }
+
+    assert target_card.count("<strong>Insufficient evidence</strong>") == 1
+    assert expected_ranges[title] not in target_card
+    for leaked_detail in (
+        "us-price-medium-v2",
+        "Training evidence grade:",
+        "Forecast confidence/status:",
+        "Training evidence limitation:",
+        "non-overlapping cohort",
+        "Relative momentum",
+        "Base accuracy",
+        "Probability skill",
+        "Interval evidence",
+        "Research-only.",
+    ):
+        assert leaked_detail not in target_card
+
+    assert "<strong>Insufficient evidence</strong>" not in sibling_card
+    assert expected_ranges[sibling_title] in sibling_card
+    assert "us-price-medium-v2" in sibling_card
+    assert "Training evidence grade: Research" in sibling_card
+    assert "Forecast confidence/status:" in sibling_card
+    assert "non-overlapping cohorts" in sibling_card
+    assert "Base accuracy" in sibling_card
+    assert "Probability skill" in sibling_card
+    assert "Interval evidence" in sibling_card
+    assert sibling_card.count("Research-only.") == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title"),
+    [
+        ("6m", "6-month advisory forecast"),
+        ("12m", "12-month advisory forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_training_grade",
+        "unrecognized_training_grade",
+        "missing_confidence_status",
+        "unrecognized_confidence_status",
+    ],
+)
+def test_medium_cards_do_not_infer_missing_or_unrecognized_provenance(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+    mutation: str,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = {
+        item: {
+            "bear": -0.1,
+            "base": 0.1,
+            "bull": 0.3,
+            "probability_positive": None,
+            "confidence": 50,
+            "confidence_status": "empirical_range_only",
+            "insufficiency_reason": "Probability withheld",
+            "method": "conditional_empirical_price",
+            "method_version": "us-price-medium-v1",
+            "return_basis": "split_adjusted_price_return",
+            "training_evidence": _medium_v1_training_evidence(),
+        }
+        for item in ("6m", "12m")
+    }
+    target = scenarios[horizon]
+    if mutation == "missing_training_grade":
+        target.pop("training_evidence")
+    elif mutation == "unrecognized_training_grade":
+        target["training_evidence"] = {
+            **_medium_v1_training_evidence(),
+            "grade": "claimed_observed",
+        }
+    elif mutation == "missing_confidence_status":
+        target.pop("confidence_status")
+    else:
+        target["confidence_status"] = "guaranteed_success"
+    persisted_analysis.data_quality = {
+        **persisted_analysis.data_quality,
+        "analysis_mode": "price_only_baseline",
+    }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["data_quality", "forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    medium_group = _method_group(content, "medium-advisory-title")
+    card = " ".join(_forecast_card(medium_group, title).split())
+    if "training" in mutation:
+        assert "Training evidence grade: Unavailable / insufficient" in card
+        assert "Forecast confidence/status: Analog range only — probability withheld" in card
+    else:
+        assert "Training evidence grade: Research" in card
+        assert "Forecast confidence/status: Unavailable / insufficient" in card
+    if mutation == "missing_training_grade":
+        assert "Training evidence limitation: Unavailable / insufficient." in card
+        assert _MEDIUM_BIAS_DISCLOSURE not in card
+    else:
+        assert _MEDIUM_BIAS_DISCLOSURE in card
+    assert "claimed_observed" not in card
+    assert "guaranteed_success" not in card
+    assert "Reconstructed training evidence." not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("horizon", "title"),
+    [
+        ("6m", "6-month advisory forecast"),
+        ("12m", "12-month advisory forecast"),
+    ],
+)
+def test_malformed_medium_v2_cards_suppress_success_shaped_details(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    horizon: str,
+    title: str,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    scenarios = {
+        item: {
+            "bear": -0.1,
+            "base": 0.1,
+            "bull": 0.3,
+            "probability_positive": None,
+            "confidence": 50,
+            "confidence_status": "empirical_range_only",
+            "insufficiency_reason": "Probability withheld",
+            "method": "conditional_empirical_price",
+            "method_version": "us-price-medium-v1",
+            "return_basis": "split_adjusted_price_return",
+            "training_evidence": _medium_v1_training_evidence(),
+        }
+        for item in ("6m", "12m")
+    }
+    scenarios[horizon] = {
+        "bear": -0.9,
+        "base": 0.8,
+        "bull": 4.2,
+        "method": "guaranteed_alpha",
+        "method_version": "us-price-medium-v2",
+        "confidence_status": "empirical_skill_supported",
+        "training_evidence": {"grade": "observed"},
+    }
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": scenarios,
+    }
+    persisted_analysis.save(update_fields=["forecast_scenarios"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    medium_group = _method_group(response.content.decode(), "medium-advisory-title")
+    card = " ".join(_forecast_card(medium_group, title).split())
+    assert "<strong>Insufficient evidence</strong>" in card
+    assert "us-price-medium-v2" not in card
+    assert "Guaranteed Alpha" not in card
+    assert "Training evidence grade:" not in card
+    assert "Forecast confidence/status:" not in card
+    assert "-90.0% / +80.0% / +420.0%" not in card
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("nonfinite_text", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize(
+    ("card_path", "heading_id", "title"),
+    [
+        (
+            "legacy-short",
+            "legacy-default-v1-title",
+            "Legacy short decision scenario — 1–10 trading days",
+        ),
+        (
+            "legacy-medium",
+            "legacy-default-v1-title",
+            "Legacy medium decision scenario — 6–12 months",
+        ),
+        (
+            "legacy-long",
+            "legacy-default-v1-title",
+            "Legacy long decision scenario — 3+ years",
+        ),
+        ("current-short", "short-decision-title", "Short scenario"),
+        ("medium-v1", "medium-advisory-title", "6-month advisory forecast"),
+        ("medium-v2", "medium-advisory-title", "6-month advisory forecast"),
+        ("current-long", "long-advisory-title", "3-year advisory forecast"),
+    ],
+)
+def test_stock_detail_scenario_cards_reject_persisted_nonfinite_strings(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    nonfinite_text: str,
+    card_path: str,
+    heading_id: str,
+    title: str,
+) -> None:
+    if card_path.startswith("legacy-"):
+        persisted_analysis.run.config_version = "default-v1"
+        persisted_analysis.run.save(update_fields=["config_version"])
+        scenario_field = {
+            "legacy-short": "short_scenario",
+            "legacy-medium": "medium_scenario",
+            "legacy-long": "long_scenario",
+        }[card_path]
+        scenario = deepcopy(getattr(persisted_analysis, scenario_field))
+        scenario["bear"] = nonfinite_text
+        setattr(persisted_analysis, scenario_field, scenario)
+        persisted_analysis.save(update_fields=[scenario_field])
+    else:
+        persisted_analysis.run.config_version = "us-price-baseline-v2"
+        if card_path == "current-short":
+            scenario = deepcopy(persisted_analysis.short_scenario)
+            scenario["bear"] = nonfinite_text
+            persisted_analysis.short_scenario = scenario
+            persisted_analysis.save(update_fields=["short_scenario"])
+        elif card_path in {"medium-v1", "medium-v2"}:
+            scenarios = (
+                _medium_v1_scenarios()
+                if card_path == "medium-v1"
+                else deepcopy(_medium_v2_scenarios())
+            )
+            scenarios["6m"]["bear"] = nonfinite_text
+            persisted_analysis.forecast_scenarios = {
+                "schema_version": 1,
+                "horizons": scenarios,
+            }
+            persisted_analysis.save(update_fields=["forecast_scenarios"])
+        else:
+            persisted_analysis.forecast_scenarios = {
+                "schema_version": 1,
+                "horizons": {
+                    "3y": {
+                        "bear": nonfinite_text,
+                        "base": 0.4,
+                        "bull": 0.9,
+                        "method_version": "us-sec-long-v1",
+                    },
+                    "5y": {
+                        "bear": -0.35,
+                        "base": 0.55,
+                        "bull": 1.2,
+                        "method_version": "us-sec-long-v1",
+                    },
+                },
+            }
+            persisted_analysis.save(update_fields=["forecast_scenarios"])
+        persisted_analysis.run.save(update_fields=["config_version"])
+
+    response = authenticated_client.get(
+        reverse("stock-detail", args=[persisted_analysis.listing_id])
+    )
+
+    assert response.status_code == 200
+    group = _method_group(response.content.decode(), heading_id)
+    card = " ".join(_forecast_card(group, title).split())
+    assert "<strong>Insufficient evidence</strong>" in card
+    assert "Unavailable /" not in card
+    assert (
+        re.search(
+            r"(?i)(?<![a-z])(?:nan|[+-]?(?:inf|infinity))(?![a-z])",
+            card,
+        )
+        is None
+    )
+    if card_path == "medium-v2":
+        assert "us-price-medium-v2" not in card
+        assert "Training evidence grade:" not in card
+        assert "Forecast confidence/status:" not in card
+        assert "non-overlapping cohort" not in card
+        assert "Base accuracy" not in card
+        assert "Probability skill" not in card
+        assert "Interval evidence" not in card
+        assert "Research-only." not in card
+        sibling = " ".join(_forecast_card(group, "12-month advisory forecast").split())
+        assert "-20.0% / -20.0% / +40.0%" in sibling
+        assert "us-price-medium-v2" in sibling
+        assert sibling.count("Research-only.") == 1
 
 
 @pytest.mark.django_db
@@ -1135,6 +2453,8 @@ def test_explicit_long_forecasts_render_method_support_and_annualized_values(
     authenticated_client,
     persisted_analysis: StockAnalysis,
 ) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
     horizons = {
         **persisted_analysis.forecast_scenarios.get("horizons", {}),
         "short": persisted_analysis.short_scenario,
@@ -1218,6 +2538,14 @@ def test_explicit_long_forecasts_render_method_support_and_annualized_values(
     assert "has no independent split-event verification" in detail_content
     assert "Split-adjusted price return · dividends excluded" in detail_content
     assert "Positive-return probability is unavailable" in detail_content
+    short_group = _method_group(detail_content, "short-decision-title")
+    medium_group = _method_group(detail_content, "medium-advisory-title")
+    long_group = _method_group(detail_content, "long-advisory-title")
+    assert long_group.count("us-sec-long-v1") == 2
+    assert "us-sec-long-v1" not in short_group
+    assert "us-sec-long-v1" not in medium_group
+    assert "Observed evidence" in long_group
+    assert "3 SEC peers" in long_group
 
 
 @pytest.mark.django_db
@@ -1230,6 +2558,8 @@ def test_v2_withheld_forecast_renders_assessed_split_basis_not_verified(
     the assessed/unverified wording and must never render the verified-basis
     wording reserved for a metric that actually passed continuity.
     """
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
     horizons = {
         **persisted_analysis.forecast_scenarios.get("horizons", {}),
         "short": persisted_analysis.short_scenario,
@@ -4329,6 +5659,9 @@ def test_under_ten_liquidity_panel_denies_the_proof_claim_for_incompatible_prese
 
 _STANSTOCK_CSS_PATH = Path(__file__).resolve().parent.parent / "static" / "css" / "stanstock.css"
 _LONG_UNBROKEN_REASON = "x" * 1000
+_LONG_FORECAST_METHOD = "Method" + "m" * 1000
+_LONG_FORECAST_STATUS = "Status" + "s" * 1000
+_LONG_FORECAST_INSUFFICIENCY = "Insufficiency" + "i" * 1000
 
 
 def _chromium_available() -> bool:
@@ -4360,6 +5693,34 @@ def _viewport_overflow(html: str, *, viewport_width: int) -> tuple[int, int]:
     return scroll_width, client_width
 
 
+def _forecast_card_layout(
+    html: str,
+    *,
+    viewport_width: int,
+    card_titles: tuple[str, ...],
+) -> tuple[int, int, dict[str, tuple[str, int, int]]]:
+    """Return document widths and rendered text/widths for named forecast cards."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": viewport_width, "height": 900})
+            page.set_content(html)
+            page.add_style_tag(path=str(_STANSTOCK_CSS_PATH))
+            scroll_width = page.evaluate("document.documentElement.scrollWidth")
+            client_width = page.evaluate("document.documentElement.clientWidth")
+            cards: dict[str, tuple[str, int, int]] = {}
+            for title in card_titles:
+                card = page.locator(".forecast-grid article").filter(has_text=title)
+                assert card.count() == 1
+                widths = card.evaluate("(element) => [element.scrollWidth, element.clientWidth]")
+                cards[title] = (card.inner_text(), int(widths[0]), int(widths[1]))
+        finally:
+            browser.close()
+    return scroll_width, client_width, cards
+
+
 def test_under10_panel_css_rule_exists_and_contains_overflow_wrap() -> None:
     """Applied CSS contract, checked unconditionally (no browser required)."""
     css = _STANSTOCK_CSS_PATH.read_text()
@@ -4368,6 +5729,83 @@ def test_under10_panel_css_rule_exists_and_contains_overflow_wrap() -> None:
     rule_end = css.index("}", rule_start)
     rule_body = css[rule_start:rule_end]
     assert "overflow-wrap: anywhere" in rule_body
+
+
+def test_forecast_card_css_rule_exists_and_contains_overflow_wrap() -> None:
+    css = _STANSTOCK_CSS_PATH.read_text()
+    selector = ".forecast-grid article"
+    assert selector in css
+    rule_start = css.index(selector)
+    rule_end = css.index("}", rule_start)
+    assert "overflow-wrap: anywhere" in css[rule_start:rule_end]
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium is not installed")
+@pytest.mark.parametrize("viewport_width", [320, 375, 768, 1280])
+def test_stock_detail_forecast_cards_wrap_complete_unbroken_persisted_text(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+    viewport_width: int,
+) -> None:
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
+    short_scenario = deepcopy(persisted_analysis.short_scenario)
+    short_scenario["method"] = _LONG_FORECAST_METHOD
+    medium_scenarios = _medium_v1_scenarios()
+    medium_scenarios["6m"]["insufficiency_reason"] = _LONG_FORECAST_INSUFFICIENCY
+    persisted_analysis.short_scenario = short_scenario
+    persisted_analysis.forecast_scenarios = {
+        "schema_version": 1,
+        "horizons": {
+            **medium_scenarios,
+            "3y": {
+                "bear": -0.3,
+                "base": 0.4,
+                "bull": 0.9,
+                "method_version": "us-sec-long-v1",
+                "evidence_grade": _LONG_FORECAST_STATUS,
+                "support": {
+                    "peer_count": 3,
+                    "sic_fallback_level": "2-digit",
+                },
+            },
+            "5y": {
+                "bear": -0.35,
+                "base": 0.55,
+                "bull": 1.2,
+                "method_version": "us-sec-long-v1",
+            },
+        },
+    }
+    persisted_analysis.save(update_fields=["short_scenario", "forecast_scenarios"])
+
+    detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
+
+    assert detail.status_code == 200
+    html = detail.content.decode()
+    for persisted_text in (
+        _LONG_FORECAST_METHOD,
+        _LONG_FORECAST_STATUS,
+        _LONG_FORECAST_INSUFFICIENCY,
+    ):
+        assert persisted_text in html
+
+    expected_text_by_card = {
+        "Short scenario": _LONG_FORECAST_METHOD,
+        "6-month advisory forecast": _LONG_FORECAST_INSUFFICIENCY,
+        "3-year advisory forecast": _LONG_FORECAST_STATUS,
+    }
+    scroll_width, client_width, cards = _forecast_card_layout(
+        html,
+        viewport_width=viewport_width,
+        card_titles=tuple(expected_text_by_card),
+    )
+    assert scroll_width <= client_width
+    for title, persisted_text in expected_text_by_card.items():
+        card_text, card_scroll_width, card_client_width = cards[title]
+        assert persisted_text in card_text
+        assert card_scroll_width <= card_client_width
 
 
 @pytest.mark.django_db
@@ -4403,11 +5841,19 @@ def test_under_ten_panel_ordinary_valid_payload_never_overflows(
     viewport_width: int,
 ) -> None:
     """Baseline: the CSS containment fix must not disturb an ordinary rendered panel."""
+    persisted_analysis.run.config_version = "us-price-baseline-v2"
+    persisted_analysis.run.save(update_fields=["config_version"])
     _make_under_ten(persisted_analysis, assessment=_shadow_payload())
 
     detail = authenticated_client.get(reverse("stock-detail", args=[persisted_analysis.listing_id]))
     assert detail.status_code == 200
     html = detail.content.decode()
+    for heading in (
+        "Short decision — 1–10 trading days",
+        "Medium advisory — 6 months and 12 months",
+        "Long advisory — 3 years and 5 years",
+    ):
+        assert heading in html
 
     scroll_width, client_width = _viewport_overflow(html, viewport_width=viewport_width)
     assert scroll_width <= client_width

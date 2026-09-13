@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Iterable, Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -37,15 +38,26 @@ DISPLAY_LABELS = {
 }
 
 
+def _display_decimal(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _format_percentage(number: Decimal, digits: int) -> str:
+    return f"{number * Decimal(100):+.{digits}f}%"
+
+
 @register.filter
 def percentage(value: object, digits: int = 1) -> str:
-    if value is None or value == "":
+    number = _display_decimal(value)
+    if number is None:
         return "Unavailable"
-    try:
-        number = Decimal(str(value)) * Decimal(100)
-    except (InvalidOperation, ValueError):
-        return "Unavailable"
-    return f"{number:+.{digits}f}%"
+    return _format_percentage(number, digits)
 
 
 @register.filter
@@ -95,12 +107,12 @@ def label_list(value: object, separator: str = ", ") -> str:
 def scenario_range(value: object) -> str:
     if not isinstance(value, Mapping):
         return "Insufficient evidence"
-    bear = _first(value, "bear", "bear_return")
-    base = _first(value, "base", "base_return")
-    bull = _first(value, "bull", "bull_return")
-    if bear is None or base is None or bull is None:
+    values = tuple(
+        _display_decimal(_first(value, key, f"{key}_return")) for key in ("bear", "base", "bull")
+    )
+    if any(item is None for item in values):
         return "Insufficient evidence"
-    return f"{percentage(bear)} / {percentage(base)} / {percentage(bull)}"
+    return " / ".join(_format_percentage(cast(Decimal, item), 1) for item in values)
 
 
 @register.filter
@@ -112,7 +124,7 @@ def validated_medium_forecast_scenario(value: object, horizon: object = None) ->
         return value
     try:
         _validate_medium_v2_scenario(value, horizon=str(horizon))
-    except (InvalidOperation, TypeError, ValueError):
+    except (InvalidOperation, OverflowError, TypeError, ValueError):
         return {"medium_v2_invalid": True}
     return value
 
@@ -408,18 +420,26 @@ def _validate_medium_v2_scenario(
             "alpha_claim",
         },
     )
-    if training != {
-        "grade": "research",
-        "current_universe_survivorship_bias": True,
-        "label_policy": "training_label_end_date_lte_origin",
-        "test_policy": "test_outcome_never_enters_its_origin_training_or_gates",
-        "cohort_policy": "fixed_epoch_non_overlapping",
-        "aggregation_policy": "date_equal_listing_equal_within_origin",
-        "calibration_claim": False,
-        "significance_claim": False,
-        "profitability_claim": False,
-        "alpha_claim": False,
-    }:
+    if (
+        training
+        != {
+            "grade": "research",
+            "current_universe_survivorship_bias": True,
+            "label_policy": "training_label_end_date_lte_origin",
+            "test_policy": "test_outcome_never_enters_its_origin_training_or_gates",
+            "cohort_policy": "fixed_epoch_non_overlapping",
+            "aggregation_policy": "date_equal_listing_equal_within_origin",
+            "calibration_claim": False,
+            "significance_claim": False,
+            "profitability_claim": False,
+            "alpha_claim": False,
+        }
+        or training["current_universe_survivorship_bias"] is not True
+        or training["calibration_claim"] is not False
+        or training["significance_claim"] is not False
+        or training["profitability_claim"] is not False
+        or training["alpha_claim"] is not False
+    ):
         raise ValueError
     _validate_medium_v2_scenario_state(
         horizon=horizon,
@@ -1053,7 +1073,7 @@ def _exact_mapping(
 
 
 def _nonnegative_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+    return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= sys.maxsize
 
 
 def _finite_number(value: object) -> bool:
