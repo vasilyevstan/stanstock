@@ -56,6 +56,9 @@ class Command(BaseCommand):
         config_path = options["config"]
         if not isinstance(config_path, Path):
             raise CommandError("--config must be a filesystem path")
+        if settings.RESEARCH_PRODUCT_ENABLED:
+            self._handle_research_product(config_path)
+            return
         decision_time = timezone.now()
         try:
             _validate_runtime_timezone()
@@ -198,6 +201,24 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"scheduled_refresh job_run={parent.pk} status={parent.status} "
                 f"target_date={prepared.target_date.isoformat()} details={parent.details!r}"
+            )
+        )
+
+    def _handle_research_product(self, config_path: Path) -> None:
+        from stanstock.core.research_product_refresh import (
+            execute_scheduled_research_refresh,
+        )
+
+        try:
+            result = execute_scheduled_research_refresh(core_config_path=config_path)
+        except EXPECTED_STAGE_ERRORS as exc:
+            raise CommandError(f"Scheduled research refresh failed ({type(exc).__name__})") from exc
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"scheduled_refresh profile=research_product_v1 "
+                f"status={result.parent.status} "
+                f"target_date={result.target_date.isoformat()} "
+                f"analyses={result.analysis_count} predictions={result.prediction_count}"
             )
         )
 
