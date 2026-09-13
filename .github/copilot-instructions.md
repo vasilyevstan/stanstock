@@ -140,8 +140,18 @@ Every task begins by reading, in order:
 
 ## Pull requests
 
-Use `.github/pull_request_template.md`. Every PR records base/head evidence,
-data/methodology impact, security/operations impact, and which agents in the
-chain reviewed it. Only the orchestrator (human, or an explicitly designated
-orchestrator role) performs git actions (stage, commit, push, open/merge a
-PR, dispatch a workflow); reusable agents defined under `agents/` never do.
+Use specific, outcome-focused commit subjects and pull-request titles. Avoid
+vague labels such as "updates", "changes", or "fixes".
+
+Use `.github/pull_request_template.md` and complete every applicable section
+with enough detail to explain what changed, why it was needed, and how it
+works. Every PR records exact base/head and validation evidence,
+data/methodology and compatibility impact, security/operations impact,
+risks/rollback, and the exact agent-chain results. Use
+`N/A: <factual reason>` instead of deleting an inapplicable field. Keep the
+description current as findings are resolved, and correct stale hashes,
+contract revisions, CI results, and review statuses before merge.
+
+Only the orchestrator (human, or an explicitly designated orchestrator role)
+performs git actions (stage, commit, push, open/merge a PR, dispatch a
+workflow); reusable agents defined under `agents/` never do.
