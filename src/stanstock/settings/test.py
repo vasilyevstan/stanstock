@@ -23,3 +23,5 @@ STORAGES = {
 }
 DATA_DIR = BASE_DIR / "var" / "test-data"  # noqa: F405
 DEMO_MODE = True
+# Legacy regression fixtures retain their archived profile; product tests enable it explicitly.
+RESEARCH_PRODUCT_ENABLED = False

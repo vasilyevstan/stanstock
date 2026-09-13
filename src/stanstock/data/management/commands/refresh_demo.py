@@ -1,5 +1,13 @@
 """SYNTHETIC-ONLY bounded vertical-flow demo command.
 
+The enabled research-product profile uses fixed synthetic US/USD histories
+through the shared source, calculation and five-prediction writer. It includes
+positive/negative momentum, an Under-$10 example and a precise history
+shortfall. It never reads or changes a real owner's saved preferences.
+
+The following seed_demo flow is retained only for the explicitly disabled
+research-product (archived) profile.
+
 Runs the "seed -> analyze" flow against nothing but deterministic synthetic
 demo data: (1) unconditionally calls the idempotent ``seed_demo`` command
 (cheap: it is itself a no-op for anything already seeded), (2) resolves the
@@ -57,6 +65,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
@@ -79,11 +88,9 @@ PROVIDER = "synthetic_demo"
 
 class Command(BaseCommand):
     help = (
-        "SYNTHETIC-ONLY demo vertical flow: seed_demo -> resolve the "
-        "research-grade synthetic universe snapshot -> validate target_date "
-        "against its observed synthetic history -> analyze_snapshot "
-        "(provider=synthetic_demo, benchmark=ZZBENCH01). Never calls any "
-        "live provider."
+        "SYNTHETIC-ONLY research-product demo: real source qualification, momentum, "
+        "four price projections and verified immutable output. The explicit archived "
+        "profile retains seed_demo. Never calls a live provider."
     )
 
     def add_arguments(self, parser: Any) -> None:
@@ -92,13 +99,28 @@ class Command(BaseCommand):
             help=(
                 "Logical market date to persist on the run/predictions and "
                 "to key the target-job idempotency check on (YYYY-MM-DD); "
-                "defaults to the synthetic snapshot's as_of_date. Must be an "
-                "observed session in the synthetic benchmark's price history "
-                "and no later than the snapshot's as_of_date."
+                "defaults to the fixed synthetic target. Must be a generated "
+                "session no later than the synthetic history; the active product "
+                "requires a 757-close history ending at the target."
             ),
         )
 
     def handle(self, *args: object, **options: object) -> None:
+        if settings.RESEARCH_PRODUCT_ENABLED:
+            from stanstock.data.research_product_demo import END_DATE, execute_demo_product_refresh
+
+            target = _parse_target_date(options.get("target_date")) or END_DATE
+            try:
+                job = execute_demo_product_refresh(target_date=target)
+            except (OSError, ValueError) as exc:
+                raise CommandError("Synthetic research refresh failed") from exc
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"synthetic_demo research-product-v1 status={job.status} "
+                    f"target_date={target.isoformat()} evidence_grade=research"
+                )
+            )
+            return
         call_command("seed_demo")
         benchmark_config = load_yaml_mapping(default_benchmark_config_path())
         benchmark_subject = str(benchmark_config["benchmark_subject"])
