@@ -91,8 +91,10 @@ from stanstock.research.long_forecasts_v4 import (
     validate_long_v4_forecast_pair,
 )
 from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
+from stanstock.research.opportunities import assess_opportunity
 from stanstock.research.outcomes import evaluate_prediction, resolve_outcome
 from stanstock.research.service import analyze_snapshot
+from stanstock.simulation.builders import build_signals_for_backtest
 
 TARGET_DATE = date(2026, 2, 27)
 DECISION_TIME = datetime(2026, 3, 1, 12, tzinfo=UTC)
@@ -4781,6 +4783,46 @@ def test_v4_end_to_end_persists_pair_and_renders_research_only_language(
     assert "Diluted-share basis:" in detail_text
     assert "Unverified;" in detail_text
     assert "assessed through" in detail_text
+    for heading_id in (
+        "short-decision-title",
+        "medium-advisory-title",
+        "long-advisory-title",
+    ):
+        assert detail_text.count(f'aria-labelledby="{heading_id}"') == 1
+        assert detail_text.count(f'id="{heading_id}"') == 1
+    short_group = _element_containing(
+        detail_text,
+        "section",
+        "Short decision — 1–10 trading days",
+    )
+    medium_group = _element_containing(
+        detail_text,
+        "section",
+        "Medium advisory — 6 months and 12 months",
+    )
+    long_group = _element_containing(
+        detail_text,
+        "section",
+        "Long advisory — 3 years and 5 years",
+    )
+    assert target.analysis.run.config_version in short_group
+    assert target.analysis.run.universe_snapshot.get_grade_display() in short_group
+    normalized_short_group = " ".join(short_group.split())
+    assert "Selected-run issuance evidence: Research / non-observed." in (normalized_short_group)
+    assert (
+        "Observed universe membership alone does not establish observed/live-skill issuance."
+        in normalized_short_group
+    )
+    assert "us-sec-long-v4" not in short_group
+    assert "us-sec-long-v4" not in medium_group
+    three_year_card = _element_containing(long_group, "article", "3-year advisory forecast")
+    five_year_card = _element_containing(long_group, "article", "5-year advisory forecast")
+    assert "us-sec-long-v4" in three_year_card
+    assert "us-sec-long-v4" in five_year_card
+    assert "Research evidence" in long_group
+    assert "One coherent five-year path; this 3-year view is year 3." in long_group
+    assert "One coherent five-year path; this 5-year view is year 5." in long_group
+    assert re.search(r"Confidence:\s*[+-]?\d", long_group) is None
     assert "Research-only / unactivated" in ledger_text
     assert "Diluted-share basis:" in ledger_text
     assert "assessed through" in ledger_text
@@ -4910,6 +4952,68 @@ def test_v4_end_to_end_persists_pair_and_renders_research_only_language(
     assert "Research-only / unactivated." not in blocked_card
     assert "Confidence: 0%" not in negative_status.content.decode()
     assert "Confidence: 0%" not in opportunity_html
+
+    short_decision_before = (
+        valid.recommendation,
+        valid.overall_score,
+        valid.risk_score,
+        valid.risk_class,
+        valid.confidence,
+        deepcopy(valid.short_forecast_scenario),
+        deepcopy(valid.reasons),
+        deepcopy(valid.risks),
+    )
+    opportunity_before = assess_opportunity(valid, price_band=None)
+    signals_before = build_signals_for_backtest(
+        snapshot=snapshot,
+        start_date=TARGET_DATE,
+        end_date=TARGET_DATE,
+    )
+    decision_ids_before = set(
+        Prediction.objects.filter(
+            analysis=valid,
+            evidence_role=Prediction.EvidenceRole.DECISION,
+        ).values_list("id", flat=True)
+    )
+    advisory_document = deepcopy(valid.forecast_scenarios)
+    for horizon, values in {
+        "3y": (-0.99, -0.75, -0.50),
+        "5y": (2.00, 3.00, 4.00),
+    }.items():
+        advisory_document["horizons"][horizon]["bear"] = values[0]
+        advisory_document["horizons"][horizon]["base"] = values[1]
+        advisory_document["horizons"][horizon]["bull"] = values[2]
+    StockAnalysis.objects.filter(pk=valid.pk).update(
+        forecast_scenarios=advisory_document,
+    )
+    valid.refresh_from_db()
+    signals_after = build_signals_for_backtest(
+        snapshot=snapshot,
+        start_date=TARGET_DATE,
+        end_date=TARGET_DATE,
+    )
+
+    assert (
+        valid.recommendation,
+        valid.overall_score,
+        valid.risk_score,
+        valid.risk_class,
+        valid.confidence,
+        valid.short_forecast_scenario,
+        valid.reasons,
+        valid.risks,
+    ) == short_decision_before
+    assert assess_opportunity(valid, price_band=None) == opportunity_before
+    assert signals_after.equals(signals_before)
+    assert (
+        set(
+            Prediction.objects.filter(
+                analysis=valid,
+                evidence_role=Prediction.EvidenceRole.DECISION,
+            ).values_list("id", flat=True)
+        )
+        == decision_ids_before
+    )
 
 
 @pytest.mark.django_db
@@ -5836,9 +5940,17 @@ def test_v4_applicable_withholding_renders_incompatible_assessment(
     client.force_login(user)
     detail = client.get(reverse("stock-detail", kwargs={"listing_id": target.pk}))
     ledger = client.get(reverse("predictions"))
-    assert "Diluted-share basis:" in detail.content.decode()
-    assert "Incompatible / unverified" in detail.content.decode()
-    assert "assessed through" in detail.content.decode()
+    detail_text = detail.content.decode()
+    assert "Diluted-share basis:" in detail_text
+    assert "Incompatible / unverified" in detail_text
+    assert "assessed through" in detail_text
+    long_group = _element_containing(
+        detail_text,
+        "section",
+        "Long advisory — 3 years and 5 years",
+    )
+    assert "Confidence: Not estimated / unavailable" in long_group
+    assert re.search(r"Confidence:\s*[+-]?\d", long_group) is None
     assert "Incompatible / unverified" in ledger.content.decode()
     assert "0%" not in _v4_ledger_rows(ledger.content.decode())
 

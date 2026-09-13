@@ -16,6 +16,12 @@
   </section>
   <div class="detail-grid">
     <section class="panel">
+      <h2>Version-qualified horizon methods</h2>
+      <p>The exact <code>us-price-baseline-v1</code>, <code>us-price-baseline-v2</code>, and <code>us-price-baseline-v3</code> configurations use a <strong>Short decision — 1–10 trading days</strong> method as the sole source of BUY/HOLD/AVOID and the displayed score, plus canonical <strong>Medium advisory — 6 months and 12 months</strong> and <strong>Long advisory — 3 years and 5 years</strong> methods.</p>
+      <p>The exact <code>default-v1</code> configuration is a frozen legacy decision method. Its displayed overall score is medium-weighted; quality, growth, valuation, momentum/technical, risk/liquidity, and market/sector evidence can contribute. BUY uses configured legacy short, medium, and long downside gates, and the run persists legacy medium/long decision evidence.</p>
+      <p>The canonical methods are not votes or blends, and unequal-horizon cumulative returns are not directly comparable. Legacy <code>default-v1</code> evidence is not retrospectively canonical advisory evidence.</p>
+    </section>
+    <section class="panel">
       <h2>Point in time</h2>
       <p>Every live result is limited to assets retrieved and available by its decision time. Later restatements and adjusted histories cannot rewrite past inputs.</p>
     </section>
@@ -43,12 +49,15 @@
     </section>
     <section class="panel">
       <h2>Long horizons</h2>
-      <p>The bounded tax input is a GAAP accrual proxy: TTM income-tax expense divided by TTM pretax income, not cash taxes paid or a cash tax rate. Reinvestment is compatible balance-sheet invested-capital change divided by NOPAT, an accounting proxy rather than observed capex or a proven causal rate.</p>
-      <p>Three- and five-year cases use separate frozen horizon-specific fade and multiple-reversion paths; neither is a slice or extrapolation of one shared five-year path.</p>
+      <p>Legacy long V1-V3 use a bounded tax input that is a GAAP accrual proxy: TTM income-tax expense divided by TTM pretax income, not cash taxes paid or a cash tax rate. Their reinvestment input is compatible balance-sheet invested-capital change divided by NOPAT, an accounting proxy rather than observed capex or a proven causal rate.</p>
+      <p>Only legacy V1-V3 use separate frozen horizon-specific fade and multiple-reversion paths; their three- and five-year cases are not slices or extrapolations of one shared five-year path.</p>
+      <p><code>us-sec-long-v4</code> is a separate research-only, unactivated, deterministic, and uncalibrated method. It uses reported-GAAP entity FCF, permits a genuine-absence-only net-income fallback, and then applies exactly one diluted-share translation. V4 uses one coherent five-year path: 3y is year 3 and 5y is year 5.</p>
+      <p>V4 confidence and positive-return probability are unavailable. It makes no intangible-capitalization, ROIC/ROIIC, reinvestment, causal-return, or return-on-new-capital claim.</p>
     </section>
     <section class="panel">
       <h2>Principles and fixed policy</h2>
       <p>Broad research principles include momentum/trend, explicit risk, base rates and shrinkage, sustainable-growth accounting, valuation mean reversion, and point-in-time evaluation. Wilder (1978), Jegadeesh and Titman (1993), Moskowitz, Ooi, and Pedersen (2012), Sharpe (1964), and Amihud (2002) provide broad context—not validation of StanStock's formulas or profitability. Exact lookbacks, maps, RSI transform, weights, buckets, caps, support/confidence formulas, fallbacks, thresholds, and gates are StanStock policy—not literature-standard, optimized, causal, or statistically calibrated constants, and they are not guaranteed. Dollar volume is not the Amihud measure.</p>
+      <p>For V4, Damodaran and Nissim-Penman provide valuation and accounting context; Fama-French and Bhojraj-Lee/Bhojraj-Lee-Oler cover industry and peer classification; Vorst-Yohn covers forecast-input interpretation; FASB Statement 2 / ASC 730 and ASC 260 define relevant reported accounting; Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang motivate the intangible-capital nonclaim; and Lo-MacKinlay supplies a data-snooping caution. These sources do not validate StanStock's constants, forecast accuracy, alpha, or profitability.</p>
     </section>
     <section class="panel">
       <h2>Limitations</h2>
