@@ -562,6 +562,20 @@ def _validate_my_list_reference(reference: StockReference) -> None:
     }
     if reference.mic_code not in supported_mics[reference.exchange]:
         raise ValueError("Catalog identity has an unsupported exchange MIC")
+    installed_plan = _installed_provider_plan_for_my_list()
+    if not provider_plan_allows(installed_plan, reference.access_plan):
+        raise ValueError("Installed Twelve Data plan does not authorize this catalog identity")
+
+
+def _installed_provider_plan_for_my_list() -> str:
+    recorded = (
+        ProviderRecord.objects.filter(provider=PROVIDER)
+        .values_list("metadata__plan", flat=True)
+        .first()
+    )
+    if isinstance(recorded, str) and recorded.strip():
+        return recorded
+    raise ValueError("Installed Twelve Data plan is unavailable")
 
 
 def _ensure_my_list_listing(

@@ -57,6 +57,7 @@ def _reference(
     *,
     mic_code: str = "XNAS",
     instrument_type: str = "Common Stock",
+    access_plan: str | None = "Basic",
 ) -> StockReference:
     return StockReference(
         symbol=symbol,
@@ -66,7 +67,7 @@ def _reference(
         mic_code=mic_code,
         country="United States",
         instrument_type=instrument_type,
-        access_plan="Basic",
+        access_plan=access_plan,
     )
 
 
@@ -334,6 +335,7 @@ def test_local_listing_identity_conflict_fails_closed_without_fetch(
     tmp_path: Path,
 ) -> None:
     _owner()
+    _enable_provider()
     _listing("CONFLICT", mic_code="XNYS")
 
     def forbidden(*args: object, **kwargs: object) -> object:
@@ -356,6 +358,86 @@ def test_local_listing_identity_conflict_fails_closed_without_fetch(
     assert result.credits_used == 0
     assert "conflicts with verified catalog identity" in result.symbols[0].reason
     assert str(tmp_path) not in result.symbols[0].reason
+
+
+def test_required_catalog_plan_is_enforced_before_fetch_or_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _owner()
+    _enable_provider()
+    fetch_calls: list[str] = []
+
+    def fetch(symbol: str, **kwargs: object) -> PriceSeries:
+        fetch_calls.append(symbol)
+        return _series(symbol)
+
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_daily_price_series", fetch)
+
+    result = refresh_my_list_price_evidence(
+        symbols=("DENY",),
+        catalog_references={"DENY": _reference("DENY", access_plan="Ultra")},
+        target_date=TARGET_DATE,
+        decision_time=DECISION_TIME,
+        api_key="private-test-key",
+        store=AssetStore(tmp_path),
+        enforce_rate_limit=False,
+    )
+
+    assert result.status == "partial_failed"
+    assert result.failed == 1
+    assert result.fetched == 0
+    assert result.credits_used == 0
+    assert fetch_calls == []
+    assert DataAsset.objects.count() == 0
+    assert LatestMarketData.objects.count() == 0
+    assert not Listing.objects.filter(provider_symbol="DENY").exists()
+    assert "does not authorize" in result.symbols[0].reason
+    assert str(tmp_path) not in result.symbols[0].reason
+
+
+def test_authorized_catalog_plan_allows_existing_reuse_without_enabled_provider_or_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _owner()
+    listing = _listing("ALLOW")
+    _persist_price_series(
+        store=AssetStore(tmp_path),
+        series=_series("ALLOW"),
+        listing=listing,
+    )
+    ProviderRecord.objects.create(
+        provider="twelve_data",
+        enabled=False,
+        metadata={"plan": "grow"},
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        pytest.fail("authorized reuse must not touch credentials, quota, or provider fetch")
+
+    monkeypatch.setattr("stanstock.data.live_us.ProviderCreditBudget.preflight", forbidden)
+    monkeypatch.setattr("stanstock.data.live_us.ProviderCreditBudget.consume", forbidden)
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.resolve_api_key", forbidden)
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_daily_price_series", forbidden)
+
+    result = refresh_my_list_price_evidence(
+        symbols=("ALLOW",),
+        catalog_references={"ALLOW": _reference("ALLOW", access_plan="Basic")},
+        target_date=TARGET_DATE,
+        decision_time=DECISION_TIME,
+        api_key=None,
+        store=AssetStore(tmp_path),
+        enforce_rate_limit=False,
+    )
+
+    assert result.status == "success"
+    assert result.reused == 1
+    assert result.fetched == 0
+    assert result.failed == 0
+    assert result.credits_used == 0
+    assert DataAsset.objects.count() == 2
+    assert LatestMarketData.objects.count() == 1
 
 
 @pytest.mark.parametrize("instrument_type", ["ADR", "American Depositary Receipt"])
