@@ -50,6 +50,10 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Dependency diagnostics are command output too.** A count-only summary
+  does not protect private symbols when HTTP-client logs contain request URLs.
+  Privacy regressions must cover logging as well as stdout while preserving
+  explicit failure reporting.
 - **Range availability and probability support are separate facts.** A finite
   bear/base/bull range can remain usable when positive-return probability is
   withheld. Render these states independently, keep stored reasons visible,

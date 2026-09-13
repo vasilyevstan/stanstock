@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from django.contrib.auth import get_user_model
@@ -54,12 +57,13 @@ class Command(BaseCommand):
                 continue
 
         try:
-            result = refresh_my_list_price_evidence(
-                symbols=symbols,
-                catalog_references=references,
-                target_date=target_date,
-                decision_time=decision_time,
-            )
+            with _suppress_http_client_request_logs():
+                result = refresh_my_list_price_evidence(
+                    symbols=symbols,
+                    catalog_references=references,
+                    target_date=target_date,
+                    decision_time=decision_time,
+                )
         except (ProviderError, RefreshVerificationError, ValueError) as exc:
             self.stdout.write(
                 f"status=failed target_date={target_date.isoformat()} "
@@ -110,3 +114,22 @@ def _select_owner(raw_owner_id: object) -> Any:
     if len(active_owner_ids) == 1:
         return user_model.objects.get(pk=active_owner_ids[0])
     raise CommandError("No unique active owner is available; rerun with --owner-id.")
+
+
+@contextmanager
+def _suppress_http_client_request_logs() -> Iterator[None]:
+    """Suppress noisy httpx/httpcore request summaries for this command only."""
+
+    managed_loggers = (
+        logging.getLogger("httpx"),
+        logging.getLogger("httpcore"),
+    )
+    original_levels = tuple((logger, logger.level) for logger in managed_loggers)
+    try:
+        for logger in managed_loggers:
+            if logger.getEffectiveLevel() < logging.WARNING:
+                logger.setLevel(logging.WARNING)
+        yield
+    finally:
+        for logger, original_level in original_levels:
+            logger.setLevel(original_level)
