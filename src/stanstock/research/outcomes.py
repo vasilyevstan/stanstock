@@ -31,7 +31,10 @@ from stanstock.research.long_forecasts_v4 import (
     canonical_long_v4_price,
 )
 from stanstock.research.models import Prediction, PredictionOutcome, Recommendation
-from stanstock.research.price_product_config import MOMENTUM_METHOD_VERSION
+from stanstock.research.price_product_config import (
+    MOMENTUM_METHOD_VERSION,
+    PRODUCT_BENCHMARK_SUBJECT,
+)
 
 _LONG_V4_RETURN_QUANTUM = Decimal("0.0001")
 _LONG_V4_BASELINE_ROLE = "calculation.target_price.valuation_value"
@@ -156,6 +159,23 @@ def resolve_outcome(
             metadata={
                 "provider": provider,
                 "insufficiency_reason": prediction.insufficiency_reason,
+            },
+        )
+
+    if (
+        prediction.method_version == MOMENTUM_METHOD_VERSION
+        and benchmark_subject != PRODUCT_BENCHMARK_SUBJECT
+    ):
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution=(
+                "Prospective momentum decision requires configured benchmark subject "
+                f"{PRODUCT_BENCHMARK_SUBJECT}"
+            ),
+            metadata={
+                "provider": provider,
+                "benchmark_subject": benchmark_subject or "",
+                "expected_benchmark_subject": PRODUCT_BENCHMARK_SUBJECT,
             },
         )
 
@@ -288,7 +308,25 @@ def resolve_outcome(
         actual_return = session.close / price_at_prediction - 1.0
     benchmark_return = None
     benchmark_resolution = ""
-    if benchmark_subject:
+    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+        benchmark_return, benchmark_resolution = _momentum_benchmark_return(
+            price_loader=price_loader,
+            subject=PRODUCT_BENCHMARK_SUBJECT,
+            target_date=prediction.target_date,
+            evaluation_date=session.observation_date,
+        )
+        if benchmark_return is None:
+            return _unresolved_outcome(
+                evaluation_date=session.observation_date,
+                resolution=benchmark_resolution,
+                metadata={
+                    "provider": provider,
+                    "subject": subject,
+                    "benchmark_subject": PRODUCT_BENCHMARK_SUBJECT,
+                    "benchmark_resolution": benchmark_resolution,
+                },
+            )
+    elif benchmark_subject:
         benchmark_return, benchmark_resolution = _benchmark_return(
             price_loader=price_loader,
             subject=benchmark_subject,
@@ -1166,6 +1204,35 @@ def _benchmark_return(
         return None, "Benchmark has no close at or before evaluation session"
     return evaluation.close / target.close - 1.0, (
         f"Benchmark return uses {target.observation_date.isoformat()} to "
+        f"{evaluation.observation_date.isoformat()} closes"
+    )
+
+
+def _momentum_benchmark_return(
+    *,
+    price_loader: PriceLoader,
+    subject: str,
+    target_date: date,
+    evaluation_date: date,
+) -> tuple[float | None, str]:
+    try:
+        frame = price_loader(subject, evaluation_date)
+        target = _close_on_date(frame, target_date)
+        evaluation = _close_on_date(frame, evaluation_date)
+    except (
+        DataAsset.DoesNotExist,
+        PriceFrameSchemaError,
+        ValueError,
+        PriceSessionDataError,
+    ) as exc:
+        return None, f"Prospective momentum benchmark unavailable: {exc}"
+    if target is None:
+        return None, "Prospective momentum benchmark has no exact target-date close"
+    if evaluation is None:
+        return None, "Prospective momentum benchmark has no exact maturity-session close"
+    return evaluation.close / target.close - 1.0, (
+        f"Prospective momentum benchmark return uses exact "
+        f"{target.observation_date.isoformat()} to "
         f"{evaluation.observation_date.isoformat()} closes"
     )
 

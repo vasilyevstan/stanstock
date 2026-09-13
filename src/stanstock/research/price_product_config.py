@@ -16,6 +16,7 @@ PRODUCT_VERSION = "research-product-v1"
 MOMENTUM_METHOD_VERSION = "us-relative-momentum-v1"
 FHS_METHOD_VERSION = "us-price-fhs-v1"
 PRODUCT_PAYLOAD_SCHEMA = "research-product@1"
+PRODUCT_BENCHMARK_SUBJECT = "SPY"
 PRODUCT_CONFIG_FILE_SHA256 = "21dcfcb4a3560fe94a7e614bc8e659d6778312b21398cb249caf6e09df78b832"
 PRODUCT_EFFECTIVE_CONFIG_HASH = "55334183af29fc01b853e83f9bf75216f24564956925fb95912cb80a69420867"
 
@@ -141,7 +142,7 @@ class PriceProductConfig:
         _literal_text(mapping, "calendar", "XNYS")
         _literal_text(mapping, "currency", "USD")
         _literal_text(mapping, "price_provider", "twelve_data")
-        _literal_text(mapping, "benchmark_subject", "SPY")
+        _literal_text(mapping, "benchmark_subject", PRODUCT_BENCHMARK_SUBJECT)
         _literal_text(mapping, "return_basis", "split_adjusted_price_return")
         _literal_bool(mapping, "dividends_included", False)
         _literal_int(mapping, "required_closes", 757)

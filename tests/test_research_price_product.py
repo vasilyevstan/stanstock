@@ -9,6 +9,7 @@ from uuid import UUID
 import numpy as np
 import pytest
 
+import stanstock.research.price_product as price_product_module
 from stanstock.research.price_product import (
     EvidenceGrade,
     FilteredReturns,
@@ -16,6 +17,7 @@ from stanstock.research.price_product import (
     PriceProductInput,
     PriceProductInputError,
     PriceSeries,
+    SimulationTerminals,
     SourceExecutionBinding,
     SourceExecutionMode,
     apply_recommendation_policy,
@@ -268,7 +270,7 @@ def test_projection_uses_cumulative_expm1_linear_quantiles_and_same_shock_sensit
             (0.2, 0.5, 0.8),
             method="linear",
         )
-        assert projection.central_model_mass == pytest.approx(0.60)
+        assert projection.central_model_mass == 0.6
         assert projection.raw_returns is not None
         assert projection.zero_drift_raw_returns is not None
         assert (
@@ -542,6 +544,7 @@ def test_degenerate_filter_withholds_every_triplet_without_fake_zero() -> None:
     assert result.forecast.insufficiency_reason == "filter_variance_degenerate"
     assert result.forecast.mean_log_return is None
     for projection in result.forecast.projections:
+        assert projection.central_model_mass == 0.6
         assert projection.raw_returns is None
         assert projection.ledger_returns is None
         assert projection.raw_prices is None
@@ -596,6 +599,19 @@ def test_degenerate_filter_withholds_every_triplet_without_fake_zero() -> None:
             ),
             "stock_asset_after_decision",
         ),
+        (
+            lambda value: replace(
+                value,
+                stock=replace(
+                    value.stock,
+                    identity=replace(
+                        value.stock.identity,
+                        subject="SPY",
+                    ),
+                ),
+            ),
+            "stock_subject_is_benchmark",
+        ),
     ],
 )
 def test_invalid_or_asof_unsafe_windows_fail_explicitly(mutation, reason: str) -> None:
@@ -631,6 +647,110 @@ def test_negative_signal_remains_avoid_when_buy_inputs_are_missing() -> None:
 
     assert recommendation.suggestion == "avoid"
     assert recommendation.blocking_reasons == ()
+    assert recommendation.allocation_restriction == "speculative_watch_0_percent_new_allocation"
+
+
+def test_affordability_restriction_applies_to_mixed_and_unavailable_signals() -> None:
+    config = load_price_product_config()
+    closes = tuple(100.0 for _index in range(757))
+    mixed = calculate_momentum(closes, closes)
+    risk = calculate_price_product(_product_input(), config=config).risk
+
+    mixed_result = apply_recommendation_policy(
+        momentum=mixed,
+        momentum_insufficiency_reason=None,
+        risk=risk,
+        target_close=1.0,
+        source_eligible=True,
+        source_ineligibility_reasons=(),
+        config=config,
+    )
+    unavailable_result = apply_recommendation_policy(
+        momentum=None,
+        momentum_insufficiency_reason="momentum_history_insufficient",
+        risk=risk,
+        target_close=1.0,
+        source_eligible=True,
+        source_ineligibility_reasons=(),
+        config=config,
+    )
+
+    assert mixed_result.suggestion == "hold"
+    assert mixed_result.blocking_reasons == ("mixed_momentum_signal",)
+    assert unavailable_result.suggestion is None
+    assert unavailable_result.blocking_reasons == ("momentum_history_insufficient",)
+    assert (
+        mixed_result.allocation_restriction
+        == unavailable_result.allocation_restriction
+        == "speculative_watch_0_percent_new_allocation"
+    )
+
+
+def test_future_numeric_failure_preserves_completed_terminal_horizon() -> None:
+    filtered = FilteredReturns(
+        mean_log_return=0.0,
+        population_variance=1.0,
+        terminal_variance=1.0,
+        standardized_returns=tuple(0.0 for _index in range(756)),
+        residuals=tuple(6.0 for _index in range(504)),
+        residual_center=0.0,
+        residual_scale=1.0,
+    )
+
+    terminals = simulate_fhs_terminal_logs(
+        filtered,
+        seed=17,
+        horizons=(1, 1000),
+        path_count=1,
+    )
+
+    assert terminals.horizons == (1, 1000)
+    assert terminals.with_drift[0][0] == pytest.approx(6.0)
+    assert terminals.zero_drift[0][0] == pytest.approx(6.0)
+    assert np.isnan(terminals.with_drift[1]).all()
+    assert np.isnan(terminals.zero_drift[1]).all()
+
+
+def test_partial_numeric_failure_keeps_earlier_triplets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_price_product_config()
+    path_count = config.simulation.production_paths
+    first = np.linspace(-0.1, 0.1, path_count)
+    second = np.linspace(-0.2, 0.2, path_count)
+    partial = SimulationTerminals(
+        horizons=(126, 252, 756, 1260),
+        path_count=path_count,
+        with_drift=(
+            first,
+            second,
+            np.full(path_count, np.nan),
+            np.full(path_count, np.nan),
+        ),
+        zero_drift=(
+            first,
+            second,
+            np.full(path_count, np.nan),
+            np.full(path_count, np.nan),
+        ),
+    )
+    monkeypatch.setattr(
+        price_product_module,
+        "simulate_fhs_terminal_logs",
+        lambda *args, **kwargs: partial,
+    )
+    filtered = filter_historical_returns(_closes(base=100.0, drift=0.0007, wave=0.006))
+
+    forecast = project_fhs(filtered, target_close=100.0, seed=91, config=config)
+
+    assert [item.insufficiency_reason for item in forecast.projections] == [
+        None,
+        None,
+        "simulation_nonfinite",
+        "simulation_nonfinite",
+    ]
+    assert all(item.ledger_returns is not None for item in forecast.projections[:2])
+    assert all(item.raw_returns is None for item in forecast.projections[2:])
 
 
 def test_unrepresentable_forward_paths_withhold_instead_of_clipping() -> None:

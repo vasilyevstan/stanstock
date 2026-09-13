@@ -380,6 +380,161 @@ def test_momentum_outcomes_use_relative_direction_and_leave_hold_success_null() 
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("recommendation", "stock_final", "benchmark_final"),
+    [
+        (Recommendation.BUY, 30.0, 110.0),
+        (Recommendation.AVOID, 20.0, 90.0),
+    ],
+)
+def test_directional_momentum_uses_exact_aligned_spy_sessions(
+    recommendation: str,
+    stock_final: float,
+    benchmark_final: float,
+) -> None:
+    listing, run = _context(PRODUCT_VERSION)
+    analysis = _prospective_analysis(listing, run)
+    prediction = _prospective_prediction(
+        analysis,
+        method_version=MOMENTUM_METHOD_VERSION,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        recommendation=recommendation,
+        model_version=f"aligned-{recommendation}",
+    )
+    sessions = tuple(run.target_date + timedelta(days=index) for index in range(127))
+    stock = pl.DataFrame(
+        {
+            "date": sessions,
+            "close": [25.0, *[25.0] * 125, stock_final],
+        },
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+    benchmark = pl.DataFrame(
+        {
+            "date": sessions,
+            "close": [100.0, *[100.0] * 125, benchmark_final],
+        },
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+
+    result = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=datetime.combine(sessions[-1], datetime.min.time(), tzinfo=UTC),
+        benchmark_subject="SPY",
+        price_loader=lambda subject, _through: benchmark if subject == "SPY" else stock,
+    )
+
+    assert result.status == PredictionOutcome.Status.MATURED
+    assert result.success is True
+    assert result.benchmark_return == Decimal(str(benchmark_final / 100.0 - 1.0)).quantize(
+        Decimal("0.0001")
+    )
+    assert result.metadata["benchmark_subject"] == "SPY"
+    assert "uses exact" in result.metadata["benchmark_resolution"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("benchmark_dates", "expected_resolution"),
+    [
+        (
+            "truncated",
+            "Prospective momentum benchmark has no exact maturity-session close",
+        ),
+        (
+            "missing_target",
+            "Prospective momentum benchmark has no exact target-date close",
+        ),
+    ],
+)
+def test_momentum_benchmark_gaps_are_explicitly_unresolved(
+    benchmark_dates: str,
+    expected_resolution: str,
+) -> None:
+    listing, run = _context(PRODUCT_VERSION)
+    analysis = _prospective_analysis(listing, run)
+    prediction = _prospective_prediction(
+        analysis,
+        method_version=MOMENTUM_METHOD_VERSION,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        recommendation=Recommendation.BUY,
+        model_version=f"gap-{benchmark_dates}",
+    )
+    sessions = tuple(run.target_date + timedelta(days=index) for index in range(127))
+    stock = pl.DataFrame(
+        {"date": sessions, "close": [25.0, *[25.0] * 125, 26.0]},
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+    selected_dates = sessions[:61] if benchmark_dates == "truncated" else sessions[1:]
+    benchmark_closes = (
+        [100.0 + 20.0 * index / (len(selected_dates) - 1) for index in range(len(selected_dates))]
+        if benchmark_dates == "truncated"
+        else [100.0 + index / 10 for index in range(len(selected_dates))]
+    )
+    benchmark = pl.DataFrame(
+        {
+            "date": selected_dates,
+            "close": benchmark_closes,
+        },
+        schema={"date": pl.Date, "close": pl.Float64},
+    )
+
+    result = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=datetime.combine(sessions[-1], datetime.min.time(), tzinfo=UTC),
+        benchmark_subject="SPY",
+        price_loader=lambda subject, _through: benchmark if subject == "SPY" else stock,
+    )
+
+    assert result.status == PredictionOutcome.Status.UNRESOLVED
+    assert result.success is None
+    assert result.actual_return is None
+    assert result.resolution == expected_resolution
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("benchmark_subject", [None, "QQQ", "OTHER"])
+def test_momentum_outcome_refuses_caller_selected_benchmark(
+    benchmark_subject: str | None,
+) -> None:
+    listing, run = _context(PRODUCT_VERSION)
+    analysis = _prospective_analysis(listing, run)
+    prediction = _prospective_prediction(
+        analysis,
+        method_version=MOMENTUM_METHOD_VERSION,
+        horizon=Prediction.Horizon.SIX_MONTH,
+        evidence_role=Prediction.EvidenceRole.DECISION,
+        recommendation=Recommendation.BUY,
+        model_version=f"benchmark-binding-{benchmark_subject}",
+    )
+
+    def unexpected_loader(_subject: str, _through: date) -> pl.DataFrame:
+        raise AssertionError("invalid benchmark binding must fail before price IO")
+
+    result = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=run.target_date + timedelta(days=180),
+        evaluated_at=run.generated_at + timedelta(days=180),
+        benchmark_subject=benchmark_subject,
+        price_loader=unexpected_loader,
+    )
+
+    assert result.status == PredictionOutcome.Status.UNRESOLVED
+    assert result.success is None
+    assert result.resolution == (
+        "Prospective momentum decision requires configured benchmark subject SPY"
+    )
+    assert result.metadata["expected_benchmark_subject"] == "SPY"
+
+
+@pytest.mark.django_db
 def test_prediction_immutability_survives_nullable_table_rebuild() -> None:
     listing, run = _context(PRODUCT_VERSION)
     analysis = _prospective_analysis(listing, run)

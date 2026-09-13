@@ -571,9 +571,12 @@ class PredictionOutcome(models.Model):
                     {"success": "Prospective HOLD/unavailable outcomes must not claim success."}
                 )
             if not prospective_non_directional and self.success is None:
-                raise ValidationError(
-                    {"success": "Matured directional decision outcomes require success."}
+                message = (
+                    "Matured directional decision outcomes require success."
+                    if self.prediction.method_version == MOMENTUM_METHOD_VERSION
+                    else "Matured decision outcomes require a success value."
                 )
+                raise ValidationError({"success": message})
         if (
             self.prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
             and self.success is not None

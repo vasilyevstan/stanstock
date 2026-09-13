@@ -86,6 +86,18 @@ class SourceExecutionBinding:
 
 @dataclass(frozen=True, slots=True)
 class PriceProductInput:
+    """Complete immutable inputs admitted for one calculation.
+
+    ``decision_time`` is the recorded source-availability boundary, never a
+    fresh wall-clock value chosen while replaying. For observed evidence the
+    writer must set it to the logical data cutoff. A research-grade
+    current-vintage reconstruction may admit assets retrieved later than the
+    historical cutoff, but its writer must still cap every supplied price row
+    at that historical cutoff and record actual generation time separately.
+    The boundary and actual asset timestamps are hashed so an issuance can be
+    reproduced without fabricating historical availability.
+    """
+
     listing_id: UUID
     target_date: date
     decision_time: datetime
@@ -464,9 +476,12 @@ def simulate_fhs_terminal_logs(
         )
 
     generator = np.random.Generator(np.random.PCG64(seed))
-    terminal_arrays = [np.empty(path_count, dtype=np.float64) for _horizon in horizons]
+    terminal_arrays = [np.full(path_count, np.nan, dtype=np.float64) for _horizon in horizons]
     maximum_horizon = horizons[-1]
+    valid_horizon_count = len(horizons)
     for path_start in range(0, path_count, _SIMULATION_CHUNK_PATHS):
+        if valid_horizon_count == 0:
+            break
         chunk_size = min(_SIMULATION_CHUNK_PATHS, path_count - path_start)
         # C-order rows consume the random stream path by path. Keeping this
         # chunk size fixed means a 16,384-path diagnostic has the exact first
@@ -484,29 +499,39 @@ def simulate_fhs_terminal_logs(
             for session_index in range(maximum_horizon):
                 innovations = np.sqrt(q) * residuals[sampled_indices[:, session_index]]
                 cumulative += filtered.mean_log_return + innovations
-                q = (
+                next_q = (
                     variance_target_weight * filtered.population_variance
                     + variance_persistence * q
                     + innovation_weight * innovations * innovations
                 )
+                if not np.all(np.isfinite(cumulative)):
+                    valid_horizon_count = min(valid_horizon_count, horizon_index)
+                    break
                 if session_index + 1 == horizons[horizon_index]:
                     terminal_arrays[horizon_index][path_start : path_start + chunk_size] = (
                         cumulative
                     )
                     horizon_index += 1
-                    if horizon_index == len(horizons):
+                    if horizon_index == valid_horizon_count:
                         break
-        if not np.all(np.isfinite(q)) or any(
+                if not np.all(np.isfinite(next_q)) or np.any(next_q <= 0):
+                    valid_horizon_count = min(valid_horizon_count, horizon_index)
+                    break
+                q = next_q
+        if horizon_index < valid_horizon_count:
+            valid_horizon_count = horizon_index
+        if any(
             not np.all(np.isfinite(values[path_start : path_start + chunk_size]))
-            for values in terminal_arrays[:horizon_index]
+            for values in terminal_arrays[:valid_horizon_count]
         ):
-            raise PriceProductInputError(
-                "simulation_nonfinite",
-                "Forward variance recursion or cumulative returns became non-finite",
-            )
+            valid_horizon_count = 0
     zero_drift = tuple(
-        values - horizon * filtered.mean_log_return
-        for values, horizon in zip(terminal_arrays, horizons, strict=True)
+        (
+            values - horizon * filtered.mean_log_return
+            if index < valid_horizon_count
+            else np.full(path_count, np.nan, dtype=np.float64)
+        )
+        for index, (values, horizon) in enumerate(zip(terminal_arrays, horizons, strict=True))
     )
     return SimulationTerminals(
         horizons=horizons,
@@ -540,16 +565,28 @@ def project_fhs(
     except PriceProductInputError as exc:
         return _withheld_forecast(config, seed=seed, reason=exc.reason_code)
     projections = tuple(
-        _projection_from_terminal_logs(
-            horizon=name,
-            sessions=sessions,
-            terminal_logs=terminals.with_drift[index],
-            zero_drift_logs=terminals.zero_drift[index],
-            target_close=target_close,
-            quantiles=simulation.quantiles,
-            quantile_method=simulation.quantile_method,
-            return_places=config.rounding.return_decimal_places,
-            price_places=config.rounding.price_decimal_places,
+        (
+            _projection_from_terminal_logs(
+                horizon=name,
+                sessions=sessions,
+                terminal_logs=terminals.with_drift[index],
+                zero_drift_logs=terminals.zero_drift[index],
+                target_close=target_close,
+                quantiles=simulation.quantiles,
+                quantile_method=simulation.quantile_method,
+                return_places=config.rounding.return_decimal_places,
+                price_places=config.rounding.price_decimal_places,
+            )
+            if (
+                np.all(np.isfinite(terminals.with_drift[index]))
+                and np.all(np.isfinite(terminals.zero_drift[index]))
+            )
+            else _withheld_projection(
+                name,
+                sessions,
+                simulation.quantiles,
+                "simulation_nonfinite",
+            )
         )
         for index, (name, sessions) in enumerate(simulation.horizons)
     )
@@ -772,13 +809,18 @@ def apply_recommendation_policy(
     config: PriceProductConfig,
 ) -> RecommendationResult:
     horizon = config.momentum.decision_horizon_sessions
+    allocation_restriction = (
+        "speculative_watch_0_percent_new_allocation"
+        if target_close < config.risk.buy_minimum_target_close
+        else None
+    )
     if momentum is None:
         return RecommendationResult(
             raw_direction=None,
             suggestion=None,
             decision_horizon_sessions=horizon,
             blocking_reasons=(momentum_insufficiency_reason or "momentum_unavailable",),
-            allocation_restriction=None,
+            allocation_restriction=allocation_restriction,
         )
     if momentum.direction == "negative":
         return RecommendationResult(
@@ -786,7 +828,7 @@ def apply_recommendation_policy(
             suggestion="avoid",
             decision_horizon_sessions=horizon,
             blocking_reasons=(),
-            allocation_restriction=None,
+            allocation_restriction=allocation_restriction,
         )
     if momentum.direction == "mixed":
         return RecommendationResult(
@@ -794,7 +836,7 @@ def apply_recommendation_policy(
             suggestion="hold",
             decision_horizon_sessions=horizon,
             blocking_reasons=("mixed_momentum_signal",),
-            allocation_restriction=None,
+            allocation_restriction=allocation_restriction,
         )
 
     blockers: list[str] = []
@@ -810,10 +852,8 @@ def apply_recommendation_policy(
         blockers.append("dollar_turnover_unavailable")
     elif risk.average_dollar_turnover_20d < config.risk.buy_minimum_dollar_turnover:
         blockers.append("dollar_turnover_below_buy_minimum")
-    allocation_restriction = None
     if target_close < config.risk.buy_minimum_target_close:
         blockers.append("target_close_below_buy_minimum")
-        allocation_restriction = "speculative_watch_0_percent_new_allocation"
     return RecommendationResult(
         raw_direction="positive",
         suggestion="hold" if blockers else "buy",
@@ -829,7 +869,7 @@ def _validate_product_input(
     if product_input.target_date > product_input.decision_time.date():
         raise PriceProductInputError(
             "target_after_decision_time",
-            "Target date cannot be after the actual decision time",
+            "Target date cannot be after the source-availability boundary",
         )
     if len(product_input.calendar_sessions) != config.required_closes:
         raise PriceProductInputError(
@@ -895,6 +935,11 @@ def _validate_product_input(
             "benchmark_identity_mismatch",
             "Benchmark subject does not match the reviewed config",
         )
+    if product_input.stock.identity.subject == config.benchmark_subject:
+        raise PriceProductInputError(
+            "stock_subject_is_benchmark",
+            "Stock input must not use the configured benchmark subject",
+        )
 
 
 def _validate_series(
@@ -957,7 +1002,7 @@ def _validate_series(
     ):
         raise PriceProductInputError(
             f"{role}_asset_after_decision",
-            f"{role.title()} asset was not admitted by the actual decision time",
+            f"{role.title()} asset was not admitted by the source-availability boundary",
         )
 
 
@@ -1036,7 +1081,7 @@ def _projection_from_terminal_logs(
         horizon=horizon,
         sessions=sessions,
         quantile_levels=quantiles,
-        central_model_mass=quantiles[2] - quantiles[0],
+        central_model_mass=float(Decimal(str(quantiles[2])) - Decimal(str(quantiles[0]))),
         raw_returns=raw_return,
         ledger_returns=ledger_return,
         raw_prices=raw_price,
@@ -1079,7 +1124,7 @@ def _withheld_projection(
         horizon=horizon,
         sessions=sessions,
         quantile_levels=quantiles,
-        central_model_mass=quantiles[2] - quantiles[0],
+        central_model_mass=float(Decimal(str(quantiles[2])) - Decimal(str(quantiles[0]))),
         raw_returns=None,
         ledger_returns=None,
         raw_prices=None,

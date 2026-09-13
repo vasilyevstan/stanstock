@@ -1601,6 +1601,24 @@ def _differential_scenarios() -> list[dict[str, object]]:
             "final_close": 95.0,
             "with_benchmark": False,
         },
+        {
+            "id": "legacy_decision_benchmark_gap",
+            "horizon": Prediction.Horizon.SHORT,
+            "recommendation": Recommendation.BUY,
+            "evidence_role": Prediction.EvidenceRole.DECISION,
+            "final_close": 111.0,
+            "with_benchmark": True,
+            "benchmark_gap": True,
+        },
+        {
+            "id": "legacy_advisory_benchmark_gap",
+            "horizon": Prediction.Horizon.SIX_MONTH,
+            "recommendation": Recommendation.HOLD,
+            "evidence_role": Prediction.EvidenceRole.ADVISORY,
+            "final_close": 105.0,
+            "with_benchmark": True,
+            "benchmark_gap": True,
+        },
     ]
 
 
@@ -1628,14 +1646,28 @@ def test_base_and_head_evaluate_prediction_agree(
     benchmark_subject = ""
     if scenario["with_benchmark"]:
         benchmark_subject = BENCHMARK_SUBJECT
-        _register_price_asset(
-            store,
-            benchmark_subject,
-            evaluation_time,
-            sessions,
-            [100.0 + i * 0.5 for i in range(available_sessions)],
-            baseline_date=analysis.run.target_date,
-        )
+        if scenario.get("benchmark_gap"):
+            _register_price_asset(
+                store,
+                benchmark_subject,
+                evaluation_time,
+                [
+                    analysis.run.target_date - timedelta(days=1),
+                    sessions[-2],
+                    sessions[-1] + timedelta(days=3),
+                ],
+                [100.0, 110.0, 9999.0],
+                baseline_date=None,
+            )
+        else:
+            _register_price_asset(
+                store,
+                benchmark_subject,
+                evaluation_time,
+                sessions,
+                [100.0 + i * 0.5 for i in range(available_sessions)],
+                baseline_date=analysis.run.target_date,
+            )
 
     def _make_prediction(version: str) -> Prediction:
         return _prediction(
