@@ -1,218 +1,294 @@
-# Price-only stock research
+# Price Research Product
 
-`research-product-v1` combines two transparent operators: a six-month
-momentum suggestion and conditional price projections at six months,
-twelve months, three years and five years. It does not use an opaque
-overall score, fitted machine-learning model, analyst target or LLM.
+> Release state: see [README](../README.md#release-status).
 
-**Release status:** the calculation foundation is implemented; integrated
-intake, serving and production activation are still pending. This document
-describes the reviewed product contract, not a claim that the running
-application has already switched to it.
+This is the normative public explanation of `research-product-v1`. The product
+uses two deterministic operators. It is not an LLM, fitted model, paper
+replication, fair-value engine, or trading system.
 
-## What the suggestion means
+## Output contract
 
-`us-relative-momentum-v1` compares a stock with SPY over the same prior-year
-window, excluding the most recent 21 market sessions:
+For each qualified listing:
 
-```text
-stock_momentum = log(stock_close[T-21] / stock_close[T-252])
-benchmark_momentum = log(SPY_close[T-21] / SPY_close[T-252])
-relative_momentum = stock_momentum - benchmark_momentum
-```
+- one `StockAnalysis`;
+- one `Prediction(horizon="6m", role="decision",
+  method="us-relative-momentum-v1")`;
+- four advisory predictions for `us-price-fhs-v1` at `6m`, `12m`, `3y`, and
+  `5y`.
 
-Positive direction requires both stock momentum and relative momentum to
-be positive. Negative direction requires both to be negative. Other
-combinations are mixed. The relative figure is a difference in log returns,
-not a probability or a difference in ordinary percentage returns.
+Scores, numeric confidence, and positive-return probability are null. Every
+missing calculation has an explicit reason.
 
-A negative direction produces **Avoid**. A positive direction can produce
-**Buy** only with valid input evidence, annualized volatility no more than
-twice SPY's, a trailing drawdown no worse than 50%, compatible average daily
-dollar turnover of at least $5 million over 20 sessions, and a target-date
-close of at least $10. Otherwise the suggestion is **Hold**, with reasons.
-Missing momentum is **unavailable**, not a fabricated Hold.
+## Required evidence
 
-The suggestion concerns the following **126 market sessions**, approximately
-six months. Missing risk or liquidity can block Buy without erasing a valid
-negative signal. A missing advisory projection does not determine the
-momentum suggestion.
+- US/USD common stock or supported ADR.
+- Verified permanent listing and official catalog identity.
+- Registered immutable split-adjusted stock history.
+- Separate registered SPY benchmark history.
+- Exactly 757 consecutive common XNYS-session closes ending at target `T`.
+- Finite, strictly positive closes and no duplicate/missing required session.
+- Split-adjusted price returns excluding dividends.
 
-This is an adaptation of portfolio-momentum research, not a reproduction
-of the original papers' portfolios, total returns or trading costs. A Buy
-label is a research policy output, not demonstrated profitability or an
-instruction to place an order.
+Volumes are optional for projections but need independently compatible
+adjustment evidence for the BUY liquidity gate.
 
-## Reading the three projection numbers
+The live candidate set is the unchanged 100-name curated core plus at most 20
+captured owner-saved names, deduplicated by permanent listing ID. SPY is not
+stock membership.
 
-`us-price-fhs-v1` reports three **cumulative price-return** quantiles:
+## Relative 12–1 momentum
 
-| Label | Meaning inside the simulated model |
-|---|---|
-| Lower | 20th percentile |
-| Median | 50th percentile, not the mean |
-| Upper | 80th percentile |
+Stock and SPY use identical session endpoints:
 
-For example, **Lower -10% / Median +5% / Upper +25%** is one illustrative
-projection range, not three probabilities. The Lower-to-Upper interval
-contains **60% of the simulated model distribution**. It does not establish
-60% real-world coverage. Neither bound is a worst case, a maximum drawdown
-or a stop-loss guarantee.
+\[
+m_i=\log(P_{i,T-21}/P_{i,T-252})
+\]
 
-Prices corresponding to these returns use the immutable target-date close.
-All results are split-adjusted **price returns excluding dividends**.
-Three-year and five-year figures remain cumulative; any annualized display
-must be labelled separately.
+\[
+m_B=\log(P_{B,T-21}/P_{B,T-252})
+\]
 
-Gain probability and calibrated confidence are not estimated. A missing
-probability is null, not 0%. More simulated paths cannot create independent
-market evidence or unlock an accuracy claim.
+\[
+M_i=m_i-m_B
+\]
 
-## How the projections are calculated
+StanStock records the stock's skipped-month price return
+\(\exp(m_i)-1\) and the benchmark-relative log momentum \(M_i\).
 
-Each stock and SPY need **757 consecutive common exchange-session closes**
-ending on the target date. This supplies 756 daily log returns, about three
-years. Missing sessions, duplicates, invalid prices, unsupported identity
-or currency, and incompatible source evidence are not filled or guessed.
-Volume is optional for projections but required for the Buy liquidity gate.
+Direction:
 
-For the stock's daily log returns `r`, calculate the arithmetic mean `mu`
-and population variance `v`. Start the historical conditional variance at
-`q[1] = v`, then apply:
+- positive: \(m_i>0\) and \(M_i>0\);
+- negative: \(m_i<0\) and \(M_i<0\);
+- mixed: otherwise, including equality.
 
-```text
-z[t] = (r[t] - mu) / sqrt(q[t])
-q[t+1] = 0.01*v + 0.94*q[t] + 0.05*(r[t] - mu)^2
-```
+This is an adapted single-stock policy, not the momentum-portfolio
+construction in the motivating literature.
 
-Discard the first 252 standardized returns. Center and rescale the remaining
-504 residuals to zero arithmetic mean and unit second moment. Nonpositive
-variance or residual scale, or nonfinite values, withhold the affected
-calculation with a reason; no artificial variance floor or jitter is added.
+## Risk and suggestion policy
 
-Starting from the final historical variance, generate 8,192 paths:
+Using the same aligned history:
 
-```text
-epsilon[h] = sqrt(q[h]) * independently_sampled_residual[h]
-future_log_return[h] = mu + epsilon[h]
-q[h+1] = 0.01*v + 0.94*q[h] + 0.05*epsilon[h]^2
-cumulative_price_return[H] = exp(sum(future_log_return[1:H])) - 1
-```
+\[
+\sigma_i=\sqrt{252q_{i,757}},\qquad
+\rho_i=\sigma_i/\sigma_B
+\]
 
-Residuals are sampled uniformly with replacement, one at a time. The four
-horizons are 126, 252, 756 and 1,260 sessions. Quantiles use NumPy's linear
-convention. The coefficients, history window and path count are fixed
-policy assumptions, not parameters fitted to the final evaluation period.
+The product also calculates:
 
-The model extrapolates the trailing three-year **mean log return**. That
-continuation assumption can dominate long-horizon results. Regime changes,
-drift-estimation uncertainty, corporate events and survivorship make long
-projections especially uncertain; parameter uncertainty is not integrated.
-The momentum direction and projected median can disagree because they use
-different quantities.
+- maximum drawdown over the latest 252 returns / 253 closes; and
+- compatible 20-session mean dollar turnover.
 
-A **zero-log-drift sensitivity** reuses the same shocks and subtracts
-`H * mu` from terminal log returns. It illustrates dependence on the drift
-assumption; it is not a third calibrated model or a guaranteed flat-price
-forecast.
+Suggestion:
 
-## Reproducibility and evidence
+1. negative direction -> AVOID;
+2. mixed direction -> HOLD;
+3. positive direction -> BUY only when:
+   - source/identity/date checks pass;
+   - \(\rho_i\le2\);
+   - drawdown is no worse than \(-50\%\);
+   - compatible dollar turnover is at least $5 million; and
+   - target close is at least $10;
+4. otherwise positive -> HOLD with exact blockers;
+5. missing momentum -> unavailable.
 
-The tracked configuration is
-[`config/scoring/research-product-v1.yml`](../config/scoring/research-product-v1.yml).
-Its physical bytes and effective configuration hash are pinned.
+Nominal price never increases conviction. Under $10 adds
+`speculative_watch_0_percent_new_allocation` and blocks BUY promotion without
+changing raw direction.
 
-PCG64 receives a deterministic seed derived from method version, effective
-configuration hash, permanent listing UUID and target date. Mutable ticker,
-run UUID and generation time do not choose the random paths. Complete input
-values, source identities and the session calendar have a separate digest.
-The recorded calculation also identifies NumPy, the generator, quantile
-convention and numeric precision.
+The current Twelve Data source documents split-adjusted prices but does not
+prove compatible volume adjustment. That missing provenance can keep turnover
+unavailable and BUY blocked even when direction and projections calculate.
 
-Returns use four decimal places and prices six, with half-even rounding.
-Each is rounded from its own raw calculation; a stored price is not
-recomputed from a previously rounded return. An unrepresentable or invalid
-result withholds its entire horizon triplet rather than clipping bounds.
+## Filtered historical simulation
 
-Current-vintage retrospective calculations must not be called historically
-observed forecasts. Actual generation time, logical data cutoff, source
-retrieval and availability remain distinct. Recorded predictions are
-append-only; a later reissue does not inherit another version's on-time
-status or become a second independent market observation.
+For \(N=756\) daily log returns:
 
-## What would establish useful predictive evidence
+\[
+r_t=\log(P_t/P_{t-1}),\qquad
+\mu=N^{-1}\sum r_t
+\]
 
-Paper references motivate the operators; they do not prove this particular
-implementation predicts individual stocks well. Comparative evidence must
-use the predeclared protocol, not parameter selection after seeing results.
+\[
+v=N^{-1}\sum(r_t-\mu)^2,\qquad q_1=v
+\]
 
-The frozen replay protocol uses a 2019-09-03 exchange-session epoch,
-horizon-spaced anchors, 756 preceding returns and fully matured outcomes.
-Development outcomes finish before 2024; validation anchors and outcomes
-both lie within 2024; final-holdout anchors start in 2025 and outcomes must
-finish by 2026-09-11. Intervals crossing partition boundaries are excluded.
+\[
+z_t=\frac{r_t-\mu}{\sqrt{q_t}}
+\]
 
-The projection comparators are a zero-log-drift Gaussian and a
-historical-log-drift constant-variance Gaussian. Reports include median
-absolute error, quantile losses, interval width and inclusion, and the
-central-60% interval score. Results are averaged within target cohorts
-before comparison across cohorts; stock counts are not substitutes for
-independent target dates.
+\[
+q_{t+1}=0.01v+0.94q_t+0.05(r_t-\mu)^2
+\]
 
-Momentum evaluation compares stock and SPY returns over the same 126
-sessions. Buy succeeds only if the stock rises and exceeds SPY; Avoid
-succeeds only if it falls and underperforms SPY. Hold and unavailable
-suggestions have no success label. Advisory results have no recommendation
-success label.
+Discard \(z_1,\dots,z_{252}\). Center and rescale the remaining 504 values:
 
-Some long-horizon partitions may contain no mature observations. Report
-that absence, baseline underperformance and unestablished skill explicitly.
-These findings do not erase a calculable conditional projection, but they
-prevent presenting it as proven forecasting accuracy.
+\[
+e_t=(z_t-\bar z)/s_z
+\]
 
-Doubling to 16,384 paths is a numerical convergence diagnostic with the
-same initial 8,192 paths. Quantile movement above the larger of one
-percentage point or 2% of interval width needs investigation. Passing that
-diagnostic is not evidence of financial skill.
+The retained residual population has zero arithmetic mean and unit second
+moment. Invalid variance/scale withholds output; no floor, clipping, jitter, or
+replacement return is introduced.
 
-## Monitored stocks, price bands and legacy methods
+### Forward paths
 
-The reviewed admission policy keeps the existing 100-name core and overlays
-at most 20 owner-selected, independently verified names, deduplicated by
-permanent listing identity. SPY is the separate benchmark, never another
-stock recommendation. Adequate registered history is reused before any
-authorized history bootstrap.
+Generate 8,192 paths with NumPy PCG64. Residuals are sampled independently and
+uniformly with replacement. For path \(j\):
 
-A qualified Under-$10 stock can receive momentum analysis and all four
-price-only projections. It remains a **speculative watch with 0% new
-allocation**, not a Buy promotion or an approved portfolio addition.
-Nominally low price is not alpha or fundamental cheapness. Price-only
-projections do not satisfy separate solvency, dilution, corporate-action
-or investment-activation requirements.
+\[
+\epsilon^{(j)}_h=\sqrt{q^{(j)}_h}e^{*(j)}_h
+\]
 
-Old score-based, empirical-range and SEC-dependent methods retain their
-original immutable evidence and meanings. Their availability and accuracy
-must not be pooled with this product. SEC facts are not a dependency of
-these price-only projections.
+\[
+r^{(j)}_h=\mu+\epsilon^{(j)}_h
+\]
 
-## Research references and adaptations
+\[
+q^{(j)}_{h+1}
+=0.01v+0.94q^{(j)}_h+0.05(\epsilon^{(j)}_h)^2
+\]
 
-- Jegadeesh and Titman (1993), *Returns to Buying Winners and Selling
-  Losers: Implications for Stock Market Efficiency*.
-  [DOI: 10.1111/j.1540-6261.1993.tb04702.x](https://doi.org/10.1111/j.1540-6261.1993.tb04702.x).
-  Motivation for momentum, not per-stock probabilities.
-- Carhart (1997), *On Persistence in Mutual Fund Performance*.
-  [DOI: 10.1111/j.1540-6261.1997.tb03808.x](https://doi.org/10.1111/j.1540-6261.1997.tb03808.x).
-  Momentum-factor context; this product uses a simpler SPY-relative sign
-  policy rather than that paper's model.
-- Bollerslev (1986), *Generalized Autoregressive Conditional
-  Heteroskedasticity*.
-  [DOI: 10.1016/0304-4076(86)90063-1](https://doi.org/10.1016/0304-4076(86)90063-1).
-  Conditional-variance structure; coefficients here are fixed, not fitted.
-- Barone-Adesi, Giannopoulos and Vosper (1999), *VaR without correlations
-  for portfolios of derivative securities*, Journal of Futures Markets
-  19(5), 583-602. Filtered-residual simulation motivation, adapted here to
-  single-stock conditional price projections.
-- J.P. Morgan/Reuters (1996), *RiskMetrics - Technical Document*, fourth
-  edition. Daily exponential-volatility reference; this product adds a
-  variance target and does not claim to replicate standard RiskMetrics.
+\[
+R^{(j)}_H=\exp\left(\sum_{h=1}^{H}r^{(j)}_h\right)-1
+\]
+
+Horizon sessions:
+
+| Label | Sessions |
+|---|---:|
+| 6m | 126 |
+| 12m | 252 |
+| 3y | 756 |
+| 5y | 1260 |
+
+The deterministic seed derives from method version, effective config hash,
+permanent listing UUID, and target date. Random indices are generated in
+path-major order. Complete inputs and calendar are hashed separately.
+
+## Lower, Median, Upper
+
+NumPy's linear quantile convention is used:
+
+- Lower = \(Q_{0.20}(R_H)\)
+- Median = \(Q_{0.50}(R_H)\)
+- Upper = \(Q_{0.80}(R_H)\)
+
+Corresponding prices are \(P_T(1+Q_p)\).
+
+The interval is central 60% **model mass**. It is not:
+
+- demonstrated real-world coverage;
+- 80% coverage;
+- a probability of gain;
+- calibrated confidence;
+- a worst-case envelope;
+- a stop-loss recommendation; or
+- a fundamental fair value.
+
+Return ledger values use four decimal places and prices use six, both
+half-even rounded from the same unrounded trajectory.
+
+## Drift disclosure
+
+The central projection continues the trailing three-year mean log return.
+This is a conditional historical-drift extrapolation, not a reliable expected
+return estimate.
+
+The zero-drift sensitivity subtracts \(H\mu\) from the same terminal log-return
+paths, keeping the sampled shocks identical. It measures drift dependence; it
+is not a third fitted model.
+
+Momentum and FHS median may disagree because they answer different questions.
+The UI must show that disagreement rather than vote or blend.
+
+## Retrospective protocol
+
+The study is frozen before real holdout inspection:
+
+- fixed anchor epoch: 2019-09-03;
+- 756 prior returns required;
+- anchors spaced by the evaluated horizon;
+- development outcomes complete before 2024-01-01;
+- validation anchor and outcome both within calendar 2024;
+- final-holdout anchor on/after 2025-01-01 and outcome complete through
+  2026-09-11;
+- crossing intervals purged;
+- no holdout tuning.
+
+### Baselines
+
+On the same exact paired listing/anchor/maturity scope:
+
+1. zero-log-drift Gaussian, variance \(Hv\);
+2. historical-log-drift Gaussian, mean \(H\mu\), variance \(Hv\).
+
+Results are averaged within target cohorts before equal-cohort comparison.
+Many listings at one anchor do not become many independent time observations.
+
+### Metrics
+
+- mean absolute error of the median forecast;
+- p20, p50, and p80 pinball loss;
+- interval width;
+- interval inclusion; and
+- central-60% interval score.
+
+MAE, pinball loss, and interval score are lower-is-better. Width and inclusion
+are descriptive, not standalone quality rankings. A narrow interval can miss;
+a wide interval can include without being sharp.
+
+Realized losses use recorded actual returns. Simulated path count is not
+market support. Empty partitions, unavailable comparisons, and
+worse-than-baseline results remain visible.
+
+### Evidence labels
+
+The retrospective report is a
+`current-universe_current-vintage_retrospective-math-replay`. It can use a
+research-grade provider source, but it cannot claim the source was available
+at each historical anchor.
+
+The report records separately:
+
+- replay execution revision;
+- source-run revision;
+- source generation/cutoff/retrieval identity;
+- report generation time; and
+- actual registration availability.
+
+## Observed forward evaluation
+
+The six-month decision uses exact stock and SPY endpoints:
+
+- BUY success: stock return is positive and exceeds SPY;
+- AVOID success: stock return is negative and is below SPY;
+- HOLD/unavailable: no success label.
+
+Advisory rows record realized return/error/interval diagnostics, not
+recommendation success. Each immutable version proves its own issuance
+deadline. Retrospective replay never creates observed predictions.
+
+## Numerical diagnostics
+
+The frozen diagnostic doubles the path count to 16,384 while preserving the
+first 8,192 paths. Quantile movement beyond
+`max(0.01 return, 0.02 * production interval width)` is investigated.
+
+This is a numerical convergence check, not financial calibration, evidence
+breadth, or a gain probability.
+
+## Research grounding
+
+- Jegadeesh and Titman (1993):
+  <https://doi.org/10.1111/j.1540-6261.1993.tb04702.x>
+- Carhart (1997):
+  <https://doi.org/10.1111/j.1540-6261.1997.tb03808.x>
+- Bollerslev (1986):
+  <https://doi.org/10.1016/0304-4076(86)90063-1>
+- Barone-Adesi, Giannopoulos, and Vosper (1999), *Journal of Futures Markets*
+  19(5), 583–602.
+- J.P. Morgan/Reuters (1996), *RiskMetrics—Technical Document*, fourth
+  edition.
+
+These works motivate ideas, not StanStock's exact coefficients, thresholds,
+single-stock suggestions, horizons, or profitability.

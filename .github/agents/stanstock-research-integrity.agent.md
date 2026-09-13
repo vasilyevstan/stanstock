@@ -73,6 +73,12 @@ record; the summary below is not a substitute for reading it.
   zero-drift sensitivity are explicit assumptions, not fair values or gain
   probabilities. Keep the retrospective protocol frozen before holdout
   evaluation and preserve physical/source checks without HTTP Monte Carlo.
+  Require paired horizon/partition support and cohort-first means. Interval
+  width/inclusion are not standalone skill verdicts. Registered studies must
+  calculate from full selected immutable sources, distinguish study/source
+  revisions and real registration chronology, and accept honestly labelled
+  provider research-grade reconstruction without claiming observed history.
+  Price adjustment documentation alone cannot prove volume compatibility.
 - **Forecast units and outcomes**: stored scenario and actual values use the
   same cumulative price-return basis. Annualized values are derived for
   display only, cash yield is not mixed into price-return forecasts, and

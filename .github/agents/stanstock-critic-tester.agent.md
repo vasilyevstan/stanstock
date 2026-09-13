@@ -34,6 +34,18 @@ Use the four checklists above as the checklist of record; this list is a
 summary, not a substitute.
 
 - Incorrect behavior and unmet acceptance criteria.
+- Native integration: persist synthetic source evidence, invoke the real
+  calculation/writer, read through the fail-closed reader, then render
+  authenticated pages. Trusted-output mocks do not prove that chain. Exercise
+  inactive/reassigned owners, disabled profiles, corrupt registered reports,
+  and no Monte Carlo or provider calls on GET.
+- Parent-owned contracts: database guards cover parent updates and
+  reparenting as well as child saves, without rejecting unchanged saves or
+  unrelated legacy rows. Use disposable databases for immutable concurrency
+  tests instead of weakening trigger protection for teardown.
+- Profile recovery: manual research cannot occupy scheduled issuance identity;
+  completed version-specific targets recover exact records before credentials
+  or quota, and serving/scheduling select the same reviewed product.
 - Security: auth/session boundaries, CSRF, input validation, secret handling,
   and anything in `docs/review-checklists/security.md`.
 - UX: responsive/accessible tables and charts, honest rendering of missing or

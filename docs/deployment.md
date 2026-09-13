@@ -1,120 +1,144 @@
 # Deployment
 
-StanStock's canonical environment is local Docker Compose. The repository also
-contains `compose.production.yaml` as a vendor-neutral deployment contract,
-not a claim of free hosted capacity.
+> Release state: see [README](../README.md#release-status). The instructions
+> below describe the implemented profile; they do not claim that the
+> replacement product has passed release review or been activated.
 
-## Required services
+StanStock is local-first. The canonical development path is Docker Compose,
+and `compose.production.yaml` is a vendor-neutral single-instance contract,
+not a promise of hosted capacity.
 
-- One private StanStock web/job instance.
-- External PostgreSQL 17-compatible database.
-- Durable private volumes mounted at `/app/var/data`, `/app/var/backups`, and
-  `/app/var/static`.
-- HTTPS termination at the container or a trusted reverse proxy.
-- One external post-close trigger for the optional US Twelve Data workflow;
-  add a separate Europe trigger only after a European price source is
-  independently approved.
+## Safe demo deployment
 
-Ephemeral container storage is not acceptable for `STANSTOCK_DATA_DIR`.
+```bash
+docker compose up --build
+```
 
-## Required environment
+Demo mode uses `synthetic_demo` only. The replacement product setting defaults
+to enabled:
+
+```dotenv
+STANSTOCK_RESEARCH_PRODUCT_ENABLED=true
+```
+
+This does not enable a live provider. In demo mode `refresh_demo` uses
+deterministic synthetic histories and records research-grade output.
+
+## Production requirements
+
+- one private StanStock web/job instance;
+- PostgreSQL 17-compatible storage;
+- durable private volumes for `/app/var/data`, `/app/var/backups`, and
+  `/app/var/static`;
+- HTTPS at the application or a trusted reverse proxy;
+- a strong Django secret and restrictive hosts/origins;
+- an approved secret source for optional provider credentials; and
+- a separately validated local/external trigger when live refresh is enabled.
+
+Ephemeral storage is not acceptable for `STANSTOCK_DATA_DIR`.
+
+## Environment
+
+Required production values:
 
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DATABASE_URL`
 - `STANSTOCK_DATA_DIR=/app/var/data`
 - `STANSTOCK_BACKUP_DIR=/app/var/backups`
-- `STANSTOCK_CODE_REVISION` set to the immutable deployed revision
-- `TWELVE_DATA_API_KEY` only when the optional US provider is enabled
+- `STANSTOCK_CODE_REVISION` set to the deployed immutable revision
 
-Configure `DJANGO_CSRF_TRUSTED_ORIGINS` for the HTTPS origin. Keep secure
-redirect and secure cookies enabled. Set `DJANGO_TRUST_PROXY_HEADERS=true`
-only when the immediate proxy overwrites `X-Forwarded-Proto`.
-Set `STANSTOCK_LOGIN_TRUSTED_PROXY_IPS` to the comma-separated source IPs of
-immediate proxies that overwrite `X-Forwarded-For`. The application ignores
-forwarded client addresses from every other peer, preventing spoofed
-login-throttle identities.
+Product/profile value:
 
-Owner credentials are used only for explicit bootstrap. Remove
-`STANSTOCK_OWNER_PASSWORD` from the runtime environment after the account is
-created so a restart cannot silently rotate it.
+- `STANSTOCK_RESEARCH_PRODUCT_ENABLED=true` for the replacement serving and
+  scheduler profile
 
-The Twelve Data key must never be placed in the image, repository, Compose
-file, command line, URL, log, report, or `ProviderRecord`. Direct macOS
-development may use `store_twelve_data_key`, which stores it in the current
-user's login Keychain. Containers and remote deployments must inject
-`TWELVE_DATA_API_KEY` through the platform's secret manager.
+Optional live US value:
 
-Basic activation is restricted to one authenticated active user under an
-explicit personal, non-commercial, non-redistributed attestation. A
-multi-user or externally accessible deployment must not use this mode; use a
-plan or agreement covering the intended display audience.
+- `TWELVE_DATA_API_KEY`, only after provider rights and activation gates pass
 
-If those rights terminate or expire, stop all services and follow the full
-installation destruction procedure in `docs/operations.md`. Destroy the
-database, data volume, backup volume, and every external snapshot or replica;
-disabling the provider or deleting only current asset files is not sufficient.
+Configure `DJANGO_CSRF_TRUSTED_ORIGINS` for the HTTPS origin. Trust forwarded
+scheme/client headers only from immediate proxies that overwrite them.
+Remove `STANSTOCK_OWNER_PASSWORD` after explicit owner bootstrap.
+
+Never place a provider key in the image, repository, Compose file, command
+line, URL, report, log, or database.
 
 ## Container controls
 
-The runtime image:
+The production image:
 
-- contains production dependencies only;
-- includes PostgreSQL client utilities for the documented backup/restore
-  commands;
-- runs as the unprivileged `stanstock` user;
+- runs as an unprivileged user;
 - supports a read-only root filesystem;
-- drops Linux capabilities in the production Compose template;
-- writes only to durable volumes and `/tmp`;
-- serves through Gunicorn.
+- drops Linux capabilities in the supplied template;
+- writes only to durable mounted paths and its required runtime scratch path;
+- contains PostgreSQL client utilities for backup/restore; and
+- serves Django through Gunicorn.
 
-`.env` and `.env.*` files are excluded from the Docker build context (with
-`.env.example` retained), so local runtime secrets cannot be copied into an
-image layer.
+`.env` files are excluded from Git and the image build context.
 
-At container startup, the entry point applies migrations, prepares
-`STANSTOCK_DATA_DIR`, collects static files, and bootstraps the owner only
-when `STANSTOCK_OWNER_PASSWORD` is present. It runs the idempotent synthetic
-refresh only when `STANSTOCK_DEMO_MODE=true`.
+## Activation checklist
 
-## Production-style local dry run
+Do not claim product activation until all of the following are true at one
+exact committed revision:
 
-Supply a reachable PostgreSQL URL and strong temporary secrets. For an HTTP
-loopback-only dry run, explicitly disable secure redirect and secure cookies;
-do not carry those overrides to a real deployment.
+1. release-chain reviews and CI have passed;
+2. the private operational acceptance has passed without narrowing its fixed
+   denominator;
+3. provider rights and current owner authorization are confirmed;
+4. one manual research refresh succeeds and its registered evidence verifies;
+5. the serving profile selects `research-product-v1`;
+6. the scheduler selects the same product/config profile;
+7. backup verification succeeds; and
+8. rollback/disable procedures have been rehearsed without deleting immutable
+   history.
+
+The active price product has no SEC prerequisite. Do not block its market
+stage on the separately configured SEC workflow.
+
+## Scheduling
+
+The supported macOS LaunchAgent runs at **03:30 local time,
+Tuesday-Saturday**. For the reviewed deployment timezone this is
+`Europe/Tallinn`. Installation validates the detected IANA timezone across
+regular/early XNYS closes and DST transitions; unsafe zones are refused.
+
+```bash
+.venv/bin/python manage.py launchd_refresh install
+.venv/bin/python manage.py launchd_refresh status
+```
+
+The scheduler and web server must point to the same database,
+`STANSTOCK_DATA_DIR`, product setting, production config, and owner/display
+authorization. A fresh observed issuance requires a clean committed checkout
+and exact `STANSTOCK_CODE_REVISION`. A late sleep/wake run does not silently
+downgrade or backdate a missing observed issuance.
+
+Do not run a resident scheduler inside the web container. A separate clean
+runtime checkout may share the configured database and asset directory with a
+dirty development checkout.
+
+## Production-style dry run
+
+With a reachable PostgreSQL URL and non-secret local test values:
 
 ```bash
 docker compose -f compose.production.yaml config
 docker compose -f compose.production.yaml up --build
 ```
 
-Then verify:
-
-1. migrations and static collection complete;
-2. `/healthz` reports ready;
-3. anonymous data pages redirect to sign-in;
-4. owner sign-in works;
-5. a restart preserves PostgreSQL and `DATA_DIR`;
-6. backup verification succeeds.
-
-## Scheduled jobs
-
-After explicit Twelve Data activation, map a post-publication US trigger to:
-
-```bash
-python manage.py daily --region us
-```
-
-The command resolves the latest completed XNYS session, applies a provider
-publication delay, and is idempotent by target date. Use an explicit
-`--target-date` only for research-grade catch-up. Do not run a resident
-scheduler in the web container. European scheduling remains deferred until a
-separately approved provider exists.
+Verify migrations, static collection, `/healthz`, authentication, durable
+restart behavior, synthetic product rendering, and backup verification. A dry
+run does not establish live-provider entitlement or release acceptance.
 
 ## Rollback
 
-Application rollback means redeploying a known image revision. Restore data
-only when integrity requires it; never run an older image against an
-incompatible forward-only schema without a reviewed compatibility decision.
-Do not restore any bundle created while Twelve Data was enabled after the
-associated subscription or agreement has ended.
+Application rollback redeploys a known compatible revision and disables future
+prospective serving/scheduling when necessary. It must preserve every
+immutable prediction, source asset, membership record, study report, and
+archived method definition. Do not reverse an unsafe schema, reset successful
+jobs, delete evidence, or rewrite old output to make rollback appear clean.
+
+Restore data only for integrity recovery, using a verified paired
+database/asset bundle. If provider rights have ended, do not restore a bundle
+that would reintroduce data the owner is no longer entitled to retain.

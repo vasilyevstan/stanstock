@@ -161,6 +161,17 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       Current-universe/current-vintage reconstruction, cohort counts,
       insufficient maturity and baseline failures remain visible; none is
       represented as observed historical skill.
+- [ ] Paired comparisons use identical listing/anchor/maturity support within
+      each horizon/partition and equal target-cohort means. Width and inclusion
+      do not independently imply better forecasts; MAE means mean absolute
+      error of the median forecast.
+- [ ] Registered studies calculate the full selected cohort rather than trust
+      caller-authored metrics. Source and execution revisions, report
+      generation and actual registration availability remain distinct;
+      chronology rejects future/pre-source output. Provider research-grade
+      sources remain valid for explicitly retrospective evidence.
+- [ ] Compatible volume is proven separately; split-adjusted price provenance
+      alone cannot unlock a dollar-liquidity BUY gate.
 - [ ] A valid momentum decision's null price triplet is not treated as an
       all-null advisory. Method-specific BUY/AVOID benchmark comparisons
       and HOLD/unavailable null success do not change legacy evaluation.

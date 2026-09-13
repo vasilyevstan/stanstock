@@ -205,6 +205,16 @@ Conditional FHS projections, historical drift and zero-drift sensitivity
 are not calibrated probabilities, fair values or evidence of profitable
 forecasting. Monte Carlo path counts are not independent market observations.
 
+Retrospective evidence is produced from the verified full selected cohort,
+not supplied metrics. Source revision, study execution revision, generation
+and actual registration availability are distinct. Compare identical
+horizon/partition support using cohort-first means; interval width and
+inclusion are descriptive rather than standalone quality rankings. Current
+owner/display authorization still applies to historical registered evidence.
+Manual `daily --region us` remains research-only and cannot occupy the
+reserved scheduled identity. Serving and automation share the same explicit
+product selection; a released implementation is not proof of local activation.
+
 Prospective affordability work must also be price-scale invariant: nominal
 share price never raises research conviction, price-difference momentum is
 normalized, and liquidity gates use compatible dollar volume rather than raw

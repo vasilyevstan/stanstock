@@ -19,7 +19,7 @@ Read:
 - `docs/change-planning.md` — applicable change-planning contract.
 - `.github/pull_request_template.md`;
 - `LEARNINGS.md`;
-- all four `docs/review-checklists/*.md` files;
+- all five `docs/review-checklists/*.md` files;
 - the architect handoff, simplifier artifact (including the three sealed
   passes when the change was material), developer handoff,
   `stanstock-research-integrity` evidence (when applicable), and
@@ -31,6 +31,15 @@ Read:
 
 - Verify every accepted acceptance criterion has implementation and test
   evidence.
+- When activation is requested, require parent-supplied private operational
+  aggregates against the original denominator, actual qualified saved-name
+  membership, same-profile serving/scheduling, and responsive local rendering.
+  Do not substitute fixture coverage or input-only preflight. Retrospective
+  results include empty partitions, failed baselines, and numerical
+  convergence limitations without holdout tuning or invented skill.
+- Verify the directly affected public documentation and reusable-agent
+  learning handoff match the exact implementation and honestly distinguish
+  implementation, review, release, and actual activation.
 - Verify the change was correctly classified as ordinary or material. For a
   material architecture/schema/security/scoring/methodology change, verify
   three sealed simplifier passes from distinct model families

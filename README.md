@@ -1,693 +1,225 @@
 # StanStock
 
-StanStock is a private, local-first stock-research application for transparent
-US and European equity scoring, scenario analysis, immutable prediction
-tracking, live personal portfolios, backtesting, and portfolio simulation.
+StanStock is a local-first Django application for private, transparent stock
+research, immutable prediction tracking, portfolio research, backtesting, and
+simulation. It is not a broker, automated trader, fitted machine-learning
+system, or promise of investment performance.
 
-It is a rules-based research system, not an automated trading service. It does
-not use LLMs or trained machine-learning models to produce forecasts, scores,
-or recommendations, and forecasts are never presented as guarantees. The
-math-only medium-horizon implementation and long-horizon plan are documented in
-[`docs/forecast-roadmap.md`](docs/forecast-roadmap.md).
+## Release status
 
-Scoring independently maps each available raw factor to 0-100 with fixed
-affine or piecewise policy maps, clamps it, averages factors into components,
-and applies versioned horizon weights. It does not cross-sectionally rank or
-winsorize factors; opportunity ordering uses the completed overall score
-after scoring. YAML/config policy is bound by the stored configuration hash;
-code-defined transforms are identified by the stored `code_revision`.
-Scheduled observed production automatically binds an exact clean commit SHA.
-Demo and direct research can record `working-tree` unless an exact committed
-revision is explicitly supplied. `rsi_14` is Cutler/SMA-style RSI using simple
-averages of the latest 14 gains and losses, and its RSI-to-score transform is a
-StanStock heuristic rather than a literature-standard transform.
+`research-product-v1` is implemented on the integration branch and documented
+here as the intended replacement research experience. It is **awaiting
+release and operational activation**:
 
-Broad literature-supported principles include momentum/trend, explicit risk,
-base rates and shrinkage, sustainable-growth accounting, valuation mean
-reversion, and point-in-time evaluation. Exact lookbacks, maps, weights,
-buckets, caps, confidence/support formulas, fallbacks, thresholds, and gates
-are fixed StanStock policy choices—not literature-standard, optimized,
-causal, or statistically calibrated constants.
+- integrated independent research-integrity, critic-tester, and final-validator
+  review has not completed;
+- full CI has not established release acceptance at the final head;
+- the private fixed-denominator operational acceptance has not completed;
+- no real retrospective study has been registered; and
+- no live product issuance or production activation is claimed.
 
-### Prospective short price baseline v3
+Until those gates pass and an orchestrator explicitly releases and activates
+the change, an existing installation or the public default branch may still
+serve the prior score-led product. This section is the single release-state
+summary; the detailed documents describe the implemented contract, not a
+completed deployment.
 
-`us-price-baseline-v3` is an explicit, research-only short methodology. It is
-not the production/default selector: scheduled/live US analysis and every
-medium/long compatibility lane remain pinned to `us-price-baseline-v2`.
-Explicit v3 analysis persists one short decision prediction and no
-medium/long advisory prediction. Generic latest-analysis, stock-detail,
-opportunity, watchlist, performance, and portfolio readers remain
-method-neutral, so an explicitly created v3 row may become their latest row;
-that reader truth is not default activation.
+## Research product at a glance
 
-V3's strict YAML is the sole authority for 16 transforms: eight normalized
-momentum/technical factors, five risk/liquidity factors, and three relative
-market factors. It rejects missing, unknown, or duplicate recursive keys,
-booleans used as numbers, non-finite inputs, invalid bounds, and hidden
-defaults. RSI remains Cutler/SMA RSI over the latest 14 close changes, not
-Wilder smoothing, and v3 maps it continuously as
-`100 * clamp((RSI - 30) / 40)` (`30/50/70 -> 0/50/100`). The normalized MACD
-input is histogram/latest positive close. Abnormal volume is `0` at a reported
-ratio `<= 0`; for a positive ratio `x` it is
-`clamp(100 - 20 * abs(x - 1))`. The jump from `0` at zero to a right-hand
-limit of `80` is intentional, not continuous.
+The replacement product has two deterministic operators:
 
-V3 volatility, downside deviation, maximum drawdown, and beta use exactly the
-latest 252 closes shared by the asset and benchmark (251 aligned simple-return
-pairs), require matching latest dates, and do not fill calendar gaps. The
-252-session relative-return factor is separate and needs 253 overlapping
-closes. Beta is excluded from factor/component/conviction scoring and enters
-only composite risk as `H(abs(beta); 0, 2)`. Composite risk is the equal
-average of YAML-mapped volatility, downside, drawdown magnitude, and absolute
-beta penalties; if any one is unavailable—including zero benchmark
-variance—the numeric risk is null. Numeric empirical scenarios can still be
-reported, while missing risk blocks BUY. The score, risk, and confidence
-AVOID gates remain independently active, so insufficiency does not
-automatically mean HOLD. A genuine zero remains numeric zero.
+| Operator | Role | Output |
+|---|---|---|
+| `us-relative-momentum-v1` | Six-month decision evidence | Raw direction plus Buy / Hold / Avoid suggestion |
+| `us-price-fhs-v1` | Advisory price research | Lower / Median / Upper projections at 6m, 12m, 3y, and 5y |
 
-A compatible split-equivalent transformation multiplies OHLC/close by finite
-`k > 0` and divides share volume by `k`; normalized factors, composite risk,
-confidence, scenarios, BUY gates, and recommendation are invariant, while raw
-prices, averages, MACD, and ATR scale by `k` and raw share volume scales by
-`1/k`. Price multiplied by `k` with volume fixed is not split-equivalent:
-measured USD turnover becomes `k` times larger and may change the configured
-liquidity factor, component, overall score, `$5m` BUY gate, and
-recommendation. Nominal price bands remain display/filter/execution metadata
-and never enter research arithmetic. Provider-reported volume has not been
-proven split-compatible; mathematical equivariance is not provider
-provenance.
+The output is exactly one `StockAnalysis` and five immutable predictions for
+each qualified listing: one 6m momentum decision and four FHS advisory rows,
+including a distinct 6m advisory row. The product has no overall score,
+calibrated confidence percentage, probability of gain, or automated portfolio
+instruction.
 
-For persisted v3 analysis, each listing and each non-null requested benchmark
-is selected once through `AsOfData.latest_asset` and that exact immutable
-asset is physically read and SHA-256 checked once. An omitted benchmark means
-zero benchmark selections/reads and explicit common-risk insufficiency. A
-requested but unavailable benchmark means one failed selection and zero
-reads; a selected corrupt benchmark means one selection and one attempted
-exact read. Both failures propagate and roll back invocation-owned runs,
-analyses, predictions, manifests, panels, rows, and files—there is no cache,
-fallback, substitute, reselection, or insufficiency downgrade. V3 is USD-only.
-Provenance records exact asset UUID, checksum, provider, subject,
-`retrieved_at`, and `available_at`, with actual generation time kept distinct
-from target date and data cutoff.
+Published research motivates the operators, but StanStock's individual-stock
+rules are not paper replications and have not been proven profitable. See
+[Price research](docs/price-research.md) for formulas and nonclaims.
 
-An exceptional observed v3 issuance is a direct
-`analyze_snapshot(..., issued_on_time=True, ...)` call, never
-`manage.py analyze`. For that explicit observed-v3 request, the service
-enforces the exact v3 config version and effective config hash,
-`provider="twelve_data"`, SPY, and a raw lowercase 40-hex
-`STANSTOCK_CODE_REVISION` equal to the checkout's exact clean committed HEAD.
-The caller still owns reviewed-production-universe selection and independent
-pre-invocation proof of the next-session-open deadline and source cutoff
-safety. Existing service deadline and source-cutoff checks remain fail-closed;
-an unsafe request raises rather than silently downgrading.
+## Data and admission
 
-Broad context comes from Wilder (1978) for the distinct Wilder-smoothed RSI
-convention, Jegadeesh and Titman (1993) and Moskowitz, Ooi, and Pedersen
-(2012) for momentum/trend research, Sharpe (1964) for beta as market
-sensitivity, and Amihud (2002) for treating liquidity separately. None of
-those works validates v3's exact windows, affine maps, thresholds, weights,
-confidence rules, risk classes, dollar-volume proxy, profitability, or
-recommendation gates.
+The live candidate set is the unchanged curated 100-name US core plus at most
+20 owner-saved names, deduplicated by permanent listing identity. SPY is a
+separate benchmark and never becomes stock membership.
 
-## Current data boundary
+Each analyzed stock must have:
 
-The original free-provider gate remains **NO_GO for broad US/European
-coverage**, but StanStock now has a **conditional US-only path** through
-Twelve Data's documented API.
+- verified US/USD common-stock or supported-ADR catalog identity;
+- one registered immutable split-adjusted price vintage;
+- the separate registered SPY benchmark vintage; and
+- exactly 757 consecutive common XNYS-session closes ending at target session
+  `T`, which yields 756 daily returns.
 
-- The curated starter universe contains 100 NASDAQ/NYSE common-stock symbols.
-  SPY is fetched once as the separate benchmark and the same immutable series
-  maintains an investable SPY ETF listing without another provider request.
-  SPY is not a universe member and never enters stock scoring or ranking. The
-  universe is not represented as a licensed index.
-- Twelve Data prices are explicitly split-adjusted price returns; dividends
-  are not included and results must not be labeled total returns.
-- Basic activation is limited to one authenticated active user who explicitly
-  confirms personal, non-commercial, non-redistributed use. The provider's
-  pricing page labels Basic as internal non-display, while its August 2026
-  support guidance permits internal tools under Individual plans; use this
-  mode only when your account terms cover your exact personal workflow.
-- Grow, Pro, Ultra, or a reviewed custom agreement can instead be activated
-  with an explicit internal-display confirmation.
-- Stooq's public download route is protected against unattended automation,
-  and its automation/private-retention rights could not be verified.
-- SEC EDGAR and ECB data are viable official sources.
-- filings.xbrl.org is usable for European filings but documents incomplete
-  coverage, including Germany and Ireland.
-- European live equity prices remain deferred.
+Missing sessions are not interpolated. SEC facts are not a prerequisite for
+the active price product. Qualified Under-$10 listings receive the same
+momentum research and four projections, but remain a speculative watch with
+0% new allocation, no BUY promotion, no highlight, and no new sample-basket
+admission.
 
-StanStock still defaults to deterministic synthetic data and requires an
-explicit provider enable step. It does not scrape around access controls,
-silently broaden licensed use, or label historical catch-up as an on-time
-prediction. See `docs/source-spike.md` for the evidence and exact limitations.
+Twelve Data's currently documented split-adjusted price response does not, by
+itself, prove split-compatible volume. Price direction and all four
+projections can therefore remain calculable while the liquidity gate is
+unavailable and a positive signal stays **Hold** rather than BUY.
 
-### Synthetic demo data
+## Runtime flow
 
-`seed_demo` and `refresh_demo` never call, approximate, or claim to call any
-live provider (Stooq/SEC/filings.xbrl.org/ECB/etc.); every row they create is
-entirely synthetic, obviously-fake demo data (see the command docstrings for
-the full guarantees).
-
-Seed ~60 synthetic US/European listings, one research-grade synthetic
-universe snapshot, and 6+ years of synthetic OHLCV/fundamentals/FX history
-(idempotent: safe to rerun; never deletes or mutates already-seeded rows):
-
-```bash
-uv run python manage.py seed_demo
+```text
+fixed core + captured owner-saved names + entitlement
+        -> immutable intake before provider work
+        -> reuse verified catalog/history or acquire only missing history
+        -> immutable membership and exact stock/SPY source closure
+        -> momentum + FHS calculation
+        -> one analysis + exact five-row prediction ledger + output proof
+        -> shared fail-closed reader
+        -> Opportunities / detail / My List / status / history / performance
 ```
 
-Run the bounded, **SYNTHETIC-ONLY** vertical flow -- `seed_demo` followed by
-`analyze_snapshot` against the synthetic universe snapshot
-(`provider=synthetic_demo`, `benchmark=ZZBENCH01`) -- with only the analysis
-step wrapped in the same target-job idempotency guard as a real scheduled
-job, so a `--target-date` that already succeeded is skipped rather than
-re-analyzed. `--target-date` defaults to the synthetic snapshot's own
-`as_of_date` (its synthetic history does not extend past that date); an
-explicit `--target-date` is rejected unless it is on or before that date
-*and* an actually-observed session in the synthetic benchmark's price
-history (no fabricated weekends/holidays):
+Authenticated browsing never calls a provider, runs FHS, registers a study,
+or mutates evidence. The reader verifies owner authorization, registered
+manifests, source identity, and physical checksums before rendering. Completed
+target recovery reuses exact captured records before credential resolution or
+new quota use.
 
-```bash
-uv run python manage.py refresh_demo
-```
+## Safe local demo
 
-### Optional US Twelve Data workflow
-
-On macOS, store the key in the current user's login Keychain through an
-interactive prompt. The key is never passed as a command argument and is not
-written to Git, dotenv files, logs, URLs, metadata, or the database:
-
-```bash
-uv run python manage.py store_twelve_data_key
-uv run python manage.py store_twelve_data_key --status
-```
-
-Containers and non-macOS hosts should inject `TWELVE_DATA_API_KEY` through
-their secret manager or process environment. Environment variables take
-precedence over Keychain.
-
-For a private local checkout, `.env` is also supported by Docker Compose and
-is excluded from both Git and the image build context. Keep it owner-readable
-only:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-# Edit TWELVE_DATA_API_KEY in .env without committing the file.
-```
-
-Direct `manage.py` commands do not parse dotenv files themselves. Export the
-local file into that command's process when not using Compose:
-
-```bash
-set -a
-. ./.env
-set +a
-uv run python manage.py source_spike
-```
-
-For the Basic personal plan, run the bounded source probe and then activate
-the single-user guard:
-
-```bash
-uv run python manage.py source_spike
-uv run python manage.py configure_twelve_data \
-  --enable \
-  --plan basic \
-  --confirm PERSONAL_SINGLE_USER_NONCOMMERCIAL_AUTHORIZED
-uv run python manage.py daily --region us
-```
-
-Basic mode records the licensed owner and refuses provider jobs if another
-active StanStock user exists. Authenticated provider-backed pages return 403
-for any other user. There is no public signup. For Grow, Pro, Ultra, or a
-reviewed custom agreement, use
-`--confirm PERSONAL_INTERNAL_DISPLAY_AUTHORIZED`.
-
-SEC EDGAR needs no account or API key. Automated requests must identify the
-application and a monitored contact in `SEC_USER_AGENT`; keep that value only
-in the ignored local `.env`:
-
-```bash
-SEC_USER_AGENT="StanStockResearch/0.1 monitored-address@example.com"
-set -a
-. ./.env
-set +a
-uv run python manage.py source_spike \
-  --skip twelve_data,stooq,filings_xbrl_org,ecb
-uv run python manage.py configure_sec --enable
-uv run python manage.py fetch_sec_mapping
-uv run python manage.py sync_sec_fundamentals --target-date YYYY-MM-DD
-```
-
-The reviewed CIK configuration covers the 100-stock US universe and excludes
-SPY. SEC ingestion preserves the official mapping, current and historical
-submissions, Companyfacts, exact accession/acceptance provenance, append-only
-revisions, full instant/duration period identity, and current SIC snapshots.
-Daily automation polls submissions, refreshes Companyfacts after a new filing,
-retries a still-missing filing at most once daily for seven days, and then
-falls back to staggered periodic reconciliation rather than downloading all
-history every night. Normalized facts retain a separate immutable link to the
-submissions or history asset that supplied their acceptance boundary.
-
-`daily --region us` validates the configured symbols against Twelve Data's
-NASDAQ/NYSE catalogs, stores the raw JSON and normalized Parquet as immutable
-vintages, captures an observed universe snapshot for the latest eligible
-session, analyzes eligible listings, appends the supported short-horizon
-decision prediction, and issues separate 6- and 12-month price-only advisory
-forecasts. When SEC is enabled, the same immutable run also issues separate
-3- and 5-year advisory forecasts or an explicit insufficiency reason. The
-medium engine writes one private immutable Parquet panel per analysis run and
-uses fixed-epoch non-overlapping cohorts. Matched and unconditional
-cohort-weighted p20/p50/p80 estimates are each shrinkage blended: published
-base is blended p50, with bear/bull at blended p20/p80. Bear-to-bull is a
-nominal central 60% analog-return range, not a calibrated interval, and has no
-coverage guarantee. The shrinkage-weighted positive-return estimate stays
-hidden until support/diversity checks, base-case MAE comparisons against
-unconditional and SPY-relative baselines, and the configured absolute Brier
-threshold pass. The retained internal `empirical_calibrated` status records
-only that publication-gate result; it does not prove calibrated probabilities
-or interval coverage.
-
-`us-price-medium-v1` remains byte-for-byte frozen and is still the only
-default and scheduled medium method. `us-price-medium-v2` is available only
-through an explicit `analyze_snapshot(..., medium_forecast_config_path=...)`
-research invocation with `issued_on_time=False`, a research-grade US/USD
-stock universe, exact `us-price-baseline-v2` scoring, and SPY. V2 selects all
-panel source vintages at generation time, refuses the run before any source
-read when a selected asset became available after the run's historical data
-cutoff, then checksum-reads each accepted exact asset once.
-
-V2 derives p20/p50/p80 and strict `P(return > 0)` from one cohort-equal
-matched/unconditional empirical-CDF mixture. Probability is published only
-when current support floors pass and matured-only, prior-only prequential
-Brier skill against the unconditional reference is strictly positive. Its
-central p20-p80 range and coverage, miss-rate, width, and interval-score
-summaries are descriptive. V2 is current-universe and survivorship-biased,
-research-only evidence—not calibrated probability, statistical significance,
-profitability, alpha, or observed live skill. See
-[`docs/methodology.md`](docs/methodology.md#explicit-research-only-medium-v2).
-
-The single SPY benchmark response supplies both regime evidence for those
-forecasts and the investable ETF market row; it is not fetched twice.
-Current-universe historical panels are explicitly labeled survivorship-biased
-research evidence and are not presented as live skill. Existing `medium` and
-`long` records retain their legacy identities. Exact `3y` and `5y` forecasts
-use a separate deterministic SEC engine: positive compatible FCF/share takes
-priority, EPS/share is eligible only when FCF evidence is genuinely
-unavailable, current SIC peers must meet frozen sample floors, and growth
-fades toward a fixed terminal rate while valuation partially reverts toward a
-bounded peer median. Every selected annual period must reconcile
-net-income-derived EPS with reported diluted EPS, TTM diluted shares must stay
-within 15% of the latest overlapping annual basis, and beginning/end invested
-capital must use the same canonical and source concept definitions. Scenario
-returns divide by the actual current multiple while using a bounded current
-multiple only as the reversion anchor; a raw multiple below the supported
-family floor is withheld rather than being raised mechanically. Missing,
-negative, incompatible, stale, or unsupported inputs stay `Insufficient
-evidence`; probability remains unavailable. Because there is no verified
-split-event feed, each prediction also records and discloses the bounded
-period after its latest SEC share evidence as residual post-period split risk.
-The bounded tax input is a GAAP accrual proxy—TTM income-tax expense divided
-by TTM pretax income—not cash taxes paid or a cash tax rate. Reinvestment is
-compatible balance-sheet invested-capital change divided by NOPAT, an
-accounting proxy rather than directly observed capex or a proven causal rate.
-The 3y and 5y forecasts use separate frozen horizon-specific fade and
-multiple-reversion paths; neither is a slice or extrapolation of one shared
-5y path.
-These advisory rows cannot change BUY/HOLD/AVOID, opportunity ranking, or
-decision hit rates. A withheld advisory forecast (all scenario returns null)
-stays unresolved when evaluated and is excluded from advisory reporting
-denominators rather than being counted as a matured call. A stricter
-eligibility gate ships as a new versioned configuration; the prior version's
-config hash, behavior, and output payloads remain unchanged and reproducible.
-`us-sec-long-v4` is a separate **research-only, unactivated** schema-2
-experiment. It is available only through an explicit
-`analyze_snapshot(..., long_forecast_config_path="config/forecasts/us-sec-long-v4.yml",
-long_forecast_requested=True, issued_on_time=False)` call against the exact
-reviewed `us-price-baseline-v2` identity and a research-grade US/USD
-snapshot. It is not the default or scheduled method and cannot affect
-recommendations, opportunities, allocation, or simulations. A matured
-research-grade V4 row may be processed by the shared immutable outcome
-evaluator, but it remains excluded from observed, reportable, and headline
-performance. That shared flow has an isolated V4 baseline rule: it
-authenticates `calculation.target_price.valuation_value` against an exact
-target-date close and uses that physical value, not the six-decimal ledger
-price, as the realized-return denominator.
-
-V4 estimates reported-GAAP entity growth first, separately estimates dilution
-from weighted-average diluted shares, and translates entity growth to
-per-share growth exactly once. It uses one five-year fade and
-multiple-reversion path; the 3y result is year 3 of that path and the 5y
-result is year 5. FCF is operating cash flow less absolute capex. Net income
-is considered only when admitted raw FCF evidence is genuinely absent.
-Probability and numeric confidence are unavailable: stored confidence `0.00`
-is an unavailable sentinel and the UI renders words, never `0%`.
-Eligibility has no nominal per-share floor: every entity value, diluted-share
-denominator, derived per-share value, and price must instead be finite and
-strictly positive. A split-equivalent rescaling of every target and peer
-(shares multiplied by the same factor and prices/per-share figures divided by
-it) leaves eligibility, peer locking, growth, dilution, return paths, and
-confidence semantics unchanged.
-
-Every V4 calculation is bound to the byte hash and effective hash of its V4
-policy file, the canonical SEC fundamentals configuration, and the
-independent canonical SEC CIK configuration; the latter also pins the exact
-raw SEC ticker/exchange mapping hash. Every cohort listing must match one
-reviewed symbol/CIK/exchange row and the exact `Nasdaq -> XNAS` or
-`NYSE -> XNYS` rule before any SEC fact or peer evidence is used.
-
-The schema-2 evidence catalog is replayed from the complete locked eligible
-snapshot cohort. It separately records raw-FCF authority as `absent`,
-`present_complete`, or `present_normalization_incomplete`; only genuine
-absence permits net-income fallback. The source manifest follows one
-canonical order: the SEC mapping asset; each assessed owner's Companyfacts,
-current submissions, and filename-sorted submissions history; existing fact
-source/filing/context triples; classifications; then each cohort price's
-normalized Parquet and linked raw provider asset, with global
-first-occurrence deduplication. Every unique file is checksum-read.
-
-Price evidence retains the exact unrounded physical Parquet close for
-valuation and a separate six-decimal ledger close for Django decimal fields.
-Formula gates and return arithmetic use the former; `StockAnalysis` and
-`Prediction` price fields use only the latter. V4 outcome evaluation also
-uses the authenticated physical close as its denominator, requires that exact
-close on the prediction target date in the evaluation vintage, and rounds the
-result once to four decimals with half-even rounding. Both values, their
-role, and the normalized/raw asset identities are persisted and replayed.
-
-The accounting and valuation literature is context, not calibration:
-Damodaran and Nissim-Penman motivate separating operating growth from
-valuation; Fama-French and Bhojraj-Lee/Bhojraj-Lee-Oler motivate caution about
-industry grouping and peer multiples; FASB Statement 2 / ASC 730 and ASC 260
-explain the reported R&D and weighted diluted-share accounting boundaries;
-Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang show why omitted
-intangible capitalization must be disclosed rather than guessed;
-Vorst-Yohn motivates disciplined forecast-input interpretation; and
-Lo-MacKinlay motivates an out-of-sample, cutoff-safe replay before any
-activation claim. V4's caps, weights, fade, dilution multipliers, and
-multiple-reversion schedule are fixed policy assumptions, not fitted or
-optimized estimates.
-
-An explicit older `--target-date YYYY-MM-DD` is labeled
-research-grade. A successful target is idempotent; another invocation creates
-a skipped job and makes no provider requests.
-
-After upgrading an existing database that already contains immutable SPY
-benchmark assets, create its ETF listing locally without consuming provider
-credits:
-
-```bash
-uv run python manage.py migrate
-uv run python manage.py sync_investable_etfs
-```
-
-On a private macOS checkout, install the validated local scheduler after the
-manual provider workflow succeeds:
-
-```bash
-.venv/bin/python manage.py launchd_refresh install
-.venv/bin/python manage.py launchd_refresh status
-```
-
-The LaunchAgent invokes one recoverable refresh at 03:30 local time
-Tuesday-Saturday. Installation is refused unless that wall-clock schedule is
-after Twelve Data's publication delay and before the next XNYS opening across
-regular closes, early closes, and DST transitions. The ignored `.env` must be
-owner-only (`chmod 600 .env`); its values are sourced by a private runner and
-never copied into the plist. A late sleep/wake invocation refuses automatic
-research-grade backdating. Remove the job with
-`.venv/bin/python manage.py launchd_refresh uninstall`.
-
-Install the LaunchAgent from a clean, committed checkout; the scheduled
-market child requires a clean Git worktree
-(`stanstock.core.revision.clean_git_revision`) and fails closed on local
-changes. If the primary development checkout is intentionally dirty, install
-the LaunchAgent from a separate clean runtime checkout instead, pointed at
-the same local SQLite database and `STANSTOCK_DATA_DIR` via
-`STANSTOCK_SQLITE_PATH` (see above).
-
-The Basic quota guard is 8 credits/minute and 800/day. The 100-symbol
-configuration uses approximately 103 credits per full run (two catalogs, 100
-stocks, and SPY), so two configured daily runs remain below the local daily
-ceiling. Requests are spaced at least 7.5 seconds apart and a run is rejected
-before provider access when its estimated credits would exceed the remaining
-local allowance. This accounting cannot see credits consumed by other
-applications using the same Twelve Data account. Disable access immediately
-with:
-
-```bash
-uv run python manage.py configure_twelve_data --disable
-```
-
-Twelve Data data must remain private, may not be redistributed without
-appropriate rights, and must be deleted after the subscription or agreement
-ends as required by the provider's current terms. The supported termination
-procedure is a full installation reset covering the database, data directory,
-backups, snapshots, and replicas; see
-[Operations and recovery](docs/operations.md#destroying-twelve-data-data-after-access-ends).
-
-## Start locally
+The main application setting defaults `RESEARCH_PRODUCT_ENABLED` to `true`;
+the environment name is `STANSTOCK_RESEARCH_PRODUCT_ENABLED`. Demo mode
+remains safe and offline: `refresh_demo` creates visibly synthetic
+`synthetic_demo` intake, history, membership, calculations, and research-grade
+output through the production paths.
 
 ### Docker Compose
-
-Requirements: Docker with Compose.
 
 ```bash
 docker compose up --build
 ```
 
-Open <http://localhost:8000> and sign in with the development-only defaults:
+Open <http://localhost:8000> and sign in with the development owner
+credentials configured for the local environment.
 
-```text
-username: admin
-password: stanstock-dev
-```
-
-Override both values with `STANSTOCK_OWNER_USERNAME` and
-`STANSTOCK_OWNER_PASSWORD`.
-
-### Direct Python development
-
-Requirements: Python 3.13 and `uv`.
+### Direct Python
 
 ```bash
 uv sync --all-groups
 uv run python manage.py migrate
-STANSTOCK_OWNER_PASSWORD=stanstock-dev uv run python manage.py bootstrap_owner
+printf 'Owner password: '
+read -rs STANSTOCK_OWNER_PASSWORD
+printf '\n'
+STANSTOCK_OWNER_USERNAME=local-owner \
+STANSTOCK_OWNER_PASSWORD="$STANSTOCK_OWNER_PASSWORD" \
+  uv run python manage.py bootstrap_owner
+unset STANSTOCK_OWNER_PASSWORD
 uv run python manage.py refresh_demo
 uv run python manage.py runserver
 ```
 
-The direct development path uses SQLite unless `DATABASE_URL` is set. Docker
-Compose uses PostgreSQL and durable named volumes for the database and
-`STANSTOCK_DATA_DIR`. Development Compose runs the idempotent synthetic demo
-refresh automatically when `STANSTOCK_DEMO_MODE=true`.
+The demo includes qualified synthetic examples, a qualified Under-$10
+example, and an insufficient-history example. Synthetic output is always
+research-grade and never establishes historical or future forecast skill.
 
-A separate clean runtime checkout (for example, one dedicated to the
-LaunchAgent schedule while the primary development checkout stays
-intentionally dirty for in-progress work) can share the same local SQLite
-database and `STANSTOCK_DATA_DIR` as the primary checkout by setting
-`STANSTOCK_SQLITE_PATH` to an absolute path. Leave `DATABASE_URL` unset when
-using `STANSTOCK_SQLITE_PATH`; the two are mutually exclusive and setting
-both fails closed at startup rather than silently picking one. A relative
-path is also rejected; `STANSTOCK_SQLITE_PATH` must already be absolute after
-`~` expansion.
+## Optional private US workflow
 
-Evaluate pending predictions through an explicit observed-data cutoff:
+Broad unattended US/European OHLCV remains `NO_GO`. The only approved live
+price path is the bounded private US Twelve Data workflow, disabled unless a
+non-demo key and the required personal/internal-display entitlement are
+explicitly configured. Provider data must not be redistributed.
+
+After the bounded source probe and rights review, an owner may enable the
+provider and run:
 
 ```bash
-uv run python manage.py evaluate --all-pending \
-  --evaluation-date 2026-09-04 \
-  --benchmark-subject ZZBENCH01
+uv run python manage.py daily --region us
 ```
 
-Run a portfolio simulation from the authenticated `/simulations` page or with
-the `simulate` command. CLI portfolio selections use permanent listing UUIDs;
-`python manage.py simulate --help` documents the complete arguments. A
-selection spanning several native currencies is converted into one explicit
-reporting currency (`--base-currency USD`, `EUR`, or `GBP`) using rates dated
-on or before each simulated date, resolved against that date's own end-of-day
-cutoff so a later correction cannot rewrite an earlier execution; a missing,
-over-stale, or ambiguous rate path fails the run rather than converting part
-of it. Use `--restrict-native-currency` to run a single-currency slice of a
-mixed universe instead.
+With the research-product setting enabled, manual `daily --region us` is
+**always research-grade**. `--issuance-key` defaults to `manual`; the reserved
+`scheduled` identity is rejected. The generic `analyze` command also remains
+research-only regardless of provider, configuration, benchmark, target, or
+revision flags.
 
-Create several live tracked portfolios from `/portfolios`. Each portfolio is
-private to its owner and stores current holdings plus immutable dated
-valuation snapshots. Holdings are currently restricted to the portfolio's
-base currency and must have a current persisted market row. SPY can be held
-and valued from its ETF market row without a stock analysis; other ETFs are
-not enabled. Snapshot returns are unrealized price returns against the average
-costs entered by the owner; cash is excluded from that return, dividends are
-excluded unless the source explicitly includes them, and the value history
-includes holding/cash changes rather than claiming a time-weighted return.
+The supported macOS profile invokes `scheduled_refresh` at **03:30
+Europe/Tallinn, Tuesday through Saturday** after validating the machine
+timezone across market closes and DST. A fresh scheduled issuance requires an
+observed window, exact owner/provider/config binding, and a clean committed
+revision. SEC ingestion is separate and does not block the active price
+product.
 
-Keep a separate private symbol preference list from `/my-list`. **My list**
-accepts unique active US common-stock/ADR listings and symbols identified by
-the latest checksummed local Twelve Data NASDAQ/NYSE catalogs. Browsing or
-adding symbols never fetches provider data, changes universe membership, runs
-analysis, or creates a portfolio holding. The separate local
-`refresh_my_list_prices` command can refresh persisted prices for up to 20
-saved symbols using the existing enabled Twelve Data workflow and verified
-local catalog evidence. See [price-only monitoring](docs/operations.md#my-list-price-only-monitoring).
-The page separates all tracked symbols, current provider-backed Under-$10
-prices, and symbols without a current live price. Price monitoring does not
-create a forecast or enable investment: Under-$10 new allocation remains 0%.
+See [Operations](docs/operations.md), [Deployment](docs/deployment.md), and
+[Source capability](docs/source-spike.md) before enabling any live path.
 
-Manual portfolios also support immutable external deposits and recorded
-monthly allocations. The editable monthly preference defaults to $600.
-Previews are side-effect free and target 70% of total NAV in SPY plus at most
-30% in one currently qualified short-horizon stock satellite. Fractional
-shares are enabled by default; whole-share mode rounds down and carries the
-remaining cash. The planner never sells, never allocates new money to the
-Under-$10 speculative watchlist, and never sends a brokerage order or makes a
-provider request. Confirmation recomputes a checksummed plan from locked
-portfolio, price, and analysis state before appending immutable purchase
-records tied to exact market sessions and source assets.
+## Research evidence
 
-Contribution-adjusted profit/loss subtracts immutable deposits from current
-NAV relative to an eligible valuation boundary. It is a simple since-boundary
-return, not a time-weighted or money-weighted result. Fresh, coherent,
-split-adjusted, dividend-excluding price evidence is required. A supported
-manual quantity change or removal appends an immutable post-change baseline
-so performance restarts without treating the change as profit; if that
-valuation cannot be established, the edit still succeeds and performance is
-explicitly withheld until a later valid baseline supersedes it.
+Forward observed outcomes and retrospective comparisons are separate lanes.
+The frozen retrospective protocol uses a fixed 2019-09-03 epoch,
+horizon-spaced anchors, development outcomes before 2024, validation anchors
+and complete outcomes within 2024, and final-holdout anchors from 2025 with
+complete outcomes through 2026-09-11. Partition crossings are purged and the
+holdout cannot be used for tuning.
 
-The same page can build an idempotent, frozen StanStock sample portfolio from
-the latest provider-backed opportunity run. It equal-weights up to five
-eligible USD listings by default, preserves the source run and reference
-prices, and creates an immutable baseline snapshot. The current price-only
-sample is a research-reference basket rather than an executable-fill claim;
-its short signal horizon, research grade, no-rebalance policy, split-adjusted
-price-return basis, and dividend exclusion remain visible. ETFs are excluded
-from stock sample construction. Newly constructed samples also exclude the
-`Under $10 - speculative watchlist` band and record the price-band policy
-used. Construction classifies the immutable analysis reference close at the
-run's target date rather than a later mutable close; existing holdings and
-older frozen samples are not rewritten.
+The read-only `replay_price_product` CLI can inspect an exact immutable source
+run without provider access or database/asset writes. A separate parent-invoked
+Python service, `register_price_product_study(run=..., store=...)`, calculates
+the full selected cohort itself and registers canonical evidence; it does not
+accept caller-authored metrics. HTTP GET never performs replay.
 
-The equivalent command is:
-
-```bash
-uv run python manage.py build_sample_portfolio \
-  --username <owner> \
-  --starting-capital 100000 \
-  --top-n 5
-```
-
-Record all active portfolios after a market-data refresh:
-
-```bash
-uv run python manage.py snapshot_portfolios
-```
+No real study is claimed in the current release state.
 
 ## Authenticated pages
 
-- `/opportunities` - ranked analyses grouped and filterable by neutral current
-  USD price bands, with the close date displayed.
-- `/stocks/<listing-id>` - scenarios, factor evidence, risks, and provenance.
-- `/etfs/<listing-id>` - SPY price-return, volatility, drawdown, benchmark
-  identity, and provenance without a stock recommendation.
-- `/predictions` - the append-only prediction ledger, including explicit
-  decision/advisory role and the recorded price provider/subject.
-- `/performance` - decision outcomes retain their fixed 30-observation display
-  threshold. A separate advisory section validates exact
-  method/configuration/provider/horizon/evidence/revision groups, reduces
-  overlapping target dates to non-overlapping cohorts, and publishes
-  equal-vintage sign, inclusion, and base-error metrics only after the
-  horizon-specific breadth and calendar-span floors pass.
-- `/my-list` - private owner-scoped symbol preferences validated only from
-  existing listings or checksummed locally stored stock catalogs, with
-  provider-backed price monitoring and explicit missing-price states.
-- `/portfolios` - owner-scoped holdings, immutable deposits/purchases,
-  monthly allocation previews, contribution-aware performance, and valuation
-  history.
-- `/simulations` - backtest and portfolio runs through one accounting model.
-- `/status` - database, asset-store, provider, job, and prediction status.
-- `/methodology` - point-in-time, scoring, scenario, and limitation summary.
+- `/opportunities` — primary price-research cards and filters;
+- `/stocks/<listing-id>` — method assumptions, source closure, decision, and
+  all projection horizons;
+- `/my-list` — captured saved-candidate state and current persisted prices;
+- `/status` — operational health, admission, freshness, and verification, not
+  a second forecast table;
+- `/predictions` — immutable decision/advisory history;
+- `/performance` — separate observed outcome cohorts and registered
+  retrospective comparisons;
+- archive routes — frozen prior methods and their original definitions;
+- `/portfolios` and `/simulations` — unchanged local research-accounting
+  surfaces that do not consume the new signal as a trading instruction.
 
-When persisted analysis does not exist, the status page clearly labels its
-illustrative synthetic rows. Data-bearing pages require authentication;
-`/healthz` exposes only coarse readiness information. The authenticated data
-label is derived from the latest serving analysis provenance rather than the
-development debug setting, and the market overview is restricted to that
-serving run's listings. Historical prediction rows retain their own
-provider/synthetic labels.
+All data-bearing pages require authentication. `/healthz` exposes only coarse
+readiness.
 
 ## Integrity guarantees
 
-- Permanent company, security, and listing IDs; ticker text is not identity.
-- Immutable source assets and explicit `retrieved_at`/`available_at` vintages.
-- Historical reads use the `AsOfData` boundary, including physical row-level
-  clipping and ascending ordering through the requested market date.
-- Historical research reconstructions cap fact availability and price rows at
-  the logical target while retaining their actual later generation/retrieval
-  timestamps; only on-time observed runs count as live evidence.
-- No reissue of an immutable prediction inherits another version's on-time
-  status; each version independently proves its own next-market-session-open
-  deadline.
-- Within an exact method/configuration/provider cohort, performance counts each
-  listing/target/horizon/evidence-role observation once from its earliest
-  reportable issuance; later observed reissues remain in the immutable ledger.
-- Database constraints bound scores, confidence, probability, dates, and
-  scenario ordering.
-- Prediction, asset-manifest, filing-fact, and FX-vintage updates/deletes are
-  rejected by Django and database triggers.
-- Target-date jobs are serialized and a successful target cannot execute
-  twice.
-- Missing or statistically insufficient evidence remains explicit.
-- Missing risk inputs produce an `INSUFFICIENT EVIDENCE` state rather than a
-  fabricated numeric risk score.
-- Simulation results and exact price/signal/benchmark inputs are persisted as
-  checksummed immutable assets, and the run input hash covers their complete
-  normalized contents.
+- Permanent company, security, listing, asset, analysis, and prediction
+  identities.
+- Immutable source vintages and explicit `available_at`, `retrieved_at`,
+  `generated_at`, `data_cutoff`, and per-version `issued_on_time`.
+- Historical reads physically exclude price rows after the requested market
+  date.
+- Complete canonical input/calendar hashes, registered manifests, and
+  physical checksum verification.
+- Missing, incompatible, stale, unauthorized, or unverified data remains
+  explicit; it is never coerced to zero or a success-shaped default.
+- Safe retries recover committed target evidence before provider enablement,
+  credentials, or quota.
+- Frozen prior configs, payloads, predictions, and performance meanings stay
+  archived; the new product does not rewrite them.
 
 ## Backup and recovery
 
-Create one checksummed bundle containing the database snapshot and every file
-under `STANSTOCK_DATA_DIR`:
+The database and `STANSTOCK_DATA_DIR` assets are one recovery unit:
 
 ```bash
 uv run python manage.py backup
+uv run python manage.py restore BACKUP_BUNDLE.tar.gz --verify-only
+uv run python manage.py restore BACKUP_BUNDLE.tar.gz --confirm RESTORE
 ```
 
-Verify a bundle without changing state:
-
-```bash
-uv run python manage.py restore var/backups/<bundle>.tar.gz --verify-only
-```
-
-Restore is destructive and requires explicit confirmation:
-
-```bash
-uv run python manage.py restore var/backups/<bundle>.tar.gz --confirm RESTORE
-```
-
-Stop all web and job processes before a restore, then restart them afterward.
-PostgreSQL backup/restore requires `pg_dump` and `pg_restore` on `PATH`; the
-provided production image includes the PostgreSQL client tools. PostgreSQL
-restore is fail-fast and single-transaction so a failed restore rolls back its
-database changes.
-
-## Production configuration
-
-`compose.production.yaml` is a vendor-neutral single-instance template. It
-requires:
-
-- an external PostgreSQL `DATABASE_URL`;
-- a strong `DJANGO_SECRET_KEY`;
-- explicit allowed hosts and trusted origins;
-- TLS at the application or trusted reverse proxy;
-- durable private volumes for `/app/var/data`, `/app/var/backups`, and
-  `/app/var/static`.
-
-Production settings default to secure cookies, HTTPS redirect, HSTS, and a
-non-root/read-only container. Set insecure cookie/redirect options only for a
-local HTTP dry run. Set `STANSTOCK_LOGIN_TRUSTED_PROXY_IPS` to the
-comma-separated source IPs of proxies that overwrite `X-Forwarded-For`;
-unlisted peers cannot influence the login-throttle client address.
+Stop web and job processes before restore. Rollback disables future
+prospective serving/scheduling or redeploys a known compatible revision; it
+does not delete immutable rows or rewrite old predictions. See
+[Operations](docs/operations.md#backup-restore-and-rollback).
 
 ## Development checks
 
@@ -697,22 +229,25 @@ uv run python manage.py makemigrations --check --dry-run
 uv run python manage.py check --deploy --settings=stanstock.settings.prod
 ```
 
-Tests and CI use synthetic fixtures and never call live providers.
+Tests and CI use synthetic fixtures only and never contact live providers.
+Current release acceptance is stated only in [Release status](#release-status).
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Point-in-time integrity](docs/point-in-time.md)
+- [Price-research specification](docs/price-research.md)
 - [Methodology](docs/methodology.md)
-- [Source capability spike](docs/source-spike.md)
+- [Point-in-time integrity](docs/point-in-time.md)
+- [Accepted roadmap and release gates](docs/forecast-roadmap.md)
 - [Operations and recovery](docs/operations.md)
 - [Deployment](docs/deployment.md)
+- [Source capability](docs/source-spike.md)
 - [Testing](docs/testing.md)
 - [Known limitations](docs/limitations.md)
-- [Durable implementation learnings](LEARNINGS.md)
 
 ## Financial disclaimer
 
-Forecasts are estimates, not guarantees. Historical and simulated performance
-does not guarantee future performance. StanStock does not provide personalized
-financial, investment, tax, or legal advice.
+Forecasts are conditional estimates, not guarantees. Historical,
+retrospective, and simulated results do not guarantee future performance.
+StanStock does not provide personalized financial, investment, tax, or legal
+advice.

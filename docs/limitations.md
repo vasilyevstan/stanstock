@@ -1,385 +1,141 @@
 # Limitations
 
-## Live prices are US-only and conditional
+> Release state: see [README](../README.md#release-status). The replacement
+> product is implemented but not yet independently accepted or activated.
 
-The original free-only, unattended, roughly 500-stock US/Europe requirement
-remains `NO_GO`. A reduced 100-stock US starter universe is technically
-supported through Twelve Data's official API, but it is disabled by default
-and conditional on account rights.
+## Research-product limits
 
-- Stooq's public CSV path is protected against automation in the tested
-  environment.
-- Its official automation and private-retention terms could not be
-  machine-verified.
-- No browser challenge or access control will be bypassed.
-- Alpha Vantage's official free limit is too small for the requested universe.
-- Twelve Data's pricing page labels Basic as internal non-display, while its
-  August 2026 support guidance says Individual plans may be used for personal,
-  non-commercial internal tools and prohibits redistribution and commercial
-  display. StanStock supports Basic only under the owner's explicit
-  single-user personal-use attestation, records the licensed user, blocks
-  every other authenticated user, and stops provider jobs if another active
-  account exists. This technical guard is not a substitute for confirming the
-  account's current terms with Twelve Data.
-- Twelve Data data cannot be redistributed or publicly displayed without
-  appropriate rights, and current terms require its deletion after the
-  subscription or agreement ends. Because provider assets feed immutable
-  provenance and derived records, the supported deletion path is a full
-  installation reset, including databases, assets, backups, replicas, and
-  snapshots; selective provider purging is intentionally unsupported.
-- European live equity coverage is still deferred.
+- The two active operators are fixed mathematical policies, not fitted ML and
+  not replications of the cited papers.
+- Literature motivation is not proof of profitability, calibration,
+  statistical significance, or live forecasting skill.
+- Momentum measures a skipped-month historical relationship to SPY. It is not
+  a probability or causal forecast.
+- FHS extrapolates the stock's trailing three-year mean log return and
+  fixed-parameter variance dynamics. Regime change, parameter uncertainty,
+  delisting, corporate events, and survivorship effects can dominate,
+  especially at 3y and 5y.
+- Residuals are sampled independently with replacement. Dependence beyond the
+  variance recursion is not claimed to be preserved.
+- Lower/Median/Upper are p20/p50/p80 model quantiles. The interval contains
+  60% of simulated model mass, not demonstrated 60% real-world coverage.
+- Median is not mean. Lower is not a worst case, stop price, or guaranteed
+  floor.
+- Probability and confidence are null, not zero.
+- 8,192 production paths and 16,384-path diagnostics describe numerical
+  approximation, not additional financial evidence.
+- Missing or invalid calculation components are withheld rather than repaired
+  with floors, clipping, interpolation, jitter, or success-shaped defaults.
 
-Consequently, the default application remains deterministic synthetic
-research. US live rankings become available only after explicit
-`configure_twelve_data` activation with a non-demo key and the confirmation
-appropriate to the selected plan. Historical catch-up runs are research-grade
-and cannot be presented as predictions issued on time.
+## History and source limits
 
-Twelve Data daily histories are requested with split adjustment only. They
-exclude dividends, so all derived performance is price return, not total
-return. The local quota ledger cannot observe credits consumed by another
-application using the same account, and provider coverage, symbols, plan
-entitlements, timing, and terms can change independently of this code.
-See `docs/operations.md` for the destructive termination procedure.
+- Qualification needs 757 consecutive common stock/SPY XNYS closes ending
+  exactly at the target. A short monitoring asset is not adequate history.
+- All active returns are split-adjusted price returns excluding dividends.
+  They are not total returns.
+- The current approved live path is US/USD only. European equity prices remain
+  deferred.
+- A research-grade retrospective may use an immutable provider source
+  retrieved later than an anchor, but must label that current-vintage
+  limitation and clip rows through the anchor. It is not historical observed
+  availability.
+- Execution revision, source-run revision, report generation, and report
+  registration availability are separate facts.
 
-## ETF scope
+## Volume and BUY eligibility
 
-- SPY is the only enabled investable ETF. It reuses the single benchmark
-  series already fetched by the US workflow; StanStock does not request a
-  second SPY series for portfolio use.
-- SPY is not part of the 100-stock universe and receives no stock
-  fundamentals, factor score, BUY/HOLD/AVOID recommendation, opportunity
-  rank, prediction, or sample-basket allocation.
-- The ETF page reports trailing split-adjusted price behavior only. Return
-  excludes dividends, volatility is historical rather than predictive, and
-  drawdown is limited to the available persisted window.
-- Portfolio valuation can price SPY without a `StockAnalysis`, but no other
-  ETF symbol is enabled in this release.
+The currently documented Twelve Data split-adjustment contract establishes
+the price basis but not a compatible split-adjusted volume basis. StanStock
+does not infer volume compatibility from adjusted prices.
 
-## Tracked portfolios
+Consequences:
 
-- Tracked portfolios are research-accounting records, not brokerage ledgers.
-  They record immutable external deposits and confirmed planner purchases,
-  but not withdrawals, tax lots, realized gains, commissions, bid/ask
-  spreads, taxes, or actual broker fills.
-- A confirmed planner purchase changes only the local portfolio ledger. It
-  sends no order and makes no provider request. Its price is the latest
-  eligible persisted close, not a claim that the owner could execute at that
-  price.
-- The monthly planner is USD-only, targets 70% of total NAV in SPY and at most
-  30% in one explicitly short-horizon qualified stock, never sells, and
-  carries unused cash. These fixed v1 targets are policy assumptions, not an
-  optimized allocation model.
-- Contribution-adjusted return is a simple return since the active immutable
-  boundary. It is not time-weighted or money-weighted, and dividends remain
-  excluded. All-time deposits are shown separately from the deposits applied
-  after the current boundary.
-- Manual quantity changes and removals create a visible immutable performance
-  restart instead of being counted as investment return. If the post-change
-  portfolio cannot be valued, the edit succeeds but percentage performance is
-  withheld from an explicit unavailable-boundary record until a later valid
-  manual baseline supersedes it.
-- Holdings are restricted to the portfolio base currency even though the
-  simulation engine has point-in-time FX support. This is a deliberate first
-  release boundary, not an implicit conversion.
-- Contribution performance and planner execution require compatible Twelve
-  Data price evidence from one session. Stale, future-dated, mixed-session,
-  non-split-adjusted, dividend-ambiguous, or missing evidence is withheld.
-- Prices may be split-adjusted while user-entered quantities are not. A
-  split-sized move with unchanged quantity remains flagged across later
-  snapshots; the owner must explicitly restate quantity and average cost.
-  That quantity change creates a new performance baseline rather than
-  retroactively rewriting earlier values.
-- StanStock sample portfolios use immutable analysis reference closes so their
-  construction can be reproduced. They are research-reference baskets, not
-  claims of an executable same-close fill. Their composition is frozen, they
-  do not rebalance, and the current price-only signal is intended for 1-10
-  trading days even though the basket can remain visible afterward.
-- Nominal price bands are affordability context, not evidence of
-  undervaluation. Under $10 is a non-investable speculative watchlist for new
-  allocations and sample construction. Existing holdings remain trackable.
-  Long-horizon activation remains unavailable pending joint Under-$10 review
-  and candidate-specific eligibility. Released reusable foundations are
-  point-in-time SEC facts with adverse-versus-missing branch behavior, the
-  long-v2 diluted-share/per-share continuity assessment with withholding (not
-  post-period event verification), and the deterministic 3-year/5-year formula
-  engine with missing-input withholding; none establishes candidate
-  qualification. The solvency/cash-runway and 252-session dollar-liquidity
-  capabilities are released as unactivated shadow diagnostics (see below). The
-  only still-unreleased activation control is a verified split/reverse-split
-  event source. Previously issued immutable long-horizon ledger evidence
-  remains visible, with its original horizon and evidence role preserved, and
-  is labeled with the current activation context.
-- The `us-under10-shadow-v1` assessment is diagnostic only and deliberately
-  conservative. It is recorded on **newly created** qualifying analyses and
-  nothing is backfilled, so an absent `data_quality["under10_assessment"]` key
-  means the analysis was never assessed -- not that it failed. Because a
-  missing debt component is missing rather than zero, all five balance-sheet
-  inputs must share one period end, and a metric older than 200 days is stale,
-  many candidates land in `insufficient_evidence`. That is the intended honest
-  answer, not a defect. “Assessed SEC facts” includes only fixed canonical
-  concepts whose fact row and source asset both identify SEC; foreign or
-  provider-mismatched rows are excluded from calculation, lineage, and the
-  on-time SEC asset cutoff check.
-- The Under-$10 dollar-volume diagnostic has **no threshold** and can never
-  pass an activation gate on its own. Split-only adjustment is proven for
-  Twelve Data prices but not for its reported volume, so the metric's basis is
-  recorded as `provider_reported_unverified_split_basis` even when a number is
-  computed. A synthetic demo price asset carries no reviewed basis metadata at
-  all, so the diagnostic is withheld rather than estimated.
-- Verified split and reverse-split evidence is unavailable for every provider.
-  The recorded Twelve Data Basic plan is not entitled to a corporate-actions
-  feed, and no reviewed corporate-actions source is integrated for any other
-  provider; a different plan alone would not supply one. Split events are never
-  inferred from adjusted prices, share-count discontinuities, or SEC facts, so
-  Under-$10 candidate activation cannot pass in this version.
-- The analysis pipeline persists the Under-$10 assessment in
-  `StockAnalysis.data_quality`, but that JSON field is mutable and has no
-  model or database immutability guard. Only protected evidence such as
-  `Prediction`, `DataAsset`, and `FundamentalFact` supplies the independent
-  replay boundary. The shadow assessment's `assessment_hash` and
-  `policy_hash` are recomputation checksums for a canonical payload --
-  corruption detection, not signatures or proof that the row was never
-  modified.
-- The stock-detail reader only renders a stored assessment after binding it
-  exactly to its parent decision: the permanent `Listing.id`, the parent
-  analysis run's own exact target date and data cutoff, its exact immutable
-  decision-run reference close and currency (cross-checked against the
-  immutable original decision predictions), and the exact immutable
-  price-asset UUID *and* content checksum recorded alongside it. A matching
-  checksum alone never substitutes for any of these -- two unrelated
-  candidates can share every other field on the same decision date, and
-  copying an entire genuine `data_quality` blob from one analysis to another
-  moves every other internal anchor along with it. Before display, the reader
-  replays the accepted builder from the original immutable decision-prediction
-  provenance, the exact cutoff-clipped price asset, and the exact
-  cutoff-qualified SEC facts. Only canonical equality with the stored
-  solvency and liquidity blocks renders; missing, unreadable, or mismatched
-  evidence is withheld and never written back.
-- The recorded provider plan describes capability context at assessment
-  generation time. It is not evidence of a historical entitlement, and the raw
-  plan label is never persisted into the assessment.
-- Sample-portfolio return is current total value versus starting capital. It
-  is a split-adjusted price return excluding dividends. A possible split
-  suppresses the headline return until its quantity basis is reviewed.
+- raw direction, relative volatility, drawdown, and all four projections can
+  remain calculable;
+- 20-session dollar turnover can remain unavailable;
+- missing/incompatible turnover blocks BUY; and
+- a positive signal can remain HOLD with an explicit liquidity reason.
 
-## Fundamentals
+A negative direction can still produce AVOID because missing BUY-only evidence
+does not erase independently valid negative momentum.
 
-- SEC submissions and Companyfacts are suitable for US filing vintages, but
-  every environment must pass a bounded preflight with a compliant identifying
-  User-Agent and fair-access limits before the provider is enabled. Network or
-  provider failures remain explicit rather than being interpreted as missing
-  company fundamentals.
-- filings.xbrl.org states that its repository is incomplete and explicitly
-  identifies Germany and Ireland as missing. Repository-added time can lag the
-  authority filing time.
-- European coverage is annual-report-first and is not equivalent to US
-  quarterly freshness.
+## Under-$10 limits
 
-## FX
+A qualified Under-$10 listing can receive momentum research and all four
+price projections. It remains:
 
-ECB reference rates are informational observations, not transaction rates.
-They are generally published around 16:00 CET and describe market conditions
-around 14:15 CET. Same-day rates cannot be used before publication.
+- 0% new allocation;
+- ineligible for BUY promotion and highlights;
+- excluded from newly constructed sample baskets; and
+- a speculative watch rather than proof of undervaluation.
 
-The legacy ECB history CSV showed anomalous rows during the spike. StanStock
-prefers the SDMX API or daily XML and must validate every observation.
+Price-only projections do not establish solvency, dilution safety, a verified
+corporate-action history, or portfolio eligibility. Frozen historical
+Under-$10 records retain their original definitions.
 
-The simulation engine converts native prices into one explicit base currency
-with dated, point-in-time rates. The conversion inherits every weakness of its
-inputs: reference rates are not transaction rates, so a converted portfolio is
-not a claim about executable cross-currency trading, and no FX bid/ask spread,
-conversion commission, or hedging cost is modeled. Rates are carried forward
-across market closures within a bounded window rather than interpolated, so a
-value dated inside a closure is priced at the last observation, not at an
-estimate of that day's true rate. A holding whose own market is closed keeps
-its currency exposure -- its last native quote is revalued at the current
-rate -- but its *stock* price is still stale for as long as the closure
-lasts.
+## Retrospective and performance limits
 
-FX availability is resolved only to end-of-day, because the source vintages
-record no intraday publication knowability. A currency-converted run is
-therefore limited to close-based execution; opening-price execution bases are
-rejected rather than modeled with an intraday cutoff the data cannot support.
+- Current-universe/current-vintage reconstruction is exposed as research, not
+  observed live skill.
+- Development, validation, and final holdout are separate. Crossing intervals
+  are purged and holdout tuning is forbidden.
+- FHS/baseline comparisons use identical paired listing/anchor/maturity
+  support and equal target-cohort means.
+- Mean absolute error measures the absolute error of the median forecast.
+  Pinball loss and interval score are lower-is-better.
+- Interval width and inclusion are descriptive. A narrower range or higher
+  inclusion is not automatically better; interval score jointly penalizes
+  width and misses.
+- Empty long-horizon partitions, unavailable results, and
+  worse-than-baseline outcomes must remain visible.
+- Real comparison losses come from recorded realized returns. Simulated paths
+  are never treated as realized market support.
+- A registered retrospective report can still fail to establish skill.
 
-The stock-versus-FX split is reported only when it is exact -- the same
-quantity path restated at each currency's inception rate. It is a
-decomposition of the reported result, not an attribution of skill, and it is
-withheld entirely when a cash settlement or a missing reference rate makes it
-unmeasurable.
+## Observed issuance limits
 
-## Forecast evidence
+Observed evidence requires more than an `observed` snapshot:
 
-- Analysis confidence is a heuristic evidence score, and prediction
-  confidence is a support/coverage heuristic. Neither is a statistical
-  confidence level.
-- The medium positive-return estimate is shrinkage weighted and withheld until
-  its support/diversity and probability-publication gate passes. The persisted
-  `empirical_calibrated` status means only that support, base-case MAE
-  comparisons against unconditional and SPY-relative baselines, and the
-  configured absolute Brier threshold passed. It does not prove calibrated
-  probabilities or calibrated interval coverage.
-- The explicit `6m` and `12m` price-only engine uses the current configured
-  universe's history. Its backfilled panel is therefore survivorship-biased
-  research evidence, not proof of live skill. The positive-return estimate is
-  additionally withheld unless effective non-overlapping cohort support,
-  listing diversity, calendar span, matched market-regime breadth, and fixed
-  publication gates pass. Its matched and unconditional cohort-weighted
-  p20/p50/p80 estimates are each shrinkage blended; base is blended p50 and
-  bear/bull are blended p20/p80. Bear-to-bull is a nominal central 60%
-  analog-return range, not a calibrated prediction/credible/confidence
-  interval, and it has no coverage guarantee.
-- `us-price-medium-v1` remains the default and scheduled implementation.
-  Explicit `us-price-medium-v2` runs are research-only and require the current
-  eligible US/USD stock universe, so their reconstructed evidence remains
-  survivorship-biased. V2's one-CDF p20/p50/p80 range, positive-return
-  estimate, prequential Brier skill, base MAE comparisons, coverage, strict
-  miss rates, mean width, and interval scores are descriptive historical
-  evidence. Positive Brier skill is not proof of calibrated probabilities,
-  statistical significance, profitability, alpha, or observed live skill.
-  No bootstrap, significance test, reliability calibration, CRPS, or median
-  width is reported. See
-  [`docs/methodology.md`](methodology.md#explicit-research-only-medium-v2).
-- Point-in-time SEC facts are available for the configured US universe, but
-  Companyfacts excludes custom issuer concepts and segment dimensions. Current
-  SIC snapshots are not historical classifications, ambiguous taxonomies stay
-  missing, debt components are not promoted to a total unless they are
-  compatible and non-overlapping, and banks/financials/REIT-like accounting
-  may remain unsupported by long v1.
-- The deterministic SEC-backed `3y` and `5y` engine is intentionally narrow.
-  It requires compatible positive FCF/share or a separately eligible EPS/share
-  branch, reported diluted-EPS share-basis evidence, sustainable-growth
-  inputs, and a same-family SIC peer floor. Missing tax, invested capital,
-  peers, annual history, classification, or compatible price provenance
-  produces `Insufficient evidence`; negative or inconsistent FCF cannot
-  silently switch to EPS. Existing `medium` and `long` rows remain legacy
-  identities rather than being relabeled as exact horizons. Its bounded tax
-  input is TTM GAAP income-tax expense divided by TTM pretax income, an
-  accrual proxy rather than cash taxes paid or a cash tax rate. Reinvestment
-  is compatible balance-sheet invested-capital change divided by NOPAT, an
-  accounting proxy rather than observed capex or a proven causal rate. The 3y
-  and 5y calculations use separate frozen fade and multiple-reversion paths;
-  neither is a slice or extrapolation of one shared 5y path.
-- Advisory `6m`/`12m` and `3y`/`5y` forecasts require a complete eligible
-  universe snapshot so their cohort and peer context is immutable. The
-  single-listing analysis service intentionally issues only the decision
-  prediction path; use the snapshot or daily workflow for advisory horizons.
-- Long scenarios are deterministic advisory cases, not statistically
-  calibrated target-price probabilities. Their positive-return probability is
-  unavailable at launch, dividends are excluded, current SIC is not historical
-  industry membership, and historical company valuation normalization remains
-  out of scope until a compatible split-factor or unadjusted-price source
-  exists.
-- Long-v1 verifies the SEC diluted-share basis through the latest metric
-  period, including every selected annual EPS/share period and TTM-to-annual
-  continuity. It cannot verify a split between that period and the forecast
-  target from split-adjusted prices alone. Each prediction exposes the
-  bounded number of unverified post-period days; this is residual risk, not
-  evidence that a split occurred or did not occur. Long-v1 is frozen and
-  never checks continuity between adjacent selected annual diluted-share
-  bases; its pinned configuration hash and prior predictions are unaffected
-  by later configuration versions.
-- Long-v2 is the default configuration and retains every long-v1 assumption
-  except that it enables the adjacent-period diluted-share basis continuity
-  capability: checking continuity between every adjacent pair of selected
-  annual periods (same 15% tolerance). An incompatible adjacent-period
-  diluted-share basis is withheld as unverified continuity, never asserted as
-  a confirmed split. Persisted output is not otherwise byte-identical: long-v2
-  also persists the structured assessed share-consistency evidence on
-  share-basis failures, while frozen long-v1's withheld-failure payloads are
-  unchanged. Long-v1 and long-v2 predictions carry distinct method versions
-  and configuration hashes and are never pooled into the same performance
-  cohort.
-- Long-v1 withholds raw current FCF/share or EPS/share multiples below the
-  configured family floor because raising a cheap multiple to that floor
-  before reversion would overstate return. High raw multiples retain the
-  actual price denominator and use the configured cap only as a conservative
-  reversion anchor.
-- Long-v4 is a separate schema-2, research-only, unactivated experiment; it is
-  not the default or scheduled long method. It requires four contiguous
-  annual tuples, a homogeneous newest-quarter TTM, exact point-in-time
-  evidence closure, and an ex-ante locked SIC cohort. These restrictions can
-  leave most or all targets withheld. SIC is coarse, weighted diluted shares
-  are an accounting-period denominator rather than issuance counts, and no
-  ADS ratio is inferred for depositary receipts. There is no nominal
-  per-share floor: entity values, diluted shares, derived per-share values,
-  and prices must be finite and strictly positive, preserving a common
-  split-equivalent rescaling across the target and all peers.
-- Long-v4's evidence boundary includes the complete eligible snapshot cohort,
-  the pinned canonical CIK config and raw SEC ticker/exchange mapping,
-  independently reconstructed SIC lock trace, raw-FCF normalization closure,
-  full SEC Companyfacts/submissions-history/fact/filing/classification file
-  closure, and each cohort price's checksummed normalized and raw assets. This
-  detects omissions and identity, cutoff, checksum, and physical-file drift,
-  but it does not make the research-only reconstruction observed evidence.
-- V4 outcome authentication requires every retained assessed-owner
-  Companyfacts, current-submissions, and submissions-history file to remain
-  readable and checksum-identical to its immutable asset row. Missing or
-  tampered raw SEC evidence produces an unresolved `identity_mismatch` before
-  stock or benchmark lookup. The check makes no provider request, does not
-  rebuild the forecast, and does not reread the issuance-price file.
-- Long-v4 retains an unrounded physical Parquet close for valuation arithmetic
-  and a separately rounded six-decimal ledger close for persisted analysis and
-  prediction prices. This avoids a ledger rounding boundary changing
-  eligibility. V4 is also an explicit exception to the legacy ledger-based
-  outcome denominator: after authenticating both roles and an exact
-  target-date close, it divides the terminal close by the physical valuation
-  value and rounds once to four decimals with half-even rounding. This does
-  not add intraday price precision.
-- Long-v4 intentionally makes no NOPAT, tax, invested-capital, reinvestment,
-  ROIC/ROIIC, sustainable-growth, R&D-capitalization, intangible useful-life,
-  causal growth, or project-IRR claim. Missing R&D is not zero. FASB
-  Statement 2 / ASC 730 and ASC 260 explain the reported-accounting boundary;
-  Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang demonstrate why
-  intangible-capital treatment matters, but do not authorize a guessed
-  adjustment here.
-- Damodaran, Nissim-Penman, Fama-French, Vorst-Yohn,
-  Bhojraj-Lee/Bhojraj-Lee-Oler, and Lo-MacKinlay provide valuation,
-  classification, forecast, and data-snooping context. They do not validate
-  the v4 caps, weights, scenario deltas, dilution multipliers, fade, or
-  multiple-reversion schedule. Those are fixed policy assumptions, not
-  optimized estimates. Positive-return probability and confidence remain
-  unavailable, and a separate cutoff-safe historical replay is required
-  before activation.
-- A matured research-grade V4 prediction can receive a shared immutable
-  outcome record through the isolated physical-baseline branch. That does not
-  make it observed or reportable: V4 remains
-  excluded from observed, headline, and reportable performance.
-- Legacy scenario columns remain in storage for rollback compatibility. New
-  application reads use the schema-versioned `forecast_scenarios` document;
-  the old columns can be retired only after all supported deployments have
-  crossed this migration and rollback is no longer required.
-- Long-horizon scenarios are explicit fundamental cases, not precise
-  statistically validated forecasts.
-- Simulated or reconstructed performance is not live performance.
-- Decision metrics display after 30 canonical row-level prediction
-  observations in the relevant cohort. That fixed threshold is presentation
-  policy, not statistical validation.
-- Advisory metrics require non-overlapping target-date cohorts, at least 30
-  listings in every selected cohort, and fixed horizon-specific calendar
-  spans. These floors reduce obvious overlap and concentration; they do not
-  prove independence, calibration, or statistical power.
-- Advisory evidence is separated by exact code revision because StanStock has
-  no independently governed implementation-equivalence digest. Even a
-  documentation-only commit therefore starts a new reporting group. Invalid
-  revisions, malformed outcome evidence, or more than 50,000 grouped
-  target-date summaries withhold metrics rather than being normalized,
-  discarded, or truncated.
-- The 3y floor needs selected targets spanning six years before the last
-  three-year outcome can mature, so publication takes roughly nine years. The
-  5y floor needs targets spanning ten years plus the final five-year outcome,
-  or roughly fifteen years. Exact-revision separation can extend those
-  accumulation periods further.
-- Price returns must not be described as total returns when dividend data is
-  absent.
+- each immutable prediction version proves its own on-time status;
+- the source cutoff must be safe;
+- the request must occur before the next regular XNYS session open;
+- production config, provider, benchmark, owner authorization, and exact clean
+  committed revision must be bound; and
+- an unsafe explicit request raises rather than silently downgrading.
 
-## Deployment
+`manage.py analyze` and manual `daily --region us` are always research-grade.
 
-No continuously free hosted service is claimed. A valid deployment needs
-durable PostgreSQL and asset storage, HTTPS, backups, and enough capacity for
-the configured universe.
+## Provider and privacy limits
 
-The current development machine's Docker Desktop storage is saturated by
-unrelated images, volumes, and build cache. Repository configuration can be
-validated there, but a fresh image build requires safe targeted cleanup or a
-different host; unrelated shared Docker data must not be pruned.
+Broad unattended US/European OHLCV remains `NO_GO`. Twelve Data is a
+conditional private US path only after a non-demo key and the account's
+required personal/internal-display rights are confirmed. The technical guard
+is not legal advice. Data must not be redistributed.
+
+Stooq remains `NO_GO`; StanStock will not bypass automation controls. SEC,
+ECB, and filings.xbrl.org have separate capabilities and limitations but are
+not prerequisites for the active price product.
+
+Authenticated output is owner-bound. Public deployment or multiple display
+users require rights that cover that audience.
+
+## Portfolio and simulation limits
+
+- Research suggestions never place orders.
+- Tracked portfolios are local research accounting, not brokerage ledgers.
+- Recorded purchases use persisted closes, not claimed fills.
+- Withdrawals, tax lots, realized gains, commissions, spreads, taxes, and
+  broker execution are not modeled.
+- Contribution performance is a simple since-boundary return, not
+  time-weighted or money-weighted performance.
+- Existing portfolio/simulation policies are not redesigned by the price
+  product.
+- Multi-currency simulation requires dated point-in-time FX into one base
+  currency; missing, stale, ambiguous, or late-published rates fail.
+
+## Deployment limits
+
+There is no promise of continuously free hosting. A durable deployment needs
+private PostgreSQL, asset and backup storage, HTTPS, secret management, and
+enough capacity for the configured universe. The intended topology is one
+private instance; multi-replica coordination needs separate review.

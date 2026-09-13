@@ -35,6 +35,11 @@ Never rely on stale conversation state or a branch name as current truth.
 - Map affected apps, models, migrations, provider boundaries, `AsOfData`
   usage, templates, and tests.
 - Separate product decisions from implementation choices.
+- Separate mathematical calculability from measured predictive skill and
+  investment eligibility. Define the complete source-to-screen path and,
+  when activation is requested, a fixed-denominator operational usefulness
+  gate. Fixture success, acquired prices, or an unserved implementation do
+  not satisfy actual analyzed membership and local activation.
 - Identify permanent-ID, immutable-vintage, `available_at <= decision_time`,
   actual-generation-versus-logical-cutoff, research-grade-versus-observed,
   native-currency, and missing-versus-zero implications.

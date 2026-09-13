@@ -1,133 +1,175 @@
 # Architecture
 
-StanStock is one Django modular monolith. The boundaries exist to protect
-research integrity, not to imitate a distributed system.
+> Release state: see the centralized [README status](../README.md#release-status).
+> This document describes the implemented `research-product-v1` contract
+> awaiting release and activation.
+
+StanStock is one Django modular monolith. Module boundaries protect evidence,
+authorization, and point-in-time correctness; they are not a reason to add
+distributed infrastructure.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `core` | Owner authentication support, health, target-date job runs, backup and restore |
-| `data` | Permanent identities, universe snapshots, providers, immutable assets, filings, FX, and as-of reads |
-| `research` | Indicators, transparent scores, risk, scenarios, analyses, predictions, and outcomes |
-| `simulation` | One accounting model shared by backtests and portfolio simulations |
-| `portfolio` | Owner-scoped holdings, immutable deposits/purchases/performance baselines, allocation planning, and dated valuations |
-| `web` | Authenticated server-rendered pages, filters, status, and lightweight JSON where needed |
+| `core` | Owner bootstrap, health, target-date jobs, schedule verification, backup, and restore |
+| `data` | Permanent identities, provider boundaries, immutable assets, captured intake/membership, SEC facts, FX, and as-of reads |
+| `research` | Price operators, analyses, immutable predictions, verification, outcomes, replay, and reporting |
+| `portfolio` | Owner-scoped holdings, immutable cash/purchase records, planning, and valuations |
+| `simulation` | Shared deterministic accounting for backtests and portfolio comparisons |
+| `web` | Authenticated server-rendered product, archive, portfolio, and status pages |
 
-Raw provider clients belong under `stanstock.data.providers`. An architecture
-test rejects imports of those modules from `research` and `simulation`.
-Quantitative code consumes normalized records or the `AsOfData` boundary.
+Raw provider clients remain under `stanstock.data.providers`. Research and
+simulation consume selected normalized evidence, not provider clients.
 
-## Storage
+The stack remains Django, PostgreSQL (SQLite for direct local development),
+Polars, NumPy, and content-addressed files under `STANSTOCK_DATA_DIR`. There is
+no DRF, DuckDB, Node build chain, Celery, distributed scheduler, fitted ML
+model, or runtime AI agent.
 
-PostgreSQL is the canonical relational store. Direct development can use
-SQLite. Relational rows hold:
+## Storage and identity
 
-- permanent company, security, and listing identities;
-- dated universe snapshots and memberships;
-- source and provider status;
-- data-asset manifests and normalized filing/FX facts;
-- analyses, immutable predictions, outcomes, jobs, simulations, tracked
-  portfolios, immutable cash/purchase ledgers and performance baselines, and
-  immutable portfolio valuations.
+Relational rows store permanent identities, snapshots, manifests, jobs,
+analyses, predictions, outcomes, portfolios, and normalized vintages. Large
+source and derived payloads live as immutable files. Each `DataAsset` records
+provider, subject, relative path, SHA-256, retrieval/availability times,
+economic period, and provenance.
 
-Large or source-native payloads live under `STANSTOCK_DATA_DIR`. `DataAsset`
-stores a relative path, SHA-256 checksum, retrieval time, availability time,
-period, schema version, and metadata. Price/research panels use Parquet. A
-same-path/same-checksum write is idempotent; a same-path/different-checksum
-write fails instead of replacing evidence.
+A same-path/same-checksum write is idempotent. Different bytes at the same
+path fail. Database rows and asset files form one backup and recovery unit.
 
-The database and assets are one recovery unit. The `backup` command bundles
-both and the `restore` command verifies every size and checksum before
-replacement.
+Predictions, data assets, fundamental facts, and FX rates are append-only.
+Corrections create new identities/vintages. A later product version never
+rewrites a frozen historical result.
 
-## Point-in-time flow
+## Price-product data flow
 
-1. A provider response is written to an immutable path.
-2. A `DataAsset` manifest records when the source was retrieved and when its
-   contents became knowable.
-3. Normalization creates additive filing or FX vintages linked to the source
-   asset.
-4. For an observed decision, `AsOfData(generated_at)` permits only assets
-   retrieved by generation time and facts available by the same decision
-   boundary. For a research-grade historical reconstruction, the asset may
-   have been retrieved later, but fact availability and price rows remain
-   capped at the logical `data_cutoff`.
-5. `AsOfData.price_frame` normalizes and sorts the price date column and
-   physically removes rows after the requested market date.
-6. An `AnalysisRun` records `generated_at`, `data_cutoff`, the universe
-   snapshot, configuration hash, and code revision.
-7. For the US price-only configuration, the run builds one immutable derived
-   Parquet panel from the exact stock and SPY price assets available to that
-   run. Historical labels end on or before the forecast target, fixed-epoch
-   cohorts do not overlap within a horizon, and the asset records source,
-   calendar, configuration, content, and code hashes.
-8. `StockAnalysis.forecast_scenarios` is the schema-versioned scenario read
-   path. The legacy short/medium/long columns remain temporarily for rollback
-   compatibility, but application policy reads through the unified accessor.
-9. `Prediction` stores the complete issued result and provenance, including
-   its forecast identity, decision/advisory role, evidence grade, source mode,
-   exact price provider and source subject when proven, and a structured
-   calculation record. Performance reporting reads these immutable prediction
-   fields rather than mutable parent metadata. Django guards and database
-   triggers reject updates and deletes. The same application/database
-   immutability rule protects `DataAsset`, `FundamentalFact`, and `FxRate`.
-10. Outcomes append after the horizon matures; matured and corporate-event
-   states are terminal and do not alter the original prediction. Decision
-   outcomes retain recommendation success, while advisory outcomes use
-   base-case sign match, bear-to-bull inclusion, and signed base-case error
-   with `success=NULL`.
-11. A simulation stores its base currency, result curve, and exact price,
-   signal, benchmark, and FX frames as checksummed assets keyed by the run
-   UUID. Converted price rows keep their native price and currency beside the
-   converted value. Its input hash covers complete canonical frame contents
-   and any explicit calendar.
-12. A tracked portfolio snapshot stores the exact quantity, average cost,
-    latest persisted price, price session, source asset, code revision, and
-    aggregate value used. Repeated identical inputs are idempotent; changed
-    holdings can create another snapshot on the same market date. Database
-    triggers reject snapshot and snapshot-position updates or deletes.
-13. External deposits, confirmed planner executions/purchases, and manual
-    performance baselines are append-only. Confirmation re-hashes locked
-    portfolio, price, and qualifying-analysis state. A manual quantity change
-    creates a post-change boundary (or an explicit unavailable-boundary
-    record), so contribution return is never inferred from unexplained state.
+```text
+curated 100-name core + at most 20 captured saved names
+        |
+        v
+immutable owner/entitlement intake before provider work
+        |
+        v
+verified catalog + reusable registered history
+        |                         |
+        | missing history only    v
+        +-----------------> bounded provider acquisition
+        |
+        v
+new immutable qualified membership; SPY remains separate
+        |
+        v
+exact target cutoff + 757 common stock/SPY session closes
+        |
+        +--> us-relative-momentum-v1 (6m decision)
+        |
+        +--> us-price-fhs-v1 (6m, 12m, 3y, 5y advisory)
+        |
+        v
+one analysis + exact five-row immutable output + registered proof
+        |
+        v
+shared owner-bound verifier/reader
+        |
+        v
+primary research, detail, My List, status, history, performance, archives
+```
 
-## Runtime
+Saved preferences are not membership. Adding/removing a name affects the next
+intake; a retry reuses its captured set. Pending, rejected, or
+insufficient-history candidates stay explicit and are not counted as
+analyzed.
 
-The same image runs:
+SEC facts are not on the active price-product dependency path. They remain
+evidence for frozen archived methods. FX remains on existing
+valuation/simulation paths.
 
-- Gunicorn for the Django website;
-- deterministic Django management commands for source probes, demo data,
-  conditional US Twelve Data ingestion, analysis, predictions, evaluation,
-  simulations, tracked-portfolio snapshots, backup, and restore.
+## Exact output ownership
 
-Target-date work uses `JobRun` plus a PostgreSQL advisory lock. A unique
-constraint permits only one successful run for a job/region/date. Repeating a
-successful target creates a visible skipped attempt instead of repeating work.
-The US workflow additionally coordinates a conservative provider credit budget
-through a locked `ProviderRecord` and persists raw and normalized vintages
-before analysis. Basic mode is bound to exactly one active licensed user with
-an explicit personal/non-commercial attestation; other plans require an
-explicit internal-display entitlement.
+For each qualified listing the writer persists:
 
-No Redis, Celery, resident scheduler, second analytics engine, SPA, or fitted
-ML model is part of v1.
+1. one `StockAnalysis`;
+2. one 6m decision prediction for `us-relative-momentum-v1`; and
+3. four advisory predictions for `us-price-fhs-v1` at 6m, 12m, 3y, and 5y.
 
-## Security boundary
+The decision row and 6m advisory row are different evidence roles and method
+identities. The expected five-row multiset is planned before writing and
+verified independently. A decision's null price-range fields do not make it an
+all-null advisory.
+
+Calculation artifacts bind the complete stock/SPY source window, immutable
+asset references, input/calendar hash, configuration identity, result shape,
+and output manifest. The reader verifies those records and physical bytes; it
+does not rerun Monte Carlo trajectories during HTTP GET.
+
+## Runtime profiles
+
+`STANSTOCK_RESEARCH_PRODUCT_ENABLED` maps to
+`settings.RESEARCH_PRODUCT_ENABLED` and defaults to `true`.
+
+- In demo mode, the selected provider identity is `synthetic_demo`; the same
+  intake, calculation, writer, verifier, and reader paths are used, but output
+  is always research-grade.
+- Manual `daily --region us` uses the active research profile and always
+  requests research-grade issuance.
+- The local scheduler uses the same product/config/reader profile and may
+  request observed issuance only inside the validated deadline from a clean
+  committed revision.
+- When the feature is disabled, frozen archive behavior remains available; the
+  product reader never silently substitutes a legacy run.
+
+## Serving and authorization
+
+Primary pages select the expected product/config, target session, authorized
+captured owner, and source provider. They verify:
+
+- current display authorization;
+- immutable intake and membership binding;
+- official catalog identity;
+- exact source assets and physical checksums;
+- calculation and output manifests;
+- roles, methods, horizons, probability absence, and numeric shape; and
+- current target freshness.
+
+Invalid, stale, ambiguous, or unauthorized output is suppressed with an
+explicit state. Authenticated browsing never fetches provider data or mutates
+the evidence ledger.
+
+## Replay and registered comparison evidence
+
+The retrospective study is deliberately separate from prospective issuance:
+
+- `replay_price_product` reads an exact immutable run and writes no database or
+  asset evidence;
+- `register_price_product_study(run=..., store=...)` is a parent-invoked
+  Python service that calculates the complete selected cohort itself and
+  registers a canonical immutable report;
+- the performance GET path reads only registered evidence and re-verifies its
+  source run; it never accepts caller-authored metrics or runs a replay.
+
+Execution revision, source-run revision, report generation time, and actual
+registration availability are distinct provenance fields.
+
+## Jobs and recovery
+
+The product uses versioned parent, daily, and intake `JobRun` identities.
+Completed work is independently reconstructed from recorded parent details,
+intake, membership, manifests, calculations, and physical assets before any
+credential or provider spend. Conflicting completions fail.
+
+Scheduled market, evaluation, and portfolio stages remain independently
+recoverable. SEC is a separate workflow and is not a prerequisite for active
+price research.
+
+## Security and deployment boundary
 
 Every data-bearing page requires Django authentication. There is no public
-signup. Login attempts are bounded in the application process, state-changing
-forms use CSRF protection, production settings default to secure cookies and
-HTTPS, and the production container runs as an unprivileged user with a
-read-only root filesystem. Forwarded client IPs affect login throttling only
-when the immediate proxy address is explicitly trusted.
+signup. State-changing forms use CSRF protection. Provider display
+authorization is owner-bound and rechecked when serving.
 
-When Twelve Data Basic is enabled, middleware fails closed for every
-authenticated user except the licensed owner recorded during activation.
-Provider jobs also stop if more than one active user exists. The provider key
-is resolved from the process environment or, for direct macOS use, the current
-OS user's login Keychain; it is never stored in application tables.
-
-The intended deployment is one private instance. A multi-replica deployment
-would require a shared rate-limit store and explicit job coordination review.
+The intended deployment is one private instance. Production defaults use
+HTTPS, secure cookies, HSTS, an unprivileged process, a read-only root
+filesystem, durable PostgreSQL and asset volumes, and a separate writable
+backup volume. Credentials are read from approved secret sources and are not
+stored in application tables, URLs, logs, reports, or committed files.
