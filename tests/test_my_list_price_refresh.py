@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -264,6 +265,126 @@ def test_command_requires_safe_owner_selection_when_multiple_owners_have_symbols
     assert "FIRST" not in message
     assert "SECOND" not in message
     assert output.getvalue() == ""
+
+
+def test_command_suppresses_http_client_request_url_logs_and_restores_logger_state(
+    caplog: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings.DATA_DIR = tmp_path
+    owner = _owner()
+    TrackedSymbol.objects.create(owner=owner, symbol="TESTONLY")
+    _enable_provider()
+    request_url = "https://api.twelvedata.com/time_series?symbol=TESTONLY&interval=1day"
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    original_levels = (httpx_logger.level, httpcore_logger.level)
+    httpx_logger.setLevel(logging.NOTSET)
+    httpcore_logger.setLevel(logging.NOTSET)
+
+    def fetch(symbol: str, **kwargs: object) -> PriceSeries:
+        logging.getLogger("httpx").info(
+            'HTTP Request: GET %s "HTTP/1.1 200 OK"',
+            request_url,
+        )
+        return _series(symbol)
+
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices.resolve_us_target_date",
+        lambda **kwargs: (TARGET_DATE, "observed"),
+    )
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices.timezone.now",
+        lambda: DECISION_TIME,
+    )
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices."
+        "verified_catalog_references_for_symbols",
+        lambda *, symbols: {symbol: _reference(symbol) for symbol in symbols},
+    )
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.resolve_api_key", lambda _: "key")
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_daily_price_series", fetch)
+    output = StringIO()
+
+    try:
+        with caplog.at_level(logging.INFO):
+            call_command("refresh_my_list_prices", stdout=output)
+
+        assert httpx_logger.level == logging.NOTSET
+        assert httpcore_logger.level == logging.NOTSET
+    finally:
+        httpx_logger.setLevel(original_levels[0])
+        httpcore_logger.setLevel(original_levels[1])
+
+    text = output.getvalue()
+    assert "status=success" in text
+    assert "TESTONLY" not in text
+    assert request_url not in caplog.text
+    assert "TESTONLY" not in caplog.text
+    assert "api.twelvedata.com/time_series" not in caplog.text
+
+
+def test_command_restores_http_logger_state_when_refresh_fails(
+    caplog: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings.DATA_DIR = tmp_path
+    owner = _owner()
+    TrackedSymbol.objects.create(owner=owner, symbol="TESTONLY")
+    _enable_provider()
+    request_url = "https://api.twelvedata.com/time_series?symbol=TESTONLY&interval=1day"
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    original_levels = (httpx_logger.level, httpcore_logger.level)
+    httpx_logger.setLevel(logging.NOTSET)
+    httpcore_logger.setLevel(logging.NOTSET)
+
+    def fetch(symbol: str, **kwargs: object) -> PriceSeries:
+        logging.getLogger("httpx").info(
+            'HTTP Request: GET %s "HTTP/1.1 200 OK"',
+            request_url,
+        )
+        return _series(symbol, currency="EUR")
+
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices.resolve_us_target_date",
+        lambda **kwargs: (TARGET_DATE, "observed"),
+    )
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices.timezone.now",
+        lambda: DECISION_TIME,
+    )
+    monkeypatch.setattr(
+        "stanstock.portfolio.management.commands.refresh_my_list_prices."
+        "verified_catalog_references_for_symbols",
+        lambda *, symbols: {symbol: _reference(symbol) for symbol in symbols},
+    )
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.resolve_api_key", lambda _: "key")
+    monkeypatch.setattr("stanstock.data.live_us.twelve_data.fetch_daily_price_series", fetch)
+    output = StringIO()
+
+    try:
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(CommandError, match="failed for one or more tracked symbols"):
+                call_command("refresh_my_list_prices", stdout=output)
+
+        assert httpx_logger.level == logging.NOTSET
+        assert httpcore_logger.level == logging.NOTSET
+    finally:
+        httpx_logger.setLevel(original_levels[0])
+        httpcore_logger.setLevel(original_levels[1])
+
+    text = output.getvalue()
+    assert "status=partial_failed" in text
+    assert "failed=1" in text
+    assert "TESTONLY" not in text
+    assert request_url not in caplog.text
+    assert "TESTONLY" not in caplog.text
+    assert "api.twelvedata.com/time_series" not in caplog.text
 
 
 def test_missing_prices_fetch_once_and_partial_retry_reuses_success(
