@@ -14,6 +14,42 @@
       </p>
     </div>
   </section>
+  {% if stanstock_research_product_enabled %}
+    <section class="panel active-methodology">
+      <p class="eyebrow">Active research-product-v1</p>
+      <h2>Relative momentum decision and conditional price projections</h2>
+      <p>
+        The active six-month suggestion uses stock and SPY split-adjusted
+        price returns over identical T−252 to T−21 session endpoints.
+        Jegadeesh–Titman (1993) and Carhart (1997) are published momentum
+        foundations, not validation of this individual-stock sign policy or
+        evidence of profitability.
+      </p>
+      <p>
+        Four advisory horizons use fixed-parameter, variance-targeted filtered
+        historical simulation: 756 daily log returns, 252-return burn-in, 504
+        centered/rescaled residuals, variance weights 0.01/0.94/0.05, and
+        8,192 deterministic PCG64 paths. Bollerslev (1986), Barone-Adesi,
+        Giannopoulos and Vosper (1999), and RiskMetrics (1996) are foundations;
+        the fixed coefficients, three-year drift window, path count, and
+        thresholds are StanStock assumptions, not fitted or proven optimal.
+      </p>
+      <p>
+        Lower/Median/Upper are linear p20/p50/p80 cumulative split-adjusted
+        price-return quantiles excluding dividends. Their span is central 60%
+        model mass, not real-world probability, calibrated coverage, fair
+        value, or a stop-loss. The same-shock zero-log-drift sensitivity
+        subtracts horizon drift without changing sampled shocks.
+      </p>
+      <p>
+        Long horizons are especially exposed to drift estimation, regime,
+        survivorship, delisting, merger, symbol-change, and parameter
+        uncertainty. Future corporate events are not modeled. Forecasting
+        skill is not established, and Monte Carlo paths are not independent
+        market observations.
+      </p>
+    </section>
+  {% endif %}
   <div class="detail-grid">
     <section class="panel">
       <h2>Version-qualified horizon methods</h2>

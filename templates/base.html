@@ -21,7 +21,7 @@
         </a>
         {% if request.user.is_authenticated %}
           <nav aria-label="Primary">
-            <a href="{% url 'opportunities' %}"{% if request.resolver_match.url_name == "opportunities" %} aria-current="page"{% endif %}>Opportunities</a>
+            <a href="{% url 'opportunities' %}"{% if request.resolver_match.url_name == "opportunities" %} aria-current="page"{% endif %}>Research</a>
             <a href="{% url 'market' %}"{% if request.resolver_match.url_name == "market" or request.resolver_match.url_name == "etf-detail" %} aria-current="page"{% endif %}>Market</a>
             <a href="{% url 'predictions' %}"{% if request.resolver_match.url_name == "predictions" %} aria-current="page"{% endif %}>Predictions</a>
             <a href="{% url 'performance' %}"{% if request.resolver_match.url_name == "performance" %} aria-current="page"{% endif %}>Performance</a>
@@ -42,6 +42,26 @@
         <div class="shell">
           <strong>Synthetic research data.</strong>
           Values are generated fixtures, not live market data or issued investment calls.
+        </div>
+      </div>
+    {% endif %}
+    {% if request.user.is_authenticated and request.resolver_match.url_name|slice:":8" == "archive-" %}
+      <div class="archive-banner" role="status">
+        <div class="shell">
+          <strong>Archived research interface.</strong>
+          These records retain their original methods and meanings. They are
+          not reinterpreted as the active research product.
+          {% if stanstock_research_product_enabled %}
+            <a href="{% url 'opportunities' %}">Return to active research</a>.
+          {% endif %}
+        </div>
+      </div>
+    {% elif request.user.is_authenticated and not stanstock_research_product_enabled %}
+      <div class="archive-banner" role="status">
+        <div class="shell">
+          <strong>Rollback/archive mode.</strong>
+          The prospective research product is disabled; this is the retained
+          legacy interface.
         </div>
       </div>
     {% endif %}

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Research performance · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Canonical observed cohorts</p>
+      <h1>Research performance</h1>
+      <p class="lede">
+        The active 126-session decision cohort and each FHS advisory horizon
+        are reported separately. Archived methods are never pooled into these
+        counts.
+      </p>
+    </div>
+  </section>
+
+  {% if not product.available %}
+    <div class="error-box" role="alert"><strong>Active performance unavailable.</strong> {{ product.message }}</div>
+  {% else %}
+    <div class="notice">
+      <strong>Forecasting skill is not established.</strong>
+      The retrospective study loader is separate from this serving view. No
+      fixture result, Monte Carlo path count, success percentage, or old/new
+      pooled accuracy is presented as real comparison evidence.
+    </div>
+    {% if not has_matured %}
+      <p class="empty-state">
+        No canonical observed active-product outcome has matured yet. The
+        projections remain calculable conditional model outputs; absence of a
+        matured outcome does not turn them into an “insufficient evidence”
+        range.
+      </p>
+    {% endif %}
+
+    <div class="detail-grid">
+      <section class="panel">
+        <h2>Six-month decision cohort</h2>
+        <p><code>us-relative-momentum-v1</code> · decision evidence only.</p>
+        <ul>
+          {% for group in decision_groups %}
+            <li>{{ group.status|display_label }}: {{ group.count }}</li>
+          {% empty %}
+            <li>No canonical observed outcomes.</li>
+          {% endfor %}
+        </ul>
+        <p class="muted">BUY/AVOID evaluation uses stock and SPY returns at the same endpoints. HOLD has no manufactured success value.</p>
+      </section>
+      <section class="panel">
+        <h2>FHS advisory cohorts</h2>
+        <p><code>us-price-fhs-v1</code> · no recommendation success metric.</p>
+        <ul>
+          {% for group in advisory_groups %}
+            <li>{{ group.prediction__horizon|display_label }} · {{ group.status|display_label }}: {{ group.count }}</li>
+          {% empty %}
+            <li>No canonical observed advisory outcomes.</li>
+          {% endfor %}
+        </ul>
+        <p class="muted">6m, 12m, 3y, and 5y remain distinct cohorts. All-null advisory rows are non-evaluable.</p>
+      </section>
+    </div>
+  {% endif %}
+  <p><a href="{% url 'archive-performance' %}">Archived performance reports</a> retain their original methods and thresholds.</p>
+{% endblock %}

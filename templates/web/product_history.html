@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Active research ledger · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Append-only active evidence</p>
+      <h1>Research product ledger</h1>
+      <p class="lede">
+        The six-month momentum decision and four FHS advisory horizons remain
+        separate immutable evidence roles. Reissues have unique issuance
+        versions while retaining stable method identities.
+      </p>
+    </div>
+  </section>
+
+  {% if not product.available %}
+    <div class="error-box" role="alert"><strong>Active ledger unavailable.</strong> {{ product.message }}</div>
+  {% else %}
+    <section aria-labelledby="decision-ledger">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Decision evidence</p>
+          <h2 id="decision-ledger">126-session relative-momentum decisions</h2>
+        </div>
+      </div>
+      <div class="responsive-table" tabindex="0" aria-label="Six-month decision ledger">
+        <table class="compact-table">
+          <thead>
+            <tr>
+              <th scope="col">Stock</th>
+              <th scope="col">Target</th>
+              <th scope="col">Direction</th>
+              <th scope="col">Suggestion</th>
+              <th scope="col">Grade / provider</th>
+              <th scope="col">Method / issuance</th>
+              <th scope="col">Outcome</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for card in decision_cards %}
+              <tr>
+                <th scope="row"><a href="{% url 'stock-detail' card.analysis.listing_id %}">{{ card.listing.ticker }}</a></th>
+                <td>{{ card.decision_prediction.target_date }}</td>
+                <td>{{ card.direction|display_label }}</td>
+                <td>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</td>
+                <td>{{ card.decision_prediction.evidence_grade|display_label }} · {{ card.decision_prediction.price_provider|display_label }}</td>
+                <td>{{ card.decision_prediction.method_version }}<small>{{ card.decision_prediction.model_version }}</small></td>
+                <td>{% if card.decision_prediction.outcome %}{{ card.decision_prediction.outcome.get_status_display }}{% else %}Not matured{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="advisory-ledger">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Advisory evidence</p>
+          <h2 id="advisory-ledger">FHS projection ledger</h2>
+        </div>
+      </div>
+      <p class="muted">
+        These rows do not change suggestions or enter decision hit rates.
+        p20–p80 is central 60% model mass, not calibrated coverage.
+      </p>
+      <div class="responsive-table" tabindex="0" aria-label="FHS advisory ledger">
+        <table class="compact-table">
+          <thead>
+            <tr>
+              <th scope="col">Stock</th>
+              <th scope="col">Horizon</th>
+              <th scope="col">Lower (p20)</th>
+              <th scope="col">Median (p50)</th>
+              <th scope="col">Upper (p80)</th>
+              <th scope="col">Evidence state</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for card, projection in advisory_rows %}
+              <tr>
+                <th scope="row">{{ card.listing.ticker }}</th>
+                <td>{{ projection.label }}</td>
+                {% if projection.available %}
+                  <td>{{ projection.lower_return|percentage }}</td>
+                  <td>{{ projection.median_return|percentage }}</td>
+                  <td>{{ projection.upper_return|percentage }}</td>
+                  <td>Recorded advisory · skill not established</td>
+                {% else %}
+                  <td colspan="3">Withheld</td>
+                  <td>{{ projection.insufficiency_reason|display_label }}</td>
+                {% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+  <p><a href="{% url 'archive-predictions' %}">Open the archived prediction ledger</a> with its original horizon meanings.</p>
+{% endblock %}
