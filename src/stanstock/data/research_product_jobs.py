@@ -20,6 +20,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from stanstock.core.jobs import JobExecutionResult, execute_target_job, target_job_lock
+from stanstock.core.logging import suppress_http_client_request_logs
 from stanstock.core.models import JobRun
 from stanstock.core.verification_types import AssetRef, RefreshVerificationError
 from stanstock.data.asof import AsOfData, verified_price_fields
@@ -202,27 +203,30 @@ def execute_daily_research_job(
         )
 
     with target_job_lock(job_name=DAILY_RESEARCH_JOB, region="us", target_date=target_date):
-        validate_provider_usage(_provider_record(require_enabled=False))
-        job = execute_target_job(
-            job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
-            region="us",
-            target_date=target_date,
-            task=daily_task,
-        )
-        successful = _successful_attempt(job)
-        if successful.status == JobRun.Status.SUCCESS:
-            intake = load_product_intake(
+        with suppress_http_client_request_logs():
+            validate_provider_usage(_provider_record(require_enabled=False))
+            job = execute_target_job(
+                job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
+                region="us",
                 target_date=target_date,
-                owner_id=str(owner.pk),
-                issuance_key=issuance_key,
-                store=asset_store,
+                task=daily_task,
             )
-            if intake is None:
-                raise ValueError("Completed research job has no registered intake")
-            completed = _completed_product_run(intake, store=asset_store)
-            if completed is None or successful.details.get("analysis_run_id") != str(completed.id):
-                raise ValueError("Completed research job does not bind its exact output")
-        return job
+            successful = _successful_attempt(job)
+            if successful.status == JobRun.Status.SUCCESS:
+                intake = load_product_intake(
+                    target_date=target_date,
+                    owner_id=str(owner.pk),
+                    issuance_key=issuance_key,
+                    store=asset_store,
+                )
+                if intake is None:
+                    raise ValueError("Completed research job has no registered intake")
+                completed = _completed_product_run(intake, store=asset_store)
+                if completed is None or successful.details.get("analysis_run_id") != str(
+                    completed.id
+                ):
+                    raise ValueError("Completed research job does not bind its exact output")
+            return job
 
 
 def _acquire_product_membership(

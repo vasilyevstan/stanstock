@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import subprocess
 import sys
@@ -199,6 +200,62 @@ def test_missing_saved_history_is_bootstrapped_once_then_analyzed(product_enviro
     resolve.assert_called_once()
     fetch.assert_called_once()
     assert DataAsset.objects.filter(kind="price_history", subject="SPY").count() == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_failure", "expected_admission", "expected_predictions"),
+    [
+        pytest.param(False, "admitted", 15, id="success"),
+        pytest.param(True, "provider_failed", 10, id="provider-failure"),
+    ],
+)
+def test_daily_job_suppresses_http_client_request_logs_for_native_acquisition(
+    product_environment,
+    caplog,
+    provider_failure,
+    expected_admission,
+    expected_predictions,
+):
+    _owner, store, _path, resolve, fetch = product_environment
+    resolve.side_effect = None
+    resolve.return_value = "synthetic-test-token"
+    request_url = (
+        "https://synthetic-provider.invalid/time_series?"
+        "symbol=SYNTHETIC_PRIVATE_SYMBOL&interval=1day"
+    )
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    original_levels = (httpx_logger.level, httpcore_logger.level)
+    httpx_logger.setLevel(logging.INFO)
+    httpcore_logger.setLevel(logging.DEBUG)
+
+    def acquire(symbol, **_kwargs):
+        httpx_logger.info('HTTP Request: GET %s "HTTP/1.1 200 OK"', request_url)
+        httpcore_logger.debug("receive_response_headers.complete url=%s", request_url)
+        if provider_failure:
+            raise ProviderError("Synthetic provider failure")
+        return _series(symbol)
+
+    fetch.side_effect = acquire
+    try:
+        with caplog.at_level(logging.DEBUG):
+            job = _run(product_environment)
+
+        assert (httpx_logger.level, httpcore_logger.level) == (logging.INFO, logging.DEBUG)
+    finally:
+        httpx_logger.setLevel(original_levels[0])
+        httpcore_logger.setLevel(original_levels[1])
+
+    run = AnalysisRun.objects.get(id=job.details["analysis_run_id"])
+    admissions = product_membership_payload(run.universe_snapshot, store=store)["admissions"]
+    admission = admissions["CHEAP"]
+    assert job.status == "success"
+    assert admission["status"] == expected_admission
+    assert Prediction.objects.count() == expected_predictions
+    fetch.assert_called_once()
+    assert request_url not in caplog.text
+    assert "SYNTHETIC_PRIVATE_SYMBOL" not in caplog.text
+    assert not [record for record in caplog.records if record.name in {"httpx", "httpcore"}]
 
 
 def test_completed_retry_ignores_changed_grade_preferences_and_enablement(product_environment):
