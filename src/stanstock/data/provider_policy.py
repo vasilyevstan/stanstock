@@ -87,7 +87,12 @@ def split_event_capability(provider: str, plan: str | None = None) -> tuple[str,
     return (CAPABILITY_UNAVAILABLE, CAPABILITY_NO_REVIEWED_SOURCE)
 
 
-def validate_provider_usage(record: ProviderRecord) -> None:
+def validate_provider_usage(record: ProviderRecord, *, owner_id: str | None = None) -> None:
+    if (
+        owner_id is not None
+        and not get_user_model().objects.filter(pk=owner_id, is_active=True).exists()
+    ):
+        raise ProviderConfigurationError("Provider display owner is not an active account.")
     plan = str(record.metadata.get("plan") or "").lower()
     if plan == BASIC_PLAN:
         if (
@@ -106,7 +111,9 @@ def validate_provider_usage(record: ProviderRecord) -> None:
             .order_by("pk")
             .values_list("pk", flat=True)[:2]
         ]
-        if active_user_ids != [licensed_user_id]:
+        if active_user_ids != [licensed_user_id] or (
+            owner_id is not None and owner_id != licensed_user_id
+        ):
             raise ProviderConfigurationError(
                 "Twelve Data Basic access is restricted to the one licensed active "
                 "StanStock user. Disable additional users or use a plan/agreement "

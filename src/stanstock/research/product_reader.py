@@ -376,7 +376,7 @@ def _require_current_display_authorization(
     record = ProviderRecord.objects.filter(provider=TWELVE_DATA_PROVIDER).first()
     if record is None:
         raise ProviderConfigurationError("Provider display authorization is absent")
-    validate_provider_usage(record)
+    validate_provider_usage(record, owner_id=owner_id)
 
 
 def _build_cards(candidate: _AuthorizedCandidate, *, store: AssetStore) -> tuple[ProductCard, ...]:

@@ -6,60 +6,201 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Canonical observed cohorts</p>
+      <p class="eyebrow">Separated evidence lanes</p>
       <h1>Research performance</h1>
       <p class="lede">
-        The active 126-session decision cohort and each FHS advisory horizon
-        are reported separately. Archived methods are never pooled into these
-        counts.
+        Current observed outcome cohorts remain separate from registered
+        current-universe/current-vintage retrospective comparisons. Neither
+        section is pooled into one unlabeled “accuracy” number.
       </p>
     </div>
   </section>
 
-  {% if not product.available %}
-    <div class="error-box" role="alert"><strong>Active performance unavailable.</strong> {{ product.message }}</div>
-  {% else %}
-    <div class="notice">
-      <strong>Forecasting skill is not established.</strong>
-      The retrospective study loader is separate from this serving view. No
-      fixture result, Monte Carlo path count, success percentage, or old/new
-      pooled accuracy is presented as real comparison evidence.
-    </div>
-    {% if not has_matured %}
-      <p class="empty-state">
-        No canonical observed active-product outcome has matured yet. The
-        projections remain calculable conditional model outputs; absence of a
-        matured outcome does not turn them into an “insufficient evidence”
-        range.
-      </p>
-    {% endif %}
+  <section class="panel">
+    <p class="eyebrow">Current observed outcome cohorts</p>
+    <h2>Active issuance ledgers</h2>
+    {% if not product.available %}
+      <div class="error-box" role="alert">
+        <strong>Active performance unavailable.</strong> {{ product.message }}
+      </div>
+    {% else %}
+      <div class="notice">
+        <strong>Forecasting skill is not established.</strong>
+        The observed decision and advisory ledgers below stay separate from the
+        retrospective historical comparison section. No fixture result,
+        Monte Carlo path count, or pooled old/new percentage is presented as a
+        proven live-skill headline.
+      </div>
+      {% if not has_matured %}
+        <p class="empty-state">
+          No canonical observed active-product outcome has matured yet. The
+          projections remain conditional model outputs; absence of a matured
+          outcome does not turn them into an “insufficient evidence” range.
+        </p>
+      {% endif %}
 
-    <div class="detail-grid">
-      <section class="panel">
-        <h2>Six-month decision cohort</h2>
-        <p><code>us-relative-momentum-v1</code> · decision evidence only.</p>
-        <ul>
-          {% for group in decision_groups %}
-            <li>{{ group.status|display_label }}: {{ group.count }}</li>
-          {% empty %}
-            <li>No canonical observed outcomes.</li>
+      <div class="detail-grid">
+        <section class="panel">
+          <h3>Six-month decision cohort</h3>
+          <p><code>us-relative-momentum-v1</code> · decision evidence only.</p>
+          <ul>
+            {% for group in decision_groups %}
+              <li>{{ group.status|display_label }}: {{ group.count }}</li>
+            {% empty %}
+              <li>No canonical observed outcomes.</li>
+            {% endfor %}
+          </ul>
+          <p class="muted">
+            BUY/AVOID evaluation uses stock and SPY returns at the same
+            endpoints. HOLD has no manufactured success value.
+          </p>
+        </section>
+        <section class="panel">
+          <h3>FHS advisory cohorts</h3>
+          <p><code>us-price-fhs-v1</code> · no recommendation success metric.</p>
+          <ul>
+            {% for group in advisory_groups %}
+              <li>{{ group.prediction__horizon|display_label }} · {{ group.status|display_label }}: {{ group.count }}</li>
+            {% empty %}
+              <li>No canonical observed advisory outcomes.</li>
+            {% endfor %}
+          </ul>
+          <p class="muted">
+            6m, 12m, 3y, and 5y remain distinct cohorts. All-null advisory rows
+            are non-evaluable.
+          </p>
+        </section>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <p class="eyebrow">Registered retrospective evidence</p>
+    <h2>Current-universe/current-vintage historical comparisons</h2>
+    {% if registered_study.available %}
+      <p>
+        <strong>Studied cohort:</strong>
+        {{ registered_study.studied_listing_count }} of
+        {{ registered_study.source_run_listing_count }} selected listings from
+        the source cohort dated {{ registered_study.source_target_date }}.
+        Source grade: {{ registered_study.source_snapshot_grade|display_label }}.
+      </p>
+      <p>
+        <strong>Source run captured:</strong> {{ registered_study.source_generated_at }}
+        · <strong>report generated:</strong> {{ registered_study.report_generated_at }}
+        · <strong>protocol:</strong> <code>{{ registered_study.evidence_label }}</code>
+      </p>
+      <ul>
+        <li>
+          Fixed epoch {{ registered_study.fixed_epoch }}; validation runs from
+          {{ registered_study.validation_start }} through the session before
+          {{ registered_study.validation_end_exclusive }}; final holdout runs
+          from {{ registered_study.holdout_start }} through
+          {{ registered_study.holdout_complete_through }}.
+        </li>
+        <li>The frozen protocol forbids tuning on the 2025+ final holdout.</li>
+        <li>
+          This is a current-universe/current-vintage reconstruction, so
+          survivorship and current-vintage bias remain visible limits.
+        </li>
+        <li>
+          Convergence diagnostics are numerical checks, not extra market
+          evidence, support, or calibration.
+        </li>
+        <li>
+          Historical losses compare conditional forecasts with recorded realized
+          price returns, not simulated outcomes. Better or worse describes paired
+          error, not proven profitability or statistically established live skill.
+        </li>
+        <li>
+          Width and inclusion are descriptive, not standalone quality rankings.
+          The interval score jointly penalizes width and missed outcomes; higher
+          inclusion is not automatically better for a 60% interval.
+        </li>
+      </ul>
+      {% for disclosure in registered_study.disclosures %}
+        <p class="muted">{{ disclosure }}</p>
+      {% endfor %}
+
+      {% for partition in registered_study.partitions %}
+        <section class="panel">
+          <h3>{{ partition.label }}</h3>
+          {% for scope in partition.scopes %}
+            <article>
+              <h4>{{ scope.horizon_label }}</h4>
+              <p>
+                FHS support: {{ scope.target_cohort_count }} target cohorts
+                across {{ scope.distinct_listing_count }} listings.
+                {% if scope.insufficient_reason %}
+                  <strong>No candidate actual observations yet.</strong>
+                  {{ scope.insufficient_reason|display_label }}.
+                {% endif %}
+              </p>
+              <div
+                class="responsive-table"
+                tabindex="0"
+                aria-label="{{ partition.label }} {{ scope.horizon_label }} paired retrospective comparisons"
+              >
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Baseline</th>
+                      <th scope="col">Metric</th>
+                      <th scope="col">Paired observations</th>
+                      <th scope="col">Paired target cohorts</th>
+                      <th scope="col">FHS average</th>
+                      <th scope="col">Baseline average</th>
+                      <th scope="col">Δ FHS − baseline</th>
+                      <th scope="col">Readout</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in scope.rows %}
+                      <tr>
+                        <th scope="row">{{ row.baseline_label }}</th>
+                        <td>{{ row.metric_label }}</td>
+                        <td>{{ row.paired_observation_count }}</td>
+                        <td>{{ row.paired_target_cohort_count }}</td>
+                        <td>{{ row.candidate_average|percentage:2 }}</td>
+                        <td>{{ row.baseline_average|percentage:2 }}</td>
+                        <td>{{ row.mean_difference_candidate_minus_baseline|percentage:2 }}</td>
+                        <td>
+                          {% if row.unavailable_reason %}
+                            No paired actual observations yet —
+                            {{ row.unavailable_reason|display_label }}
+                          {% else %}
+                            {{ row.assessment }}
+                          {% endif %}
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </article>
           {% endfor %}
-        </ul>
-        <p class="muted">BUY/AVOID evaluation uses stock and SPY returns at the same endpoints. HOLD has no manufactured success value.</p>
-      </section>
-      <section class="panel">
-        <h2>FHS advisory cohorts</h2>
-        <p><code>us-price-fhs-v1</code> · no recommendation success metric.</p>
-        <ul>
-          {% for group in advisory_groups %}
-            <li>{{ group.prediction__horizon|display_label }} · {{ group.status|display_label }}: {{ group.count }}</li>
-          {% empty %}
-            <li>No canonical observed advisory outcomes.</li>
-          {% endfor %}
-        </ul>
-        <p class="muted">6m, 12m, 3y, and 5y remain distinct cohorts. All-null advisory rows are non-evaluable.</p>
-      </section>
-    </div>
-  {% endif %}
-  <p><a href="{% url 'archive-performance' %}">Archived performance reports</a> retain their original methods and thresholds.</p>
+        </section>
+      {% endfor %}
+      <p>
+        See <a href="{% url 'methodology' %}">methodology and limitations</a>
+        for the fixed operator assumptions and disclosure boundary.
+      </p>
+    {% elif registered_study.status == "absent" %}
+      <p class="empty-state">
+        <strong>Retrospective skill not established.</strong>
+        No registered all-selected historical comparison report is available
+        for this account. Older or partial diagnostics are not substituted.
+      </p>
+    {% else %}
+      <div class="error-box" role="alert">
+        <strong>Registered retrospective evidence unavailable.</strong>
+        {{ registered_study.message }}
+      </div>
+    {% endif %}
+  </section>
+
+  <p>
+    <a href="{% url 'archive-performance' %}">Archived performance reports</a>
+    retain their original methods and thresholds.
+  </p>
 {% endblock %}

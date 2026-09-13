@@ -31,6 +31,7 @@ from stanstock.data.assets import (
 )
 from stanstock.data.models import DataAsset, Listing
 from stanstock.data.research_product import product_membership_payload
+from stanstock.research.config import code_revision
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product import (
     EvidenceGrade,
@@ -193,6 +194,7 @@ def study_price_product_run(
 
     report: dict[str, Any] = {
         "schema": REPLAY_STUDY_SCHEMA,
+        "execution": {"code_revision": code_revision()},
         "source_run": {
             "id": run.id,
             "generated_at": run.generated_at,

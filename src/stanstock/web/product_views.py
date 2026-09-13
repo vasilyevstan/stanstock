@@ -29,6 +29,7 @@ from stanstock.research.price_product_config import (
     MOMENTUM_METHOD_VERSION,
 )
 from stanstock.research.product_reader import ProductCard, ProductRead, read_research_product
+from stanstock.research.product_study_evidence import read_registered_price_product_study
 from stanstock.research.reporting import canonical_reportable_prediction_filter
 from stanstock.web import views as legacy_views
 from stanstock.web.forms import ResearchProductFilterForm, TrackedSymbolForm
@@ -179,6 +180,7 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             return archive_performance_page(request)
         return legacy_views.performance_page(request)
     product = _read(request)
+    registered_study = read_registered_price_product_study(user=cast(User, request.user))
     decision_groups: list[dict[str, object]] = []
     advisory_groups: list[dict[str, object]] = []
     if product.available and product.run is not None:
@@ -210,6 +212,7 @@ def performance_page(request: HttpRequest) -> HttpResponse:
         "web/product_performance.html",
         {
             "product": product,
+            "registered_study": registered_study,
             "decision_groups": decision_groups,
             "advisory_groups": advisory_groups,
             "has_matured": any(
