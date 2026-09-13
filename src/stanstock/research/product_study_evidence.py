@@ -36,8 +36,11 @@ from stanstock.data.assets import (
     resolve_asset_ref,
 )
 from stanstock.data.models import DataAsset, ProviderRecord, UniverseSnapshot
-from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER, validate_provider_usage
-from stanstock.data.providers.exceptions import ProviderConfigurationError
+from stanstock.data.provider_policy import (
+    TWELVE_DATA_PROVIDER,
+    ProviderConfigurationError,
+    validate_provider_usage,
+)
 from stanstock.data.research_product import PRODUCT_INTAKE_KIND, product_membership_payload
 from stanstock.data.research_product_demo import DEMO_OWNER_ID
 from stanstock.research.models import AnalysisRun, StockAnalysis

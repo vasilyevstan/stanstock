@@ -103,6 +103,9 @@ request that review rather than re-deriving it.
 1. Map each acceptance criterion and each finding to a test.
 2. Run the narrowest existing command first (e.g. `uv run pytest
    tests/<path>`).
+   New domain modules also require `tests/test_architecture.py`; importing a
+   provider exception through a raw-provider path is still a boundary
+   violation even when behavioral tests pass.
 3. Expand to `uv run pytest --cov=stanstock --cov-report=term-missing`,
    `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`,
    and `uv run python manage.py check --settings=stanstock.settings.test`

@@ -50,6 +50,11 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Provider exception imports still cross the provider boundary.** Domain
+  readers obtain `ProviderConfigurationError` through `data.provider_policy`,
+  not `data.providers.exceptions`. Run the fast architecture tests when
+  adding domain modules; extensive behavioral coverage does not enforce an
+  import-layer rule.
 - **Historical losses and descriptive interval metrics are different.**
   Compare losses on identical horizon/partition support with equal
   target-cohort weights. Narrower intervals and higher inclusion are not

@@ -32,9 +32,9 @@ from stanstock.data.live_us import resolve_us_target_date
 from stanstock.data.models import DataAsset, Listing, ProviderRecord
 from stanstock.data.provider_policy import (
     TWELVE_DATA_PROVIDER,
+    ProviderConfigurationError,
     validate_provider_usage,
 )
-from stanstock.data.providers.exceptions import ProviderConfigurationError
 from stanstock.data.research_product import PRODUCT_INTAKE_KIND, product_membership_payload
 from stanstock.data.research_product_demo import DEMO_OWNER_ID
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis

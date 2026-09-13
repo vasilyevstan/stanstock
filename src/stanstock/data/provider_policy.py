@@ -4,7 +4,9 @@ from django.contrib.auth import get_user_model
 
 from stanstock.data.models import ProviderRecord
 from stanstock.data.providers import sec, twelve_data
-from stanstock.data.providers.exceptions import ProviderConfigurationError
+from stanstock.data.providers.exceptions import (
+    ProviderConfigurationError as ProviderConfigurationError,
+)
 
 #: Canonical SEC provider identifier, re-exported at the provider-policy
 #: boundary so research code can qualify SEC evidence without importing the

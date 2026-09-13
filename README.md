@@ -7,22 +7,19 @@ system, or promise of investment performance.
 
 ## Release status
 
-`research-product-v1` is implemented on the integration branch and documented
-here as the intended replacement research experience. It is **awaiting
-release and operational activation**:
+This revision implements `research-product-v1`, the prospective replacement
+for the score-led research experience.
+[PR #53](https://github.com/vasilyevstan/stanstock/pull/53) records exact
+revision, independent review, CI, operational acceptance, and release evidence.
 
-- integrated independent research-integrity, critic-tester, and final-validator
-  review has not completed;
-- full CI has not established release acceptance at the final head;
-- the private fixed-denominator operational acceptance has not completed;
-- no real retrospective study has been registered; and
-- no live product issuance or production activation is claimed.
-
-Until those gates pass and an orchestrator explicitly releases and activates
-the change, an existing installation or the public default branch may still
-serve the prior score-led product. This section is the single release-state
-summary; the detailed documents describe the implemented contract, not a
-completed deployment.
+Implementation, release, and local activation are separate facts. Checking out
+code or enabling the product setting does not enable a provider, register a
+retrospective study, or prove forecasting skill. A private installation must
+follow the [operating gates](docs/operations.md), preserve a paired backup,
+and establish actual source-to-screen coverage before claiming activation.
+An existing installation retains its prior behavior until it is deliberately
+upgraded and configured. These documents explain the implemented contract;
+they do not certify the state of a particular running installation.
 
 ## Research product at a glance
 
@@ -169,7 +166,8 @@ Python service, `register_price_product_study(run=..., store=...)`, calculates
 the full selected cohort itself and registers canonical evidence; it does not
 accept caller-authored metrics. HTTP GET never performs replay.
 
-No real study is claimed in the current release state.
+Only source-bound registered evidence establishes that a retrospective study
+ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 
 ## Authenticated pages
 

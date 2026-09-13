@@ -250,7 +250,8 @@ Keep distinct:
 - report generation time; and
 - registered asset availability time.
 
-No real study is registered in the current release state.
+Registration is a separate authorized local operation; a source-code revision
+alone does not establish that it has run.
 
 ## Job states
 
