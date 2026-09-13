@@ -121,6 +121,35 @@ Future default, scheduled, provider-production, or observed v2 activation is
 a separate material decision; positive historical Brier skill is not
 calibration, significance, profitability, alpha, or live-skill evidence.
 
+### My List price-only monitoring
+
+After configuring the existing private Twelve Data workflow above, the local
+owner can refresh prices for already-saved My List symbols:
+
+```bash
+uv run python manage.py refresh_my_list_prices
+```
+
+This is a separate manual command, not part of the 03:30 scheduled refresh.
+It admits at most 20 saved symbols and requires existing verified, current
+NASDAQ/NYSE catalog evidence; it does not fetch a new catalog or discover
+additional symbols. Provider enablement, display entitlement, single-user
+restrictions, quota, and request spacing still apply.
+
+Eligible current price assets are reused without another provider request.
+Missing or stale prices require a bounded Twelve Data refresh. Raw and
+normalized assets are immutable, and the shared current-market writer cannot
+move a listing back to an older session. Invalid, ambiguous, unsupported, or
+future evidence fails closed. Command output reports counts rather than
+private symbol lists or prices.
+
+Use **My List > Under $10 provider-backed** to see qualifying persisted USD
+closes with their source and market-session date. Synthetic, stale, and
+unavailable prices do not qualify for that filter. This does not add names to
+the scored universe, issue predictions, create holdings, or change allocation:
+Under-$10 new allocation remains 0%. Browsing, adding, and removing saved
+symbols remain provider-free.
+
 ### SEC EDGAR fundamentals
 
 SEC EDGAR is unauthenticated and requires no API key. Put only an identifying

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Final, Literal
 from uuid import UUID
@@ -18,6 +21,7 @@ from stanstock.core.refresh_verification import (
 )
 from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.assets import AssetStore, read_checksummed_bytes
+from stanstock.data.live_us import resolve_us_target_date
 from stanstock.data.models import (
     LatestMarketData,
     Listing,
@@ -50,6 +54,12 @@ SUPPORTED_LISTING_TYPES = (
     Security.SecurityType.COMMON_STOCK,
     Security.SecurityType.ADR,
 )
+SUPPORTED_CATALOG_INSTRUMENT_TYPES: Final[dict[str, str]] = {
+    "Common Stock": Security.SecurityType.COMMON_STOCK,
+    "ADR": Security.SecurityType.ADR,
+    "American Depositary Receipt": Security.SecurityType.ADR,
+    "Depositary Receipt": Security.SecurityType.ADR,
+}
 # Seven calendar days covers a long holiday weekend plus bounded scheduler
 # recovery while still refusing an old catalog for interactive support
 # admission. This is a support-currentness gate only, never an investment
@@ -58,6 +68,17 @@ CATALOG_MAX_AGE_DAYS = 7
 VERIFIED_PARENT_SCAN_LIMIT = 8
 SCHEDULED_REFRESH_JOB = "scheduled_refresh"
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,31}$")
+TRACKED_SYMBOL_FILTER_ALL = "all"
+TRACKED_SYMBOL_FILTER_UNDER_10 = "under_10_provider"
+TRACKED_SYMBOL_FILTER_NO_LIVE_PRICE = "no_live_price"
+TRACKED_SYMBOL_FILTERS = frozenset(
+    {
+        TRACKED_SYMBOL_FILTER_ALL,
+        TRACKED_SYMBOL_FILTER_UNDER_10,
+        TRACKED_SYMBOL_FILTER_NO_LIVE_PRICE,
+    }
+)
+TRACKED_SYMBOL_UNDER_10_THRESHOLD = Decimal("10")
 
 
 class TrackedSymbolValidationError(ValueError):
@@ -82,6 +103,9 @@ class TrackedSymbolState:
     market_data: LatestMarketData | None
     analysis: StockAnalysis | None
     in_selected_analysis_universe: bool
+    has_live_provider_price: bool
+    live_price_under_10: bool
+    live_price_status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +121,32 @@ def normalize_tracked_symbol(raw_symbol: str) -> str:
             "Enter a symbol using up to 32 letters, numbers, periods, or hyphens."
         )
     return normalized
+
+
+def normalize_tracked_symbol_filter(raw_filter: object) -> str:
+    candidate = str(raw_filter or "").strip()
+    return candidate if candidate in TRACKED_SYMBOL_FILTERS else TRACKED_SYMBOL_FILTER_ALL
+
+
+def tracked_symbol_filter_choices(*, current: str) -> tuple[dict[str, object], ...]:
+    active = normalize_tracked_symbol_filter(current)
+    return (
+        {
+            "value": TRACKED_SYMBOL_FILTER_ALL,
+            "label": "All tracked",
+            "active": active == TRACKED_SYMBOL_FILTER_ALL,
+        },
+        {
+            "value": TRACKED_SYMBOL_FILTER_UNDER_10,
+            "label": "Under $10 provider-backed",
+            "active": active == TRACKED_SYMBOL_FILTER_UNDER_10,
+        },
+        {
+            "value": TRACKED_SYMBOL_FILTER_NO_LIVE_PRICE,
+            "label": "No live persisted price",
+            "active": active == TRACKED_SYMBOL_FILTER_NO_LIVE_PRICE,
+        },
+    )
 
 
 def add_tracked_symbol(
@@ -177,7 +227,17 @@ def tracked_symbol_states(
     *,
     owner: User,
     selected_run: AnalysisRun | None,
+    price_filter: str = TRACKED_SYMBOL_FILTER_ALL,
+    live_session_date: date | None = None,
+    decision_time: datetime | None = None,
 ) -> tuple[TrackedSymbolState, ...]:
+    active_filter = normalize_tracked_symbol_filter(price_filter)
+    effective_decision_time = decision_time or timezone.now()
+    effective_live_session_date = live_session_date
+    if effective_live_session_date is None:
+        effective_live_session_date, _grade = resolve_us_target_date(
+            decision_time=effective_decision_time
+        )
     preferences = tuple(TrackedSymbol.objects.filter(owner=owner))
     symbols = {preference.symbol for preference in preferences}
     if not symbols:
@@ -187,7 +247,11 @@ def tracked_symbol_states(
     candidates = (
         Listing.objects.filter(is_active=True)
         .filter(Q(provider_symbol__in=symbols) | Q(ticker__in=symbols))
-        .select_related("security__company", "latest_market_data")
+        .select_related(
+            "security__company",
+            "latest_market_data",
+            "latest_market_data__source_asset",
+        )
     )
     for candidate in candidates:
         aliases = {candidate.ticker, candidate.provider_symbol}
@@ -231,6 +295,19 @@ def tracked_symbol_states(
             if resolved_listing is not None
             else None
         )
+        live_status = _live_provider_price_status(
+            preference=preference,
+            listing=resolved_listing,
+            market_data=market_data,
+            live_session_date=effective_live_session_date,
+            decision_time=effective_decision_time,
+        )
+        has_live_provider_price = live_status == "eligible"
+        live_price_under_10 = bool(
+            has_live_provider_price
+            and market_data is not None
+            and market_data.close < TRACKED_SYMBOL_UNDER_10_THRESHOLD
+        )
         states.append(
             TrackedSymbolState(
                 preference=preference,
@@ -245,9 +322,56 @@ def tracked_symbol_states(
                 in_selected_analysis_universe=(
                     resolved_listing is not None and resolved_listing.pk in selected_listing_ids
                 ),
+                has_live_provider_price=has_live_provider_price,
+                live_price_under_10=live_price_under_10,
+                live_price_status=live_status,
             )
         )
-    return tuple(states)
+    return _filter_tracked_symbol_states(tuple(states), active_filter)
+
+
+def verified_catalog_references_for_symbols(
+    *,
+    symbols: Collection[str],
+    store: AssetStore | None = None,
+) -> dict[str, StockReference]:
+    normalized_symbols = tuple(
+        dict.fromkeys(normalize_tracked_symbol(symbol) for symbol in symbols)
+    )
+    if not normalized_symbols:
+        return {}
+    try:
+        references = _verified_catalog_references(symbols=normalized_symbols, store=store)
+    except TrackedSymbolValidationError:
+        raise
+    except (
+        OSError,
+        ProviderError,
+        RefreshVerificationError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        raise TrackedSymbolValidationError(
+            "Verified symbol catalog evidence is unavailable or invalid. "
+            "Run a local market refresh before trying again."
+        ) from None
+
+    resolved: dict[str, StockReference] = {}
+    for symbol in normalized_symbols:
+        matches = [reference for reference in references if reference.symbol == symbol]
+        if not matches:
+            raise TrackedSymbolValidationError(
+                f"{symbol} was not found in the latest verified NASDAQ/NYSE catalog bundle."
+            )
+        if len(matches) != 1:
+            raise TrackedSymbolValidationError(
+                f"{symbol} is ambiguous in the latest verified NASDAQ/NYSE catalog bundle."
+            )
+        reference = matches[0]
+        _validate_supported_catalog_reference(reference)
+        resolved[symbol] = reference
+    return resolved
 
 
 def _resolve_listing_candidates(candidates: list[Listing]) -> _ListingResolution:
@@ -266,42 +390,20 @@ def _resolve_listing_candidates(candidates: list[Listing]) -> _ListingResolution
 
 
 def _validate_catalog_identity(symbol: str, *, store: AssetStore | None) -> None:
-    try:
-        references = _verified_catalog_references(symbol=symbol, store=store)
-    except TrackedSymbolValidationError:
-        raise
-    except (
-        OSError,
-        ProviderError,
-        RefreshVerificationError,
-        TypeError,
-        UnicodeDecodeError,
-        ValueError,
-    ):
-        raise TrackedSymbolValidationError(
-            "Verified symbol catalog evidence is unavailable or invalid. "
-            "Run a local market refresh before trying again."
-        ) from None
+    verified_catalog_references_for_symbols(symbols=(symbol,), store=store)
 
-    matches = [reference for reference in references if reference.symbol == symbol]
-    if not matches:
-        raise TrackedSymbolValidationError(
-            f"{symbol} was not found in the latest verified NASDAQ/NYSE catalog bundle."
-        )
-    if len(matches) != 1:
-        raise TrackedSymbolValidationError(
-            f"{symbol} is ambiguous in the latest verified NASDAQ/NYSE catalog bundle."
-        )
-    reference = matches[0]
+
+def _validate_supported_catalog_reference(reference: StockReference) -> None:
     if (
         reference.country != "United States"
         or reference.currency != "USD"
-        or reference.instrument_type != "Common Stock"
+        or reference.instrument_type not in SUPPORTED_CATALOG_INSTRUMENT_TYPES
         or reference.exchange not in SUPPORTED_CATALOG_EXCHANGES
         or reference.mic_code not in SUPPORTED_CATALOG_MICS[reference.exchange]
     ):
         raise TrackedSymbolValidationError(
-            "Only United States USD common stocks on reviewed NASDAQ or NYSE venues can be tracked."
+            "Only United States USD common stocks or ADRs on reviewed NASDAQ or NYSE venues "
+            "can be tracked."
         )
     installed_plan = _installed_provider_plan()
     if not provider_plan_allows(installed_plan, reference.access_plan):
@@ -312,7 +414,7 @@ def _validate_catalog_identity(symbol: str, *, store: AssetStore | None) -> None
 
 def _verified_catalog_references(
     *,
-    symbol: str,
+    symbols: Collection[str],
     store: AssetStore | None,
 ) -> list[StockReference]:
     asset_store = store or _open_existing_asset_store()
@@ -330,12 +432,13 @@ def _verified_catalog_references(
         )
 
     references: list[StockReference] = []
+    required_symbols = frozenset(symbols)
     for asset in bundle.catalog_assets:
         payload = read_checksummed_bytes(asset_store, asset)
         parsed, _count = parse_stock_catalog_references(
             payload,
             exchange=asset.subject,
-            required_symbols={symbol},
+            required_symbols=required_symbols,
             require_complete=True,
         )
         for reference in parsed:
@@ -346,6 +449,62 @@ def _verified_catalog_references(
                 )
         references.extend(parsed)
     return references
+
+
+def _filter_tracked_symbol_states(
+    states: tuple[TrackedSymbolState, ...],
+    active_filter: str,
+) -> tuple[TrackedSymbolState, ...]:
+    if active_filter == TRACKED_SYMBOL_FILTER_UNDER_10:
+        return tuple(state for state in states if state.live_price_under_10)
+    if active_filter == TRACKED_SYMBOL_FILTER_NO_LIVE_PRICE:
+        return tuple(state for state in states if not state.has_live_provider_price)
+    return states
+
+
+def _live_provider_price_status(
+    *,
+    preference: TrackedSymbol,
+    listing: Listing | None,
+    market_data: LatestMarketData | None,
+    live_session_date: date,
+    decision_time: datetime,
+) -> str:
+    if listing is None or market_data is None:
+        return "missing"
+    if listing.currency != "USD":
+        return "non_usd"
+    if market_data.session_date < live_session_date:
+        return "stale"
+    if market_data.session_date > live_session_date:
+        return "future"
+    if market_data.close <= 0:
+        return "invalid"
+    source_asset = getattr(market_data, "source_asset", None)
+    if source_asset is None:
+        return "missing"
+    if (
+        source_asset.provider != TWELVE_DATA_PROVIDER
+        or source_asset.kind != "price_history"
+        or source_asset.subject
+        not in {
+            preference.symbol,
+            listing.provider_symbol,
+        }
+    ):
+        return "not_live_provider"
+    if source_asset.available_at > decision_time or source_asset.retrieved_at > decision_time:
+        return "future"
+    if source_asset.period_end != live_session_date:
+        if source_asset.period_end and source_asset.period_end < live_session_date:
+            return "stale"
+        return "future"
+    metadata = source_asset.metadata if isinstance(source_asset.metadata, dict) else {}
+    if metadata.get("currency") != "USD":
+        return "non_usd"
+    if metadata.get("interval") != "1day" or metadata.get("adjustment") != "splits":
+        return "bad_source"
+    return "eligible"
 
 
 def _latest_verified_refresh_bundle() -> ReplayedScheduledRefresh:

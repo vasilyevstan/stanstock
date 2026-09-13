@@ -361,7 +361,10 @@
                 <p>
                   Only listings with a stored analysis in the selected research universe are shown.
                   <a href="{% url 'my-list' %}">My List</a> tracks symbols locally;
-                  it does not fetch prices or expand the research universe.
+                  browsing or adding symbols there does not refresh prices or
+                  expand the research universe. Persisted price refreshes are
+                  handled separately by the local <code>refresh_my_list_prices</code>
+                  command.
                 </p>
                 <p>The 0% new-allocation policy is separate from whether candidates are present.</p>
               </div>
