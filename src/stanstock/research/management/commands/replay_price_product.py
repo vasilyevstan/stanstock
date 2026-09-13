@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from argparse import ArgumentParser
 from pathlib import Path
 from uuid import UUID
@@ -47,7 +48,7 @@ class Command(BaseCommand):
             "--output-file",
             type=Path,
             default=None,
-            help="Optional explicit output file; stdout is used when omitted",
+            help="New private report file outside DATA_DIR; existing files are never overwritten",
         )
 
     def handle(self, *args: object, **options: object) -> None:
@@ -57,6 +58,14 @@ class Command(BaseCommand):
             )
             listing_ids = _parse_listing_ids(str(options.get("listing_ids") or ""))
             store = open_asset_store()
+            output_file = options.get("output_file")
+            if output_file is not None:
+                if not isinstance(output_file, Path):
+                    raise CommandError("--output-file must be a filesystem path")
+                if output_file.exists() or output_file.is_symlink():
+                    raise CommandError("Report output must be a new file")
+                if output_file.resolve().is_relative_to(store.root):
+                    raise CommandError("Report output must be outside the immutable asset store")
             report = study_price_product_run(
                 run=run,
                 store=store,
@@ -69,19 +78,26 @@ class Command(BaseCommand):
                 output_format=str(options["format"]),
                 include_generated_at=True,
             )
-            output_file = options.get("output_file")
             if output_file is None:
                 self.stdout.write(rendered)
                 return
-            if not isinstance(output_file, Path):
-                raise CommandError("--output-file must be a filesystem path")
-            output_file.write_text(rendered, encoding="utf-8")
+            _write_private_report(output_file, rendered)
         except AnalysisRun.DoesNotExist as exc:
             raise CommandError("Unknown AnalysisRun UUID") from exc
         except OSError as exc:
             raise CommandError("Could not write the requested report output file") from exc
         except (TypeError, ValueError) as exc:
             raise CommandError(str(exc)) from exc
+
+
+def _write_private_report(path: Path, rendered: str) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(rendered)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _parse_listing_ids(raw: str) -> tuple[UUID, ...]:

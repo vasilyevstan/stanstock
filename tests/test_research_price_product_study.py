@@ -231,6 +231,47 @@ def test_replay_command_requires_explicit_scope_and_emits_json_without_writes(so
     }
 
 
+def test_private_report_writer_never_replaces_an_existing_file(tmp_path):
+    from stanstock.research.management.commands.replay_price_product import _write_private_report
+
+    path = tmp_path / "report.json"
+    _write_private_report(path, '{"synthetic":true}')
+    assert path.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(FileExistsError):
+        _write_private_report(path, "replacement")
+    assert path.read_text() == '{"synthetic":true}'
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_replay_output_preflight_protects_asset_store_before_calculation(
+    source_run, monkeypatch, existing
+):
+    from stanstock.research.management.commands import replay_price_product as command
+
+    run, listing, store = source_run
+    path = store.root / "must-not-be-written.json"
+    if existing:
+        path.write_text("original")
+
+    def unexpected_study(**kwargs):
+        raise AssertionError("Invalid output path must fail before expensive replay")
+
+    monkeypatch.setattr(command, "study_price_product_run", unexpected_study)
+    with pytest.raises(CommandError, match="new file|outside the immutable asset store"):
+        call_command(
+            "replay_price_product",
+            "--run",
+            str(run.pk),
+            "--listing-ids",
+            str(listing.pk),
+            "--format",
+            "json",
+            "--output-file",
+            str(path),
+        )
+    assert path.read_text() == "original" if existing else not path.exists()
+
+
 @pytest.mark.parametrize("mode", ["corrupt_source_bytes", "ambiguous_calculation_source"])
 def test_study_loader_refuses_corrupt_or_ambiguous_registered_sources(
     source_run, mode: str
