@@ -60,8 +60,8 @@ def live_product(tmp_path, monkeypatch, django_user_model, settings):
     return owner, store, run
 
 
-@pytest.fixture
-def observed_product_history(tmp_path, monkeypatch, django_user_model, settings):
+@pytest.fixture(params=(True, False))
+def observed_product_history(tmp_path, monkeypatch, django_user_model, settings, request):
     """Three real verified issuances spanning one 126-session maturity."""
 
     settings.RESEARCH_PRODUCT_ENABLED = True
@@ -175,7 +175,7 @@ def observed_product_history(tmp_path, monkeypatch, django_user_model, settings)
     current_job = execute_daily_research_job(
         target_date=current_target,
         owner=owner,
-        issued_on_time=True,
+        issued_on_time=request.param,
         store=store,
         core_config_path=path,
         enforce_rate_limit=False,
@@ -490,6 +490,10 @@ def test_verified_history_and_performance_span_runs_without_recounting_reissue(
     }
     assert history_content.count("Matured") >= 2
     assert "historical evidence, not a current signal" in history_content
+    advisory_content = history_content.split('aria-label="FHS advisory ledger"', 1)[1]
+    assert "Observed · Twelve Data" in advisory_content
+    if not current.issued_on_time:
+        assert "Research · Twelve Data" in advisory_content
     no_simulation.assert_not_called()
 
     other = django_user_model.objects.create_user(username="history-other-owner")

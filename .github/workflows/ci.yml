@@ -114,6 +114,7 @@ jobs:
             tests/test_research_product_schema.py \
             tests/test_research_product_parent_guards.py \
             tests/test_research_product_scheduled.py \
+            tests/test_research_product_study_evidence.py::test_registered_study_reader_fails_closed_on_forged_metadata_row \
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \
             tests/test_research_outcomes.py::test_outcome_role_integrity_triggers_are_installed \

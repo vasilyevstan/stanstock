@@ -253,7 +253,10 @@ def test_registered_study_reader_fails_closed_on_corrupt_bytes(demo_product) -> 
     assert result.verification_code
 
 
-def test_registered_study_reader_fails_closed_on_forged_metadata_row(demo_product) -> None:
+@pytest.mark.parametrize("different_subject", (False, True))
+def test_registered_study_reader_fails_closed_on_forged_metadata_row(
+    demo_product, different_subject
+) -> None:
     viewer, store, run = demo_product
     asset = _register_price_product_study(
         report=_study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC)),
@@ -267,7 +270,11 @@ def test_registered_study_reader_fails_closed_on_forged_metadata_row(demo_produc
     register_asset(
         provider="stanstock",
         kind=STUDY_EVIDENCE_KIND,
-        subject=asset.subject,
+        subject=(
+            asset.subject.rsplit(":", 1)[0] + ":00000000-0000-0000-0000-000000000001"
+            if different_subject
+            else asset.subject
+        ),
         stored=stored,
         retrieved_at=asset.retrieved_at + timedelta(minutes=1),
         available_at=asset.available_at + timedelta(minutes=1),

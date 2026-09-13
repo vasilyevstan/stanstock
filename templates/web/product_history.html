@@ -109,6 +109,7 @@
                 {% endif %}
                 <td>{{ prediction.method_version }}<small>{{ prediction.model_version }}</small></td>
                 <td>
+                  <small>{{ prediction.evidence_grade|display_label }} · {{ prediction.price_provider|display_label }}</small>
                   {% if projection.available %}
                     Recorded advisory · skill not established
                   {% else %}
