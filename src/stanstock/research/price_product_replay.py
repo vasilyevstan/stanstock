@@ -179,6 +179,7 @@ class AggregateMetricSummary:
     non_overlapping_target_count: int
     calendar_span: CalendarSpan | None
     duplicate_observation_count: int
+    conflicting_maturity_observation_count: int
     unavailable_count: int
     unavailable_reasons: Mapping[str, int]
     averages: Mapping[ProjectionMetricName, Decimal | None]
@@ -189,8 +190,11 @@ class AggregateMetricSummary:
 class PairedModelComparison:
     candidate_model: str
     baseline_model: str
+    partition: ReplayPartition
+    horizon: str
     metric_name: ProjectionMetricName
     paired_observation_count: int
+    paired_target_cohort_count: int
     candidate_average: Decimal | None
     baseline_average: Decimal | None
     mean_difference_candidate_minus_baseline: Decimal | None
@@ -464,20 +468,32 @@ def score_projection_metrics(
     actual_return: Decimal | float | None,
     config: PriceProductConfig,
 ) -> ProjectionMetricResult:
-    """Score one advisory triplet against one realized cumulative return."""
+    """Score one advisory triplet against one realized cumulative return.
+
+    ``median_absolute_error`` is the absolute error of the median forecast for
+    one observation.  Aggregate helpers mean these errors within target cohorts
+    and then across cohorts; they do not compute the median of absolute errors.
+    """
 
     precision = replay_precision(config)
     if predicted_returns is None:
         return _unavailable_projection_metrics(precision, "prediction_triplet_unavailable")
+    if not _finite_ledger_triplet(predicted_returns):
+        return _unavailable_projection_metrics(precision, "prediction_triplet_unavailable")
     if not _ordered_ledger_triplet(predicted_returns):
+        return _unavailable_projection_metrics(precision, "prediction_triplet_unordered")
+    normalized_prediction = _normalize_ledger_triplet(predicted_returns, config=config)
+    if normalized_prediction is None:
+        return _unavailable_projection_metrics(precision, "prediction_triplet_unavailable")
+    if not _ordered_ledger_triplet(normalized_prediction):
         return _unavailable_projection_metrics(precision, "prediction_triplet_unordered")
     actual = _round_metric_return(actual_return, config=config)
     if actual is None:
         return _unavailable_projection_metrics(precision, "actual_return_unavailable")
 
-    lower = predicted_returns.lower
-    median = predicted_returns.median
-    upper = predicted_returns.upper
+    lower = normalized_prediction.lower
+    median = normalized_prediction.median
+    upper = normalized_prediction.upper
     losses = tuple(
         _pinball_loss(name, Decimal(str(level)), forecast, actual)
         for name, level, forecast in zip(
@@ -499,7 +515,7 @@ def score_projection_metrics(
     return ProjectionMetricResult(
         precision=precision,
         actual_return=actual,
-        predicted_returns=predicted_returns,
+        predicted_returns=normalized_prediction,
         median_absolute_error=abs(actual - median),
         pinball_losses=(losses[0], losses[1], losses[2]),
         interval_width=interval_width,
@@ -588,7 +604,13 @@ def aggregate_projection_metrics(
     expected_horizons: Iterable[str],
     expected_models: Iterable[str],
 ) -> tuple[AggregateMetricSummary, ...]:
-    """Aggregate by target cohort first, then across cohorts."""
+    """Aggregate by target cohort first, then across cohorts.
+
+    Each model summary uses that model's own eligible support and reports
+    duplicate/conflicting observations excluded from that support.  These
+    summaries must not be presented as a paired candidate-vs-baseline
+    comparison; use :func:`compare_aligned_models` for aligned comparisons.
+    """
 
     expected_keys = tuple(
         (partition, horizon, model)
@@ -596,13 +618,16 @@ def aggregate_projection_metrics(
         for horizon in expected_horizons
         for model in expected_models
     )
-    canonical, duplicates = _canonical_observations(observations)
+    canonical, duplicates, conflicts = _canonical_observations(observations)
     by_group: dict[tuple[ReplayPartition, str, str], list[ReplayMetricObservation]] = {
         key: [] for key in expected_keys
     }
     duplicate_counts: Counter[tuple[ReplayPartition, str, str]] = Counter()
+    conflict_counts: Counter[tuple[ReplayPartition, str, str]] = Counter()
     for duplicate in duplicates:
         duplicate_counts[(duplicate.partition, duplicate.horizon, duplicate.model_name)] += 1
+    for conflict in conflicts:
+        conflict_counts[(conflict.partition, conflict.horizon, conflict.model_name)] += 1
     for observation in canonical:
         by_group.setdefault(
             (observation.partition, observation.horizon, observation.model_name),
@@ -619,6 +644,7 @@ def aggregate_projection_metrics(
                 horizon=horizon,
                 model=model,
                 duplicate_count=duplicate_counts[(partition, horizon, model)],
+                conflict_count=conflict_counts[(partition, horizon, model)],
             )
         )
     return tuple(summaries)
@@ -629,15 +655,37 @@ def compare_aligned_models(
     *,
     candidate_model: str,
     baseline_model: str,
+    partition: ReplayPartition,
+    horizon: str,
     metric_name: ProjectionMetricName,
 ) -> PairedModelComparison:
-    """Compare models only on observations eligible for both model outputs."""
+    """Compare one explicit partition/horizon scope on paired observations.
 
-    canonical, duplicates = _canonical_observations(observations)
+    Callers must pass only observations for the requested ``partition`` and
+    ``horizon`` for the candidate/baseline models.  Mixed-scope input is
+    rejected instead of being silently filtered or pooled.  Within the explicit
+    scope, paired available observations are averaged within target-date
+    cohorts first, then those cohort means are averaged across cohorts.
+    """
+
+    all_observations = tuple(observations)
+    _reject_mixed_comparison_scope(
+        all_observations,
+        candidate_model=candidate_model,
+        baseline_model=baseline_model,
+        partition=partition,
+        horizon=horizon,
+    )
+    canonical, duplicates, conflicts = _canonical_observations(all_observations)
     candidate: dict[tuple[str, date, date, str, ReplayPartition], ReplayMetricObservation] = {}
     baseline: dict[tuple[str, date, date, str, ReplayPartition], ReplayMetricObservation] = {}
     all_keys: set[tuple[str, date, date, str, ReplayPartition]] = set()
-    exclusions: Counter[str] = Counter({"duplicate_identity_excluded": len(duplicates)})
+    exclusions: Counter[str] = Counter(
+        {
+            "duplicate_identity_excluded": len(duplicates),
+            "conflicting_maturity_excluded": len(conflicts),
+        }
+    )
     for observation in canonical:
         key = (
             observation.listing_id,
@@ -653,8 +701,7 @@ def compare_aligned_models(
             baseline[key] = observation
             all_keys.add(key)
 
-    candidate_values: list[Decimal] = []
-    baseline_values: list[Decimal] = []
+    paired_by_target: dict[date, list[tuple[Decimal, Decimal]]] = {}
     for key in sorted(all_keys):
         candidate_observation = candidate.get(key)
         baseline_observation = baseline.get(key)
@@ -678,28 +725,44 @@ def compare_aligned_models(
             )
             exclusions[f"baseline_unavailable:{reason}"] += 1
             continue
-        candidate_values.append(candidate_value)
-        baseline_values.append(baseline_value)
+        paired_by_target.setdefault(candidate_observation.target_date, []).append(
+            (candidate_value, baseline_value)
+        )
 
-    if not candidate_values:
+    if not paired_by_target:
         return PairedModelComparison(
             candidate_model=candidate_model,
             baseline_model=baseline_model,
+            partition=partition,
+            horizon=horizon,
             metric_name=metric_name,
             paired_observation_count=0,
+            paired_target_cohort_count=0,
             candidate_average=None,
             baseline_average=None,
             mean_difference_candidate_minus_baseline=None,
             exclusions=dict(exclusions),
             unavailable_reason="no_aligned_candidate_baseline_observations",
         )
-    candidate_average = _mean_decimal(candidate_values)
-    baseline_average = _mean_decimal(baseline_values)
+    candidate_cohort_means: list[Decimal] = []
+    baseline_cohort_means: list[Decimal] = []
+    paired_count = 0
+    for pairs in paired_by_target.values():
+        paired_count += len(pairs)
+        candidate_cohort_means.append(
+            _mean_decimal(candidate_value for candidate_value, _ in pairs)
+        )
+        baseline_cohort_means.append(_mean_decimal(baseline_value for _, baseline_value in pairs))
+    candidate_average = _mean_decimal(candidate_cohort_means)
+    baseline_average = _mean_decimal(baseline_cohort_means)
     return PairedModelComparison(
         candidate_model=candidate_model,
         baseline_model=baseline_model,
+        partition=partition,
+        horizon=horizon,
         metric_name=metric_name,
-        paired_observation_count=len(candidate_values),
+        paired_observation_count=paired_count,
+        paired_target_cohort_count=len(paired_by_target),
         candidate_average=candidate_average,
         baseline_average=baseline_average,
         mean_difference_candidate_minus_baseline=candidate_average - baseline_average,
@@ -718,7 +781,10 @@ def compare_numerical_convergence(
     """Compare production and doubled-path p20/p50/p80 quantiles."""
 
     rows: list[QuantileConvergence] = []
-    for horizon in sorted(set(production) | set(diagnostic)):
+    for horizon in sorted(
+        set(production) | set(diagnostic),
+        key=lambda value: (_convergence_horizon_sessions(value, production, diagnostic), value),
+    ):
         production_item = production.get(horizon)
         diagnostic_item = diagnostic.get(horizon)
         if production_item is None or diagnostic_item is None:
@@ -976,6 +1042,31 @@ def _round_metric_return(
     return _round_ledger(float(value), places=config.rounding.return_decimal_places, kind="return")
 
 
+def _normalize_ledger_triplet(
+    value: LedgerTriplet | None,
+    *,
+    config: PriceProductConfig,
+) -> LedgerTriplet | None:
+    if value is None:
+        return None
+    try:
+        return _round_triplet(
+            RawTriplet(
+                float(value.lower),
+                float(value.median),
+                float(value.upper),
+            ),
+            places=config.rounding.return_decimal_places,
+            kind="return",
+        )
+    except (OverflowError, ValueError):
+        return None
+
+
+def _finite_ledger_triplet(value: LedgerTriplet) -> bool:
+    return value.lower.is_finite() and value.median.is_finite() and value.upper.is_finite()
+
+
 def _unavailable_projection_metrics(
     precision: ReplayPrecision,
     reason: str,
@@ -1006,24 +1097,87 @@ def _pinball_loss(
 
 def _canonical_observations(
     observations: Iterable[ReplayMetricObservation],
-) -> tuple[tuple[ReplayMetricObservation, ...], tuple[ReplayMetricObservation, ...]]:
-    seen: set[tuple[str, date, str, ReplayPartition, str]] = set()
-    canonical: list[ReplayMetricObservation] = []
-    duplicates: list[ReplayMetricObservation] = []
+) -> tuple[
+    tuple[ReplayMetricObservation, ...],
+    tuple[ReplayMetricObservation, ...],
+    tuple[ReplayMetricObservation, ...],
+]:
+    by_conflict_key: dict[
+        tuple[str, date, str, ReplayPartition, str],
+        list[ReplayMetricObservation],
+    ] = {}
     for observation in observations:
-        key = (
+        conflict_key = (
             observation.listing_id,
-            observation.target_date,
+            observation.anchor_date,
             observation.horizon,
             observation.partition,
             observation.model_name,
         )
-        if key in seen:
-            duplicates.append(observation)
+        by_conflict_key.setdefault(conflict_key, []).append(observation)
+    conflict_ids = {
+        conflict_key
+        for conflict_key, items in by_conflict_key.items()
+        if len({item.target_date for item in items}) > 1
+    }
+    conflicts: list[ReplayMetricObservation] = []
+    seen: set[tuple[str, date, date, str, ReplayPartition, str]] = set()
+    canonical: list[ReplayMetricObservation] = []
+    duplicates: list[ReplayMetricObservation] = []
+    for items in by_conflict_key.values():
+        for observation in items:
+            conflict_key = (
+                observation.listing_id,
+                observation.anchor_date,
+                observation.horizon,
+                observation.partition,
+                observation.model_name,
+            )
+            if conflict_key in conflict_ids:
+                conflicts.append(observation)
+                continue
+            key = (
+                observation.listing_id,
+                observation.anchor_date,
+                observation.target_date,
+                observation.horizon,
+                observation.partition,
+                observation.model_name,
+            )
+            if key in seen:
+                duplicates.append(observation)
+                continue
+            seen.add(key)
+            canonical.append(observation)
+    return tuple(canonical), tuple(duplicates), tuple(conflicts)
+
+
+def _reject_mixed_comparison_scope(
+    observations: Iterable[ReplayMetricObservation],
+    *,
+    candidate_model: str,
+    baseline_model: str,
+    partition: ReplayPartition,
+    horizon: str,
+) -> None:
+    for observation in observations:
+        if observation.model_name not in (candidate_model, baseline_model):
             continue
-        seen.add(key)
-        canonical.append(observation)
-    return tuple(canonical), tuple(duplicates)
+        if observation.partition != partition or observation.horizon != horizon:
+            raise ReplayProtocolError(
+                "compare_aligned_models requires pre-filtered observations for one "
+                "explicit partition and horizon"
+            )
+
+
+def _convergence_horizon_sessions(
+    horizon: str,
+    production: Mapping[str, tuple[int, RawTriplet | None]],
+    diagnostic: Mapping[str, tuple[int, RawTriplet | None]],
+) -> int:
+    if horizon in production:
+        return production[horizon][0]
+    return diagnostic[horizon][0]
 
 
 def _summarize_group(
@@ -1033,6 +1187,7 @@ def _summarize_group(
     horizon: str,
     model: str,
     duplicate_count: int,
+    conflict_count: int,
 ) -> AggregateMetricSummary:
     observations = tuple(group)
     unavailable_reasons: Counter[str] = Counter(
@@ -1076,6 +1231,7 @@ def _summarize_group(
         non_overlapping_target_count=_non_overlapping_target_count(observations),
         calendar_span=span,
         duplicate_observation_count=duplicate_count,
+        conflicting_maturity_observation_count=conflict_count,
         unavailable_count=sum(unavailable_reasons.values()),
         unavailable_reasons=dict(unavailable_reasons),
         averages=averages,

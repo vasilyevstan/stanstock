@@ -15,6 +15,7 @@ from stanstock.research.price_product_replay import (
     AnchorPartitionPlan,
     ProjectionMetricResult,
     ReplayMetricObservation,
+    ReplayProtocolError,
     aggregate_projection_metrics,
     build_anchor_plan,
     compare_aligned_models,
@@ -284,6 +285,7 @@ def test_aggregation_is_cohort_first_and_deduplicates_listing_identities() -> No
     empty = _summary_by_key(summaries)[("validation", "12m", "candidate")]
 
     assert summary.duplicate_observation_count == 1
+    assert summary.conflicting_maturity_observation_count == 0
     assert summary.target_cohort_count == 2
     assert summary.distinct_listing_count == 3
     assert summary.non_overlapping_target_count == 2
@@ -352,16 +354,219 @@ def test_aligned_model_comparison_reports_paired_missingness_and_unavailable_bas
         observations,
         candidate_model="candidate",
         baseline_model="baseline",
+        partition="validation",
+        horizon="6m",
         metric_name="median_absolute_error",
     )
 
+    assert comparison.partition == "validation"
+    assert comparison.horizon == "6m"
     assert comparison.paired_observation_count == 1
+    assert comparison.paired_target_cohort_count == 1
     assert comparison.candidate_average == Decimal("0.0000")
     assert comparison.baseline_average == Decimal("0.1000")
     assert comparison.mean_difference_candidate_minus_baseline == Decimal("-0.1000")
     assert comparison.exclusions["baseline_missing"] == 1
     assert comparison.exclusions["candidate_missing"] == 1
     assert comparison.exclusions["candidate_unavailable:prediction_triplet_unavailable"] == 1
+
+
+def test_aligned_model_comparison_rejects_mixed_horizon_or_partition_scope() -> None:
+    triplet = LedgerTriplet(Decimal("-0.1"), Decimal("0.0"), Decimal("0.1"))
+    observations = [
+        _observation(
+            listing="A",
+            anchor=date(2024, 1, 2),
+            target=date(2024, 7, 1),
+            model="candidate",
+            metrics=_metrics(triplet, Decimal("0.0000")),
+        ),
+        _observation(
+            listing="A",
+            anchor=date(2024, 1, 2),
+            target=date(2024, 7, 1),
+            model="baseline",
+            metrics=_metrics(triplet, Decimal("0.0000")),
+            horizon="12m",
+        ),
+    ]
+
+    with pytest.raises(ReplayProtocolError, match="one explicit partition and horizon"):
+        compare_aligned_models(
+            observations,
+            candidate_model="candidate",
+            baseline_model="baseline",
+            partition="validation",
+            horizon="6m",
+            metric_name="median_absolute_error",
+        )
+
+    mixed_partition = [
+        _observation(
+            listing="A",
+            anchor=date(2024, 1, 2),
+            target=date(2024, 7, 1),
+            model="candidate",
+            metrics=_metrics(triplet, Decimal("0.0000")),
+        ),
+        ReplayMetricObservation(
+            listing_id="A",
+            anchor_date=date(2024, 1, 2),
+            target_date=date(2024, 7, 1),
+            horizon="6m",
+            partition="development",
+            model_name="baseline",
+            metrics=_metrics(triplet, Decimal("0.0000")),
+        ),
+    ]
+
+    with pytest.raises(ReplayProtocolError, match="one explicit partition and horizon"):
+        compare_aligned_models(
+            mixed_partition,
+            candidate_model="candidate",
+            baseline_model="baseline",
+            partition="validation",
+            horizon="6m",
+            metric_name="median_absolute_error",
+        )
+
+
+def test_aligned_model_comparison_is_cohort_first_for_imbalanced_support() -> None:
+    candidate_good = LedgerTriplet(Decimal("-0.1"), Decimal("0.0000"), Decimal("0.1"))
+    baseline_worse = LedgerTriplet(Decimal("-0.1"), Decimal("0.0100"), Decimal("0.1"))
+    candidate_bad = LedgerTriplet(Decimal("-0.1"), Decimal("0.0200"), Decimal("0.1"))
+    baseline_good = LedgerTriplet(Decimal("-0.1"), Decimal("0.0000"), Decimal("0.1"))
+    observations = []
+    for index in range(10):
+        listing = f"A{index}"
+        observations.extend(
+            [
+                _observation(
+                    listing=listing,
+                    anchor=date(2024, 1, 2),
+                    target=date(2024, 7, 1),
+                    model="candidate",
+                    metrics=_metrics(candidate_good, Decimal("0.0000")),
+                ),
+                _observation(
+                    listing=listing,
+                    anchor=date(2024, 1, 2),
+                    target=date(2024, 7, 1),
+                    model="baseline",
+                    metrics=_metrics(baseline_worse, Decimal("0.0000")),
+                ),
+            ]
+        )
+    observations.extend(
+        [
+            _observation(
+                listing="B",
+                anchor=date(2024, 7, 1),
+                target=date(2024, 12, 31),
+                model="candidate",
+                metrics=_metrics(candidate_bad, Decimal("0.0000")),
+            ),
+            _observation(
+                listing="B",
+                anchor=date(2024, 7, 1),
+                target=date(2024, 12, 31),
+                model="baseline",
+                metrics=_metrics(baseline_good, Decimal("0.0000")),
+            ),
+        ]
+    )
+
+    comparison = compare_aligned_models(
+        observations,
+        candidate_model="candidate",
+        baseline_model="baseline",
+        partition="validation",
+        horizon="6m",
+        metric_name="median_absolute_error",
+    )
+
+    assert comparison.paired_observation_count == 11
+    assert comparison.paired_target_cohort_count == 2
+    assert comparison.candidate_average == Decimal("0.0100")
+    assert comparison.baseline_average == Decimal("0.0050")
+    assert comparison.mean_difference_candidate_minus_baseline == Decimal("0.0050")
+
+
+def test_observation_identity_keeps_anchor_and_rejects_conflicting_maturities() -> None:
+    triplet = LedgerTriplet(Decimal("-0.1"), Decimal("0.0"), Decimal("0.1"))
+    exact_duplicate = _observation(
+        listing="A",
+        anchor=date(2024, 1, 2),
+        target=date(2024, 7, 1),
+        model="candidate",
+        metrics=_metrics(triplet, Decimal("0.0000")),
+    )
+    same_anchor_conflict_first = _observation(
+        listing="B",
+        anchor=date(2024, 1, 2),
+        target=date(2024, 8, 1),
+        model="candidate",
+        metrics=_metrics(triplet, Decimal("0.0000")),
+    )
+    same_anchor_conflict_second = _observation(
+        listing="B",
+        anchor=date(2024, 1, 2),
+        target=date(2024, 7, 1),
+        model="candidate",
+        metrics=_metrics(triplet, Decimal("0.0000")),
+    )
+    observations = [
+        exact_duplicate,
+        exact_duplicate,
+        same_anchor_conflict_first,
+        same_anchor_conflict_second,
+    ]
+
+    summaries = aggregate_projection_metrics(
+        observations,
+        expected_partitions=("validation",),
+        expected_horizons=("6m",),
+        expected_models=("candidate",),
+    )
+    reversed_summaries = aggregate_projection_metrics(
+        reversed(observations),
+        expected_partitions=("validation",),
+        expected_horizons=("6m",),
+        expected_models=("candidate",),
+    )
+    summary = summaries[0]
+    reversed_summary = reversed_summaries[0]
+
+    assert summary.duplicate_observation_count == 1
+    assert summary.conflicting_maturity_observation_count == 2
+    assert summary.distinct_listing_count == 1
+    assert summary.averages["median_absolute_error"] == Decimal("0.0000")
+    assert reversed_summary.duplicate_observation_count == 1
+    assert reversed_summary.conflicting_maturity_observation_count == 2
+    assert reversed_summary.distinct_listing_count == 1
+
+
+def test_projection_metrics_quantizes_forecast_triplet_to_declared_ledger_precision() -> None:
+    config = load_price_product_config()
+    result = score_projection_metrics(
+        predicted_returns=LedgerTriplet(
+            Decimal("-0.123456789"),
+            Decimal("0.0123456789"),
+            Decimal("0.1500000000"),
+        ),
+        actual_return=Decimal("0.0200004"),
+        config=config,
+    )
+
+    assert result.predicted_returns == LedgerTriplet(
+        Decimal("-0.1235"),
+        Decimal("0.0123"),
+        Decimal("0.1500"),
+    )
+    assert result.actual_return == Decimal("0.0200")
+    assert result.median_absolute_error == Decimal("0.0077")
+    assert result.pinball_losses is not None
+    assert result.pinball_losses[1].loss == Decimal("0.00385")
 
 
 def test_convergence_thresholds_use_production_interval_width_and_exact_boundary() -> None:
@@ -379,6 +584,21 @@ def test_convergence_thresholds_use_production_interval_width_and_exact_boundary
     assert rows["p80"].exceeded is True
     assert report.exceeded_count == 1
     assert report.threshold_rule == "max(0.01 return, 0.02 * production_interval_width)"
+
+
+def test_convergence_rows_are_ordered_by_horizon_sessions_not_name() -> None:
+    report = compare_numerical_convergence(
+        production={
+            "12m": (252, RawTriplet(-0.1000, 0.0000, 0.4000)),
+            "6m": (126, RawTriplet(-0.1000, 0.0000, 0.4000)),
+        },
+        diagnostic={
+            "12m": (252, RawTriplet(-0.1000, 0.0000, 0.4000)),
+            "6m": (126, RawTriplet(-0.1000, 0.0000, 0.4000)),
+        },
+    )
+
+    assert [row.horizon for row in report.rows] == ["6m", "6m", "6m", "12m", "12m", "12m"]
 
 
 def test_convergence_invalid_triplet_reports_unavailable_rows_without_zeroes() -> None:
