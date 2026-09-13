@@ -95,6 +95,9 @@
                   Legacy provider not proven
                 {% endif %}
               </small>
+              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
+                <small><strong>Research-only / unactivated</strong> · deterministic uncalibrated scenarios</small>
+              {% endif %}
             </td>
             <td>{{ prediction.get_horizon_display }}</td>
             <td>
@@ -106,7 +109,10 @@
             </td>
             <td>{{ prediction.bear_return|percentage }} / {{ prediction.base_return|percentage }} / {{ prediction.bull_return|percentage }}</td>
             <td>
-              {% if prediction.probability_positive is not None %}
+              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
+                Unavailable
+                <small>Separate cutoff-safe historical replay review is required before activation.</small>
+              {% elif prediction.probability_positive is not None %}
                 {{ prediction.probability_positive|percentage }}
                 {% if prediction.horizon == "6m" or prediction.horizon == "12m" %}
                   <small>Shrinkage-weighted analog estimate</small>
@@ -116,7 +122,21 @@
                 {% if prediction.insufficiency_reason %}<small>{{ prediction.insufficiency_reason }}</small>{% endif %}
               {% endif %}
             </td>
-            <td>{{ prediction.confidence|floatformat:"0" }}%<small>{{ prediction.confidence_status|display_label }}</small></td>
+            <td>
+              {% if prediction.method_version == "us-sec-long-v4" and prediction.calculation.schema_version == 2 %}
+                Not estimated / unavailable
+                <small>{{ prediction.confidence_status|display_label }}</small>
+                {% if prediction.calculation.split_basis.assessed_through %}
+                  <small>
+                    Diluted-share basis:
+                    {% if prediction.calculation.split_basis.assessment_status == "incompatible_or_unverified" %}Incompatible / unverified{% else %}Unverified{% endif %};
+                    assessed through {{ prediction.calculation.split_basis.assessed_through }}.
+                  </small>
+                {% endif %}
+              {% else %}
+                {{ prediction.confidence|floatformat:"0" }}%<small>{{ prediction.confidence_status|display_label }}</small>
+              {% endif %}
+            </td>
             <td>
               {% if prediction.outcome %}
                 {{ prediction.outcome.get_status_display }}

@@ -1,0 +1,76 @@
+schema_version: 2
+version: us-sec-long-v4
+method: sec_entity_growth_dilution_multiple_reversion
+method_version: us-sec-long-v4
+research_status: research_only_unactivated
+enabled_scoring_versions:
+  - us-price-baseline-v2
+price_provider: twelve_data
+fundamentals_provider: sec
+fundamentals_config_version: us-sec-fundamentals-v1
+fundamentals_config_file_sha256: 829ed267eec62304804c9ef71f1816636389c2b0ad77423d8a534a00a5e1ae30
+fundamentals_config_hash: 7822a1faaae1c8028d71851337a7dbb7a65d9aeaa0f44478e3814a6468b62604
+sec_cik_config_version: us-sec-cik-v1
+sec_cik_config_file_sha256: 3e65d924d77b3ea233806cdfb006ddb30a0b982fecafd9568cbf680e37ffeb07
+sec_cik_config_hash: 5443bb613e1b40545faa4f53794a869453c6f78317390389c3959e938ba99f65
+sec_mapping_source_sha256: ec43db74f82d1739cce6340f36b9695dcb51231fc38edd493215677627bb01cd
+return_basis: split_adjusted_price_return
+dividends_included: false
+base_currency: USD
+fx_conversion: false
+path_years: 5
+probability_positive_enabled: false
+eligibility:
+  maximum_metric_age_days: 200
+  annual_periods: 4
+  annual_duration_minimum_days: 350
+  annual_duration_maximum_days: 380
+  share_continuity_relative_tolerance: 0.15
+  reported_eps_relative_tolerance: 0.15
+  fcf_presence_blocks_net_income_fallback: true
+metric_families:
+  fcf_per_share:
+    source_metric: free_cash_flow
+    multiple_minimum: 3.0
+    multiple_maximum: 60.0
+  net_income_per_share:
+    source_metric: net_income
+    multiple_minimum: 5.0
+    multiple_maximum: 50.0
+growth:
+  target_minimum: -0.20
+  target_maximum: 0.25
+  peer_minimum: -0.15
+  peer_maximum: 0.25
+  entity_minimum: -0.15
+  entity_maximum: 0.25
+  terminal_entity_growth: 0.025
+  target_weight: 0.50
+  peer_weight: 0.50
+peer:
+  sic_prefix_levels: [4, 3, 2]
+  minimum_cohort:
+    4: 3
+    3: 5
+    2: 8
+path:
+  fade: [0.80, 0.60, 0.40, 0.20, 0.00]
+  multiple_reversion: [0.14, 0.28, 0.42, 0.56, 0.70]
+scenarios:
+  bear:
+    growth_delta: -0.04
+    dilution_multiplier: 1.25
+    peer_multiple_multiplier: 0.80
+  base:
+    growth_delta: 0.00
+    dilution_multiplier: 1.00
+    peer_multiple_multiplier: 1.00
+  bull:
+    growth_delta: 0.03
+    dilution_multiplier: 0.75
+    peer_multiple_multiplier: 1.15
+confidence:
+  success_status: not_estimated_uncalibrated
+  withheld_status: not_estimated_insufficient
+  numeric_value: 0.00
+  numeric_semantics: zero_is_unavailable_sentinel

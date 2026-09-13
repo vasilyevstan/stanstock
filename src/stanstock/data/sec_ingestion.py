@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from time import sleep
+from typing import TYPE_CHECKING
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from django.db import IntegrityError, transaction
@@ -22,7 +24,6 @@ from stanstock.data.assets import (
     register_asset,
 )
 from stanstock.data.fact_identity import build_observation_hash, build_period_identity
-from stanstock.data.live_us import UsUniverseConfig
 from stanstock.data.models import (
     OBSERVATION_INSTANT_CONSTRAINT,
     Company,
@@ -54,7 +55,9 @@ from stanstock.data.sec_evidence import (
     MAPPING_KIND,
     SUBMISSIONS_HISTORY_KIND,
     SUBMISSIONS_KIND,
+    SecEvidencePayloadError,
     historical_submission_filenames,
+    is_safe_history_filename,
 )
 from stanstock.data.sec_fundamentals import (
     CORRECTION_AVAILABILITY_BASIS,
@@ -63,12 +66,25 @@ from stanstock.data.sec_fundamentals import (
     resolve_availability,
 )
 
+if TYPE_CHECKING:
+    from stanstock.data.live_us import UsUniverseConfig
+
 PROVIDER = sec.PROVIDER
 SIC_SCHEME = "sec_sic"
 _COMPANYFACTS_VERIFICATIONS_KEY = "companyfacts_verifications"
 _COMPANYFACTS_NORMALIZATION_VERSION = "sec-companyfacts-v2"
 _NEW_YORK = ZoneInfo("America/New_York")
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+_SUBMISSIONS_REQUIRED_COLUMNS = (
+    "accessionNumber",
+    "filingDate",
+    "form",
+    "reportDate",
+    "primaryDocument",
+)
+_SUBMISSIONS_OPTIONAL_COLUMNS = ("acceptanceDateTime",)
+SEC_EXCHANGE_MIC_RULE = (("Nasdaq", "XNAS"), ("NYSE", "XNYS"))
+RawObservationLineage = tuple[str, str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,12 +98,104 @@ class SecMappingRow:
 @dataclass(frozen=True, slots=True)
 class FilingRecord:
     accession: str
-    filing_date: date | None
-    acceptance_at: datetime | None
+    filing_date: date
+    acceptance_at: datetime
+    acceptance_basis: str
     filing_form: str
     report_date: date | None
     primary_document: str
     source_asset: DataAsset
+
+
+@dataclass(frozen=True, slots=True)
+class SecSubmissionsEvidence:
+    cik: str
+    filings: tuple[FilingRecord, ...]
+    historical_filenames: tuple[str, ...]
+    sic: str
+    sic_description: str
+
+
+@dataclass(frozen=True, slots=True)
+class SecFactDerivation:
+    concept: str
+    taxonomy: str
+    source_concept: str
+    value: Decimal
+    unit: str
+    currency: str
+    period_type: str
+    period_identity: str
+    period_start: date | None
+    period_end: date
+    fiscal_year: int | None
+    fiscal_period: str
+    frame: str
+    accession: str
+    filing_form: str
+    filing_date: date | None
+    acceptance_at: datetime
+    filing_availability_basis: str
+    is_amendment: bool
+    observation_hash: str
+    base_quality_flags: tuple[str, ...]
+    filing_source_asset_id: UUID
+    raw_observation_lineage: RawObservationLineage
+    raw_observation_signature: str
+    raw_observation_match_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SecConfiguredObservation:
+    """One configured Companyfacts alias occurrence before normalization.
+
+    ``derive_sec_companyfacts`` remains the strict ingestion-writer API.
+    Point-in-time readers that must distinguish a genuinely absent alias from
+    an alias that could not be normalized use ``inspect_sec_companyfacts`` and
+    consume these records.  Scope fields are best-effort only for rejected
+    observations: ``None`` means the malformed source did not prove the field,
+    not that the field was absent economically. ``raw_filing_form`` retains
+    the Companyfacts cell byte-for-text, while ``filing_form`` uses the
+    reconciled submissions form whenever authoritative filing evidence exists.
+    """
+
+    concept: str
+    taxonomy: str
+    source_concept: str
+    unit: str | None
+    unit_supported: bool | None
+    status: str
+    rejection_code: str | None
+    period_type: str
+    period_start: date | None
+    period_end: date | None
+    accession: str | None
+    raw_filing_form: str | None
+    filing_form: str | None
+    filing_date: date | None
+    acceptance_at: datetime | None
+    filing_availability_basis: str | None
+    filing_source_asset_id: UUID | None
+    derivation: SecFactDerivation | None
+    raw_observation_lineage: RawObservationLineage | None
+    raw_observation_signature: str | None
+    raw_observation_match_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SecCompanyfactsInspection:
+    derivations: tuple[SecFactDerivation, ...]
+    configured_observations: tuple[SecConfiguredObservation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedLineageHead:
+    fact: FundamentalFact
+    raw_observation_signature: str
+
+
+class SecDerivationError(ProviderResponseError):
+    """Raw SEC evidence could not produce the shared canonical derivation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +341,16 @@ def fetch_sec_mapping_asset(
 
 
 def parse_sec_mapping(payload: bytes) -> tuple[SecMappingRow, ...]:
+    """Parse the SEC ticker map through the shared path-free error surface."""
+    try:
+        return _parse_sec_mapping(payload)
+    except SecDerivationError:
+        raise
+    except ProviderResponseError as exc:
+        raise SecDerivationError(str(exc)) from exc
+
+
+def _parse_sec_mapping(payload: bytes) -> tuple[SecMappingRow, ...]:
     data = _load_json_object(payload, label="SEC ticker mapping")
     fields = data.get("fields")
     rows = data.get("data")
@@ -264,6 +382,17 @@ def parse_sec_mapping(payload: bytes) -> tuple[SecMappingRow, ...]:
             )
         )
     return tuple(parsed)
+
+
+def verify_sec_exchange_mic(*, exchange: object, mic: object) -> None:
+    """Verify the exact SEC exchange spelling against StanStock's MIC.
+
+    This intentionally owns only the two reviewed SEC spellings used by the
+    canonical US CIK configuration. It is not a general exchange mapper.
+    """
+    expected = dict(SEC_EXCHANGE_MIC_RULE).get(exchange) if isinstance(exchange, str) else None
+    if expected is None or not isinstance(mic, str) or mic != expected:
+        raise SecDerivationError("SEC exchange and listing MIC do not match the reviewed rule")
 
 
 def mapping_candidates_for_symbols(
@@ -362,6 +491,13 @@ def _verify_cik_config(
 ) -> None:
     official = {(row.ticker, row.cik, row.exchange) for row in rows}
     for mapping in cik_config.mappings.values():
+        expected_mic = dict(SEC_EXCHANGE_MIC_RULE).get(mapping.exchange)
+        if expected_mic is None:
+            raise ValueError(
+                f"Reviewed SEC mapping for {mapping.symbol} uses unsupported "
+                f"exchange {mapping.exchange!r}"
+            )
+        verify_sec_exchange_mic(exchange=mapping.exchange, mic=expected_mic)
         identity = (mapping.official_ticker, mapping.cik, mapping.exchange)
         if identity not in official:
             raise ValueError(
@@ -403,15 +539,15 @@ def _ingest_company(
             symbol=mapping.symbol,
         ),
     )
-    current_records = list(
-        _parse_current_submissions(
-            submissions_payload.content,
-            source_asset=submissions_asset,
-        )
+    submissions_evidence = derive_sec_current_submissions(
+        submissions_payload.content,
+        source_asset=submissions_asset,
+        expected_cik=mapping.cik,
     )
+    current_records = list(submissions_evidence.filings)
     raw_created = int(submissions_created)
     raw_reused = int(not submissions_created)
-    history_filenames = historical_submission_filenames(submissions_payload.content)
+    history_filenames = submissions_evidence.historical_filenames
     history_assets = {
         filename: _latest_history_asset(cik=mapping.cik, filename=filename)
         for filename in history_filenames
@@ -519,36 +655,47 @@ def _ingest_company(
             resolved_history_assets[filename] = history_asset
             historical_count += 1
             filing_records.extend(
-                _parse_submission_rows(
+                derive_sec_historical_submissions(
                     history_content,
                     source_asset=history_asset,
+                    expected_cik=mapping.cik,
+                    filename=filename,
+                    allowed_filenames=history_filenames,
                 )
             )
         filing_sources_hash = _filing_sources_hash(
             submissions_asset=submissions_asset,
             history_assets=resolved_history_assets,
         )
-        filing_index = _filing_index(filing_records)
 
     if fetch_companyfacts:
         budget.consume()
         companyfacts_payload = sec.fetch_companyfacts(mapping.cik)
+        companyfacts_metadata = _source_metadata(
+            payload=companyfacts_payload,
+            config=config,
+            target_date=target_date,
+            symbol=mapping.symbol,
+            extra={
+                "submissions_asset_id": str(submissions_asset.pk),
+                "submissions_sha256": submissions_asset.sha256,
+                "reconciliation": reconciliation_due,
+            },
+        )
+        _preflight_companyfacts_lineage(
+            company=company,
+            payload=companyfacts_payload,
+            metadata=companyfacts_metadata,
+            filing_records=tuple(filing_records),
+            config=config,
+            store=store,
+        )
         companyfacts_asset, companyfacts_created = _persist_payload(
             store=store,
             payload=companyfacts_payload,
             kind=COMPANYFACTS_KIND,
             subject=mapping.cik,
-            metadata=_source_metadata(
-                payload=companyfacts_payload,
-                config=config,
-                target_date=target_date,
-                symbol=mapping.symbol,
-                extra={
-                    "submissions_asset_id": str(submissions_asset.pk),
-                    "submissions_sha256": submissions_asset.sha256,
-                    "reconciliation": reconciliation_due,
-                },
-            ),
+            metadata=companyfacts_metadata,
         )
         raw_created += int(companyfacts_created)
         raw_reused += int(not companyfacts_created)
@@ -589,8 +736,9 @@ def _ingest_company(
             payload=companyfacts_content,
             source_asset=companyfacts_asset,
             observed_at=companyfacts_observed_at,
-            filing_index=filing_index,
+            filing_records=tuple(filing_records),
             config=config,
+            store=store,
         )
         _record_companyfacts_verification(
             cik=mapping.cik,
@@ -616,7 +764,8 @@ def _ingest_company(
         facts_reused = 0
     classifications_created = _persist_sic_classification(
         company=company,
-        submissions_payload=submissions_payload,
+        evidence=submissions_evidence,
+        observed_at=submissions_payload.retrieved_at,
         source_asset=submissions_asset,
     )
     companyfacts_used_asset = (
@@ -1265,8 +1414,15 @@ def _observation_instant_conflict(error: IntegrityError) -> bool:
     )
 
 
-def _assert_event_matches_asset(event: SourceObservationEvent) -> SourceObservationEvent:
-    """Refuse an event whose digest does not match its own source asset."""
+def validate_sec_observation_event(
+    event: SourceObservationEvent,
+) -> SourceObservationEvent:
+    """Refuse an event whose digest does not match its own source asset.
+
+    This deliberately validates only the event-to-asset relationship.  A
+    caller that owns a particular provider/kind/subject boundary must also
+    compare those identities with its independently resolved authority.
+    """
     if event.content_sha256 != event.source_asset.sha256:
         raise ObservationEvidenceError(
             f"Observation event {event.pk} claims content {event.content_sha256[:12]} "
@@ -1275,6 +1431,11 @@ def _assert_event_matches_asset(event: SourceObservationEvent) -> SourceObservat
             "observation may only certify the bytes its asset actually contains."
         )
     return event
+
+
+def _assert_event_matches_asset(event: SourceObservationEvent) -> SourceObservationEvent:
+    """Backward-compatible internal spelling for the public validator."""
+    return validate_sec_observation_event(event)
 
 
 def _record_observation_event(
@@ -1367,17 +1528,171 @@ def _record_observation_event(
     return committed
 
 
+def derive_sec_current_submissions(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+) -> SecSubmissionsEvidence:
+    """Derive current filing/SIC evidence from supplied bytes only.
+
+    The function performs no ORM lookup, persistence, file read, or network
+    access.  The caller supplies both the immutable source row and its bytes;
+    their SEC/CIK identities are checked before any fields are derived.
+    """
+    try:
+        return _derive_sec_current_submissions(
+            payload,
+            source_asset=source_asset,
+            expected_cik=expected_cik,
+        )
+    except SecDerivationError:
+        raise
+    except (ProviderResponseError, SecEvidencePayloadError) as exc:
+        raise SecDerivationError(str(exc)) from exc
+
+
+def _derive_sec_current_submissions(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+) -> SecSubmissionsEvidence:
+    cik = _canonical_cik(expected_cik, label="expected CIK")
+    _validate_sec_source_identity(
+        source_asset,
+        expected_cik=cik,
+        expected_kind=SUBMISSIONS_KIND,
+    )
+    # This shared parser is the canonical strict owner of the source-ordered,
+    # duplicate-free and path-safe history filename list.
+    filenames = historical_submission_filenames(payload)
+    data = _load_json_object(payload, label="SEC submissions")
+    if _canonical_cik(data.get("cik"), label="SEC submissions CIK") != cik:
+        raise ProviderResponseError("SEC submissions payload CIK does not match its source asset")
+    filings = data.get("filings")
+    if not isinstance(filings, dict):
+        raise ProviderResponseError("SEC submissions filings was missing or malformed")
+    recent = filings.get("recent")
+    if not isinstance(recent, dict):
+        raise ProviderResponseError("SEC submissions filings.recent was missing or malformed")
+    records = _records_from_columns(recent, source_asset=source_asset)
+    raw_sic = data.get("sic")
+    sic = "" if raw_sic is None else str(raw_sic).strip()
+    return SecSubmissionsEvidence(
+        cik=cik,
+        filings=records,
+        historical_filenames=filenames,
+        sic=sic,
+        sic_description=_text(data.get("sicDescription")),
+    )
+
+
+def derive_sec_historical_submissions(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+    filename: str,
+    allowed_filenames: tuple[str, ...],
+) -> tuple[FilingRecord, ...]:
+    """Derive one context-authorized historical filing table without I/O."""
+    try:
+        return _derive_sec_historical_submissions(
+            payload,
+            source_asset=source_asset,
+            expected_cik=expected_cik,
+            filename=filename,
+            allowed_filenames=allowed_filenames,
+        )
+    except SecDerivationError:
+        raise
+    except (ProviderResponseError, SecEvidencePayloadError) as exc:
+        raise SecDerivationError(str(exc)) from exc
+
+
+def _derive_sec_historical_submissions(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+    filename: str,
+    allowed_filenames: tuple[str, ...],
+) -> tuple[FilingRecord, ...]:
+    cik = _canonical_cik(expected_cik, label="expected CIK")
+    normalized_filename = filename.strip() if isinstance(filename, str) else ""
+    expected_prefix = f"CIK{cik}-submissions-"
+    history_suffix = (
+        normalized_filename[len(expected_prefix) : -len(".json")]
+        if normalized_filename.startswith(expected_prefix) and normalized_filename.endswith(".json")
+        else ""
+    )
+    allowed = tuple(allowed_filenames)
+    allowed_are_strings = all(isinstance(item, str) for item in allowed)
+    if (
+        not normalized_filename
+        or normalized_filename != filename
+        or not is_safe_history_filename(normalized_filename)
+        or not normalized_filename.startswith(expected_prefix)
+        or not normalized_filename.endswith(".json")
+        or not history_suffix
+        or not allowed_are_strings
+        or len(set(allowed)) != len(allowed)
+        or any(
+            item != item.strip() or not is_safe_history_filename(item)
+            for item in allowed
+            if isinstance(item, str)
+        )
+        or allowed.count(normalized_filename) != 1
+    ):
+        raise ProviderResponseError(
+            "SEC historical submissions filename is not uniquely authorized by its context"
+        )
+    _validate_sec_source_identity(
+        source_asset,
+        expected_cik=cik,
+        expected_kind=SUBMISSIONS_HISTORY_KIND,
+        expected_filename=normalized_filename,
+    )
+    data = _load_json_object(payload, label="SEC historical submissions")
+    if (
+        "cik" in data
+        and _canonical_cik(
+            data.get("cik"),
+            label="SEC historical submissions CIK",
+        )
+        != cik
+    ):
+        raise ProviderResponseError(
+            "SEC historical submissions payload CIK does not match its source asset"
+        )
+    columns = data
+    # Preserve the ingestion recovery compatibility path for an archived
+    # response that carries the current-submissions envelope at a history
+    # identity. The selected table is still parsed by the same strict column
+    # owner below; a missing/non-object nested table is never treated as empty.
+    if not all(field in columns for field in _SUBMISSIONS_REQUIRED_COLUMNS):
+        filings = data.get("filings")
+        recent = filings.get("recent") if isinstance(filings, dict) else None
+        if not isinstance(recent, dict):
+            raise ProviderResponseError(
+                "SEC historical submissions columns were missing or malformed"
+            )
+        columns = recent
+    return _records_from_columns(columns, source_asset=source_asset)
+
+
 def _parse_current_submissions(
     payload: bytes,
     *,
     source_asset: DataAsset,
 ) -> tuple[FilingRecord, ...]:
-    data = _load_json_object(payload, label="SEC submissions")
-    filings = data.get("filings")
-    recent = filings.get("recent") if isinstance(filings, dict) else None
-    if not isinstance(recent, dict):
-        return ()
-    return _records_from_columns(recent, source_asset=source_asset)
+    """Compatibility wrapper for pre-shared internal callers."""
+    return derive_sec_current_submissions(
+        payload,
+        source_asset=source_asset,
+        expected_cik=source_asset.subject,
+    ).filings
 
 
 def _parse_submission_rows(
@@ -1385,10 +1700,46 @@ def _parse_submission_rows(
     *,
     source_asset: DataAsset,
 ) -> tuple[FilingRecord, ...]:
+    """Compatibility parser retained for callers without context authority."""
     return _records_from_columns(
         _load_json_object(payload, label="SEC historical submissions"),
         source_asset=source_asset,
     )
+
+
+def _canonical_cik(raw: object, *, label: str) -> str:
+    if isinstance(raw, bool):
+        raise ProviderResponseError(f"{label} is invalid")
+    if isinstance(raw, int):
+        text = str(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+    else:
+        raise ProviderResponseError(f"{label} is invalid")
+    if not text or len(text) > 10 or not text.isascii() or not text.isdigit():
+        raise ProviderResponseError(f"{label} is invalid")
+    return text.zfill(10)
+
+
+def _validate_sec_source_identity(
+    source_asset: DataAsset,
+    *,
+    expected_cik: str,
+    expected_kind: str,
+    expected_filename: str | None = None,
+) -> None:
+    metadata = source_asset.metadata if isinstance(source_asset.metadata, dict) else {}
+    if (
+        source_asset.pk is None
+        or source_asset.provider != PROVIDER
+        or source_asset.kind != expected_kind
+        or source_asset.subject != expected_cik
+        or (
+            expected_filename is not None
+            and metadata.get(HISTORY_FILENAME_METADATA_KEY) != expected_filename
+        )
+    ):
+        raise ProviderResponseError("SEC source asset identity is incompatible")
 
 
 def _records_from_columns(
@@ -1396,27 +1747,61 @@ def _records_from_columns(
     *,
     source_asset: DataAsset,
 ) -> tuple[FilingRecord, ...]:
-    accessions = columns.get("accessionNumber")
-    if not isinstance(accessions, list):
-        return ()
+    required: dict[str, list[object]] = {}
+    for field in _SUBMISSIONS_REQUIRED_COLUMNS:
+        values = columns.get(field)
+        if not isinstance(values, list):
+            raise ProviderResponseError(
+                f"SEC submissions column {field!r} was missing or malformed"
+            )
+        required[field] = values
+    accessions = required["accessionNumber"]
+    row_count = len(accessions)
+    if any(len(values) != row_count for values in required.values()):
+        raise ProviderResponseError("SEC submissions required column lengths do not match")
+    optional: dict[str, list[object]] = {}
+    for field in _SUBMISSIONS_OPTIONAL_COLUMNS:
+        if field not in columns:
+            continue
+        values = columns[field]
+        if not isinstance(values, list) or len(values) != row_count:
+            raise ProviderResponseError(
+                f"SEC submissions optional column {field!r} has an invalid length or type"
+            )
+        optional[field] = values
     records: list[FilingRecord] = []
     for index, raw_accession in enumerate(accessions):
-        if not isinstance(raw_accession, str) or not raw_accession.strip():
-            continue
+        accession = _required_cell_text(raw_accession, label="accessionNumber")
+        filing_date = _required_cell_date(
+            required["filingDate"][index],
+            label="filingDate",
+        )
+        filing_form = _required_cell_text(required["form"][index], label="form").upper()
+        report_date = _optional_cell_date(
+            required["reportDate"][index],
+            label="reportDate",
+        )
+        primary_document = _optional_cell_text(
+            required["primaryDocument"][index],
+            label="primaryDocument",
+        )
+        acceptance_at, acceptance_basis = _filing_acceptance(
+            optional.get("acceptanceDateTime", [None] * row_count)[index],
+            filing_date=filing_date,
+        )
         records.append(
             FilingRecord(
-                accession=raw_accession.strip(),
-                filing_date=_parse_date(_column_value(columns, "filingDate", index)),
-                acceptance_at=_parse_acceptance(
-                    _column_value(columns, "acceptanceDateTime", index)
-                ),
-                filing_form=_text(_column_value(columns, "form", index)).upper(),
-                report_date=_parse_date(_column_value(columns, "reportDate", index)),
-                primary_document=_text(_column_value(columns, "primaryDocument", index)),
+                accession=accession,
+                filing_date=filing_date,
+                acceptance_at=acceptance_at,
+                acceptance_basis=acceptance_basis,
+                filing_form=filing_form,
+                report_date=report_date,
+                primary_document=primary_document,
                 source_asset=source_asset,
             )
         )
-    return tuple(records)
+    return tuple(_filing_index(records).values())
 
 
 def _filing_index(records: list[FilingRecord]) -> dict[str, FilingRecord]:
@@ -1426,38 +1811,61 @@ def _filing_index(records: list[FilingRecord]) -> dict[str, FilingRecord]:
         if existing is None:
             index[record.accession] = record
             continue
-        same_metadata = (
-            existing.filing_date == record.filing_date
-            and existing.acceptance_at == record.acceptance_at
-            and existing.filing_form == record.filing_form
-            and existing.report_date == record.report_date
-            and existing.primary_document == record.primary_document
-        )
-        if same_metadata:
-            index[record.accession] = min(
-                (existing, record),
-                key=lambda item: (
-                    item.source_asset.retrieved_at,
-                    str(item.source_asset.pk),
-                ),
-            )
-            continue
-        preferred = record if record.acceptance_at is not None else existing
-        other = existing if preferred is record else record
-        if (
-            preferred.filing_date != other.filing_date
-            or preferred.filing_form != other.filing_form
-            or (
-                preferred.acceptance_at is not None
-                and other.acceptance_at is not None
-                and preferred.acceptance_at != other.acceptance_at
-            )
-        ):
-            raise ProviderResponseError(
-                f"SEC submissions conflict for accession {record.accession}"
-            )
-        index[record.accession] = preferred
+        index[record.accession] = _merge_filing_records(existing, record)
     return index
+
+
+def _merge_filing_records(existing: FilingRecord, incoming: FilingRecord) -> FilingRecord:
+    """Collapse one accession only when all independently supplied facts agree."""
+    if (
+        existing.filing_date != incoming.filing_date
+        or existing.filing_form != incoming.filing_form
+        or (
+            existing.report_date is not None
+            and incoming.report_date is not None
+            and existing.report_date != incoming.report_date
+        )
+        or (
+            existing.primary_document
+            and incoming.primary_document
+            and existing.primary_document != incoming.primary_document
+        )
+        or (
+            existing.acceptance_basis == "acceptance_datetime"
+            and incoming.acceptance_basis == "acceptance_datetime"
+            and existing.acceptance_at != incoming.acceptance_at
+        )
+    ):
+        raise ProviderResponseError(f"SEC submissions conflict for accession {incoming.accession}")
+    exact = [
+        item for item in (existing, incoming) if item.acceptance_basis == "acceptance_datetime"
+    ]
+    acceptance_owner = exact[0] if exact else existing
+    # Exact acceptance and fuller metadata win first; the current-submissions
+    # source then wins an otherwise exact current/history duplicate. The final
+    # immutable-source ordering makes the result independent of input order.
+    source_owner = min(
+        (existing, incoming),
+        key=lambda item: (
+            -int(item.acceptance_basis == "acceptance_datetime"),
+            -int(item.report_date is not None),
+            -int(bool(item.primary_document)),
+            0 if item.source_asset.kind == SUBMISSIONS_KIND else 1,
+            item.source_asset.retrieved_at,
+            item.source_asset.available_at,
+            str(item.source_asset.pk),
+        ),
+    )
+    return FilingRecord(
+        accession=existing.accession,
+        filing_date=existing.filing_date,
+        acceptance_at=acceptance_owner.acceptance_at,
+        acceptance_basis=acceptance_owner.acceptance_basis,
+        filing_form=existing.filing_form,
+        report_date=existing.report_date or incoming.report_date,
+        primary_document=existing.primary_document or incoming.primary_document,
+        source_asset=source_owner.source_asset,
+    )
 
 
 def _normalize_companyfacts(
@@ -1466,103 +1874,1136 @@ def _normalize_companyfacts(
     payload: bytes,
     source_asset: DataAsset,
     observed_at: datetime,
-    filing_index: dict[str, FilingRecord],
+    filing_records: tuple[FilingRecord, ...],
     config: SecFundamentalsConfig,
+    store: AssetStore,
 ) -> tuple[int, int]:
+    strict_inspection = _inspect_sec_companyfacts(
+        payload,
+        source_asset=source_asset,
+        expected_cik=company.cik,
+        filing_records=filing_records,
+        config=config,
+        tolerate_configured_observation_errors=False,
+    )
+    lineage_inspection = _inspect_sec_companyfacts(
+        payload,
+        source_asset=source_asset,
+        expected_cik=company.cik,
+        filing_records=filing_records,
+        config=config,
+        tolerate_configured_observation_errors=True,
+    )
+    derivations = strict_inspection.derivations
+    predecessors = _latest_facts_by_raw_lineage(
+        company=company,
+        current_derivations=derivations,
+        current_inspection=lineage_inspection,
+        current_source=source_asset,
+        current_payload=payload,
+        current_observed_at=observed_at,
+        filing_records=filing_records,
+        config=config,
+        store=store,
+    )
+    filing_assets = {
+        record.source_asset.pk: record.source_asset
+        for record in filing_records
+        if record.source_asset.pk is not None
+    }
+    if source_asset.pk is not None:
+        filing_assets[source_asset.pk] = source_asset
+    created = 0
+    reused = 0
+    with transaction.atomic():
+        for derivation, predecessor in zip(derivations, predecessors, strict=True):
+            filing_source_asset = filing_assets.get(derivation.filing_source_asset_id)
+            if filing_source_asset is None:
+                raise ProviderResponseError(
+                    "SEC fact derivation names an unavailable filing source asset"
+                )
+            _fact, was_created = _persist_fact_derivation(
+                company=company,
+                derivation=derivation,
+                source_asset=source_asset,
+                filing_source_asset=filing_source_asset,
+                observed_at=observed_at,
+                lineage_predecessor=predecessor,
+            )
+            created += int(was_created)
+            reused += int(not was_created)
+    return created, reused
+
+
+def _preflight_companyfacts_lineage(
+    *,
+    company: Company,
+    payload: FundamentalSourcePayload,
+    metadata: dict[str, object],
+    filing_records: tuple[FilingRecord, ...],
+    config: SecFundamentalsConfig,
+    store: AssetStore,
+) -> None:
+    """Reject ambiguous raw lineage before registering its asset or event."""
+    try:
+        digest = hashlib.sha256(payload.content).hexdigest()
+    except (TypeError, ValueError):
+        raise RefreshVerificationError(
+            "sec_evidence_digest_failed", "SEC evidence payload could not be checksummed"
+        ) from None
+    prospective = DataAsset(
+        id=uuid4(),
+        provider=PROVIDER,
+        kind=COMPANYFACTS_KIND,
+        subject=company.cik,
+        relative_path="preflight/companyfacts.json",
+        sha256=digest,
+        retrieved_at=payload.retrieved_at,
+        available_at=payload.retrieved_at,
+        metadata=metadata,
+    )
+    inspection = _inspect_sec_companyfacts(
+        payload.content,
+        source_asset=prospective,
+        expected_cik=company.cik,
+        filing_records=filing_records,
+        config=config,
+        tolerate_configured_observation_errors=True,
+    )
+    _inspect_sec_companyfacts(
+        payload.content,
+        source_asset=prospective,
+        expected_cik=company.cik,
+        filing_records=filing_records,
+        config=config,
+        tolerate_configured_observation_errors=False,
+    )
+    _latest_facts_by_raw_lineage(
+        company=company,
+        current_derivations=inspection.derivations,
+        current_inspection=inspection,
+        current_source=prospective,
+        current_payload=payload.content,
+        current_observed_at=payload.retrieved_at,
+        filing_records=filing_records,
+        config=config,
+        store=store,
+    )
+
+
+def _latest_facts_by_raw_lineage(
+    *,
+    company: Company,
+    current_derivations: tuple[SecFactDerivation, ...],
+    current_inspection: SecCompanyfactsInspection,
+    current_source: DataAsset,
+    current_payload: bytes,
+    current_observed_at: datetime,
+    filing_records: tuple[FilingRecord, ...],
+    config: SecFundamentalsConfig,
+    store: AssetStore,
+) -> tuple[_PersistedLineageHead | None, ...]:
+    """Resolve persisted predecessors from their immutable raw source slots.
+
+    Companyfacts has no provider-issued observation identifier below an
+    accession. Exact complete observations are therefore matched first across
+    immutable payloads, then changed observations are matched only when stable
+    components establish a unique correspondence.
+
+    A candidate that cannot be bound to exactly one occurrence is refused.
+    Treating it as unrelated would make the incoming value look original and
+    backdate it to filing acceptance.
+    """
+    pairs = {
+        (derivation.source_concept, derivation.accession) for derivation in current_derivations
+    }
+    if not pairs:
+        return ()
+    existing = [
+        fact
+        for fact in FundamentalFact.objects.filter(
+            company=company,
+            provider=PROVIDER,
+            source_concept__in={item[0] for item in pairs},
+            accession__in={item[1] for item in pairs},
+        ).select_related("source_asset")
+        if (fact.source_concept, fact.accession) in pairs
+    ]
+    assets = {
+        asset.pk: asset
+        for asset in DataAsset.objects.filter(
+            provider=PROVIDER,
+            kind=COMPANYFACTS_KIND,
+            subject=company.cik,
+            retrieved_at__lte=current_observed_at,
+        )
+    }
+    assets[current_source.pk] = current_source
+    events = list(
+        SourceObservationEvent.objects.filter(
+            provider=PROVIDER,
+            kind=COMPANYFACTS_KIND,
+            subject=company.cik,
+            observed_at__lte=current_observed_at,
+        )
+        .select_related("source_asset")
+        .order_by("observed_at", "recorded_at", "pk")
+    )
+    history: list[tuple[datetime, DataAsset, bytes | None]] = []
+    event_source_ids: set[UUID] = set()
+    for event in events:
+        _assert_event_matches_asset(event)
+        event_source_ids.add(event.source_asset_id)
+        history.append(
+            (
+                event.observed_at,
+                event.source_asset,
+                (
+                    current_payload
+                    if (
+                        event.source_asset_id == current_source.pk
+                        and event.observed_at == current_observed_at
+                    )
+                    else None
+                ),
+            )
+        )
+    for asset in assets.values():
+        if asset.pk not in event_source_ids:
+            history.append(
+                (
+                    asset.retrieved_at,
+                    asset,
+                    current_payload if asset.pk == current_source.pk else None,
+                )
+            )
+    if not any(
+        source.pk == current_source.pk and observed_at == current_observed_at
+        for observed_at, source, _payload in history
+    ):
+        history.append((current_observed_at, current_source, current_payload))
+    history.sort(key=lambda item: (item[0], item[1].retrieved_at, str(item[1].pk)))
+
+    inspections: list[SecCompanyfactsInspection] = []
+    current_history_index: int | None = None
+    for history_index, (observed_at, source, supplied_payload) in enumerate(history):
+        payload = (
+            supplied_payload
+            if supplied_payload is not None
+            else read_checksummed_bytes(store, source)
+        )
+        inspection = (
+            current_inspection
+            if source.pk == current_source.pk
+            and observed_at == current_observed_at
+            and payload == current_payload
+            else _inspect_sec_companyfacts(
+                payload,
+                source_asset=source,
+                expected_cik=company.cik,
+                filing_records=filing_records,
+                config=config,
+                tolerate_configured_observation_errors=True,
+            )
+        )
+        inspections.append(inspection)
+        if (
+            source.pk == current_source.pk
+            and observed_at == current_observed_at
+            and payload == current_payload
+        ):
+            current_history_index = history_index
+    if current_history_index is None:
+        raise ProviderResponseError("Current SEC observation has no lineage history position")
+    resolved_lineages = reconcile_sec_observation_lineages(tuple(inspections))
+
+    facts_by_lineage: dict[
+        RawObservationLineage,
+        list[_PersistedLineageHead],
+    ] = {}
+    for fact in existing:
+        matches: set[tuple[RawObservationLineage, str]] = set()
+        for (_observed_at, source, _payload), inspection, lineages in zip(
+            history,
+            inspections,
+            resolved_lineages,
+            strict=True,
+        ):
+            if source.pk != fact.source_asset_id:
+                continue
+            for observation, lineage in zip(
+                inspection.configured_observations,
+                lineages,
+                strict=True,
+            ):
+                if (
+                    observation.derivation is not None
+                    and lineage is not None
+                    and _derivation_content_matches_fact(observation.derivation, fact)
+                    and observation.raw_observation_signature is not None
+                ):
+                    matches.add((lineage, observation.raw_observation_signature))
+        if len(matches) != 1:
+            raise ProviderResponseError(
+                "Persisted SEC fact could not be bound to one raw-observation lineage"
+            )
+        lineage, signature = matches.pop()
+        facts_by_lineage.setdefault(lineage, []).append(
+            _PersistedLineageHead(
+                fact=fact,
+                raw_observation_signature=signature,
+            )
+        )
+
+    latest: dict[RawObservationLineage, _PersistedLineageHead] = {}
+    for lineage, entries in facts_by_lineage.items():
+        newest_revision = max(entry.fact.source_revision for entry in entries)
+        heads = [entry for entry in entries if entry.fact.source_revision == newest_revision]
+        if len(heads) != 1:
+            raise ProviderResponseError(
+                "Persisted SEC raw-observation lineage has an ambiguous latest revision"
+            )
+        latest[lineage] = heads[0]
+    current_lineages = resolved_lineages[current_history_index]
+    current_by_identity = {
+        (
+            observation.derivation.raw_observation_lineage,
+            observation.derivation.observation_hash,
+        ): lineage
+        for observation, lineage in zip(
+            current_inspection.configured_observations,
+            current_lineages,
+            strict=True,
+        )
+        if observation.derivation is not None and lineage is not None
+    }
+    previous_signatures: dict[RawObservationLineage, str] = {}
+    for inspection, lineages in zip(
+        inspections[:current_history_index],
+        resolved_lineages[:current_history_index],
+        strict=True,
+    ):
+        for observation, lineage in zip(
+            inspection.configured_observations,
+            lineages,
+            strict=True,
+        ):
+            if lineage is not None and observation.raw_observation_signature is not None:
+                previous_signatures[lineage] = observation.raw_observation_signature
+    result: list[_PersistedLineageHead | None] = []
+    for derivation in current_derivations:
+        lineage = current_by_identity.get(
+            (
+                derivation.raw_observation_lineage,
+                derivation.observation_hash,
+            )
+        )
+        if lineage is None:
+            raise ProviderResponseError("Current SEC derivation has no reconciled raw lineage")
+        head = latest.get(lineage)
+        if head is not None:
+            current_boundary = max(
+                derivation.acceptance_at,
+                current_observed_at,
+            )
+            replays_persisted_current_observation = bool(
+                head.fact.source_asset_id == current_source.pk
+                and head.fact.available_at == current_boundary
+                and head.fact.observation_hash == derivation.observation_hash
+            )
+            head = _PersistedLineageHead(
+                fact=head.fact,
+                raw_observation_signature=(
+                    head.raw_observation_signature
+                    if replays_persisted_current_observation
+                    else previous_signatures.get(
+                        lineage,
+                        head.raw_observation_signature,
+                    )
+                ),
+            )
+        result.append(head)
+    return tuple(result)
+
+
+def _derivation_content_matches_fact(
+    derivation: SecFactDerivation,
+    fact: FundamentalFact,
+) -> bool:
+    """Compare complete normalized observation content, not vintage clocks.
+
+    Filing acceptance can be enriched by a later submissions snapshot while
+    the Companyfacts observation itself remains unchanged. Those availability
+    fields are deliberately excluded; every field sourced from the raw
+    observation, including period and unit, is compared.
+    """
+    return bool(
+        derivation.concept == fact.concept
+        and derivation.taxonomy == fact.taxonomy
+        and derivation.source_concept == fact.source_concept
+        and derivation.value == fact.value
+        and derivation.unit == fact.unit
+        and derivation.currency == fact.currency
+        and derivation.period_type == fact.period_type
+        and derivation.period_identity == fact.period_identity
+        and derivation.period_start == fact.period_start
+        and derivation.period_end == fact.period_end
+        and derivation.fiscal_year == fact.fiscal_year
+        and derivation.fiscal_period == fact.fiscal_period
+        and derivation.frame == fact.frame
+        and derivation.accession == fact.accession
+        and derivation.filing_form == fact.filing_form
+        and derivation.filing_date == fact.filing_date
+        and derivation.is_amendment is fact.is_amendment
+    )
+
+
+def derive_sec_companyfacts(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+    filing_records: tuple[FilingRecord, ...],
+    config: SecFundamentalsConfig,
+) -> tuple[SecFactDerivation, ...]:
+    """Derive canonical SEC fact candidates from supplied evidence only.
+
+    Revision numbering, correction timing, evidence-link writes, and every
+    ORM operation remain the ingestion writer's responsibility.  This pure
+    derivation is consequently reusable by a fail-closed reader that must
+    prove a persisted row from the exact raw bytes.
+    """
+    try:
+        return _inspect_sec_companyfacts(
+            payload,
+            source_asset=source_asset,
+            expected_cik=expected_cik,
+            filing_records=filing_records,
+            config=config,
+            tolerate_configured_observation_errors=False,
+        ).derivations
+    except SecDerivationError:
+        raise
+    except (ProviderResponseError, SecEvidencePayloadError) as exc:
+        raise SecDerivationError(str(exc)) from exc
+
+
+def inspect_sec_companyfacts(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+    filing_records: tuple[FilingRecord, ...],
+    config: SecFundamentalsConfig,
+) -> SecCompanyfactsInspection:
+    """Inspect configured aliases without turning normalization failure into absence.
+
+    The ingestion writer intentionally remains strict through
+    :func:`derive_sec_companyfacts`.  This companion API uses the same JSON
+    parser, source-identity checks, filing reconciliation, and fact derivation
+    owner, but records a configured observation that cannot be normalized.
+    That lets a fail-closed research reader distinguish an absent source alias
+    from present-but-unusable source evidence without implementing a second
+    Companyfacts parser.
+    """
+    try:
+        return _inspect_sec_companyfacts(
+            payload,
+            source_asset=source_asset,
+            expected_cik=expected_cik,
+            filing_records=filing_records,
+            config=config,
+            tolerate_configured_observation_errors=True,
+        )
+    except SecDerivationError:
+        raise
+    except (ProviderResponseError, SecEvidencePayloadError) as exc:
+        raise SecDerivationError(str(exc)) from exc
+
+
+def _inspect_sec_companyfacts(
+    payload: bytes,
+    *,
+    source_asset: DataAsset,
+    expected_cik: str,
+    filing_records: tuple[FilingRecord, ...],
+    config: SecFundamentalsConfig,
+    tolerate_configured_observation_errors: bool,
+) -> SecCompanyfactsInspection:
+    cik = _canonical_cik(expected_cik, label="expected CIK")
+    _validate_sec_source_identity(
+        source_asset,
+        expected_cik=cik,
+        expected_kind=COMPANYFACTS_KIND,
+    )
     data = _load_json_object(payload, label="SEC companyfacts")
+    if _canonical_cik(data.get("cik"), label="SEC companyfacts CIK") != cik:
+        raise ProviderResponseError("SEC companyfacts payload CIK does not match its source asset")
     taxonomies = data.get("facts")
     if not isinstance(taxonomies, dict):
         raise ProviderResponseError("SEC companyfacts payload has no facts mapping")
+    for record in filing_records:
+        if record.source_asset.kind not in {SUBMISSIONS_KIND, SUBMISSIONS_HISTORY_KIND}:
+            raise ProviderResponseError("SEC filing record has an incompatible source kind")
+        _validate_sec_source_identity(
+            record.source_asset,
+            expected_cik=cik,
+            expected_kind=record.source_asset.kind,
+        )
+    if tolerate_configured_observation_errors:
+        filing_index, ambiguous_accessions = _inspection_filing_index(filing_records)
+    else:
+        filing_index = _filing_index(list(filing_records))
+        ambiguous_accessions = frozenset()
     source_rules = config.source_concept_rules
-    created = 0
-    reused = 0
+    derivations: list[SecFactDerivation] = []
+    configured_observations: list[SecConfiguredObservation] = []
+    lineage_counts: dict[tuple[str, str, str, str], int] = {}
     for taxonomy, concepts in taxonomies.items():
-        if taxonomy not in config.allowed_taxonomies or not isinstance(concepts, dict):
+        if taxonomy not in config.allowed_taxonomies:
             continue
+        if not isinstance(concepts, dict):
+            raise ProviderResponseError("Configured SEC taxonomy payload was malformed")
         for source_name, concept_payload in concepts.items():
             rule = source_rules.get((taxonomy, source_name))
-            if rule is None or not isinstance(concept_payload, dict):
+            if rule is None:
                 continue
+            if not isinstance(concept_payload, dict):
+                if tolerate_configured_observation_errors:
+                    configured_observations.append(
+                        _rejected_configured_observation(
+                            taxonomy=taxonomy,
+                            source_name=source_name,
+                            unit=None,
+                            unit_supported=None,
+                            observation=None,
+                            filing_index=filing_index,
+                            ambiguous_accessions=ambiguous_accessions,
+                            rule=rule,
+                            rejection_code="configured_concept_payload_malformed",
+                        )
+                    )
+                    continue
+                raise ProviderResponseError("Configured SEC concept payload was malformed")
             units = concept_payload.get("units")
             if not isinstance(units, dict):
-                continue
-            for unit, observations in units.items():
-                if unit not in rule.units or not isinstance(observations, list):
+                if tolerate_configured_observation_errors:
+                    configured_observations.append(
+                        _rejected_configured_observation(
+                            taxonomy=taxonomy,
+                            source_name=source_name,
+                            unit=None,
+                            unit_supported=None,
+                            observation=None,
+                            filing_index=filing_index,
+                            ambiguous_accessions=ambiguous_accessions,
+                            rule=rule,
+                            rejection_code="configured_units_payload_malformed",
+                        )
+                    )
                     continue
+                raise ProviderResponseError("Configured SEC concept units were malformed")
+            for unit, observations in units.items():
+                unit_supported = unit in rule.units
+                if not isinstance(observations, list):
+                    if tolerate_configured_observation_errors:
+                        configured_observations.append(
+                            _rejected_configured_observation(
+                                taxonomy=taxonomy,
+                                source_name=source_name,
+                                unit=unit,
+                                unit_supported=unit_supported,
+                                observation=None,
+                                filing_index=filing_index,
+                                ambiguous_accessions=ambiguous_accessions,
+                                rule=rule,
+                                rejection_code="configured_observation_list_malformed",
+                            )
+                        )
+                        continue
+                    raise ProviderResponseError("Configured SEC observation list was malformed")
                 for observation in observations:
                     if not isinstance(observation, dict):
-                        continue
-                    normalized = _normalized_fact(
-                        company=company,
+                        if tolerate_configured_observation_errors:
+                            configured_observations.append(
+                                _rejected_configured_observation(
+                                    taxonomy=taxonomy,
+                                    source_name=source_name,
+                                    unit=unit,
+                                    unit_supported=unit_supported,
+                                    observation=None,
+                                    filing_index=filing_index,
+                                    ambiguous_accessions=ambiguous_accessions,
+                                    rule=rule,
+                                    rejection_code="configured_observation_malformed",
+                                )
+                            )
+                            continue
+                        raise ProviderResponseError("Configured SEC observation was malformed")
+                    accession = _best_effort_text(observation.get("accn"))
+                    raw_lineage, raw_signature, raw_match_keys = _raw_observation_provenance(
                         taxonomy=taxonomy,
                         source_name=source_name,
                         unit=unit,
                         observation=observation,
-                        source_asset=source_asset,
-                        observed_at=observed_at,
-                        filing_index=filing_index,
-                        config=config,
-                        rule=rule,
+                        lineage_counts=lineage_counts,
                     )
-                    if normalized is None:
+                    if not unit_supported and not tolerate_configured_observation_errors:
                         continue
-                    fact, was_created = normalized
-                    created += int(was_created)
-                    reused += int(not was_created)
-                    del fact
-    return created, reused
+                    if accession in ambiguous_accessions:
+                        if not tolerate_configured_observation_errors:
+                            raise ProviderResponseError(
+                                f"SEC submissions conflict for accession {accession}"
+                            )
+                        configured_observations.append(
+                            _rejected_configured_observation(
+                                taxonomy=taxonomy,
+                                source_name=source_name,
+                                unit=unit,
+                                unit_supported=unit_supported,
+                                observation=observation,
+                                filing_index=filing_index,
+                                ambiguous_accessions=ambiguous_accessions,
+                                rule=rule,
+                                rejection_code="filing_availability_ambiguous",
+                                raw_observation_lineage=raw_lineage,
+                                raw_observation_signature=raw_signature,
+                                raw_observation_match_keys=raw_match_keys,
+                            )
+                        )
+                        continue
+                    if not unit_supported:
+                        configured_observations.append(
+                            _rejected_configured_observation(
+                                taxonomy=taxonomy,
+                                source_name=source_name,
+                                unit=unit,
+                                unit_supported=False,
+                                observation=observation,
+                                filing_index=filing_index,
+                                ambiguous_accessions=ambiguous_accessions,
+                                rule=rule,
+                                rejection_code="unsupported_unit",
+                                raw_observation_lineage=raw_lineage,
+                                raw_observation_signature=raw_signature,
+                                raw_observation_match_keys=raw_match_keys,
+                            )
+                        )
+                        continue
+                    try:
+                        derivation = _derive_sec_fact(
+                            taxonomy=taxonomy,
+                            source_name=source_name,
+                            unit=unit,
+                            observation=observation,
+                            source_asset=source_asset,
+                            filing_index=filing_index,
+                            config=config,
+                            rule=rule,
+                            raw_observation_lineage=raw_lineage,
+                            raw_observation_signature=raw_signature,
+                            raw_observation_match_keys=raw_match_keys,
+                        )
+                    except ProviderResponseError:
+                        if not tolerate_configured_observation_errors:
+                            raise
+                        configured_observations.append(
+                            _rejected_configured_observation(
+                                taxonomy=taxonomy,
+                                source_name=source_name,
+                                unit=unit,
+                                unit_supported=True,
+                                observation=observation,
+                                filing_index=filing_index,
+                                ambiguous_accessions=ambiguous_accessions,
+                                rule=rule,
+                                rejection_code="configured_fields_malformed",
+                                raw_observation_lineage=raw_lineage,
+                                raw_observation_signature=raw_signature,
+                                raw_observation_match_keys=raw_match_keys,
+                            )
+                        )
+                        continue
+                    if derivation is not None:
+                        derivations.append(derivation)
+                        configured_observations.append(
+                            _configured_observation_from_derivation(
+                                derivation,
+                                observation=observation,
+                            )
+                        )
+                    elif tolerate_configured_observation_errors:
+                        reconciled_filing = (
+                            filing_index.get(accession) if accession is not None else None
+                        )
+                        configured_observations.append(
+                            _rejected_configured_observation(
+                                taxonomy=taxonomy,
+                                source_name=source_name,
+                                unit=unit,
+                                unit_supported=True,
+                                observation=observation,
+                                filing_index=filing_index,
+                                ambiguous_accessions=ambiguous_accessions,
+                                rule=rule,
+                                rejection_code="filing_form_not_allowed",
+                                status=(
+                                    "excluded" if reconciled_filing is not None else "rejected"
+                                ),
+                                raw_observation_lineage=raw_lineage,
+                                raw_observation_signature=raw_signature,
+                                raw_observation_match_keys=raw_match_keys,
+                            )
+                        )
+    return SecCompanyfactsInspection(
+        derivations=tuple(derivations),
+        configured_observations=tuple(configured_observations),
+    )
 
 
-def _normalized_fact(
+def _raw_observation_provenance(
     *,
-    company: Company,
     taxonomy: str,
     source_name: str,
     unit: str,
     observation: dict[str, object],
-    source_asset: DataAsset,
-    observed_at: datetime,
-    filing_index: dict[str, FilingRecord],
-    config: SecFundamentalsConfig,
-    rule: SecConceptRule,
-) -> tuple[FundamentalFact, bool] | None:
-    accession = _text(observation.get("accn"))
-    period_end = _parse_date(observation.get("end"))
-    if not accession or period_end is None:
-        return None
-    period_start = _parse_date(observation.get("start"))
-    period_type = _period_type(rule=rule, period_start=period_start)
-    if period_type is None:
-        return None
-    filing = filing_index.get(accession)
-    filing_form = _text(observation.get("form")).upper()
-    if filing is not None and not filing_form:
-        filing_form = filing.filing_form
-    if filing_form not in config.allowed_forms:
-        return None
-    filing_date = (
-        filing.filing_date
-        if filing is not None and filing.filing_date is not None
-        else _parse_date(observation.get("filed"))
+    lineage_counts: dict[tuple[str, str, str, str], int],
+) -> tuple[RawObservationLineage | None, str, tuple[str, ...]]:
+    """Name one raw source occurrence and hash all of its supplied content."""
+    source_concept = f"{taxonomy}:{source_name}"
+    accession = _best_effort_text(observation.get("accn"))
+    lineage: RawObservationLineage | None = None
+    canonical_payload: dict[str, object] = {
+        "taxonomy": taxonomy,
+        "source_concept": source_concept,
+        "unit": unit,
+        "observation": observation,
+    }
+    canonical = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
+    signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if accession is not None:
+        owner = (taxonomy, source_concept, accession)
+        signature_owner = (*owner, signature)
+        occurrence = lineage_counts.get(signature_owner, 0)
+        lineage_counts[signature_owner] = occurrence + 1
+        lineage = (*owner, f"{signature}:{occurrence}")
+    match_keys = tuple(
+        _raw_observation_component_hash(
+            canonical_payload,
+            excluded_observation_fields=excluded_fields,
+            exclude_unit=exclude_unit,
+        )
+        for excluded_fields, exclude_unit in (
+            (frozenset(("val",)), False),
+            (frozenset(), True),
+            (frozenset(("start", "end", "frame")), True),
+        )
     )
+    return lineage, signature, match_keys
+
+
+def _raw_observation_component_hash(
+    payload: dict[str, object],
+    *,
+    excluded_observation_fields: frozenset[str],
+    exclude_unit: bool,
+) -> str:
+    observation = payload["observation"]
+    assert isinstance(observation, dict)
+    reduced = {
+        "taxonomy": payload["taxonomy"],
+        "source_concept": payload["source_concept"],
+        "observation": {
+            key: value
+            for key, value in observation.items()
+            if key not in excluded_observation_fields
+        },
+    }
+    if not exclude_unit:
+        reduced["unit"] = payload["unit"]
+    canonical = json.dumps(reduced, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedRawObservation:
+    lineage: RawObservationLineage
+    signature: str
+    match_keys: tuple[str, ...]
+
+
+def reconcile_sec_observation_lineages(
+    inspections: tuple[SecCompanyfactsInspection, ...],
+) -> tuple[tuple[RawObservationLineage | None, ...], ...]:
+    """Reconcile stable raw occurrences across ordered immutable snapshots.
+
+    Exact signatures are matched first, including multiplicity. Remaining
+    observations are paired only by mutually unique stable-component matches,
+    or by a sole old/new remainder after all stronger matches have been
+    removed. A many-to-many remainder with plausible matches is ambiguous and
+    fails instead of using provider array position as evidence.
+    """
+    active: dict[
+        tuple[str, str, str],
+        list[_ResolvedRawObservation],
+    ] = {}
+    used: set[RawObservationLineage] = set()
+    resolved_vintages: list[tuple[RawObservationLineage | None, ...]] = []
+
+    for inspection in inspections:
+        resolved: list[RawObservationLineage | None] = [
+            None for _observation in inspection.configured_observations
+        ]
+        grouped: dict[tuple[str, str, str], list[int]] = {}
+        for index, observation in enumerate(inspection.configured_observations):
+            provisional = observation.raw_observation_lineage
+            if provisional is None:
+                continue
+            grouped.setdefault(provisional[:3], []).append(index)
+
+        next_active: dict[tuple[str, str, str], list[_ResolvedRawObservation]] = {}
+        for group, indexes in grouped.items():
+            previous = list(active.get(group, ()))
+            unmatched_previous = set(range(len(previous)))
+            unmatched_current = set(indexes)
+
+            previous_by_signature: dict[str, list[int]] = {}
+            for previous_index, item in enumerate(previous):
+                previous_by_signature.setdefault(item.signature, []).append(previous_index)
+            current_by_signature: dict[str, list[int]] = {}
+            for current_index in indexes:
+                signature = inspection.configured_observations[
+                    current_index
+                ].raw_observation_signature
+                if signature is not None:
+                    current_by_signature.setdefault(signature, []).append(current_index)
+            for signature in sorted(set(previous_by_signature) & set(current_by_signature)):
+                old_indexes = sorted(
+                    previous_by_signature[signature],
+                    key=lambda item: previous[item].lineage,
+                )
+                new_indexes = sorted(current_by_signature[signature])
+                for old_index, current_index in zip(old_indexes, new_indexes, strict=False):
+                    resolved[current_index] = previous[old_index].lineage
+                    unmatched_previous.discard(old_index)
+                    unmatched_current.discard(current_index)
+
+            while unmatched_previous and unmatched_current:
+                candidates_by_old = {
+                    old_index: {
+                        current_index
+                        for current_index in unmatched_current
+                        if _raw_observations_share_stable_components(
+                            previous[old_index],
+                            inspection.configured_observations[current_index],
+                        )
+                    }
+                    for old_index in unmatched_previous
+                }
+                candidates_by_current = {
+                    current_index: {
+                        old_index
+                        for old_index in unmatched_previous
+                        if current_index in candidates_by_old[old_index]
+                    }
+                    for current_index in unmatched_current
+                }
+                unique_pairs = sorted(
+                    (
+                        old_index,
+                        next(iter(candidates)),
+                    )
+                    for old_index, candidates in candidates_by_old.items()
+                    if len(candidates) == 1
+                    and len(candidates_by_current[next(iter(candidates))]) == 1
+                )
+                if not unique_pairs:
+                    break
+                for old_index, current_index in unique_pairs:
+                    resolved[current_index] = previous[old_index].lineage
+                    unmatched_previous.discard(old_index)
+                    unmatched_current.discard(current_index)
+
+            if len(unmatched_previous) == 1 and len(unmatched_current) == 1:
+                old_index = next(iter(unmatched_previous))
+                current_index = next(iter(unmatched_current))
+                resolved[current_index] = previous[old_index].lineage
+                unmatched_previous.clear()
+                unmatched_current.clear()
+            elif unmatched_previous and unmatched_current:
+                raise SecDerivationError(
+                    "SEC same-accession raw observations have ambiguous lineage"
+                )
+
+            for current_index in sorted(unmatched_current):
+                observation = inspection.configured_observations[current_index]
+                provisional = observation.raw_observation_lineage
+                signature = observation.raw_observation_signature
+                if provisional is None or signature is None:
+                    continue
+                candidate = provisional
+                suffix = 1
+                while candidate in used:
+                    candidate = (*group, f"{signature}:{suffix}")
+                    suffix += 1
+                resolved[current_index] = candidate
+
+            group_state: list[_ResolvedRawObservation] = []
+            for current_index in indexes:
+                observation = inspection.configured_observations[current_index]
+                lineage = resolved[current_index]
+                signature = observation.raw_observation_signature
+                if lineage is None or signature is None:
+                    raise SecDerivationError(
+                        "SEC configured observation has no reconcilable raw lineage"
+                    )
+                used.add(lineage)
+                group_state.append(
+                    _ResolvedRawObservation(
+                        lineage=lineage,
+                        signature=signature,
+                        match_keys=observation.raw_observation_match_keys,
+                    )
+                )
+            next_active[group] = group_state
+        active.update(next_active)
+        resolved_vintages.append(tuple(resolved))
+    return tuple(resolved_vintages)
+
+
+def _raw_observations_share_stable_components(
+    previous: _ResolvedRawObservation,
+    current: SecConfiguredObservation,
+) -> bool:
+    return bool(
+        previous.match_keys
+        and current.raw_observation_match_keys
+        and set(previous.match_keys).intersection(current.raw_observation_match_keys)
+    )
+
+
+def _inspection_filing_index(
+    records: tuple[FilingRecord, ...],
+) -> tuple[dict[str, FilingRecord], frozenset[str]]:
+    """Build a deterministic index while retaining conflicting accessions."""
+    index: dict[str, FilingRecord] = {}
+    ambiguous: set[str] = set()
+    for record in records:
+        if record.accession in ambiguous:
+            continue
+        existing = index.get(record.accession)
+        if existing is None:
+            index[record.accession] = record
+            continue
+        try:
+            index[record.accession] = _merge_filing_records(existing, record)
+        except ProviderResponseError:
+            index.pop(record.accession, None)
+            ambiguous.add(record.accession)
+    return index, frozenset(ambiguous)
+
+
+def _configured_observation_from_derivation(
+    derivation: SecFactDerivation,
+    *,
+    observation: dict[str, object],
+) -> SecConfiguredObservation:
+    return SecConfiguredObservation(
+        concept=derivation.concept,
+        taxonomy=derivation.taxonomy,
+        source_concept=derivation.source_concept,
+        unit=derivation.unit,
+        unit_supported=True,
+        status="derived",
+        rejection_code=None,
+        period_type=derivation.period_type,
+        period_start=derivation.period_start,
+        period_end=derivation.period_end,
+        accession=derivation.accession,
+        raw_filing_form=_raw_companyfacts_form(observation),
+        filing_form=derivation.filing_form,
+        filing_date=derivation.filing_date,
+        acceptance_at=derivation.acceptance_at,
+        filing_availability_basis=derivation.filing_availability_basis,
+        filing_source_asset_id=derivation.filing_source_asset_id,
+        derivation=derivation,
+        raw_observation_lineage=derivation.raw_observation_lineage,
+        raw_observation_signature=derivation.raw_observation_signature,
+        raw_observation_match_keys=derivation.raw_observation_match_keys,
+    )
+
+
+def _rejected_configured_observation(
+    *,
+    taxonomy: str,
+    source_name: str,
+    unit: str | None,
+    unit_supported: bool | None,
+    observation: dict[str, object] | None,
+    filing_index: dict[str, FilingRecord],
+    ambiguous_accessions: frozenset[str],
+    rule: SecConceptRule,
+    rejection_code: str,
+    status: str = "rejected",
+    raw_observation_lineage: RawObservationLineage | None = None,
+    raw_observation_signature: str | None = None,
+    raw_observation_match_keys: tuple[str, ...] = (),
+) -> SecConfiguredObservation:
+    accession = _best_effort_text(observation.get("accn")) if observation is not None else None
+    filing = (
+        filing_index.get(accession)
+        if accession is not None and accession not in ambiguous_accessions
+        else None
+    )
+    period_start = _best_effort_date(observation.get("start")) if observation is not None else None
+    period_end = _best_effort_date(observation.get("end")) if observation is not None else None
+    raw_filing_form = _raw_companyfacts_form(observation)
+    normalized_raw_form = _best_effort_text(raw_filing_form)
+    filing_form = (
+        filing.filing_form
+        if filing is not None
+        else (normalized_raw_form.upper() if normalized_raw_form is not None else None)
+    )
+    raw_filing_date = (
+        _best_effort_date(observation.get("filed")) if observation is not None else None
+    )
+    filing_date = filing.filing_date if filing is not None else raw_filing_date
     acceptance_at = filing.acceptance_at if filing is not None else None
-    filing_source_asset = filing.source_asset if filing is not None else source_asset
-    availability_basis = "acceptance_datetime"
-    if acceptance_at is None:
-        if filing_date is None:
-            return None
+    availability_basis = filing.acceptance_basis if filing is not None else None
+    filing_source_asset_id = filing.source_asset.pk if filing is not None else None
+    if acceptance_at is None and filing_date is not None and accession not in ambiguous_accessions:
         acceptance_at = datetime.combine(
             filing_date + timedelta(days=1),
             time.min,
             tzinfo=_NEW_YORK,
         )
         availability_basis = "filed_date_next_day"
+    return SecConfiguredObservation(
+        concept=rule.canonical_concept,
+        taxonomy=taxonomy,
+        source_concept=f"{taxonomy}:{source_name}",
+        unit=unit,
+        unit_supported=unit_supported,
+        status=status,
+        rejection_code=rejection_code,
+        period_type=rule.period_type,
+        period_start=period_start,
+        period_end=period_end,
+        accession=accession,
+        raw_filing_form=raw_filing_form,
+        filing_form=filing_form,
+        filing_date=filing_date,
+        acceptance_at=acceptance_at,
+        filing_availability_basis=availability_basis,
+        filing_source_asset_id=filing_source_asset_id,
+        derivation=None,
+        raw_observation_lineage=raw_observation_lineage,
+        raw_observation_signature=raw_observation_signature,
+        raw_observation_match_keys=raw_observation_match_keys,
+    )
+
+
+def _raw_companyfacts_form(observation: dict[str, object] | None) -> str | None:
+    """Return the provider cell unchanged for configured-observation evidence."""
+    if observation is None:
+        return None
+    raw_form = observation.get("form")
+    return raw_form if isinstance(raw_form, str) else None
+
+
+def _best_effort_text(raw: object) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def _best_effort_date(raw: object) -> date | None:
+    text_value = _best_effort_text(raw)
+    if text_value is None:
+        return None
+    try:
+        return date.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+
+def _derive_sec_fact(
+    *,
+    taxonomy: str,
+    source_name: str,
+    unit: str,
+    observation: dict[str, object],
+    source_asset: DataAsset,
+    filing_index: dict[str, FilingRecord],
+    config: SecFundamentalsConfig,
+    rule: SecConceptRule,
+    raw_observation_lineage: RawObservationLineage | None,
+    raw_observation_signature: str,
+    raw_observation_match_keys: tuple[str, ...],
+) -> SecFactDerivation | None:
+    accession = _required_cell_text(observation.get("accn"), label="Companyfacts accn")
+    if raw_observation_lineage is None:
+        raise ProviderResponseError("Configured SEC observation has no stable source lineage")
+    period_end = _required_cell_date(observation.get("end"), label="Companyfacts end")
+    filing = filing_index.get(accession)
+    filing_form = _optional_cell_text(observation.get("form"), label="Companyfacts form").upper()
+    if filing is not None:
+        if filing_form and filing_form != filing.filing_form:
+            raise ProviderResponseError(
+                f"SEC Companyfacts form conflicts with submissions for accession {accession}"
+            )
+        filing_form = filing_form or filing.filing_form
+    elif not filing_form:
+        raise ProviderResponseError("SEC Companyfacts form was missing without submissions")
+    companyfacts_filed = _optional_cell_date(
+        observation.get("filed"),
+        label="Companyfacts filed",
+    )
+    if filing is not None and (
+        companyfacts_filed is not None and companyfacts_filed != filing.filing_date
+    ):
+        raise ProviderResponseError(
+            f"SEC Companyfacts filed date conflicts with submissions for accession {accession}"
+        )
+    filing_date = filing.filing_date if filing is not None else companyfacts_filed
+    if filing_date is None:
+        raise ProviderResponseError("SEC Companyfacts filed date was missing without submissions")
+    if filing is not None and filing.report_date is not None and period_end > filing.report_date:
+        raise ProviderResponseError(
+            f"SEC Companyfacts end is after submissions reportDate for accession {accession}"
+        )
+    if filing_form not in config.allowed_forms:
+        return None
+    period_start = _optional_cell_date(
+        observation.get("start"),
+        label="Companyfacts start",
+    )
+    period_type = _period_type(rule=rule, period_start=period_start)
+    if period_type is None or (
+        rule.period_type == FundamentalFact.PeriodType.DURATION and period_start is None
+    ):
+        raise ProviderResponseError("Configured SEC observation period was malformed")
+    acceptance_at = filing.acceptance_at if filing is not None else None
+    filing_source_asset = filing.source_asset if filing is not None else source_asset
+    availability_basis = filing.acceptance_basis if filing is not None else "filed_date_next_day"
+    if acceptance_at is None:
+        acceptance_at = datetime.combine(
+            filing_date + timedelta(days=1),
+            time.min,
+            tzinfo=_NEW_YORK,
+        )
     value = _parse_decimal(observation.get("val"))
     if value is None:
-        return None
-    fiscal_year = _parse_int(observation.get("fy"))
-    fiscal_period = _text(observation.get("fp")).upper()
-    frame = _text(observation.get("frame")).upper()
+        raise ProviderResponseError("Configured SEC observation value was malformed")
+    fiscal_year = _optional_cell_int(observation.get("fy"), label="Companyfacts fy")
+    fiscal_period = _optional_cell_text(
+        observation.get("fp"),
+        label="Companyfacts fp",
+    ).upper()
+    frame = _optional_cell_text(
+        observation.get("frame"),
+        label="Companyfacts frame",
+    ).upper()
     period_identity = build_period_identity(
         period_type=period_type,
         period_start=period_start,
@@ -1587,29 +3028,6 @@ def _normalized_fact(
         acceptance_at=acceptance_at,
         frame=frame,
     )
-    identity = FundamentalFact.objects.filter(
-        company=company,
-        provider=PROVIDER,
-        source_concept=source_concept,
-        period_identity=period_identity,
-        accession=accession,
-        unit=unit,
-    )
-    latest = identity.order_by("-source_revision").first()
-    rebinds_unproven_correction = False
-    if (
-        latest is not None
-        and latest.observation_hash == observation_hash
-        and latest.concept == rule.canonical_concept
-    ):
-        rebinds_unproven_correction = _needs_observation_rebinding(identity=identity, latest=latest)
-        if not rebinds_unproven_correction:
-            FundamentalFactEvidence.objects.get_or_create(
-                fact=latest,
-                role=FundamentalFactEvidence.Role.FILING,
-                defaults={"source_asset": filing_source_asset},
-            )
-            return latest, False
     quality_flags: list[str] = []
     if source_asset.retrieved_at > acceptance_at + timedelta(minutes=1):
         quality_flags.append("research_reconstruction")
@@ -1621,6 +3039,80 @@ def _normalized_fact(
         quality_flags.append("unclassified_period")
     if rule.explanation_only:
         quality_flags.append("explanation_only")
+    if filing_source_asset.pk is None:
+        raise ProviderResponseError("SEC filing source asset has no persistent identity")
+    return SecFactDerivation(
+        concept=rule.canonical_concept,
+        taxonomy=taxonomy,
+        source_concept=source_concept,
+        value=value,
+        unit=unit,
+        currency=currency,
+        period_type=period_type,
+        period_identity=period_identity,
+        period_start=period_start,
+        period_end=period_end,
+        fiscal_year=fiscal_year,
+        fiscal_period=fiscal_period,
+        frame=frame,
+        accession=accession,
+        filing_form=filing_form,
+        filing_date=filing_date,
+        acceptance_at=acceptance_at,
+        filing_availability_basis=availability_basis,
+        is_amendment=filing_form.endswith("/A"),
+        observation_hash=observation_hash,
+        base_quality_flags=tuple(quality_flags),
+        filing_source_asset_id=filing_source_asset.pk,
+        raw_observation_lineage=raw_observation_lineage,
+        raw_observation_signature=raw_observation_signature,
+        raw_observation_match_keys=raw_observation_match_keys,
+    )
+
+
+def _persist_fact_derivation(
+    *,
+    company: Company,
+    derivation: SecFactDerivation,
+    source_asset: DataAsset,
+    filing_source_asset: DataAsset,
+    observed_at: datetime,
+    lineage_predecessor: _PersistedLineageHead | None,
+) -> tuple[FundamentalFact, bool]:
+    identity = FundamentalFact.objects.filter(
+        company=company,
+        provider=PROVIDER,
+        source_concept=derivation.source_concept,
+        period_identity=derivation.period_identity,
+        accession=derivation.accession,
+        unit=derivation.unit,
+    )
+    latest = lineage_predecessor.fact if lineage_predecessor is not None else None
+    if latest is None and identity.exists():
+        raise ProviderResponseError(
+            "Distinct SEC raw-observation lineages collide on one normalized fact identity"
+        )
+    rebinds_unproven_correction = False
+    same_normalized_observation = bool(
+        latest is not None
+        and latest.observation_hash == derivation.observation_hash
+        and latest.concept == derivation.concept
+    )
+    if same_normalized_observation and latest is not None:
+        rebinds_unproven_correction = _needs_observation_rebinding(identity=identity, latest=latest)
+        if (
+            lineage_predecessor is not None
+            and lineage_predecessor.raw_observation_signature
+            == derivation.raw_observation_signature
+            and not rebinds_unproven_correction
+        ):
+            FundamentalFactEvidence.objects.get_or_create(
+                fact=latest,
+                role=FundamentalFactEvidence.Role.FILING,
+                defaults={"source_asset": filing_source_asset},
+            )
+            return latest, False
+    quality_flags = list(derivation.base_quality_flags)
     # A later revision under an accession that already has one is a
     # correction: the provider restated this observation without filing a
     # new accession. `acceptance_at`/`filed_at` keep the original, unmodified
@@ -1635,9 +3127,10 @@ def _normalized_fact(
     # is reused and its `retrieved_at` still points at the *first* time that
     # content was seen. `max` keeps the boundary monotonic and satisfies
     # `fact_available_after_acceptance`.
-    available_at = acceptance_at
+    available_at = derivation.acceptance_at
+    availability_basis = derivation.filing_availability_basis
     if latest is not None:
-        available_at = max(acceptance_at, observed_at)
+        available_at = max(derivation.acceptance_at, observed_at)
         availability_basis = CORRECTION_AVAILABILITY_BASIS
         quality_flags.append(CORRECTION_QUALITY_FLAG)
     if rebinds_unproven_correction:
@@ -1645,41 +3138,48 @@ def _normalized_fact(
         # boundary, not the number -- so the provenance says explicitly why a
         # new vintage exists despite identical content.
         quality_flags.append(REBOUND_QUALITY_FLAG)
-    with transaction.atomic():
-        fact = FundamentalFact.objects.create(
-            company=company,
-            provider=PROVIDER,
-            concept=rule.canonical_concept,
-            taxonomy=taxonomy,
-            source_concept=source_concept,
-            value=value,
-            unit=unit,
-            currency=currency,
-            period_type=period_type,
-            period_identity=period_identity,
-            period_start=period_start,
-            period_end=period_end,
-            fiscal_year=fiscal_year,
-            fiscal_period=fiscal_period,
-            frame=frame,
-            accession=accession,
-            filing_form=filing_form,
-            filing_date=filing_date,
-            filed_at=acceptance_at,
-            acceptance_at=acceptance_at,
-            available_at=available_at,
-            availability_basis=availability_basis,
-            is_amendment=filing_form.endswith("/A"),
-            source_revision=(latest.source_revision if latest is not None else 0) + 1,
-            observation_hash=observation_hash,
-            quality_flags=quality_flags,
-            source_asset=source_asset,
+    next_revision = (latest.source_revision if latest is not None else 0) + 1
+    revision_collision = identity.filter(source_revision=next_revision)
+    if latest is not None:
+        revision_collision = revision_collision.exclude(pk=latest.pk)
+    if revision_collision.exists():
+        raise ProviderResponseError(
+            "SEC correction revision collides with a distinct normalized observation"
         )
-        FundamentalFactEvidence.objects.create(
-            fact=fact,
-            role=FundamentalFactEvidence.Role.FILING,
-            source_asset=filing_source_asset,
-        )
+    fact = FundamentalFact.objects.create(
+        company=company,
+        provider=PROVIDER,
+        concept=derivation.concept,
+        taxonomy=derivation.taxonomy,
+        source_concept=derivation.source_concept,
+        value=derivation.value,
+        unit=derivation.unit,
+        currency=derivation.currency,
+        period_type=derivation.period_type,
+        period_identity=derivation.period_identity,
+        period_start=derivation.period_start,
+        period_end=derivation.period_end,
+        fiscal_year=derivation.fiscal_year,
+        fiscal_period=derivation.fiscal_period,
+        frame=derivation.frame,
+        accession=derivation.accession,
+        filing_form=derivation.filing_form,
+        filing_date=derivation.filing_date,
+        filed_at=derivation.acceptance_at,
+        acceptance_at=derivation.acceptance_at,
+        available_at=available_at,
+        availability_basis=availability_basis,
+        is_amendment=derivation.is_amendment,
+        source_revision=next_revision,
+        observation_hash=derivation.observation_hash,
+        quality_flags=quality_flags,
+        source_asset=source_asset,
+    )
+    FundamentalFactEvidence.objects.create(
+        fact=fact,
+        role=FundamentalFactEvidence.Role.FILING,
+        source_asset=filing_source_asset,
+    )
     return fact, True
 
 
@@ -1735,17 +3235,13 @@ def _period_type(*, rule: SecConceptRule, period_start: date | None) -> str | No
 def _persist_sic_classification(
     *,
     company: Company,
-    submissions_payload: FundamentalSourcePayload,
+    evidence: SecSubmissionsEvidence,
+    observed_at: datetime,
     source_asset: DataAsset,
 ) -> int:
-    data = _load_json_object(submissions_payload.content, label="SEC submissions")
-    raw_code = data.get("sic")
-    if raw_code is None:
-        return 0
-    code = str(raw_code).strip()
+    code = evidence.sic
     if not code:
         return 0
-    description = _text(data.get("sicDescription"))
     _classification, created = CompanyClassificationObservation.objects.get_or_create(
         company=company,
         provider=PROVIDER,
@@ -1753,53 +3249,108 @@ def _persist_sic_classification(
         code=code,
         source_asset=source_asset,
         defaults={
-            "description": description,
-            "observed_at": submissions_payload.retrieved_at,
-            "available_at": submissions_payload.retrieved_at,
+            "description": evidence.sic_description,
+            "observed_at": observed_at,
+            "available_at": observed_at,
             "quality_flags": ["current_snapshot_not_historical"],
         },
     )
     return int(created)
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProviderResponseError(f"SEC evidence contains duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def _load_json_object(payload: bytes, *, label: str) -> dict[str, object]:
     try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
+        parsed = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProviderResponseError(f"{label} JSON was malformed: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ProviderResponseError(f"{label} JSON was not an object")
     return parsed
 
 
-def _column_value(columns: dict[str, object], field: str, index: int) -> object:
-    values = columns.get(field)
-    if not isinstance(values, list) or index >= len(values):
-        return None
-    return values[index]
+def _required_cell_text(raw: object, *, label: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ProviderResponseError(f"SEC {label} cell was blank or invalid")
+    return raw.strip()
 
 
-def _parse_acceptance(raw: object) -> datetime | None:
-    text_value = _text(raw)
-    if not text_value:
-        return None
+def _optional_cell_text(raw: object, *, label: str) -> str:
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ProviderResponseError(f"SEC {label} cell was invalid")
+    return raw.strip()
+
+
+def _required_cell_date(raw: object, *, label: str) -> date:
+    text_value = _required_cell_text(raw, label=label)
     try:
-        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        return date.fromisoformat(text_value)
     except ValueError as exc:
-        raise ProviderResponseError(f"SEC acceptanceDateTime {text_value!r} was invalid") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_NEW_YORK)
-    return parsed
+        raise ProviderResponseError(f"SEC {label} date {text_value!r} was invalid") from exc
 
 
-def _parse_date(raw: object) -> date | None:
-    text_value = _text(raw)
+def _optional_cell_date(raw: object, *, label: str) -> date | None:
+    text_value = _optional_cell_text(raw, label=label)
     if not text_value:
         return None
     try:
         return date.fromisoformat(text_value)
     except ValueError as exc:
-        raise ProviderResponseError(f"SEC date {text_value!r} was invalid") from exc
+        raise ProviderResponseError(f"SEC {label} date {text_value!r} was invalid") from exc
+
+
+def _filing_acceptance(raw: object, *, filing_date: date) -> tuple[datetime, str]:
+    text_value = _optional_cell_text(raw, label="acceptanceDateTime")
+    fallback = datetime.combine(
+        filing_date + timedelta(days=1),
+        time.min,
+        tzinfo=_NEW_YORK,
+    )
+    if not text_value:
+        return fallback, "filed_date_next_day"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text_value):
+        try:
+            acceptance_date = date.fromisoformat(text_value)
+        except ValueError as exc:
+            raise ProviderResponseError(
+                f"SEC acceptanceDateTime {text_value!r} was invalid"
+            ) from exc
+        if acceptance_date != filing_date:
+            raise ProviderResponseError(
+                "SEC date-only acceptanceDateTime does not equal filingDate"
+            )
+        return fallback, "filed_date_next_day"
+    if (
+        re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+            r"(?:Z|[+-]\d{2}:\d{2})?",
+            text_value,
+        )
+        is None
+    ):
+        raise ProviderResponseError(f"SEC acceptanceDateTime {text_value!r} was invalid")
+    iso_value = f"{text_value[:-1]}+00:00" if text_value.endswith("Z") else text_value
+    try:
+        parsed = datetime.fromisoformat(iso_value)
+    except ValueError as exc:
+        raise ProviderResponseError(f"SEC acceptanceDateTime {text_value!r} was invalid") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_NEW_YORK)
+    if parsed.astimezone(_NEW_YORK).date() != filing_date:
+        raise ProviderResponseError(
+            "SEC exact acceptanceDateTime New York date does not equal filingDate"
+        )
+    return parsed, "acceptance_datetime"
 
 
 def _parse_decimal(raw: object) -> Decimal | None:
@@ -1814,17 +3365,17 @@ def _parse_decimal(raw: object) -> Decimal | None:
     return value
 
 
-def _parse_int(raw: object) -> int | None:
-    if isinstance(raw, bool) or raw is None:
+def _optional_cell_int(raw: object, *, label: str) -> int | None:
+    if raw is None or raw == "":
         return None
-    if not isinstance(raw, (int, float, str)):
-        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        raise ProviderResponseError(f"SEC {label} cell was invalid")
     if isinstance(raw, float) and not raw.is_integer():
-        return None
+        raise ProviderResponseError(f"SEC {label} cell was invalid")
     try:
         return int(raw)
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as exc:
+        raise ProviderResponseError(f"SEC {label} cell was invalid") from exc
 
 
 def _text(raw: object) -> str:

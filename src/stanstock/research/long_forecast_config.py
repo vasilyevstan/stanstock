@@ -9,6 +9,17 @@ from typing import Any, Self, cast
 
 import yaml
 
+from stanstock.data.management.config_loader import (
+    default_sec_cik_mapping_path,
+    default_sec_fundamentals_config_path,
+)
+from stanstock.data.sec_config import (
+    SecCikConfig,
+    SecFundamentalsConfig,
+    load_sec_cik_config,
+    load_sec_fundamentals_config,
+)
+
 LONG_FORECAST_HORIZONS = ("3y", "5y")
 LONG_METRIC_FAMILIES = ("fcf_per_share", "eps_per_share")
 LONG_SCENARIOS = ("bear", "base", "bull")
@@ -43,6 +54,28 @@ LONG_OPTIONAL_BINDING_FIELDS = (
 #: truncated, or defaulted, because a different ceiling would change which
 #: balance-sheet dates are refused.
 REVIEWED_MAX_SAME_DATE_SOURCE_COMBINATIONS = 256
+
+LONG_V4_VERSION = "us-sec-long-v4"
+LONG_V4_METHOD = "sec_entity_growth_dilution_multiple_reversion"
+LONG_V4_RESEARCH_STATUS = "research_only_unactivated"
+LONG_V4_SCORING_VERSION = "us-price-baseline-v2"
+LONG_V4_FUNDAMENTALS_VERSION = "us-sec-fundamentals-v1"
+LONG_V4_FUNDAMENTALS_CONFIG_FILE_SHA256 = (
+    "829ed267eec62304804c9ef71f1816636389c2b0ad77423d8a534a00a5e1ae30"
+)
+LONG_V4_FUNDAMENTALS_CONFIG_HASH = (
+    "7822a1faaae1c8028d71851337a7dbb7a65d9aeaa0f44478e3814a6468b62604"
+)
+LONG_V4_SEC_CIK_CONFIG_VERSION = "us-sec-cik-v1"
+LONG_V4_SEC_CIK_CONFIG_FILE_SHA256 = (
+    "3e65d924d77b3ea233806cdfb006ddb30a0b982fecafd9568cbf680e37ffeb07"
+)
+LONG_V4_SEC_CIK_CONFIG_HASH = "5443bb613e1b40545faa4f53794a869453c6f78317390389c3959e938ba99f65"
+LONG_V4_SEC_MAPPING_SOURCE_SHA256 = (
+    "ec43db74f82d1739cce6340f36b9695dcb51231fc38edd493215677627bb01cd"
+)
+LONG_V4_CONFIG_FILE_SHA256 = "840bda0d6b3122dd4c75b9b14ec32cf64a1b1dc49e921cf88a9256f413fe81d2"
+LONG_V4_EFFECTIVE_CONFIG_HASH = "acaf8a3a8cd6975ef894a5fbce50a6a3ca3dc6dce0886f03dbf9416e285268fa"
 
 
 class LongForecastConfigParseError(ValueError):
@@ -434,6 +467,420 @@ class LongForecastConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LongForecastV4EligibilityConfig:
+    maximum_metric_age_days: int
+    annual_periods: int
+    annual_duration_minimum_days: int
+    annual_duration_maximum_days: int
+    share_continuity_relative_tolerance: float
+    reported_eps_relative_tolerance: float
+    fcf_presence_blocks_net_income_fallback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4MetricFamilyConfig:
+    source_metric: str
+    multiple_minimum: float
+    multiple_maximum: float
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4GrowthConfig:
+    target_minimum: float
+    target_maximum: float
+    peer_minimum: float
+    peer_maximum: float
+    entity_minimum: float
+    entity_maximum: float
+    terminal_entity_growth: float
+    target_weight: float
+    peer_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4PeerConfig:
+    sic_prefix_levels: tuple[int, ...]
+    minimum_cohort: dict[int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4PathConfig:
+    fade: tuple[float, ...]
+    multiple_reversion: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4ScenarioConfig:
+    growth_delta: float
+    dilution_multiplier: float
+    peer_multiple_multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4ConfidenceConfig:
+    success_status: str
+    withheld_status: str
+    numeric_value: float
+    numeric_semantics: str
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4Config:
+    """Strict schema-2 configuration for the research-only long-v4 lane.
+
+    This is deliberately a separate type rather than an extension of
+    :class:`LongForecastConfig`.  The legacy schema-1 parser and its effective
+    hashes therefore cannot acquire placeholder tax, invested-capital, ROIC,
+    reinvestment, or horizon-specific fields from v4.
+    """
+
+    schema_version: int
+    version: str
+    method: str
+    method_version: str
+    research_status: str
+    enabled_scoring_versions: tuple[str, ...]
+    price_provider: str
+    fundamentals_provider: str
+    fundamentals_config_version: str
+    fundamentals_config_file_sha256: str
+    fundamentals_config_hash: str
+    sec_cik_config_version: str
+    sec_cik_config_file_sha256: str
+    sec_cik_config_hash: str
+    sec_mapping_source_sha256: str
+    return_basis: str
+    dividends_included: bool
+    base_currency: str
+    fx_conversion: bool
+    path_years: int
+    probability_positive_enabled: bool
+    eligibility: LongForecastV4EligibilityConfig
+    metric_families: dict[str, LongForecastV4MetricFamilyConfig]
+    growth: LongForecastV4GrowthConfig
+    peer: LongForecastV4PeerConfig
+    path: LongForecastV4PathConfig
+    scenarios: dict[str, LongForecastV4ScenarioConfig]
+    confidence: LongForecastV4ConfidenceConfig
+    raw: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any]) -> Self:
+        expected_top_level = {
+            "schema_version",
+            "version",
+            "method",
+            "method_version",
+            "research_status",
+            "enabled_scoring_versions",
+            "price_provider",
+            "fundamentals_provider",
+            "fundamentals_config_version",
+            "fundamentals_config_file_sha256",
+            "fundamentals_config_hash",
+            "sec_cik_config_version",
+            "sec_cik_config_file_sha256",
+            "sec_cik_config_hash",
+            "sec_mapping_source_sha256",
+            "return_basis",
+            "dividends_included",
+            "base_currency",
+            "fx_conversion",
+            "path_years",
+            "probability_positive_enabled",
+            "eligibility",
+            "metric_families",
+            "growth",
+            "peer",
+            "path",
+            "scenarios",
+            "confidence",
+        }
+        _require_exact_keys(mapping, expected_top_level, "long-v4")
+        if _positive_int(mapping, "schema_version") != 2:
+            raise ValueError("Long forecast v4 config schema_version must be 2")
+        if _required_text(mapping, "version") != LONG_V4_VERSION:
+            raise ValueError(f"Long forecast v4 version must be {LONG_V4_VERSION}")
+        if _required_text(mapping, "method") != LONG_V4_METHOD:
+            raise ValueError(f"Long forecast v4 method must be {LONG_V4_METHOD}")
+        if _required_text(mapping, "method_version") != LONG_V4_VERSION:
+            raise ValueError(f"Long forecast v4 method_version must be {LONG_V4_VERSION}")
+        if _required_text(mapping, "research_status") != LONG_V4_RESEARCH_STATUS:
+            raise ValueError(f"Long forecast v4 research_status must be {LONG_V4_RESEARCH_STATUS}")
+        scoring_versions = _string_tuple(mapping, "enabled_scoring_versions")
+        if scoring_versions != (LONG_V4_SCORING_VERSION,):
+            raise ValueError(
+                f"Long forecast v4 scoring identity must be exactly {LONG_V4_SCORING_VERSION}"
+            )
+        if _required_text(mapping, "price_provider") != "twelve_data":
+            raise ValueError("Long forecast v4 price_provider must be twelve_data")
+        if _required_text(mapping, "fundamentals_provider") != "sec":
+            raise ValueError("Long forecast v4 fundamentals_provider must be sec")
+        if _required_text(mapping, "fundamentals_config_version") != LONG_V4_FUNDAMENTALS_VERSION:
+            raise ValueError(
+                "Long forecast v4 fundamentals_config_version must be "
+                f"{LONG_V4_FUNDAMENTALS_VERSION}"
+            )
+        if (
+            _required_text(mapping, "fundamentals_config_file_sha256")
+            != LONG_V4_FUNDAMENTALS_CONFIG_FILE_SHA256
+        ):
+            raise ValueError("Long forecast v4 SEC fundamentals config bytes changed")
+        if _required_text(mapping, "fundamentals_config_hash") != LONG_V4_FUNDAMENTALS_CONFIG_HASH:
+            raise ValueError("Long forecast v4 SEC fundamentals effective config changed")
+        if _required_text(mapping, "sec_cik_config_version") != LONG_V4_SEC_CIK_CONFIG_VERSION:
+            raise ValueError("Long forecast v4 SEC CIK config version changed")
+        if (
+            _required_text(mapping, "sec_cik_config_file_sha256")
+            != LONG_V4_SEC_CIK_CONFIG_FILE_SHA256
+        ):
+            raise ValueError("Long forecast v4 SEC CIK config bytes changed")
+        if _required_text(mapping, "sec_cik_config_hash") != LONG_V4_SEC_CIK_CONFIG_HASH:
+            raise ValueError("Long forecast v4 SEC CIK effective config changed")
+        if (
+            _required_text(mapping, "sec_mapping_source_sha256")
+            != LONG_V4_SEC_MAPPING_SOURCE_SHA256
+        ):
+            raise ValueError("Long forecast v4 SEC mapping source changed")
+        if _required_text(mapping, "return_basis") != "split_adjusted_price_return":
+            raise ValueError("Long forecast v4 requires split_adjusted_price_return")
+        if mapping.get("dividends_included") is not False:
+            raise ValueError("Long forecast v4 must exclude dividends")
+        if _required_text(mapping, "base_currency") != "USD":
+            raise ValueError("Long forecast v4 base_currency must be USD")
+        if mapping.get("fx_conversion") is not False:
+            raise ValueError("Long forecast v4 does not perform FX conversion")
+        if _positive_int(mapping, "path_years") != 5:
+            raise ValueError("Long forecast v4 path_years must be 5")
+        if mapping.get("probability_positive_enabled") is not False:
+            raise ValueError("Long forecast v4 probability must remain unavailable")
+
+        eligibility_raw = _mapping(mapping, "eligibility")
+        _require_exact_keys(
+            eligibility_raw,
+            {
+                "maximum_metric_age_days",
+                "annual_periods",
+                "annual_duration_minimum_days",
+                "annual_duration_maximum_days",
+                "share_continuity_relative_tolerance",
+                "reported_eps_relative_tolerance",
+                "fcf_presence_blocks_net_income_fallback",
+            },
+            "long-v4 eligibility",
+        )
+        eligibility = LongForecastV4EligibilityConfig(
+            maximum_metric_age_days=_positive_int(eligibility_raw, "maximum_metric_age_days"),
+            annual_periods=_positive_int(eligibility_raw, "annual_periods"),
+            annual_duration_minimum_days=_positive_int(
+                eligibility_raw, "annual_duration_minimum_days"
+            ),
+            annual_duration_maximum_days=_positive_int(
+                eligibility_raw, "annual_duration_maximum_days"
+            ),
+            share_continuity_relative_tolerance=_bounded_float(
+                eligibility_raw,
+                "share_continuity_relative_tolerance",
+                minimum=0,
+                maximum=0.15,
+                minimum_inclusive=False,
+            ),
+            reported_eps_relative_tolerance=_bounded_float(
+                eligibility_raw,
+                "reported_eps_relative_tolerance",
+                minimum=0,
+                maximum=0.15,
+                minimum_inclusive=False,
+            ),
+            fcf_presence_blocks_net_income_fallback=_required_bool(
+                eligibility_raw, "fcf_presence_blocks_net_income_fallback"
+            ),
+        )
+        if eligibility.annual_periods != 4:
+            raise ValueError("Long forecast v4 annual_periods must be 4")
+        if (
+            eligibility.annual_duration_minimum_days != 350
+            or eligibility.annual_duration_maximum_days != 380
+        ):
+            raise ValueError("Long forecast v4 annual duration bounds must be 350..380 days")
+
+        metric_raw = _mapping(mapping, "metric_families")
+        family_names = {"fcf_per_share", "net_income_per_share"}
+        _require_exact_keys(metric_raw, family_names, "long-v4 metric_families")
+        metric_families: dict[str, LongForecastV4MetricFamilyConfig] = {}
+        expected_source = {
+            "fcf_per_share": "free_cash_flow",
+            "net_income_per_share": "net_income",
+        }
+        expected_bounds = {
+            "fcf_per_share": (3.0, 60.0),
+            "net_income_per_share": (5.0, 50.0),
+        }
+        for name in sorted(family_names):
+            raw_family = _mapping(metric_raw, name)
+            _require_exact_keys(
+                raw_family,
+                {"source_metric", "multiple_minimum", "multiple_maximum"},
+                f"long-v4 {name}",
+            )
+            source_metric = _required_text(raw_family, "source_metric")
+            minimum = _positive_float(raw_family, "multiple_minimum")
+            maximum = _positive_float(raw_family, "multiple_maximum")
+            if (
+                source_metric != expected_source[name]
+                or (minimum, maximum) != expected_bounds[name]
+            ):
+                raise ValueError(f"Long forecast v4 {name} identity or bounds changed")
+            metric_families[name] = LongForecastV4MetricFamilyConfig(
+                source_metric=source_metric,
+                multiple_minimum=minimum,
+                multiple_maximum=maximum,
+            )
+
+        growth_raw = _mapping(mapping, "growth")
+        growth_fields = {
+            "target_minimum",
+            "target_maximum",
+            "peer_minimum",
+            "peer_maximum",
+            "entity_minimum",
+            "entity_maximum",
+            "terminal_entity_growth",
+            "target_weight",
+            "peer_weight",
+        }
+        _require_exact_keys(growth_raw, growth_fields, "long-v4 growth")
+        growth = LongForecastV4GrowthConfig(
+            **{name: _finite_float(growth_raw, name) for name in growth_fields}
+        )
+        if (
+            (growth.target_minimum, growth.target_maximum) != (-0.20, 0.25)
+            or (growth.peer_minimum, growth.peer_maximum) != (-0.15, 0.25)
+            or (growth.entity_minimum, growth.entity_maximum) != (-0.15, 0.25)
+            or growth.terminal_entity_growth != 0.025
+            or not math.isclose(growth.target_weight, 0.5)
+            or not math.isclose(growth.peer_weight, 0.5)
+        ):
+            raise ValueError("Long forecast v4 growth policy constants changed")
+
+        peer_raw = _mapping(mapping, "peer")
+        _require_exact_keys(peer_raw, {"sic_prefix_levels", "minimum_cohort"}, "long-v4 peer")
+        levels = tuple(
+            _positive_int_value(value, label="sic_prefix_levels")
+            for value in _list(peer_raw, "sic_prefix_levels")
+        )
+        floors_raw = _mapping(peer_raw, "minimum_cohort")
+        floors = {
+            int(level): _positive_int_value(value, label=f"minimum_cohort[{level}]")
+            for level, value in floors_raw.items()
+        }
+        if levels != (4, 3, 2) or floors != {4: 3, 3: 5, 2: 8}:
+            raise ValueError("Long forecast v4 peer lock policy must remain 4/3/2 -> 3/5/8")
+        peer = LongForecastV4PeerConfig(levels, floors)
+
+        path_raw = _mapping(mapping, "path")
+        _require_exact_keys(path_raw, {"fade", "multiple_reversion"}, "long-v4 path")
+        fade = tuple(
+            _bounded_float_value(value, label="fade", minimum=0, maximum=1)
+            for value in _list(path_raw, "fade")
+        )
+        reversion = tuple(
+            _bounded_float_value(value, label="multiple_reversion", minimum=0, maximum=1)
+            for value in _list(path_raw, "multiple_reversion")
+        )
+        if fade != (0.8, 0.6, 0.4, 0.2, 0.0):
+            raise ValueError("Long forecast v4 fade path changed")
+        if reversion != (0.14, 0.28, 0.42, 0.56, 0.70):
+            raise ValueError("Long forecast v4 multiple-reversion path changed")
+        path = LongForecastV4PathConfig(fade, reversion)
+
+        scenarios_raw = _mapping(mapping, "scenarios")
+        _require_exact_keys(scenarios_raw, set(LONG_SCENARIOS), "long-v4 scenarios")
+        expected_scenarios = {
+            "bear": (-0.04, 1.25, 0.80),
+            "base": (0.00, 1.00, 1.00),
+            "bull": (0.03, 0.75, 1.15),
+        }
+        scenarios: dict[str, LongForecastV4ScenarioConfig] = {}
+        for name in LONG_SCENARIOS:
+            raw_scenario = _mapping(scenarios_raw, name)
+            _require_exact_keys(
+                raw_scenario,
+                {"growth_delta", "dilution_multiplier", "peer_multiple_multiplier"},
+                f"long-v4 {name} scenario",
+            )
+            scenario = LongForecastV4ScenarioConfig(
+                growth_delta=_finite_float(raw_scenario, "growth_delta"),
+                dilution_multiplier=_positive_float(raw_scenario, "dilution_multiplier"),
+                peer_multiple_multiplier=_positive_float(raw_scenario, "peer_multiple_multiplier"),
+            )
+            if (
+                scenario.growth_delta,
+                scenario.dilution_multiplier,
+                scenario.peer_multiple_multiplier,
+            ) != expected_scenarios[name]:
+                raise ValueError(f"Long forecast v4 {name} scenario constants changed")
+            scenarios[name] = scenario
+
+        confidence_raw = _mapping(mapping, "confidence")
+        _require_exact_keys(
+            confidence_raw,
+            {
+                "success_status",
+                "withheld_status",
+                "numeric_value",
+                "numeric_semantics",
+            },
+            "long-v4 confidence",
+        )
+        confidence = LongForecastV4ConfidenceConfig(
+            success_status=_required_text(confidence_raw, "success_status"),
+            withheld_status=_required_text(confidence_raw, "withheld_status"),
+            numeric_value=_finite_float(confidence_raw, "numeric_value"),
+            numeric_semantics=_required_text(confidence_raw, "numeric_semantics"),
+        )
+        if confidence != LongForecastV4ConfidenceConfig(
+            success_status="not_estimated_uncalibrated",
+            withheld_status="not_estimated_insufficient",
+            numeric_value=0.0,
+            numeric_semantics="zero_is_unavailable_sentinel",
+        ):
+            raise ValueError("Long forecast v4 confidence semantics changed")
+
+        return cls(
+            schema_version=2,
+            version=LONG_V4_VERSION,
+            method=LONG_V4_METHOD,
+            method_version=LONG_V4_VERSION,
+            research_status=LONG_V4_RESEARCH_STATUS,
+            enabled_scoring_versions=scoring_versions,
+            price_provider="twelve_data",
+            fundamentals_provider="sec",
+            fundamentals_config_version=LONG_V4_FUNDAMENTALS_VERSION,
+            fundamentals_config_file_sha256=LONG_V4_FUNDAMENTALS_CONFIG_FILE_SHA256,
+            fundamentals_config_hash=LONG_V4_FUNDAMENTALS_CONFIG_HASH,
+            sec_cik_config_version=LONG_V4_SEC_CIK_CONFIG_VERSION,
+            sec_cik_config_file_sha256=LONG_V4_SEC_CIK_CONFIG_FILE_SHA256,
+            sec_cik_config_hash=LONG_V4_SEC_CIK_CONFIG_HASH,
+            sec_mapping_source_sha256=LONG_V4_SEC_MAPPING_SOURCE_SHA256,
+            return_basis="split_adjusted_price_return",
+            dividends_included=False,
+            base_currency="USD",
+            fx_conversion=False,
+            path_years=5,
+            probability_positive_enabled=False,
+            eligibility=eligibility,
+            metric_families=metric_families,
+            growth=growth,
+            peer=peer,
+            path=path,
+            scenarios=scenarios,
+            confidence=confidence,
+            raw=mapping,
+        )
+
+
 def default_long_forecast_config_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "forecasts" / "us-sec-long-v2.yml"
 
@@ -472,11 +919,115 @@ def long_forecast_config_hash(config: LongForecastConfig) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def long_forecast_v4_config_path() -> Path:
+    """Return the only path from which the research-only v4 config may load."""
+    return Path(__file__).resolve().parents[3] / "config" / "forecasts" / "us-sec-long-v4.yml"
+
+
+def load_long_forecast_v4_config(path: Path) -> LongForecastV4Config:
+    """Load v4 only from its exact repository-owned, byte-pinned path.
+
+    V4 is not a default and must never be selected by a basename copied into
+    another directory.  Requiring the canonical path and bytes also prevents
+    a caller from presenting an untracked lookalike as the reviewed contract.
+    """
+    canonical = long_forecast_v4_config_path().resolve()
+    if path.resolve() != canonical:
+        raise ValueError(
+            "us-sec-long-v4 requires the exact tracked config/forecasts/us-sec-long-v4.yml path"
+        )
+    try:
+        raw_bytes = canonical.read_bytes()
+        data = yaml.safe_load(raw_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise LongForecastConfigParseError(
+            "Long forecast v4 config could not be read as valid UTF-8 YAML"
+        ) from None
+    if not isinstance(data, dict):
+        raise ValueError("Long forecast v4 config must be a mapping")
+    if hashlib.sha256(raw_bytes).hexdigest() != LONG_V4_CONFIG_FILE_SHA256:
+        raise ValueError("Long forecast v4 config bytes do not match the reviewed identity")
+    config = LongForecastV4Config.from_mapping(cast(dict[str, Any], data))
+    if long_forecast_v4_config_hash(config) != LONG_V4_EFFECTIVE_CONFIG_HASH:
+        raise ValueError("Long forecast v4 effective config identity does not match the review")
+    load_long_v4_sec_fundamentals_config(config)
+    load_long_v4_sec_cik_config(config)
+    return config
+
+
+def long_forecast_v4_config_hash(config: LongForecastV4Config) -> str:
+    effective = asdict(config)
+    effective.pop("raw")
+    payload = json.dumps(effective, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def load_long_v4_sec_fundamentals_config(
+    config: LongForecastV4Config,
+) -> SecFundamentalsConfig:
+    """Load and verify the one SEC normalization contract admitted by v4."""
+    canonical = default_sec_fundamentals_config_path().resolve()
+    try:
+        raw_bytes = canonical.read_bytes()
+    except OSError:
+        raise LongForecastConfigParseError(
+            "The canonical SEC fundamentals config could not be read"
+        ) from None
+    physical_hash = hashlib.sha256(raw_bytes).hexdigest()
+    if (
+        physical_hash != LONG_V4_FUNDAMENTALS_CONFIG_FILE_SHA256
+        or config.fundamentals_config_file_sha256 != physical_hash
+    ):
+        raise ValueError("Long forecast v4 SEC fundamentals config bytes changed")
+    sec_config = load_sec_fundamentals_config(canonical)
+    if (
+        sec_config.config_version != LONG_V4_FUNDAMENTALS_VERSION
+        or config.fundamentals_config_version != sec_config.config_version
+        or sec_config.config_hash != LONG_V4_FUNDAMENTALS_CONFIG_HASH
+        or config.fundamentals_config_hash != sec_config.config_hash
+    ):
+        raise ValueError("Long forecast v4 SEC fundamentals effective config changed")
+    return sec_config
+
+
+def load_long_v4_sec_cik_config(config: LongForecastV4Config) -> SecCikConfig:
+    """Load and physically bind the independently reviewed SEC CIK authority."""
+    canonical = default_sec_cik_mapping_path().resolve()
+    try:
+        raw_bytes = canonical.read_bytes()
+    except OSError:
+        raise LongForecastConfigParseError(
+            "The canonical SEC CIK config could not be read"
+        ) from None
+    physical_hash = hashlib.sha256(raw_bytes).hexdigest()
+    if (
+        physical_hash != LONG_V4_SEC_CIK_CONFIG_FILE_SHA256
+        or config.sec_cik_config_file_sha256 != physical_hash
+    ):
+        raise ValueError("Long forecast v4 SEC CIK config bytes changed")
+    cik_config = load_sec_cik_config(canonical)
+    if (
+        cik_config.config_version != LONG_V4_SEC_CIK_CONFIG_VERSION
+        or config.sec_cik_config_version != cik_config.config_version
+        or cik_config.config_hash != LONG_V4_SEC_CIK_CONFIG_HASH
+        or config.sec_cik_config_hash != cik_config.config_hash
+        or cik_config.source_sha256 != LONG_V4_SEC_MAPPING_SOURCE_SHA256
+        or config.sec_mapping_source_sha256 != cik_config.source_sha256
+    ):
+        raise ValueError("Long forecast v4 SEC CIK authority changed")
+    return cik_config
+
+
 def _mapping(mapping: dict[str, Any], key: str) -> dict[str, Any]:
     value = mapping.get(key)
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be a mapping")
     return cast(dict[str, Any], value)
+
+
+def _require_exact_keys(mapping: dict[str, Any], expected: set[str], label: str) -> None:
+    if set(mapping) != expected:
+        raise ValueError(f"{label} keys do not match the reviewed schema")
 
 
 def _list(mapping: dict[str, Any], key: str) -> list[Any]:

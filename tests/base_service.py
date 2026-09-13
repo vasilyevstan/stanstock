@@ -9,9 +9,10 @@ object database and executes them in a throwaway module namespace.
 **Exact bound set and why, stated precisely rather than as a round claim:**
 
 - ``data/asof.py``, ``research/config.py``, ``research/forecast_config.py``,
-  ``research/indicators.py``, ``research/scoring.py``, and
-  ``research/medium_forecasts.py`` -- base `research/service.py` directly
-  imports all six, and this or a later methodology slice changed them.
+  ``research/long_forecast_config.py``, ``research/indicators.py``,
+  ``research/scoring.py``, and ``research/medium_forecasts.py`` -- base
+  `research/service.py` directly imports all seven, and this or a later
+  methodology slice changed them.
   Binding `service.py`
   without binding them would let those import statements resolve against
   whatever the *live*, working-tree modules currently are: a deliberate or
@@ -86,19 +87,24 @@ BASE_SHA = "65314f87fe0eb8adbb05d35d3874c22c736ae54c"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Bound in dependency order: `data.assets` before `data.asof` (which now
-#: imports it), config before `research.forecast_config` and every research
-#: calculation module, `research.medium_forecasts` before the indicator/scoring
-#: pair it precedes in the historical checksum contract, indicators before
-#: scoring, independent leaves next, and `research.service` last. Executing a
-#: module's base source registers it in `sys.modules` *before* any later
-#: module in this list is executed, so imports inside the base medium
-#: builder and service resolve against the base modules this context
-#: manager just bound -- never the live ones.
+#: imports it), config before the research forecast-config modules, both
+#: forecast-config modules before calculation modules,
+#: `research.medium_forecasts` before the indicator/scoring pair it precedes
+#: in the historical checksum contract, indicators before scoring,
+#: independent leaves next, and `research.service` last. Executing a module's
+#: base source registers it in `sys.modules` *before* any later module in this
+#: list is executed, so imports inside the base medium builder and service
+#: resolve against the base modules this context manager just bound -- never
+#: the live ones.
 DEPENDENCY_MODULES: tuple[tuple[str, str], ...] = (
     ("stanstock.data.assets", "src/stanstock/data/assets.py"),
     ("stanstock.data.asof", "src/stanstock/data/asof.py"),
     ("stanstock.research.config", "src/stanstock/research/config.py"),
     ("stanstock.research.forecast_config", "src/stanstock/research/forecast_config.py"),
+    (
+        "stanstock.research.long_forecast_config",
+        "src/stanstock/research/long_forecast_config.py",
+    ),
     ("stanstock.research.medium_forecasts", "src/stanstock/research/medium_forecasts.py"),
     ("stanstock.research.indicators", "src/stanstock/research/indicators.py"),
     ("stanstock.research.scoring", "src/stanstock/research/scoring.py"),

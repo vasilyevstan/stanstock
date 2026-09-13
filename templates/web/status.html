@@ -260,8 +260,24 @@
                 <td>Forecast unavailable</td>
                 <td>Forecast unavailable</td>
               {% elif stock.has_explicit_long_forecasts %}
-                <td>{{ stock.three_year_forecast_scenario|scenario_range }}</td>
-                <td>{{ stock.five_year_forecast_scenario|scenario_range }}</td>
+                {% with scenario=stock.three_year_forecast_scenario %}
+                  <td>
+                    {{ scenario|scenario_range }}
+                    {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                      <small>Research-only / unactivated.</small>
+                      <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                    {% endif %}
+                  </td>
+                {% endwith %}
+                {% with scenario=stock.five_year_forecast_scenario %}
+                  <td>
+                    {{ scenario|scenario_range }}
+                    {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                      <small>Research-only / unactivated.</small>
+                      <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                    {% endif %}
+                  </td>
+                {% endwith %}
               {% else %}
                 <td><small>Legacy 3+ years</small> {{ stock.legacy_long_forecast_scenario|scenario_range }}</td>
                 <td>Not issued</td>

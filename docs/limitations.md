@@ -295,6 +295,56 @@ unmeasurable.
   before reversion would overstate return. High raw multiples retain the
   actual price denominator and use the configured cap only as a conservative
   reversion anchor.
+- Long-v4 is a separate schema-2, research-only, unactivated experiment; it is
+  not the default or scheduled long method. It requires four contiguous
+  annual tuples, a homogeneous newest-quarter TTM, exact point-in-time
+  evidence closure, and an ex-ante locked SIC cohort. These restrictions can
+  leave most or all targets withheld. SIC is coarse, weighted diluted shares
+  are an accounting-period denominator rather than issuance counts, and no
+  ADS ratio is inferred for depositary receipts. There is no nominal
+  per-share floor: entity values, diluted shares, derived per-share values,
+  and prices must be finite and strictly positive, preserving a common
+  split-equivalent rescaling across the target and all peers.
+- Long-v4's evidence boundary includes the complete eligible snapshot cohort,
+  the pinned canonical CIK config and raw SEC ticker/exchange mapping,
+  independently reconstructed SIC lock trace, raw-FCF normalization closure,
+  full SEC Companyfacts/submissions-history/fact/filing/classification file
+  closure, and each cohort price's checksummed normalized and raw assets. This
+  detects omissions and identity, cutoff, checksum, and physical-file drift,
+  but it does not make the research-only reconstruction observed evidence.
+- V4 outcome authentication requires every retained assessed-owner
+  Companyfacts, current-submissions, and submissions-history file to remain
+  readable and checksum-identical to its immutable asset row. Missing or
+  tampered raw SEC evidence produces an unresolved `identity_mismatch` before
+  stock or benchmark lookup. The check makes no provider request, does not
+  rebuild the forecast, and does not reread the issuance-price file.
+- Long-v4 retains an unrounded physical Parquet close for valuation arithmetic
+  and a separately rounded six-decimal ledger close for persisted analysis and
+  prediction prices. This avoids a ledger rounding boundary changing
+  eligibility. V4 is also an explicit exception to the legacy ledger-based
+  outcome denominator: after authenticating both roles and an exact
+  target-date close, it divides the terminal close by the physical valuation
+  value and rounds once to four decimals with half-even rounding. This does
+  not add intraday price precision.
+- Long-v4 intentionally makes no NOPAT, tax, invested-capital, reinvestment,
+  ROIC/ROIIC, sustainable-growth, R&D-capitalization, intangible useful-life,
+  causal growth, or project-IRR claim. Missing R&D is not zero. FASB
+  Statement 2 / ASC 730 and ASC 260 explain the reported-accounting boundary;
+  Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang demonstrate why
+  intangible-capital treatment matters, but do not authorize a guessed
+  adjustment here.
+- Damodaran, Nissim-Penman, Fama-French, Vorst-Yohn,
+  Bhojraj-Lee/Bhojraj-Lee-Oler, and Lo-MacKinlay provide valuation,
+  classification, forecast, and data-snooping context. They do not validate
+  the v4 caps, weights, scenario deltas, dilution multipliers, fade, or
+  multiple-reversion schedule. Those are fixed policy assumptions, not
+  optimized estimates. Positive-return probability and confidence remain
+  unavailable, and a separate cutoff-safe historical replay is required
+  before activation.
+- A matured research-grade V4 prediction can receive a shared immutable
+  outcome record through the isolated physical-baseline branch. That does not
+  make it observed or reportable: V4 remains
+  excluded from observed, headline, and reportable performance.
 - Legacy scenario columns remain in storage for rollback compatibility. New
   application reads use the schema-versioned `forecast_scenarios` document;
   the old columns can be retired only after all supported deployments have

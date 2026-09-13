@@ -46,14 +46,22 @@ from typing import Any
 from uuid import UUID, uuid5
 
 import pytest
+import yaml
+from django.db import transaction
 
+import stanstock.research.service as head_service
 from frozen_base import (
     BASE_MODULE_PATHS,
     BASE_SHA,
+    LONG_V4_BASE_PROFILE,
     BaseRevisionUnavailableError,
     base_long_forecast_modules,
     base_source_checksums,
     base_sources_available,
+    exact_base_file_bytes,
+    exact_base_long_forecast_modules,
+    exact_base_source_checksums,
+    exact_base_sources_available,
 )
 from stanstock.data.asof import AsOfData
 from stanstock.data.models import (
@@ -65,17 +73,37 @@ from stanstock.data.models import (
     Listing,
     Region,
     Security,
+    Universe,
+    UniverseMembership,
+    UniverseSnapshot,
 )
 from stanstock.data.sec_config import load_sec_fundamentals_config
 from stanstock.research.long_forecast_config import load_long_forecast_config
 from stanstock.research.long_forecasts import build_long_forecasts
+from stanstock.research.models import (
+    AnalysisRun,
+    Prediction,
+    Recommendation,
+    RiskClass,
+)
+from stanstock.research.types import (
+    AggregateScore,
+    ComponentScores,
+    IndicatorResult,
+    ResearchValues,
+    Scenario,
+)
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "data" / "long_frozen_base_payloads.json"
+LONG_V4_BASE_GOLDEN_PATH = (
+    Path(__file__).resolve().parent / "data" / "long_v1_v2_v3_rev_027d943_payloads.json"
+)
 
 #: Opt-in regeneration switch. It only ever drives `regenerate_golden`, which
 #: executes the base revision's own modules; an ordinary comparison run never
 #: writes anything.
 WRITE_GOLDEN_ENV = "STANSTOCK_WRITE_FROZEN_GOLDEN"
+WRITE_LONG_V4_BASE_GOLDEN_ENV = "STANSTOCK_WRITE_LONG_V4_BASE_GOLDEN"
 
 TARGET_DATE = date(2026, 2, 27)
 DECISION_TIME = datetime(2026, 3, 1, 12, tzinfo=UTC)
@@ -348,6 +376,110 @@ def test_the_three_frozen_scenarios_cover_success_and_withholding() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Exact long-v4 base profile: v1/v2/v3 calculator + persistence contract
+# ---------------------------------------------------------------------------
+
+
+def test_long_v4_base_golden_pins_exact_revision_sources_and_configs() -> None:
+    golden = _long_v4_base_golden()
+
+    assert golden["profile"] == LONG_V4_BASE_PROFILE.name
+    assert golden["base_sha"] == LONG_V4_BASE_PROFILE.base_sha
+    assert golden["generated_from"] == "base_revision_execution"
+    assert set(golden["base_source_sha256"]) == set(LONG_V4_BASE_PROFILE.evidence_paths)
+    assert set(golden["payloads"]["configs"]) == {"v1", "v2", "v3"}
+    assert "v4" not in golden["payloads"]["configs"]
+
+
+@pytest.mark.skipif(
+    not exact_base_sources_available(LONG_V4_BASE_PROFILE),
+    reason=(
+        f"base revision {LONG_V4_BASE_PROFILE.base_sha} is not present in the "
+        "local git object database"
+    ),
+)
+def test_long_v4_base_golden_checksums_match_exact_git_objects() -> None:
+    assert _long_v4_base_golden()["base_source_sha256"] == (
+        exact_base_source_checksums(LONG_V4_BASE_PROFILE)
+    )
+
+
+@pytest.mark.django_db
+def test_long_v1_v2_v3_head_matches_the_long_v4_base_golden() -> None:
+    inputs = _build_all_scenarios()
+    head = _capture_revision_payloads(inputs, use_base=False)
+
+    assert head == _long_v4_base_golden()["payloads"]
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(
+    not exact_base_sources_available(LONG_V4_BASE_PROFILE),
+    reason=(
+        f"base revision {LONG_V4_BASE_PROFILE.base_sha} is not present in the "
+        "local git object database"
+    ),
+)
+def test_long_v1_v2_v3_head_matches_exact_long_v4_base_execution() -> None:
+    inputs = _build_all_scenarios()
+    base = _capture_revision_payloads(inputs, use_base=True)
+    head = _capture_revision_payloads(inputs, use_base=False)
+
+    assert head == base
+    assert base == _long_v4_base_golden()["payloads"]
+
+
+@pytest.mark.django_db
+def test_long_v4_base_regeneration_refuses_missing_objects_and_head_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import frozen_base
+
+    def _unavailable(_revision: str, path: str) -> bytes:
+        raise BaseRevisionUnavailableError(f"pruned: {path}")
+
+    monkeypatch.setattr(frozen_base, "_read_revision_source", _unavailable)
+    target = tmp_path / LONG_V4_BASE_GOLDEN_PATH.name
+    with pytest.raises(BaseRevisionUnavailableError):
+        regenerate_long_v4_base_golden(target)
+    assert not target.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(
+    not exact_base_sources_available(LONG_V4_BASE_PROFILE),
+    reason=(
+        f"base revision {LONG_V4_BASE_PROFILE.base_sha} is not present in the "
+        "local git object database"
+    ),
+)
+def test_long_v4_base_regeneration_never_executes_poisoned_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(__name__)
+
+    def _poisoned_head(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("exact-base regeneration must never execute head")
+
+    monkeypatch.setattr(module, "build_long_forecasts", _poisoned_head)
+    target = tmp_path / LONG_V4_BASE_GOLDEN_PATH.name
+    regenerate_long_v4_base_golden(target)
+
+    assert target.read_bytes() == LONG_V4_BASE_GOLDEN_PATH.read_bytes()
+
+
+@pytest.mark.django_db
+@pytest.mark.skipif(
+    os.environ.get(WRITE_LONG_V4_BASE_GOLDEN_ENV) != "1",
+    reason=(f"set {WRITE_LONG_V4_BASE_GOLDEN_ENV}=1 to regenerate the exact long-v4 base golden"),
+)
+def test_regenerate_long_v4_base_golden_from_exact_git_objects() -> None:  # pragma: no cover
+    regenerate_long_v4_base_golden(LONG_V4_BASE_GOLDEN_PATH)
+
+
+# ---------------------------------------------------------------------------
 # Payload capture
 # ---------------------------------------------------------------------------
 
@@ -539,6 +671,315 @@ def regenerate_golden(path: Path) -> dict[str, dict[str, Any]]:
             load_config=base.long_forecast_config.load_long_forecast_config,
         )
     _write_golden(payloads, source_sha256=checksums, path=path)
+    return payloads
+
+
+def _long_v4_base_golden(path: Path | None = None) -> dict[str, Any]:
+    raw: dict[str, Any] = json.loads((path or LONG_V4_BASE_GOLDEN_PATH).read_text(encoding="utf-8"))
+    raw["payloads"] = _expand(raw["payloads"], raw["evidence_pool"])
+    return raw
+
+
+def _capture_revision_payloads(
+    inputs: dict[str, ScenarioInputs],
+    *,
+    use_base: bool,
+) -> dict[str, Any]:
+    """Capture v1/v2/v3 config, calculator, and ORM projections losslessly."""
+    with transaction.atomic():
+        if use_base:
+            with exact_base_long_forecast_modules(LONG_V4_BASE_PROFILE) as base:
+                assert base.service is not None
+                payload = _revision_payloads(
+                    inputs,
+                    build=base.long_forecasts.build_long_forecasts,
+                    config_module=base.long_forecast_config,
+                    service_module=base.service,
+                    read_config=lambda path: exact_base_file_bytes(
+                        LONG_V4_BASE_PROFILE,
+                        str(path),
+                    ),
+                )
+        else:
+            payload = _revision_payloads(
+                inputs,
+                build=build_long_forecasts,
+                config_module=importlib.import_module("stanstock.research.long_forecast_config"),
+                service_module=head_service,
+                read_config=lambda path: path.read_bytes(),
+            )
+        # Prediction rows are immutable, but a test transaction savepoint may
+        # safely roll the complete synthetic projection back.
+        transaction.set_rollback(True)
+    return payload
+
+
+def _revision_payloads(
+    inputs: dict[str, ScenarioInputs],
+    *,
+    build: Any,
+    config_module: Any,
+    service_module: Any,
+    read_config: Any,
+) -> dict[str, Any]:
+    versions = {
+        "v1": Path("config/forecasts/us-sec-long-v1.yml"),
+        "v2": Path("config/forecasts/us-sec-long-v2.yml"),
+        "v3": Path("config/forecasts/us-sec-long-v3.yml"),
+    }
+    configs: dict[str, Any] = {}
+    parsed: dict[str, Any] = {}
+    for label, path in versions.items():
+        raw_bytes = read_config(path)
+        mapping = yaml.safe_load(raw_bytes.decode("utf-8"))
+        config = config_module.LongForecastConfig.from_mapping(mapping)
+        parsed[label] = config
+        configs[label] = {
+            "path": str(path),
+            "bytes": raw_bytes.decode("utf-8"),
+            "bytes_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "effective_hash": config_module.long_forecast_config_hash(config),
+            "schema_version": config.schema_version,
+            "version": config.version,
+        }
+
+    payloads: dict[str, Any] = {"configs": configs, "scenarios": {}}
+    for scenario, scenario_inputs in inputs.items():
+        listings, prices, price_assets = scenario_inputs
+        target = listings[0]
+        by_version: dict[str, Any] = {}
+        for label, config in parsed.items():
+            test_config = replace(
+                config,
+                peer=replace(
+                    config.peer,
+                    minimum_peers={4: 1, 3: 1, 2: 1},
+                ),
+            )
+            forecasts = build(
+                listings=listings,
+                current_prices=prices,
+                price_assets=price_assets,
+                asof=AsOfData(DECISION_TIME),
+                data_cutoff=DECISION_TIME,
+                target_date=TARGET_DATE,
+                config=test_config,
+            )
+            target_forecasts = forecasts[str(target.pk)]
+            by_version[label] = {
+                "forecasts": {
+                    horizon: _forecast_payload(target_forecasts[horizon])
+                    for horizon in ("3y", "5y")
+                },
+                "persistence": _legacy_persistence_projection(
+                    scenario=scenario,
+                    label=label,
+                    target=target,
+                    target_price=prices[str(target.pk)],
+                    forecasts=target_forecasts,
+                    config_hash_value=config_module.long_forecast_config_hash(config),
+                    service_module=service_module,
+                ),
+            }
+        payloads["scenarios"][scenario] = by_version
+    return _normalize(payloads)
+
+
+def _legacy_persistence_projection(
+    *,
+    scenario: str,
+    label: str,
+    target: Listing,
+    target_price: float,
+    forecasts: dict[str, Any],
+    config_hash_value: str,
+    service_module: Any,
+) -> dict[str, Any]:
+    universe = Universe.objects.create(
+        slug=f"frozen-{scenario}-{label}",
+        name=f"Frozen {scenario} {label}",
+        config_version="frozen-v1",
+    )
+    snapshot = UniverseSnapshot.objects.create(
+        id=_det("rev-snapshot", scenario, label),
+        universe=universe,
+        as_of_date=TARGET_DATE,
+        grade=UniverseSnapshot.Grade.RESEARCH,
+        config_hash="9" * 64,
+    )
+    UniverseMembership.objects.create(snapshot=snapshot, listing=target)
+    run = AnalysisRun.objects.create(
+        id=_det("rev-run", scenario, label),
+        generated_at=DECISION_TIME,
+        data_cutoff=DECISION_TIME,
+        target_date=TARGET_DATE,
+        issued_on_time=False,
+        universe_snapshot=snapshot,
+        config_version="us-price-baseline-v2",
+        config_hash="43cc0ee0e29f79dec4ad8d8a91e43e7b3df1d368dbc385a116fcc6ff05f18e9b",
+        code_revision=LONG_V4_BASE_PROFILE.base_sha,
+    )
+    scenarios = {
+        horizon: Scenario(
+            bear=-0.1,
+            base=0.0,
+            bull=0.1,
+            probability_positive=None,
+            confidence=50.0,
+            confidence_status="frozen_fixture",
+            insufficiency_reason="",
+            method="frozen_fixture",
+        )
+        for horizon in ("short", "medium", "long")
+    }
+    computation = service_module.AnalysisComputation(
+        indicators=IndicatorResult(values={}),
+        fundamentals=ResearchValues(values={}),
+        aggregate=AggregateScore(
+            overall=50.0,
+            horizon_scores={"short": 50.0, "medium": 50.0, "long": 50.0},
+            confidence=50.0,
+            confidence_status="frozen_fixture",
+            component_scores=ComponentScores(
+                components={},
+                factor_scores={},
+                missing={},
+                coverage=0.0,
+            ),
+            missingness_penalty=0.0,
+            freshness_penalty=0.0,
+        ),
+        scenarios=scenarios,
+        risk_score=50.0,
+        risk_class=RiskClass.MEDIUM,
+        recommendation=Recommendation.HOLD,
+        reasons=["Frozen persistence projection"],
+        risks=["Synthetic fixture only"],
+        data_quality={
+            "supported_horizons": ["short", "medium", "long"],
+            "price_source": {
+                "provider": "twelve_data",
+                "subject": target.ticker,
+            },
+        },
+        source_assets=[],
+        current_price=target_price,
+        daily_change=None,
+        price_asset=None,
+    )
+    analysis = service_module._create_stock_analysis(
+        run,
+        target,
+        computation,
+        long_forecasts=forecasts,
+    )
+    model_version = f"frozen-{label}-{scenario}"[:40]
+    predictions = [
+        service_module._create_long_advisory_prediction(
+            analysis=analysis,
+            horizon=Prediction.Horizon(horizon),
+            forecast=forecasts[horizon],
+            generated_at=DECISION_TIME,
+            data_cutoff=DECISION_TIME,
+            issued_on_time=False,
+            model_version=model_version,
+            config_hash_value=config_hash_value,
+            code_revision_value=LONG_V4_BASE_PROFILE.base_sha,
+        )
+        for horizon in ("3y", "5y")
+    ]
+    return {
+        "stock_analysis": {
+            "run_id": str(analysis.run_id),
+            "listing_id": str(analysis.listing_id),
+            "current_price": str(analysis.current_price),
+            "daily_change": (
+                str(analysis.daily_change) if analysis.daily_change is not None else None
+            ),
+            "overall_score": str(analysis.overall_score),
+            "recommendation": analysis.recommendation,
+            "risk_score": str(analysis.risk_score),
+            "risk_class": analysis.risk_class,
+            "confidence": str(analysis.confidence),
+            "confidence_status": analysis.confidence_status,
+            "component_scores": analysis.component_scores,
+            "forecast_scenarios": analysis.forecast_scenarios,
+            "short_scenario": analysis.short_scenario,
+            "medium_scenario": analysis.medium_scenario,
+            "long_scenario": analysis.long_scenario,
+            "reasons": analysis.reasons,
+            "risks": analysis.risks,
+            "data_quality": analysis.data_quality,
+        },
+        "predictions": [
+            {
+                "listing_id": str(prediction.listing_id),
+                "generated_at": prediction.generated_at.isoformat(),
+                "target_date": prediction.target_date.isoformat(),
+                "issued_on_time": prediction.issued_on_time,
+                "horizon": prediction.horizon,
+                "evidence_role": prediction.evidence_role,
+                "evidence_grade": prediction.evidence_grade,
+                "source_mode": prediction.source_mode,
+                "price_provider": prediction.price_provider,
+                "price_subject": prediction.price_subject,
+                "price_at_prediction": str(prediction.price_at_prediction),
+                "bear_return": (
+                    str(prediction.bear_return) if prediction.bear_return is not None else None
+                ),
+                "base_return": (
+                    str(prediction.base_return) if prediction.base_return is not None else None
+                ),
+                "bull_return": (
+                    str(prediction.bull_return) if prediction.bull_return is not None else None
+                ),
+                "probability_positive": prediction.probability_positive,
+                "confidence": str(prediction.confidence),
+                "confidence_status": prediction.confidence_status,
+                "insufficiency_reason": prediction.insufficiency_reason,
+                "recommendation": prediction.recommendation,
+                "overall_score": str(prediction.overall_score),
+                "component_scores": prediction.component_scores,
+                "model_version": prediction.model_version,
+                "method_version": prediction.method_version,
+                "config_hash": prediction.config_hash,
+                "data_cutoff": prediction.data_cutoff.isoformat(),
+                "source_assets": prediction.source_assets,
+                "calculation": prediction.calculation,
+                "code_revision": prediction.code_revision,
+            }
+            for prediction in predictions
+        ],
+    }
+
+
+def regenerate_long_v4_base_golden(path: Path) -> dict[str, Any]:
+    checksums = exact_base_source_checksums(LONG_V4_BASE_PROFILE)
+    payloads = _capture_revision_payloads(
+        _build_all_scenarios(),
+        use_base=True,
+    )
+    pooled, pool = _pool(payloads)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "profile": LONG_V4_BASE_PROFILE.name,
+                "base_sha": LONG_V4_BASE_PROFILE.base_sha,
+                "base_source_sha256": checksums,
+                "generated_by": "tests/test_long_frozen_differential.py",
+                "generated_from": "base_revision_execution",
+                "normalized_fields": ["ingested_at"],
+                "pooled_keys": list(POOLED_KEYS),
+                "evidence_pool": pool,
+                "payloads": pooled,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return payloads
 
 

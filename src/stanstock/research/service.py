@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -31,6 +31,7 @@ from stanstock.data.assets import (
 )
 from stanstock.data.etfs import INVESTABLE_US_ETF_SYMBOL
 from stanstock.data.models import (
+    Company,
     DataAsset,
     FundamentalFact,
     Listing,
@@ -81,11 +82,27 @@ from stanstock.research.forecasting import (
 from stanstock.research.fundamentals import calculate_fundamentals, inputs_from_facts
 from stanstock.research.indicators import calculate_indicators
 from stanstock.research.long_forecast_config import (
+    LONG_V4_EFFECTIVE_CONFIG_HASH,
+    LONG_V4_VERSION,
     LongForecastConfig,
+    LongForecastV4Config,
     load_long_forecast_config,
+    load_long_forecast_v4_config,
     long_forecast_config_hash,
+    long_forecast_v4_config_hash,
+)
+from stanstock.research.long_forecast_config import (
+    long_forecast_v4_config_path as canonical_long_forecast_v4_config_path,
 )
 from stanstock.research.long_forecasts import LongForecast, build_long_forecasts
+from stanstock.research.long_forecasts_v4 import (
+    LongForecastV4,
+    build_long_forecasts_v4,
+    canonical_long_v4_price,
+    validate_long_v4_cohort_mapping_authority,
+    validate_long_v4_evidence_authority,
+    validate_long_v4_forecast_pair,
+)
 from stanstock.research.medium_forecasts import (
     PANEL_SCHEMA,
     MediumForecast,
@@ -282,12 +299,14 @@ def _lock_advisory_parent_rows(
     snapshot_ids: Sequence[UUID] = (),
     run_ids: Sequence[UUID] = (),
     requested_listing_ids: Sequence[UUID] = (),
+    lock_companies: bool = False,
 ) -> tuple[
     dict[str, Universe],
     dict[UUID, UniverseSnapshot],
     tuple[UniverseMembership, ...],
     dict[UUID, Listing],
     dict[UUID, Security],
+    dict[UUID, Company],
     dict[UUID, AnalysisRun],
 ]:
     """Discover, lock, and reverify mutable v2 parents in canonical order.
@@ -295,15 +314,15 @@ def _lock_advisory_parent_rows(
     Only scalar projections are read before locking, and every projected
     value is compared with the row after its lock is acquired. The full lock
     order is Universe -> UniverseSnapshot -> UniverseMembership -> Listing ->
-    Security -> AnalysisRun. StockAnalysis rows, when applicable, are locked
-    by ``_lock_advisory_authority`` immediately afterward.
+    Security -> optionally Company -> AnalysisRun. StockAnalysis rows, when
+    applicable, are locked by ``_lock_advisory_authority`` immediately
+    afterward.
 
     The snapshot receives a full ``FOR UPDATE`` lock before membership rows
     are read. On PostgreSQL that conflicts with the ``KEY SHARE`` check a new
     membership's foreign key needs, closing the insertion gap until the
     surrounding transaction finishes. Existing memberships are all locked,
-    including currently ineligible rows. Company rows are deliberately never
-    selected or locked.
+    including currently ineligible rows.
     """
     ordered_run_ids = tuple(sorted(set(run_ids), key=str))
     run_fields = (
@@ -463,11 +482,42 @@ def _lock_advisory_parent_rows(
         for security_id, security in locked_securities.items()
     ):
         raise ValueError(_MEDIUM_V2_PAYLOAD_ERROR)
-    for listing in locked_listings.values():
-        security = locked_securities.get(listing.security_id)
-        if security is None:
+    locked_companies: dict[UUID, Company] = {}
+    if lock_companies:
+        ordered_company_ids = tuple(
+            sorted({security.company_id for security in locked_securities.values()}, key=str)
+        )
+        company_fields = ("name", "country", "sector", "industry", "lei", "cik", "created_at")
+        projected_companies = {
+            row[0]: row[1:]
+            for row in Company.objects.filter(pk__in=ordered_company_ids)
+            .order_by("pk")
+            .values_list("pk", *company_fields)
+        }
+        if set(projected_companies) != set(ordered_company_ids):
             raise ValueError(_MEDIUM_V2_PAYLOAD_ERROR)
-        listing._state.fields_cache["security"] = security
+        locked_companies = {
+            company.pk: company
+            for company in Company.objects.select_for_update(of=("self",))
+            .filter(pk__in=ordered_company_ids)
+            .order_by("pk")
+        }
+        if set(locked_companies) != set(ordered_company_ids) or any(
+            tuple(getattr(company, field) for field in company_fields)
+            != projected_companies[company_id]
+            for company_id, company in locked_companies.items()
+        ):
+            raise ValueError(_MEDIUM_V2_PAYLOAD_ERROR)
+        for locked_security in locked_securities.values():
+            locked_company = locked_companies.get(locked_security.company_id)
+            if locked_company is None:
+                raise ValueError(_MEDIUM_V2_PAYLOAD_ERROR)
+            locked_security._state.fields_cache["company"] = locked_company
+    for listing in locked_listings.values():
+        listing_security = locked_securities.get(listing.security_id)
+        if listing_security is None:
+            raise ValueError(_MEDIUM_V2_PAYLOAD_ERROR)
+        listing._state.fields_cache["security"] = listing_security
     for membership in locked_memberships:
         locked_snapshot = locked_snapshots.get(membership.snapshot_id)
         if locked_snapshot is None:
@@ -499,6 +549,7 @@ def _lock_advisory_parent_rows(
         locked_memberships,
         locked_listings,
         locked_securities,
+        locked_companies,
         locked_runs,
     )
 
@@ -639,6 +690,7 @@ def _lock_medium_v2_snapshot_authority(
         memberships,
         listings,
         _securities,
+        _companies,
         _runs,
     ) = _lock_advisory_parent_rows(snapshot_ids=(snapshot_id,))
     snapshot = snapshots.get(snapshot_id)
@@ -665,6 +717,8 @@ def _lock_medium_v2_snapshot_authority(
 
 def _lock_advisory_authority(
     requested_analyses: Sequence[StockAnalysis],
+    *,
+    lock_companies: bool = False,
 ) -> _LockedAdvisoryAuthority:
     """Resolve and lock every caller-requested analysis without trusting it.
 
@@ -700,12 +754,14 @@ def _lock_advisory_authority(
         memberships,
         listings,
         _securities,
+        _companies,
         runs,
     ) = _lock_advisory_parent_rows(
         run_ids=[cast(UUID, projected_analyses[pk][run_index]) for pk in ordered_analysis_ids],
         requested_listing_ids=[
             cast(UUID, projected_analyses[pk][listing_index]) for pk in ordered_analysis_ids
         ],
+        lock_companies=lock_companies,
     )
     locked_analyses = {
         analysis.pk: analysis
@@ -746,6 +802,7 @@ def _lock_medium_v2_authority(run: AnalysisRun) -> _LockedMediumV2Authority:
         memberships,
         listings,
         _securities,
+        _companies,
         runs,
     ) = _lock_advisory_parent_rows(
         run_ids=(run.pk,),
@@ -769,6 +826,149 @@ class LongForecastContext:
     config_hash: str
     model_version: str
     forecasts: dict[str, dict[str, LongForecast]]
+
+
+@dataclass(frozen=True, slots=True)
+class LongForecastV4Context:
+    config: LongForecastV4Config
+    config_hash: str
+    model_version: str
+    forecasts: dict[str, dict[str, LongForecastV4]]
+    store: AssetStore
+
+
+def _validate_v4_request_admission(
+    *,
+    universe_snapshot: UniverseSnapshot,
+    target_date: date,
+    issued_on_time: bool | None,
+    provider: str,
+    long_forecast_requested: bool | None,
+    scoring_config: ScoringConfig,
+    scoring_config_hash: str,
+    v4_config: LongForecastV4Config,
+) -> None:
+    """Reject an unsafe explicit v4 request before any output-producing work."""
+    if long_forecast_requested is not True:
+        raise ValueError("us-sec-long-v4 requires long_forecast_requested=True")
+    if issued_on_time is not False:
+        raise ValueError("us-sec-long-v4 requires literal issued_on_time=False")
+    if universe_snapshot.pk is None:
+        raise ValueError("us-sec-long-v4 requires a persisted authoritative snapshot")
+    if universe_snapshot.grade != UniverseSnapshot.Grade.RESEARCH:
+        raise ValueError("us-sec-long-v4 requires a research-grade universe snapshot")
+    if universe_snapshot.as_of_date != target_date:
+        raise ValueError("us-sec-long-v4 requires a snapshot for the exact target date")
+    if (
+        scoring_config.version != "us-price-baseline-v2"
+        or scoring_config_hash != _MEDIUM_V2_SCORING_HASH
+    ):
+        raise ValueError("us-sec-long-v4 requires the exact reviewed us-price-baseline-v2 identity")
+    if provider != "twelve_data":
+        raise ValueError("us-sec-long-v4 requires provider='twelve_data'")
+    if (
+        v4_config.version != LONG_V4_VERSION
+        or v4_config.schema_version != 2
+        or v4_config.method != "sec_entity_growth_dilution_multiple_reversion"
+        or long_forecast_v4_config_hash(v4_config) != LONG_V4_EFFECTIVE_CONFIG_HASH
+    ):
+        raise ValueError("us-sec-long-v4 config/schema/method identity mismatch")
+
+
+def _validate_v4_memberships(memberships: Sequence[UniverseMembership]) -> None:
+    if not memberships:
+        raise ValueError("us-sec-long-v4 requires a non-empty eligible snapshot cohort")
+    for membership in memberships:
+        listing = membership.listing
+        if not membership.eligible:
+            raise ValueError("us-sec-long-v4 received an ineligible membership")
+        if (
+            not listing.is_active
+            or listing.region != Region.US
+            or listing.currency != "USD"
+            or listing.security.security_type
+            not in (
+                Security.SecurityType.COMMON_STOCK,
+                Security.SecurityType.ADR,
+            )
+        ):
+            raise ValueError(
+                "us-sec-long-v4 requires active US/USD common-stock identities; "
+                "depositary receipts may enter only for explicit per-listing withholding"
+            )
+
+
+def _lock_v4_snapshot_authority(
+    snapshot: UniverseSnapshot,
+    *,
+    target_date: date,
+) -> tuple[UniverseSnapshot, list[UniverseMembership]]:
+    """Lock and independently re-resolve the v4 snapshot before the run write."""
+    if snapshot.pk is None:
+        raise ValueError("us-sec-long-v4 snapshot authority is missing")
+    universe = (
+        Universe.objects.select_for_update(of=("self",)).filter(pk=snapshot.universe_id).first()
+    )
+    if universe is None:
+        raise ValueError("us-sec-long-v4 universe authority could not be resolved")
+    locked = (
+        UniverseSnapshot.objects.select_for_update(of=("self",))
+        .select_related("universe")
+        .filter(pk=snapshot.pk)
+        .first()
+    )
+    if locked is None or (
+        locked.universe_id,
+        locked.as_of_date,
+        locked.grade,
+        locked.config_hash,
+    ) != (
+        snapshot.universe_id,
+        snapshot.as_of_date,
+        snapshot.grade,
+        snapshot.config_hash,
+    ):
+        raise ValueError("us-sec-long-v4 snapshot authority changed before issuance")
+    if locked.grade != UniverseSnapshot.Grade.RESEARCH or locked.as_of_date != target_date:
+        raise ValueError("us-sec-long-v4 snapshot authority is not the exact research target")
+
+    locked_memberships = list(
+        UniverseMembership.objects.select_for_update(of=("self",))
+        .filter(snapshot=locked)
+        .order_by("listing_id")
+    )
+    eligible_ids = [
+        membership.listing_id for membership in locked_memberships if membership.eligible
+    ]
+    listings = {
+        listing.pk: listing
+        for listing in Listing.objects.select_for_update(of=("self",))
+        .select_related("security__company")
+        .filter(pk__in=eligible_ids)
+        .order_by("pk")
+    }
+    securities = list(
+        Security.objects.select_for_update(of=("self",))
+        .filter(pk__in={listing.security_id for listing in listings.values()})
+        .order_by("pk")
+    )
+    companies = list(
+        Company.objects.select_for_update(of=("self",))
+        .filter(pk__in={security.company_id for security in securities})
+        .order_by("pk")
+    )
+    if (
+        set(listings) != set(eligible_ids)
+        or len(securities) != len({listing.security_id for listing in listings.values()})
+        or len(companies) != len({security.company_id for security in securities})
+    ):
+        raise ValueError("us-sec-long-v4 listing/security/company authority is incomplete")
+    eligible: list[UniverseMembership] = []
+    for membership in locked_memberships:
+        if membership.eligible:
+            membership.listing = listings[membership.listing_id]
+            eligible.append(membership)
+    return locked, eligible
 
 
 @dataclass(frozen=True, slots=True)
@@ -1593,7 +1793,7 @@ def _persist_listing_analysis(
     config_hash_value: str,
     code_revision_value: str,
     advisory_context: AdvisoryForecastContext | None = None,
-    long_context: LongForecastContext | None = None,
+    long_context: LongForecastContext | LongForecastV4Context | None = None,
 ) -> PersistedAnalysis:
     if run.issued_on_time:
         _validate_on_time_source_assets(computation.source_assets, data_cutoff=data_cutoff)
@@ -1608,7 +1808,10 @@ def _persist_listing_analysis(
         listing,
         computation,
         advisory_forecasts=advisory_forecasts,
-        long_forecasts=long_forecasts,
+        long_forecasts=cast(
+            dict[str, LongForecast | LongForecastV4],
+            long_forecasts,
+        ),
     )
     decision_predictions = append_predictions(
         analysis=analysis,
@@ -1623,10 +1826,22 @@ def _persist_listing_analysis(
         code_revision_value=code_revision_value,
     )
     long_predictions: tuple[Prediction, ...] = ()
-    if long_context is not None:
+    if isinstance(long_context, LongForecastV4Context):
+        long_predictions = append_long_v4_advisory_predictions(
+            analysis=analysis,
+            forecasts=cast(dict[str, LongForecastV4], long_forecasts),
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            issued_on_time=run.issued_on_time,
+            model_version=long_context.model_version,
+            config_hash_value=long_context.config_hash,
+            code_revision_value=code_revision_value,
+            store=long_context.store,
+        )
+    elif long_context is not None:
         long_predictions = append_long_advisory_predictions(
             analysis=analysis,
-            forecasts=long_forecasts,
+            forecasts=cast(dict[str, LongForecast], long_forecasts),
             generated_at=generated_at,
             data_cutoff=data_cutoff,
             issued_on_time=run.issued_on_time,
@@ -2044,6 +2259,19 @@ def analyze_snapshot(
     if long_forecast_requested is not None and not isinstance(long_forecast_requested, bool):
         raise ValueError("long_forecast_requested must be a boolean")
     logical_target_date = target_date or generated_at.date()
+    explicit_long_config: LongForecastConfig | None = None
+    explicit_v4_config: LongForecastV4Config | None = None
+    if long_forecast_config_path is not None:
+        if (
+            long_forecast_config_path.resolve()
+            == canonical_long_forecast_v4_config_path().resolve()
+        ):
+            explicit_v4_config = load_long_forecast_v4_config(long_forecast_config_path)
+        else:
+            # Explicit schema-2 lookalikes are rejected by the frozen
+            # schema-1 loader here, before any run, analysis, asset, or
+            # provider-derived source read can occur.
+            explicit_long_config = load_long_forecast_config(long_forecast_config_path)
     explicit_v2_config: MediumForecastV2Config | None = None
     explicit_v2_digest: str | None = None
     explicit_medium_config_bytes: bytes | None = None
@@ -2071,6 +2299,17 @@ def analyze_snapshot(
         _validate_snapshot_for_target(universe_snapshot, logical_target_date)
     config = load_scoring_config(config_path)
     digest = config_hash(config)
+    if explicit_v4_config is not None:
+        _validate_v4_request_admission(
+            universe_snapshot=universe_snapshot,
+            target_date=logical_target_date,
+            issued_on_time=issued_on_time,
+            provider=provider,
+            long_forecast_requested=long_forecast_requested,
+            scoring_config=config,
+            scoring_config_hash=digest,
+            v4_config=explicit_v4_config,
+        )
     if explicit_v2_config is not None:
         if config.version != "us-price-baseline-v2":
             raise ValueError("us-price-medium-v2 requires scoring config us-price-baseline-v2")
@@ -2116,9 +2355,13 @@ def analyze_snapshot(
         # after acquiring its canonical authority inside the outer atomic
         # block.
         effective_long_forecast_requested = (
-            ProviderRecord.objects.filter(provider="sec", enabled=True).exists()
-            if long_forecast_requested is None
-            else long_forecast_requested
+            True
+            if explicit_v4_config is not None
+            else (
+                ProviderRecord.objects.filter(provider="sec", enabled=True).exists()
+                if long_forecast_requested is None
+                else long_forecast_requested
+            )
         )
     if explicit_v2_config is None and config.version == V3_VERSION and issued_on_time is not True:
         run_issued_on_time = False
@@ -2146,13 +2389,16 @@ def analyze_snapshot(
             if validated_observed_v3_revision is not None
             else code_revision()
         )
-        asset_store = store or open_asset_store()
-        asof = AsOfData(generated_at, asset_store)
         memberships = list(
             UniverseMembership.objects.select_related(
                 "listing__security__company",
             ).filter(snapshot=universe_snapshot, eligible=True)
         )
+        if explicit_v4_config is not None:
+            _validate_v4_memberships(memberships)
+        else:
+            asset_store = store or open_asset_store()
+            asof = AsOfData(generated_at, asset_store)
         for membership in memberships:
             require_stock_research_listing(
                 membership.listing,
@@ -2182,6 +2428,19 @@ def analyze_snapshot(
                 revision = code_revision()
                 asset_store = store or open_asset_store()
                 asof = AsOfData(generated_at, asset_store)
+            if explicit_v4_config is not None:
+                universe_snapshot, memberships = _lock_v4_snapshot_authority(
+                    universe_snapshot,
+                    target_date=logical_target_date,
+                )
+                _validate_v4_memberships(memberships)
+                asset_store = store or open_asset_store()
+                asof = AsOfData(generated_at, asset_store)
+                validate_long_v4_cohort_mapping_authority(
+                    listings=tuple(membership.listing for membership in memberships),
+                    config=explicit_v4_config,
+                    asof=asof,
+                )
             assert memberships is not None
             assert effective_long_forecast_requested is not None
             assert revision is not None
@@ -2201,7 +2460,7 @@ def analyze_snapshot(
                 v2_authority = replace(v2_authority, run=run)
             model_version = _model_version(config.version, run.id.hex)
             advisory_context: AdvisoryForecastContext | None = None
-            long_context: LongForecastContext | None = None
+            long_context: LongForecastContext | LongForecastV4Context | None = None
             medium_config = (
                 explicit_v2_config
                 if explicit_v2_config is not None
@@ -2277,14 +2536,19 @@ def analyze_snapshot(
                     target_date=logical_target_date,
                 )
                 computations[str(membership.listing.pk)] = computation
-            long_config = load_long_forecast_config(long_forecast_config_path)
-            if (
-                provider == long_config.price_provider == "twelve_data"
+            long_config = (
+                explicit_long_config
+                if explicit_long_config is not None
+                else (None if explicit_v4_config is not None else load_long_forecast_config())
+            )
+            long_lane_active = explicit_v4_config is not None or (
+                long_config is not None
+                and provider == long_config.price_provider == "twelve_data"
                 and long_config.fundamentals_provider == "sec"
                 and config.version in long_config.enabled_scoring_versions
                 and effective_long_forecast_requested
-                and memberships
-            ):
+            )
+            if long_lane_active and memberships:
                 current_prices: dict[str, float] = {}
                 current_price_assets: dict[str, DataAsset] = {}
                 for membership in memberships:
@@ -2296,21 +2560,64 @@ def analyze_snapshot(
                         )
                     current_prices[listing_id] = computation.current_price
                     current_price_assets[listing_id] = computation.price_asset
-                long_digest = long_forecast_config_hash(long_config)
-                long_context = LongForecastContext(
-                    config=long_config,
-                    config_hash=long_digest,
-                    model_version=_model_version(long_config.version, run.id.hex),
-                    forecasts=build_long_forecasts(
+                if explicit_v4_config is not None:
+                    v4_forecasts = build_long_forecasts_v4(
                         listings=[membership.listing for membership in memberships],
                         asof=asof,
                         data_cutoff=data_cutoff,
                         target_date=logical_target_date,
-                        config=long_config,
+                        config=explicit_v4_config,
                         current_prices=current_prices,
                         price_assets=current_price_assets,
-                    ),
-                )
+                    )
+                    for listing_id, computation in tuple(computations.items()):
+                        target_price = v4_forecasts[listing_id]["3y"].calculation.get(
+                            "target_price"
+                        )
+                        price_source = _long_v4_price_source_payload(target_price)
+                        if (
+                            computation.price_asset is None
+                            or str(computation.price_asset.pk)
+                            != price_source["normalized_asset_id"]
+                            or Decimal(str(computation.current_price))
+                            != Decimal(price_source["valuation_value"])
+                        ):
+                            raise ValueError(
+                                "us-sec-long-v4 canonical calculation price disagrees "
+                                "with the analysis input"
+                            )
+                        computations[listing_id] = replace(
+                            computation,
+                            current_price=float(canonical_long_v4_price(price_source["value"])),
+                            data_quality={
+                                **computation.data_quality,
+                                "price_source": price_source,
+                            },
+                        )
+                    long_context = LongForecastV4Context(
+                        config=explicit_v4_config,
+                        config_hash=LONG_V4_EFFECTIVE_CONFIG_HASH,
+                        model_version=_model_version(LONG_V4_VERSION, run.id.hex),
+                        forecasts=v4_forecasts,
+                        store=asset_store,
+                    )
+                else:
+                    assert long_config is not None
+                    long_digest = long_forecast_config_hash(long_config)
+                    long_context = LongForecastContext(
+                        config=long_config,
+                        config_hash=long_digest,
+                        model_version=_model_version(long_config.version, run.id.hex),
+                        forecasts=build_long_forecasts(
+                            listings=[membership.listing for membership in memberships],
+                            asof=asof,
+                            data_cutoff=data_cutoff,
+                            target_date=logical_target_date,
+                            config=long_config,
+                            current_prices=current_prices,
+                            price_assets=current_price_assets,
+                        ),
+                    )
             plan = build_output_plan(
                 eligible_listing_ids={membership.listing.pk for membership in memberships},
                 decision_horizons=frozenset(config.supported_horizons),
@@ -2712,13 +3019,386 @@ def append_long_advisory_predictions(
     )
 
 
+def _long_v4_price_source_payload(raw_price: object) -> dict[str, str]:
+    if not isinstance(raw_price, Mapping):
+        raise ValueError("us-sec-long-v4 canonical target price is malformed")
+    normalized = raw_price.get("normalized_asset")
+    raw = raw_price.get("raw_asset")
+    if not isinstance(normalized, Mapping) or not isinstance(raw, Mapping):
+        raise ValueError("us-sec-long-v4 canonical price source closure is malformed")
+    required_text = {
+        "listing_id": raw_price.get("listing_id"),
+        "provider": raw_price.get("provider"),
+        "subject": raw_price.get("subject"),
+        "exchange_mic": raw_price.get("exchange_mic"),
+        "session_date": raw_price.get("session_date"),
+        "value": raw_price.get("value"),
+        "ledger_value": raw_price.get("ledger_value"),
+        "valuation_value": raw_price.get("valuation_value"),
+        "valuation_source": raw_price.get("valuation_source"),
+        "native_price": raw_price.get("native_price"),
+        "currency": raw_price.get("currency"),
+        "normalized_asset_id": normalized.get("id"),
+        "normalized_asset_sha256": normalized.get("sha256"),
+        "raw_asset_id": raw.get("id"),
+        "raw_asset_sha256": raw.get("sha256"),
+    }
+    if any(not isinstance(value, str) or not value for value in required_text.values()):
+        raise ValueError("us-sec-long-v4 canonical price identity is incomplete")
+    serialized_price = cast(str, required_text["value"])
+    valuation_text = cast(str, required_text["valuation_value"])
+    try:
+        valuation_value = Decimal(valuation_text)
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("us-sec-long-v4 valuation price serialization is malformed") from None
+    if (
+        serialized_price != format(canonical_long_v4_price(serialized_price), ".6f")
+        or required_text["ledger_value"] != serialized_price
+        or not valuation_value.is_finite()
+        or valuation_value <= 0
+        or valuation_text != format(valuation_value, "f")
+        or canonical_long_v4_price(valuation_value) != Decimal(serialized_price)
+        or required_text["valuation_source"] != "normalized_parquet_target_close"
+        or required_text["native_price"] != valuation_text
+    ):
+        raise ValueError("us-sec-long-v4 canonical price serialization is malformed")
+    if (
+        raw_price.get("normalized_asset_id") != required_text["normalized_asset_id"]
+        or raw_price.get("normalized_asset_sha256") != required_text["normalized_asset_sha256"]
+        or raw_price.get("raw_asset_id") != required_text["raw_asset_id"]
+        or raw_price.get("raw_asset_sha256") != required_text["raw_asset_sha256"]
+    ):
+        raise ValueError("us-sec-long-v4 canonical price asset identities disagree")
+    return {
+        **cast(dict[str, str], required_text),
+        # Preserve the established generic key while binding its checksum
+        # and the independently verified raw-normalized closure beside it.
+        "asset_id": cast(str, required_text["normalized_asset_id"]),
+        "asset_sha256": cast(str, required_text["normalized_asset_sha256"]),
+    }
+
+
+def append_long_v4_advisory_predictions(
+    *,
+    analysis: StockAnalysis,
+    forecasts: dict[str, LongForecastV4],
+    generated_at: datetime,
+    data_cutoff: datetime,
+    issued_on_time: bool,
+    model_version: str,
+    config_hash_value: str,
+    code_revision_value: str,
+    store: AssetStore | None = None,
+) -> tuple[Prediction, ...]:
+    """Atomically validate and append the inseparable research-only v4 pair."""
+    if issued_on_time is not False:
+        raise ValueError("us-sec-long-v4 predictions must be research-only and late")
+    if config_hash_value != LONG_V4_EFFECTIVE_CONFIG_HASH:
+        raise ValueError("us-sec-long-v4 prediction config hash is not reviewed")
+    if not model_version.startswith(f"{LONG_V4_VERSION}-"):
+        raise ValueError("us-sec-long-v4 prediction version has the wrong method prefix")
+    with transaction.atomic():
+        validate_long_v4_forecast_pair(
+            forecasts,
+            config_hash=config_hash_value,
+        )
+        locked_analysis, parent_authority = _lock_long_v4_prediction_authority(
+            analysis,
+            generated_at=generated_at,
+            data_cutoff=data_cutoff,
+            code_revision_value=code_revision_value,
+        )
+        canonical_assets, canonical_target_price = validate_long_v4_evidence_authority(
+            calculation=forecasts["3y"].calculation,
+            source_assets=forecasts["3y"].source_assets,
+            target_listing=locked_analysis.listing,
+            universe_snapshot=parent_authority.snapshot,
+            eligible_memberships=parent_authority.memberships,
+            target_date=locked_analysis.run.target_date,
+            data_cutoff=data_cutoff,
+            decision_time=generated_at,
+            store=store,
+        )
+        for horizon in (
+            Prediction.Horizon.THREE_YEAR.value,
+            Prediction.Horizon.FIVE_YEAR.value,
+        ):
+            expected_scenario = {
+                **forecasts[horizon].scenario_payload(),
+                "evidence_grade": UniverseSnapshot.Grade.RESEARCH,
+            }
+            if locked_analysis.scenario_for_horizon(horizon) != expected_scenario:
+                raise ValueError(
+                    "us-sec-long-v4 StockAnalysis scenario does not match the frozen pair"
+                )
+        prediction_kwargs = tuple(
+            _long_v4_prediction_kwargs(
+                analysis=locked_analysis,
+                horizon=Prediction.Horizon(horizon),
+                forecast=forecasts[horizon],
+                canonical_assets=canonical_assets,
+                canonical_target_price=canonical_target_price,
+                generated_at=generated_at,
+                data_cutoff=data_cutoff,
+                model_version=model_version,
+                config_hash_value=config_hash_value,
+                code_revision_value=code_revision_value,
+            )
+            for horizon in (
+                Prediction.Horizon.THREE_YEAR.value,
+                Prediction.Horizon.FIVE_YEAR.value,
+            )
+        )
+        _validate_long_v4_prediction_kwargs_pair(
+            prediction_kwargs,
+            forecasts=forecasts,
+            canonical_target_price=canonical_target_price,
+            canonical_assets=canonical_assets,
+        )
+        # Both kwargs documents and the complete authority closure are
+        # validated before the first immutable row is inserted. The local
+        # atomic block is a savepoint when called by analyze_snapshot.
+        return tuple(Prediction.objects.create(**kwargs) for kwargs in prediction_kwargs)
+
+
+def _lock_long_v4_prediction_authority(
+    analysis: StockAnalysis,
+    *,
+    generated_at: datetime,
+    data_cutoff: datetime,
+    code_revision_value: str,
+) -> tuple[StockAnalysis, _LockedMediumV2Authority]:
+    if analysis.pk is None:
+        raise ValueError("us-sec-long-v4 analysis authority is missing")
+    authority = _lock_advisory_authority((analysis,), lock_companies=True)
+    if len(authority.analyses) != 1:
+        raise ValueError("us-sec-long-v4 parent authority could not be resolved")
+    locked_analysis = authority.analyses[0]
+    run = locked_analysis.run
+    listing = locked_analysis.listing
+    parent = authority.panels_by_run.get(run.pk)
+    if parent is None:
+        raise ValueError("us-sec-long-v4 parent authority could not be resolved")
+    snapshot = parent.snapshot
+    security = listing.security
+    supplied_fields = tuple(
+        field.attname for field in StockAnalysis._meta.concrete_fields if not field.primary_key
+    )
+    if (
+        tuple(getattr(analysis, field) for field in supplied_fields)
+        != tuple(getattr(locked_analysis, field) for field in supplied_fields)
+        or snapshot.grade != UniverseSnapshot.Grade.RESEARCH
+        or snapshot.as_of_date != run.target_date
+        or run.issued_on_time
+        or run.generated_at != generated_at
+        or run.data_cutoff != data_cutoff
+        or run.config_version != "us-price-baseline-v2"
+        or run.config_hash != _MEDIUM_V2_SCORING_HASH
+        or run.code_revision != code_revision_value
+        or not parent.memberships
+        or not any(membership.listing_id == listing.pk for membership in parent.memberships)
+        or {membership.listing_id for membership in parent.memberships}
+        != {item.pk for item in parent.listings}
+        or not listing.is_active
+        or listing.region != Region.US
+        or listing.currency != "USD"
+        or security.security_type
+        not in (
+            Security.SecurityType.COMMON_STOCK,
+            Security.SecurityType.ADR,
+        )
+    ):
+        raise ValueError("us-sec-long-v4 parent authority is incompatible")
+    if any(
+        membership.snapshot_id != snapshot.pk
+        or not membership.eligible
+        or membership.listing_id != membership.listing.pk
+        or membership.listing.security.company.pk is None
+        for membership in parent.memberships
+    ):
+        raise ValueError("us-sec-long-v4 complete locked parent closure is incompatible")
+    return locked_analysis, parent
+
+
+def _long_v4_prediction_kwargs(
+    *,
+    analysis: StockAnalysis,
+    horizon: Prediction.Horizon,
+    forecast: LongForecastV4,
+    canonical_assets: tuple[DataAsset, ...],
+    canonical_target_price: dict[str, Any],
+    generated_at: datetime,
+    data_cutoff: datetime,
+    model_version: str,
+    config_hash_value: str,
+    code_revision_value: str,
+) -> dict[str, Any]:
+    source_assets = [_asset_payload(asset) for asset in canonical_assets]
+    price_source = _long_v4_price_source_payload(canonical_target_price)
+    price_provider = price_source["provider"]
+    price_subject = price_source["subject"]
+    price = canonical_long_v4_price(price_source["value"])
+    if (
+        price_provider != "twelve_data"
+        or price_source["listing_id"] != str(analysis.listing_id)
+        or price_subject != analysis.listing.provider_symbol
+        or price_source["exchange_mic"] != analysis.listing.exchange_mic
+        or price_source["currency"] != analysis.listing.currency
+        or price_source["session_date"] != analysis.run.target_date.isoformat()
+        or analysis.current_price != price
+        or analysis.data_quality.get("price_source") != price_source
+        or forecast.calculation.get("target_price") != canonical_target_price
+    ):
+        raise ValueError("us-sec-long-v4 canonical target price authority is inconsistent")
+    calculation = {
+        **forecast.calculation,
+        "prediction_version": model_version,
+        "price_subject": price_subject,
+        "evidence_grade": UniverseSnapshot.Grade.RESEARCH,
+    }
+    scenario = forecast.scenario
+    return {
+        "analysis": analysis,
+        "listing": analysis.listing,
+        "generated_at": generated_at,
+        "target_date": analysis.run.target_date,
+        "issued_on_time": False,
+        "horizon": horizon,
+        "evidence_role": Prediction.EvidenceRole.ADVISORY,
+        "evidence_grade": UniverseSnapshot.Grade.RESEARCH,
+        "source_mode": source_data_mode({"source_assets": source_assets}),
+        "price_provider": price_provider,
+        "price_subject": price_subject,
+        "price_at_prediction": price,
+        "bear_return": _optional_decimal(scenario.bear, places=4),
+        "base_return": _optional_decimal(scenario.base, places=4),
+        "bull_return": _optional_decimal(scenario.bull, places=4),
+        "probability_positive": None,
+        "confidence": _decimal(0.0, places=2),
+        "confidence_status": scenario.confidence_status,
+        "insufficiency_reason": scenario.insufficiency_reason,
+        "recommendation": analysis.recommendation,
+        "overall_score": analysis.overall_score,
+        "component_scores": analysis.component_scores,
+        "model_version": model_version,
+        "method_version": LONG_V4_VERSION,
+        "config_hash": config_hash_value,
+        "data_cutoff": data_cutoff,
+        "source_assets": source_assets,
+        "calculation": calculation,
+        "code_revision": code_revision_value,
+    }
+
+
+def _validate_long_v4_prediction_kwargs_pair(
+    prediction_kwargs: tuple[dict[str, Any], ...],
+    *,
+    forecasts: dict[str, LongForecastV4],
+    canonical_target_price: dict[str, Any],
+    canonical_assets: tuple[DataAsset, ...],
+) -> None:
+    if len(prediction_kwargs) != 2:
+        raise ValueError("us-sec-long-v4 requires exactly two prediction documents")
+    expected_price = canonical_long_v4_price(
+        _long_v4_price_source_payload(canonical_target_price)["value"]
+    )
+    expected_source_ids = [str(asset.pk) for asset in canonical_assets]
+    common_identity: tuple[Any, ...] | None = None
+    seen_horizons: set[str] = set()
+    for kwargs in prediction_kwargs:
+        horizon = str(kwargs.get("horizon"))
+        seen_horizons.add(horizon)
+        sources = kwargs.get("source_assets")
+        if not isinstance(sources, list):
+            raise ValueError("us-sec-long-v4 prediction source closure is malformed")
+        source_ids = [item.get("id") for item in sources if isinstance(item, Mapping)]
+        calculation = kwargs.get("calculation")
+        expected_forecast = forecasts.get(horizon)
+        expected_calculation = (
+            {
+                **expected_forecast.calculation,
+                "prediction_version": kwargs.get("model_version"),
+                "price_subject": canonical_target_price.get("subject"),
+                "evidence_grade": UniverseSnapshot.Grade.RESEARCH,
+            }
+            if expected_forecast is not None
+            else None
+        )
+        if (
+            len(source_ids) != len(sources)
+            or source_ids != expected_source_ids
+            or kwargs.get("price_at_prediction") != expected_price
+            or kwargs.get("price_provider") != canonical_target_price.get("provider")
+            or kwargs.get("price_subject") != canonical_target_price.get("subject")
+            or not isinstance(calculation, Mapping)
+            or calculation.get("target_price") != canonical_target_price
+            or calculation != expected_calculation
+            or kwargs.get("bear_return")
+            != _optional_decimal(
+                expected_forecast.scenario.bear if expected_forecast is not None else None,
+                places=4,
+            )
+            or kwargs.get("base_return")
+            != _optional_decimal(
+                expected_forecast.scenario.base if expected_forecast is not None else None,
+                places=4,
+            )
+            or kwargs.get("bull_return")
+            != _optional_decimal(
+                expected_forecast.scenario.bull if expected_forecast is not None else None,
+                places=4,
+            )
+            or kwargs.get("probability_positive") is not None
+            or kwargs.get("confidence") != Decimal("0.00")
+            or kwargs.get("confidence_status")
+            != (
+                expected_forecast.scenario.confidence_status
+                if expected_forecast is not None
+                else None
+            )
+        ):
+            raise ValueError("us-sec-long-v4 prediction price/source identity is inconsistent")
+        identity = (
+            kwargs.get("analysis"),
+            kwargs.get("listing"),
+            kwargs.get("generated_at"),
+            kwargs.get("target_date"),
+            kwargs.get("issued_on_time"),
+            kwargs.get("evidence_role"),
+            kwargs.get("evidence_grade"),
+            kwargs.get("source_mode"),
+            kwargs.get("price_provider"),
+            kwargs.get("price_subject"),
+            kwargs.get("price_at_prediction"),
+            tuple(
+                (item.get("id"), item.get("sha256"))
+                for item in sources
+                if isinstance(item, Mapping)
+            ),
+            kwargs.get("model_version"),
+            kwargs.get("method_version"),
+            kwargs.get("config_hash"),
+            kwargs.get("data_cutoff"),
+            kwargs.get("code_revision"),
+        )
+        if common_identity is None:
+            common_identity = identity
+        elif identity != common_identity:
+            raise ValueError("us-sec-long-v4 prediction pair identities differ")
+    if seen_horizons != {
+        Prediction.Horizon.THREE_YEAR.value,
+        Prediction.Horizon.FIVE_YEAR.value,
+    }:
+        raise ValueError("us-sec-long-v4 prediction horizons are incomplete")
+
+
 def _create_stock_analysis(
     run: AnalysisRun,
     listing: Listing,
     computation: AnalysisComputation,
     *,
     advisory_forecasts: dict[str, MediumForecast] | None = None,
-    long_forecasts: dict[str, LongForecast] | None = None,
+    long_forecasts: dict[str, LongForecast | LongForecastV4] | None = None,
 ) -> StockAnalysis:
     supported_horizons = {str(value) for value in computation.data_quality["supported_horizons"]}
     scenario_payloads = {
@@ -2739,10 +3419,17 @@ def _create_stock_analysis(
             for horizon, forecast in (long_forecasts or {}).items()
         }
     )
+    v4_price = any(
+        isinstance(forecast, LongForecastV4) for forecast in (long_forecasts or {}).values()
+    )
     return StockAnalysis.objects.create(
         run=run,
         listing=listing,
-        current_price=_decimal(computation.current_price, places=6),
+        current_price=(
+            canonical_long_v4_price(computation.current_price)
+            if v4_price
+            else _decimal(computation.current_price, places=6)
+        ),
         daily_change=_optional_decimal(computation.daily_change, places=6),
         overall_score=_decimal(computation.aggregate.overall, places=2),
         recommendation=computation.recommendation,
