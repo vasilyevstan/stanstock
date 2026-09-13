@@ -9,7 +9,7 @@
       <p class="eyebrow">Separated evidence lanes</p>
       <h1>Research performance</h1>
       <p class="lede">
-        Current observed outcome cohorts remain separate from registered
+        Owner-authorized observed outcome cohorts remain separate from registered
         current-universe/current-vintage retrospective comparisons. Neither
         section is pooled into one unlabeled “accuracy” number.
       </p>
@@ -17,11 +17,11 @@
   </section>
 
   <section class="panel">
-    <p class="eyebrow">Current observed outcome cohorts</p>
-    <h2>Active issuance ledgers</h2>
-    {% if not product.available %}
+    <p class="eyebrow">Observed product outcome cohorts</p>
+    <h2>Authorized issuance history</h2>
+    {% if not history.available %}
       <div class="error-box" role="alert">
-        <strong>Active performance unavailable.</strong> {{ product.message }}
+        <strong>Observed performance unavailable.</strong> {{ history.message }}
       </div>
     {% else %}
       <div class="notice">
@@ -33,7 +33,7 @@
       </div>
       {% if not has_matured %}
         <p class="empty-state">
-          No canonical observed active-product outcome has matured yet. The
+          No canonical observed product outcome has matured yet. The
           projections remain conditional model outputs; absence of a matured
           outcome does not turn them into an “insufficient evidence” range.
         </p>
@@ -87,6 +87,7 @@
       </p>
       <p>
         <strong>Source run captured:</strong> {{ registered_study.source_generated_at }}
+        · <strong>source run:</strong> <code>{{ registered_study.source_run_id }}</code>
         · <strong>report generated:</strong> {{ registered_study.report_generated_at }}
         · <strong>protocol:</strong> <code>{{ registered_study.evidence_label }}</code>
       </p>

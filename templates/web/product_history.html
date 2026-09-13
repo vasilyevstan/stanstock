@@ -6,18 +6,20 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Append-only active evidence</p>
+      <p class="eyebrow">Append-only product evidence</p>
       <h1>Research product ledger</h1>
       <p class="lede">
         The six-month momentum decision and four FHS advisory horizons remain
         separate immutable evidence roles. Reissues have unique issuance
-        versions while retaining stable method identities.
+        versions while retaining stable method identities. Every row keeps its
+        recorded target, generation time, and source-run identity; an older row
+        is historical evidence, not a current signal.
       </p>
     </div>
   </section>
 
-  {% if not product.available %}
-    <div class="error-box" role="alert"><strong>Active ledger unavailable.</strong> {{ product.message }}</div>
+  {% if not history.available %}
+    <div class="error-box" role="alert"><strong>Product ledger unavailable.</strong> {{ history.message }}</div>
   {% else %}
     <section aria-labelledby="decision-ledger">
       <div class="section-heading">
@@ -32,6 +34,7 @@
             <tr>
               <th scope="col">Stock</th>
               <th scope="col">Target</th>
+              <th scope="col">Generated / source run</th>
               <th scope="col">Direction</th>
               <th scope="col">Suggestion</th>
               <th scope="col">Grade / provider</th>
@@ -44,6 +47,10 @@
               <tr>
                 <th scope="row"><a href="{% url 'stock-detail' card.analysis.listing_id %}">{{ card.listing.ticker }}</a></th>
                 <td>{{ card.decision_prediction.target_date }}</td>
+                <td>
+                  {{ card.decision_prediction.generated_at }}
+                  <small><code>{{ card.analysis.run_id }}</code></small>
+                </td>
                 <td>{{ card.direction|display_label }}</td>
                 <td>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</td>
                 <td>{{ card.decision_prediction.evidence_grade|display_label }} · {{ card.decision_prediction.price_provider|display_label }}</td>
@@ -72,33 +79,63 @@
           <thead>
             <tr>
               <th scope="col">Stock</th>
+              <th scope="col">Target</th>
+              <th scope="col">Generated / source run</th>
               <th scope="col">Horizon</th>
               <th scope="col">Lower (p20)</th>
               <th scope="col">Median (p50)</th>
               <th scope="col">Upper (p80)</th>
+              <th scope="col">Method / issuance</th>
               <th scope="col">Evidence state</th>
+              <th scope="col">Outcome</th>
             </tr>
           </thead>
           <tbody>
-            {% for card, projection in advisory_rows %}
+            {% for card, prediction, projection in advisory_rows %}
               <tr>
                 <th scope="row">{{ card.listing.ticker }}</th>
+                <td>{{ prediction.target_date }}</td>
+                <td>
+                  {{ prediction.generated_at }}
+                  <small><code>{{ card.analysis.run_id }}</code></small>
+                </td>
                 <td>{{ projection.label }}</td>
                 {% if projection.available %}
                   <td>{{ projection.lower_return|percentage }}</td>
                   <td>{{ projection.median_return|percentage }}</td>
                   <td>{{ projection.upper_return|percentage }}</td>
-                  <td>Recorded advisory · skill not established</td>
                 {% else %}
                   <td colspan="3">Withheld</td>
-                  <td>{{ projection.insufficiency_reason|display_label }}</td>
                 {% endif %}
+                <td>{{ prediction.method_version }}<small>{{ prediction.model_version }}</small></td>
+                <td>
+                  {% if projection.available %}
+                    Recorded advisory · skill not established
+                  {% else %}
+                    {{ projection.insufficiency_reason|display_label }}
+                  {% endif %}
+                </td>
+                <td>{% if prediction.outcome %}{{ prediction.outcome.get_status_display }}{% else %}Not matured{% endif %}</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
     </section>
+
+    {% if cohort_page.paginator.num_pages > 1 %}
+      <nav class="pagination" aria-label="Research product ledger pages">
+        {% if cohort_page.has_previous %}
+          <a href="?page={{ cohort_page.previous_page_number }}">Previous</a>
+        {% endif %}
+        <span>
+          Run page {{ cohort_page.number }} of {{ cohort_page.paginator.num_pages }}
+        </span>
+        {% if cohort_page.has_next %}
+          <a href="?page={{ cohort_page.next_page_number }}">Next</a>
+        {% endif %}
+      </nav>
+    {% endif %}
   {% endif %}
   <p><a href="{% url 'archive-predictions' %}">Open the archived prediction ledger</a> with its original horizon meanings.</p>
 {% endblock %}

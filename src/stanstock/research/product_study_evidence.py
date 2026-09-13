@@ -23,6 +23,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
@@ -53,6 +54,7 @@ from stanstock.research.price_product_study import (
     study_price_product_run,
 )
 from stanstock.research.product_pipeline import verify_price_product_output
+from stanstock.research.product_reader import ProductVerificationSession
 
 STUDY_EVIDENCE_KIND = "research_product_study_evidence"
 STUDY_EVIDENCE_CONTRACT = "research-product-study-evidence@1"
@@ -141,6 +143,7 @@ class ProductStudyRead:
     status: StudyReadStatus
     message: str
     source_target_date: date | None = None
+    source_run_id: UUID | None = None
     source_generated_at: datetime | None = None
     report_generated_at: datetime | None = None
     source_snapshot_grade: str = ""
@@ -176,7 +179,7 @@ class _VerifiedStudyIdentity:
 
     @property
     def subject(self) -> str:
-        return _study_subject(self.owner_id)
+        return _study_subject(self.owner_id, self.source_run.id)
 
 
 def register_price_product_study(*, run: AnalysisRun, store: AssetStore) -> DataAsset:
@@ -199,6 +202,7 @@ def register_price_product_study(*, run: AnalysisRun, store: AssetStore) -> Data
             store=store,
             expected_owner=str(asset.metadata["owner_id"]),
             expected_provider=str(asset.metadata["source_provider"]),
+            expected_source_run=run,
         )
         return asset
     report = study_price_product_run(
@@ -210,11 +214,12 @@ def register_price_product_study(*, run: AnalysisRun, store: AssetStore) -> Data
 def _register_price_product_study(*, report: Mapping[str, Any], store: AssetStore) -> DataAsset:
     """Persist one canonical, all-selected retrospective report privately.
 
-    The logical identity is stable on product version, source owner, and the
-    required ``all_selected`` study scope. A second identical study replay
-    returns the existing immutable evidence even when only
-    ``report_generated_at`` changed. A conflicting replay under the same
-    logical identity fails explicitly instead of replacing history.
+    The logical identity is stable on product version, source owner, source
+    run, and the required ``all_selected`` study scope. A second identical
+    study replay returns the existing immutable evidence even when only
+    ``report_generated_at`` changed. A genuine new source run appends a new
+    immutable asset, while a conflicting replay for the same source run fails
+    explicitly instead of replacing history.
     """
 
     document = serialize_price_product_study(report, include_generated_at=True)
@@ -253,13 +258,13 @@ def _register_price_product_study(*, report: Mapping[str, Any], store: AssetStor
         if existing_logical_sha256 == logical_sha256:
             return existing_asset
         raise ValueError(
-            "Registered price-product study evidence already exists for this owner and "
-            "all-selected scope with different content"
+            "Registered price-product study evidence already exists for this owner, "
+            "source run, and all-selected scope with different content"
         )
 
     relative_path = (
         f"research/studies/{PRODUCT_VERSION}/{verified.owner_id}/"
-        f"{_STUDY_SCOPE}-{logical_sha256[:12]}.json"
+        f"{verified.source_run.id}/{_STUDY_SCOPE}-{logical_sha256[:12]}.json"
     )
     stored = store.write_bytes(relative_path, full_bytes)
     metadata = {
@@ -302,6 +307,7 @@ def read_registered_price_product_study(
     *,
     user: StudyViewer,
     store: AssetStore | None = None,
+    verification: ProductVerificationSession | None = None,
 ) -> ProductStudyRead:
     """Return the exact registered retrospective study visible to ``user``."""
 
@@ -325,14 +331,13 @@ def read_registered_price_product_study(
 
     expected_owner = DEMO_OWNER_ID if settings.DEMO_MODE else str(user.pk)
     expected_provider = "synthetic_demo" if settings.DEMO_MODE else TWELVE_DATA_PROVIDER
-    assets = list(
-        DataAsset.objects.filter(
-            provider="stanstock",
-            kind=STUDY_EVIDENCE_KIND,
-            subject=_study_subject(expected_owner),
-        ).order_by("-available_at", "-retrieved_at", "-id")
+    assets = DataAsset.objects.filter(
+        provider="stanstock",
+        kind=STUDY_EVIDENCE_KIND,
+        subject__startswith=_study_subject_prefix(expected_owner),
     )
-    if not assets:
+    asset = assets.order_by("-available_at", "-retrieved_at", "-id").first()
+    if asset is None:
         return ProductStudyRead(
             status="absent",
             message=(
@@ -340,7 +345,17 @@ def read_registered_price_product_study(
                 "Forecasting skill is not established."
             ),
         )
-    if len(assets) != 1:
+    duplicate_identity = (
+        assets.values("subject")
+        .annotate(asset_count=Count("id"))
+        .filter(asset_count__gt=1)
+        .exists()
+        or assets.values("metadata__source_run_id")
+        .annotate(asset_count=Count("id"))
+        .filter(asset_count__gt=1)
+        .exists()
+    )
+    if duplicate_identity:
         return ProductStudyRead(
             status="integrity_failed",
             message=(
@@ -350,13 +365,14 @@ def read_registered_price_product_study(
             verification_code="product_study_registry_ambiguous",
         )
     try:
-        document = _read_registered_document(asset=assets[0], store=asset_store)
+        document = _read_registered_document(asset=asset, store=asset_store)
         verified = _verify_registered_asset(
-            asset=assets[0],
+            asset=asset,
             document=document,
             store=asset_store,
             expected_owner=expected_owner,
             expected_provider=expected_provider,
+            verification=verification,
         )
         return _build_study_read(document=document, verified=verified)
     except ProviderConfigurationError:
@@ -442,6 +458,7 @@ def _build_study_read(
         status="available",
         message="Registered retrospective evidence verified.",
         source_target_date=verified.source_target_date,
+        source_run_id=verified.source_run.id,
         source_generated_at=verified.source_run.generated_at,
         report_generated_at=verified.report_generated_at,
         source_snapshot_grade=verified.source_snapshot_grade,
@@ -515,6 +532,8 @@ def _verify_registered_asset(
     store: AssetStore,
     expected_owner: str,
     expected_provider: str,
+    expected_source_run: AnalysisRun | None = None,
+    verification: ProductVerificationSession | None = None,
 ) -> _VerifiedStudyIdentity:
     if asset.provider != "stanstock" or asset.kind != STUDY_EVIDENCE_KIND:
         raise ValueError("Registered price-product study asset has the wrong identity")
@@ -547,7 +566,6 @@ def _verify_registered_asset(
         or metadata.get("scope") != _STUDY_SCOPE
         or metadata.get("owner_id") != expected_owner
         or metadata.get("source_provider") != expected_provider
-        or asset.subject != _study_subject(expected_owner)
     ):
         raise ValueError("Registered price-product study metadata identity is invalid")
 
@@ -556,6 +574,7 @@ def _verify_registered_asset(
         store=store,
         expected_owner=expected_owner,
         expected_provider=expected_provider,
+        verification=verification,
     )
     if not (
         verified.report_generated_at <= asset.retrieved_at <= timezone.now()
@@ -579,8 +598,11 @@ def _verify_registered_asset(
         or metadata.get("studied_listing_count") != verified.studied_listing_count
         or metadata.get("source_run_listing_count") != verified.source_run_listing_count
         or metadata.get("intake_asset") != verified.intake_ref
+        or asset.subject != _study_subject(expected_owner, verified.source_run.id)
     ):
         raise ValueError("Registered price-product study metadata diverges from its payload")
+    if expected_source_run is not None and verified.source_run.id != expected_source_run.id:
+        raise ValueError("Registered price-product study source run does not match the request")
     return verified
 
 
@@ -590,6 +612,7 @@ def _verify_study_document(
     store: AssetStore,
     expected_owner: str | None = None,
     expected_provider: str | None = None,
+    verification: ProductVerificationSession | None = None,
 ) -> _VerifiedStudyIdentity:
     if document.get("schema") != REPLAY_STUDY_SCHEMA:
         raise ValueError("Price-product study schema is invalid")
@@ -626,7 +649,10 @@ def _verify_study_document(
         or source_run.config_hash != PRODUCT_EFFECTIVE_CONFIG_HASH
     ):
         raise ValueError("Price-product study source run config is invalid")
-    verify_price_product_output(run=source_run, store=store, replay=False)
+    if verification is None:
+        verify_price_product_output(run=source_run, store=store, replay=False)
+    else:
+        verification.verify(run=source_run, store=store)
 
     membership = product_membership_payload(source_run.universe_snapshot, store=store)
     source_decision_time = _parse_aware_datetime(
@@ -786,10 +812,14 @@ def _source_run_document(run: AnalysisRun) -> dict[str, object]:
     }
 
 
-def _study_subject(owner_id: str) -> str:
+def _study_subject_prefix(owner_id: str) -> str:
     if not owner_id or ":" in owner_id or len(owner_id) > 36:
         raise ValueError("Price-product study owner identity is invalid")
-    return f"{PRODUCT_VERSION}:{owner_id}:{_STUDY_SCOPE}"
+    return f"{PRODUCT_VERSION}:{owner_id}:{_STUDY_SCOPE}:"
+
+
+def _study_subject(owner_id: str, source_run_id: UUID) -> str:
+    return f"{_study_subject_prefix(owner_id)}{source_run_id}"
 
 
 def _canonical_json_bytes(document: Mapping[str, Any] | dict[str, Any]) -> bytes:

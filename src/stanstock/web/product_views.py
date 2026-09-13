@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
 from typing import cast
 from uuid import UUID
 
@@ -11,6 +10,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
+from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -28,11 +28,20 @@ from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
     MOMENTUM_METHOD_VERSION,
 )
-from stanstock.research.product_reader import ProductCard, ProductRead, read_research_product
+from stanstock.research.product_reader import (
+    ProductCard,
+    ProductHistoryRead,
+    ProductRead,
+    ProductVerificationSession,
+    read_research_product,
+    read_research_product_history,
+)
 from stanstock.research.product_study_evidence import read_registered_price_product_study
 from stanstock.research.reporting import canonical_reportable_prediction_filter
 from stanstock.web import views as legacy_views
 from stanstock.web.forms import ResearchProductFilterForm, TrackedSymbolForm
+
+_PERFORMANCE_RUN_BATCH_SIZE = 200
 
 
 def _read(request: HttpRequest) -> ProductRead:
@@ -40,6 +49,22 @@ def _read(request: HttpRequest) -> ProductRead:
     # The runtime context processor consumes this request-scoped result rather
     # than selecting or verifying the run a second time.
     request._stanstock_product_read = result  # type: ignore[attr-defined]
+    return result
+
+
+def _read_history(
+    request: HttpRequest,
+    *,
+    verification: ProductVerificationSession | None = None,
+) -> ProductHistoryRead:
+    result = read_research_product_history(
+        user=cast(User, request.user),
+        verification=verification,
+    )
+    # Historical readers verify the newest run as part of the same complete
+    # owner cohort. Reuse that active projection for the runtime banner rather
+    # than verifying the current run a second time.
+    request._stanstock_product_read = result.current  # type: ignore[attr-defined]
     return result
 
 
@@ -157,16 +182,31 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
         if _has_product_output():
             return archive_prediction_history_page(request)
         return legacy_views.prediction_history_page(request)
-    product = _read(request)
-    decision_cards = list(product.cards)
+    history = _read_history(request)
+    product = history.current
+    cohort_page = Paginator(history.cohorts, 5).get_page(request.GET.get("page"))
+    page_cards = [card for cohort in cohort_page.object_list for card in cohort.cards]
+    decision_cards = page_cards
     advisory_rows = [
-        (card, projection) for card in product.cards for projection in card.projections
+        (
+            card,
+            next(
+                prediction
+                for prediction in card.advisory_predictions
+                if prediction.horizon == projection.horizon
+            ),
+            projection,
+        )
+        for card in page_cards
+        for projection in card.projections
     ]
     return render(
         request,
         "web/product_history.html",
         {
             "product": product,
+            "history": history,
+            "cohort_page": cohort_page,
             "decision_cards": decision_cards,
             "advisory_rows": advisory_rows,
         },
@@ -179,14 +219,48 @@ def performance_page(request: HttpRequest) -> HttpResponse:
         if _has_product_output():
             return archive_performance_page(request)
         return legacy_views.performance_page(request)
-    product = _read(request)
-    registered_study = read_registered_price_product_study(user=cast(User, request.user))
+    verification = ProductVerificationSession()
+    history = _read_history(request, verification=verification)
+    product = history.current
+    registered_study = read_registered_price_product_study(
+        user=cast(User, request.user),
+        verification=verification,
+    )
     decision_groups: list[dict[str, object]] = []
     advisory_groups: list[dict[str, object]] = []
-    if product.available and product.run is not None:
+    if history.available:
+        decision_groups, advisory_groups = _observed_performance_groups(history)
+    return render(
+        request,
+        "web/product_performance.html",
+        {
+            "product": product,
+            "history": history,
+            "registered_study": registered_study,
+            "decision_groups": decision_groups,
+            "advisory_groups": advisory_groups,
+            "has_matured": any(
+                group["status"] == PredictionOutcome.Status.MATURED
+                for group in (*decision_groups, *advisory_groups)
+            ),
+        },
+    )
+
+
+def _observed_performance_groups(
+    history: ProductHistoryRead,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Aggregate all verified runs without an unbounded SQL ``IN`` clause."""
+
+    decision_counts: Counter[str] = Counter()
+    advisory_counts: Counter[tuple[str, str]] = Counter()
+    run_ids = tuple(cohort.run.id for cohort in history.cohorts)
+    for offset in range(0, len(run_ids), _PERFORMANCE_RUN_BATCH_SIZE):
+        run_batch = run_ids[offset : offset + _PERFORMANCE_RUN_BATCH_SIZE]
         base = PredictionOutcome.objects.filter(
-            prediction__analysis__run=product.run,
-        ).filter(canonical_reportable_prediction_filter("prediction__"))
+            canonical_reportable_prediction_filter("prediction__"),
+            prediction__analysis__run_id__in=run_batch,
+        )
         decision_query = (
             base.filter(
                 prediction__method_version=MOMENTUM_METHOD_VERSION,
@@ -196,7 +270,8 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             .annotate(count=Count("prediction"))
             .order_by("status")
         )
-        decision_groups = list(cast(Iterable[dict[str, object]], decision_query))
+        for row in decision_query.iterator(chunk_size=25):
+            decision_counts[str(row["status"])] += int(row["count"])
         advisory_query = (
             base.filter(
                 prediction__method_version=FHS_METHOD_VERSION,
@@ -206,20 +281,20 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             .annotate(count=Count("prediction"))
             .order_by("prediction__horizon", "status")
         )
-        advisory_groups = list(cast(Iterable[dict[str, object]], advisory_query))
-    return render(
-        request,
-        "web/product_performance.html",
-        {
-            "product": product,
-            "registered_study": registered_study,
-            "decision_groups": decision_groups,
-            "advisory_groups": advisory_groups,
-            "has_matured": any(
-                group["status"] == PredictionOutcome.Status.MATURED
-                for group in (*decision_groups, *advisory_groups)
-            ),
-        },
+        for row in advisory_query.iterator(chunk_size=25):
+            advisory_counts[(str(row["prediction__horizon"]), str(row["status"]))] += int(
+                row["count"]
+            )
+    return (
+        [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
+        [
+            {
+                "prediction__horizon": horizon,
+                "status": status,
+                "count": count,
+            }
+            for (horizon, status), count in sorted(advisory_counts.items())
+        ],
     )
 
 

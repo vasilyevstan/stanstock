@@ -186,6 +186,14 @@ original config bytes/hashes, reason wording, payloads, predictions, outcome
 semantics, and archive presentation. The active product never reinterprets
 their historical `medium`/`long` roles or silently selects them as a fallback.
 
+The complete version-specific formulas, eligibility gates, and withholding
+definitions remain available in the
+[archived methodology at the last pre-redesign release](https://github.com/vasilyevstan/stanstock/blob/4e22eb35b09f3c803f4de94c9e9df9e839ab5574/docs/methodology.md).
+That pinned reference covers `us-price-baseline-v1/v2/v3`,
+`us-price-medium-v1/v2`, and `us-sec-long-v1/v2/v3/v4`; it is not the active
+product specification. Historical evidence should be interpreted using its
+recorded version, not the new momentum/FHS rules.
+
 ## Unchanged portfolio and simulation methodology
 
 The price-product redesign does not turn suggestions into orders or change

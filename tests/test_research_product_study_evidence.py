@@ -23,6 +23,7 @@ from stanstock.research.product_study_evidence import (
     STUDY_EVIDENCE_KIND,
     _register_price_product_study,
     read_registered_price_product_study,
+    register_price_product_study,
 )
 from test_research_product_jobs import (
     TARGET,
@@ -146,6 +147,62 @@ def test_register_price_product_study_is_idempotent_without_other_db_mutations(
         "outcomes": PredictionOutcome.objects.count(),
         "assets": DataAsset.objects.count(),
     }
+
+
+def test_source_run_bound_studies_append_select_newest_and_recover_old_without_replay(
+    live_product,
+    django_user_model,
+    monkeypatch,
+) -> None:
+    from stanstock.research import product_study_evidence as evidence
+
+    owner, store, first_run = live_product
+    second_run_at = datetime(2026, 9, 13, 20, tzinfo=UTC)
+    monkeypatch.setattr(timezone, "now", lambda: second_run_at)
+    second_job = execute_daily_research_job(
+        target_date=TARGET,
+        owner=owner,
+        issuance_key="second-study-source-run",
+        issued_on_time=False,
+        store=store,
+        enforce_rate_limit=False,
+    )
+    second_run = AnalysisRun.objects.select_related("universe_snapshot").get(
+        pk=second_job.details["analysis_run_id"]
+    )
+    assert second_run.id != first_run.id
+
+    first_registered_at = datetime(2026, 9, 13, 21, tzinfo=UTC)
+    monkeypatch.setattr(timezone, "now", lambda: first_registered_at)
+    first_asset = register_price_product_study(run=first_run, store=store)
+    second_registered_at = datetime(2026, 9, 13, 22, tzinfo=UTC)
+    monkeypatch.setattr(timezone, "now", lambda: second_registered_at)
+    second_asset = register_price_product_study(run=second_run, store=store)
+
+    assert first_asset.id != second_asset.id
+    assert first_asset.subject != second_asset.subject
+    assert first_asset.subject.endswith(str(first_run.id))
+    assert second_asset.subject.endswith(str(second_run.id))
+    assert DataAsset.objects.filter(kind=STUDY_EVIDENCE_KIND).count() == 2
+
+    no_replay = Mock(side_effect=AssertionError("Old source-run retry must not recompute"))
+    monkeypatch.setattr(evidence, "study_price_product_run", no_replay)
+    old_retry = register_price_product_study(run=first_run, store=store)
+    assert old_retry.id == first_asset.id
+    no_replay.assert_not_called()
+
+    result = read_registered_price_product_study(user=owner, store=store)
+    assert result.status == "available"
+    assert result.source_run_id == second_run.id
+    assert result.source_generated_at == second_run.generated_at
+
+    other = django_user_model.objects.create_user(username="other-study-history-owner")
+    assert read_registered_price_product_study(user=other, store=store).status == "absent"
+
+    store.resolve(second_asset.relative_path).write_bytes(b"corrupt newest study")
+    corrupted = read_registered_price_product_study(user=owner, store=store)
+    assert corrupted.status == "integrity_failed"
+    assert corrupted.source_run_id is None
 
 
 def test_register_price_product_study_requires_all_selected_and_exact_source_identity(
@@ -290,11 +347,21 @@ def test_live_registered_study_is_owner_bound_and_renders_without_get_time_repla
     monkeypatch.setattr(
         "stanstock.research.product_pipeline.calculate_price_product", no_calculation
     )
+    from stanstock.research.product_pipeline import (
+        verify_price_product_output as real_product_verifier,
+    )
+
+    verifier = Mock(wraps=real_product_verifier)
+    monkeypatch.setattr(
+        "stanstock.research.product_reader.verify_price_product_output",
+        verifier,
+    )
 
     client.force_login(owner)
     response = client.get(reverse("performance"))
 
     assert response.status_code == 200
+    assert verifier.call_count == 1
     assert response.context["registered_study"].status == "available"
     assert response.context["registered_study"].source_target_date == TARGET
     content = response.content.decode()

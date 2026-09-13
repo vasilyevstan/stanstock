@@ -100,7 +100,7 @@ The supported macOS LaunchAgent runs at **03:30 local time,
 Tuesday-Saturday**. The reviewed timezone is `Europe/Tallinn`.
 
 ```bash
-.venv/bin/python manage.py launchd_refresh install
+.venv/bin/python manage.py launchd_refresh install --timezone Europe/Tallinn
 .venv/bin/python manage.py launchd_refresh status
 ```
 
@@ -113,6 +113,10 @@ The private scheduler environment must be owner-only and must point the
 scheduler at the same database, asset directory, product setting, owner, and
 configuration as the web service. Keychain fallback is disabled for
 unattended execution.
+Use the ignored project `.env` with owner-only mode `0600`; interactive
+keychain onboarding alone does not configure unattended access. Do not place
+populated secret values in the plist or command arguments. Confirm the
+recorded and machine timezone agree using `launchd_refresh status`.
 
 The research profile uses version-specific parent, daily, and intake jobs:
 
@@ -204,11 +208,15 @@ The CLI is read-only:
 uv run python manage.py replay_price_product \
   --run ANALYSIS_RUN_UUID \
   --all-selected \
-  --format json
+  --format json \
+  --output-file PRIVATE_NEW_REPORT_FILE
 ```
 
 Alternatively select explicit listing UUIDs with `--listing-ids`. Exactly one
 scope is required.
+Replace the output placeholder with a new private path outside the asset
+store. Omitting it prints the report to stdout, which may contain source and
+listing details and must not be copied into public logs or issues.
 
 `--output-file`:
 
@@ -231,7 +239,8 @@ register_price_product_study(run=run, store=store)
 
 The service calculates **all selected listings itself** using the frozen
 protocol and exact immutable source run. It accepts no caller-authored metrics,
-registers one canonical private report, and fails on conflicting evidence.
+registers one canonical private report per source run, and fails on conflicting
+evidence. A new source run appends a report; same-run retry reuses the original.
 The performance page only reads and re-verifies a registered report.
 
 Keep distinct:
@@ -269,6 +278,8 @@ Backups belong outside `STANSTOCK_DATA_DIR` in a private writable
 `STANSTOCK_BACKUP_DIR`. Stop all web/job processes before restore. PostgreSQL
 restore is fail-fast and single-transaction; asset destinations and checksums
 are validated before destructive database work.
+Create and verify a paired private database-and-assets backup before any
+migration or schema change; do not proceed with only a database dump.
 
 Safe rollback:
 

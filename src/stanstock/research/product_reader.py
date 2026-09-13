@@ -10,7 +10,7 @@ legacy score-based analyses.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -177,6 +177,66 @@ class ProductRead:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductCohort:
+    """One completely verified immutable product run for historical display."""
+
+    run: AnalysisRun
+    cards: tuple[ProductCard, ...]
+    admissions: tuple[ProductAdmission, ...]
+    provider: str
+    evidence_grade: str
+    owner_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProductHistoryRead:
+    """All verified owner-authorized product runs plus the active projection.
+
+    ``current`` retains the freshness semantics used by opportunities, detail,
+    and status pages. Historical consumers use ``cohorts`` and the runs'
+    recorded target/generation dates instead of presenting an old run as the
+    current product.
+    """
+
+    status: ReaderStatus
+    message: str
+    current: ProductRead
+    cohorts: tuple[ProductCohort, ...] = ()
+    verification_code: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.status == "available"
+
+
+class ProductVerificationSession:
+    """Request-scoped exact-run verifier memo without a persistent cache."""
+
+    def __init__(self) -> None:
+        self._verified: dict[UUID, tuple[object, ...]] = {}
+
+    def verify(self, *, run: AnalysisRun, store: AssetStore) -> None:
+        fingerprint = (
+            run.generated_at,
+            run.data_cutoff,
+            run.target_date,
+            run.universe_snapshot_id,
+            run.config_version,
+            run.config_hash,
+            run.code_revision,
+            run.status,
+            store.root,
+        )
+        cached = self._verified.get(run.id)
+        if cached is not None:
+            if cached != fingerprint:
+                raise ValueError("A verified product run changed within the request")
+            return
+        verify_price_product_output(run=run, store=store, replay=False)
+        self._verified[run.id] = fingerprint
+
+
+@dataclass(frozen=True, slots=True)
 class _AuthorizedCandidate:
     run: AnalysisRun
     membership: dict[str, object]
@@ -250,9 +310,11 @@ def read_research_product(
     try:
         _require_current_display_authorization(candidate.intake, user=user)
         # This is intentionally the only complete verifier call in this read.
-        verify_price_product_output(run=candidate.run, store=asset_store, replay=False)
-        cards = _build_cards(candidate, store=asset_store)
-        admissions = _build_admissions(candidate)
+        cohort = _verify_candidate(
+            candidate,
+            store=asset_store,
+            verification=ProductVerificationSession(),
+        )
     except RefreshVerificationError as exc:
         return ProductRead(
             status="integrity_failed",
@@ -279,22 +341,212 @@ def read_research_product(
             run=candidate.run,
             verification_code="product_reader_shape_invalid",
         )
+    return _product_read_from_cohort(cohort)
+
+
+def read_research_product_history(
+    *,
+    user: ProductUser,
+    store: AssetStore | None = None,
+    verification: ProductVerificationSession | None = None,
+) -> ProductHistoryRead:
+    """Verify and return every owner-authorized active-product run.
+
+    Runs are fetched with bounded database iteration, and each included run's
+    complete registered output is verified exactly once. A corrupt older run
+    suppresses the historical result rather than being skipped in favor of a
+    convenient newer run. No numerical product calculation or Monte Carlo
+    replay occurs here.
+    """
+
+    if not settings.RESEARCH_PRODUCT_ENABLED:
+        return _history_failure(
+            status="disabled",
+            message=(
+                "The primary research product is disabled; archived evidence remains available."
+            ),
+        )
+    if not user.is_authenticated:
+        return _history_failure(
+            status="unauthorized",
+            message="Sign in to view owner-authorized research history.",
+        )
+    try:
+        asset_store = store or open_asset_store()
+    except RefreshVerificationError as exc:
+        return _history_failure(
+            status="integrity_failed",
+            message="Research history was suppressed because storage is unavailable.",
+            verification_code=exc.reason_code,
+        )
+    try:
+        candidates = _select_authorized_candidates(user=user, store=asset_store)
+    except (RefreshVerificationError, KeyError, TypeError, ValueError) as exc:
+        code = (
+            exc.reason_code
+            if isinstance(exc, RefreshVerificationError)
+            else "product_selection_integrity_invalid"
+        )
+        return _history_failure(
+            status="integrity_failed",
+            message=(
+                "Research history was suppressed because its owner-bound selection "
+                "evidence is invalid."
+            ),
+            verification_code=code,
+        )
+    if not candidates:
+        return _history_failure(
+            status="absent",
+            message="No verified research-product history is available for this account.",
+        )
+    try:
+        # Candidate construction proves every intake has this same exact owner
+        # and provider. Revalidate current display rights once before reading
+        # any private historical output.
+        _require_current_display_authorization(candidates[0].intake, user=user)
+        request_verification = verification or ProductVerificationSession()
+        cohorts = tuple(
+            _verify_candidate(
+                candidate,
+                store=asset_store,
+                verification=request_verification,
+            )
+            for candidate in candidates
+        )
+    except RefreshVerificationError as exc:
+        return _history_failure(
+            status="integrity_failed",
+            message=(
+                "Research history was suppressed because a registered product run "
+                "could not be verified."
+            ),
+            verification_code=exc.reason_code,
+        )
+    except ProviderConfigurationError:
+        return _history_failure(
+            status="unauthorized",
+            message="Current provider display authorization does not permit this history.",
+        )
+    except (InvalidOperation, KeyError, ObjectDoesNotExist, TypeError, ValueError):
+        return _history_failure(
+            status="integrity_failed",
+            message=(
+                "Research history was suppressed because a recorded product shape "
+                "or identity is invalid."
+            ),
+            verification_code="product_reader_shape_invalid",
+        )
+
+    newest = cohorts[0]
+    expected_target, _expected_grade = resolve_us_target_date(decision_time=timezone.now())
+    if newest.run.target_date == expected_target:
+        current = _product_read_from_cohort(newest)
+    else:
+        current = ProductRead(
+            status="stale",
+            message=(
+                "The owner-authorized research cohort does not match the expected "
+                "market session, so active output is withheld."
+            ),
+            run=newest.run,
+            verification_code="product_target_stale",
+        )
+    return ProductHistoryRead(
+        status="available",
+        message="Registered owner-authorized research-product history verified.",
+        current=current,
+        cohorts=cohorts,
+        verification_code="verified",
+    )
+
+
+def _product_read_from_cohort(cohort: ProductCohort) -> ProductRead:
     return ProductRead(
         status="available",
         message="Registered research-product output verified.",
+        run=cohort.run,
+        cards=cohort.cards,
+        admissions=cohort.admissions,
+        provider=cohort.provider,
+        evidence_grade=cohort.evidence_grade,
+        owner_id=cohort.owner_id,
+        verification_code="verified",
+    )
+
+
+def _history_failure(
+    *,
+    status: ReaderStatus,
+    message: str,
+    verification_code: str = "",
+) -> ProductHistoryRead:
+    return ProductHistoryRead(
+        status=status,
+        message=message,
+        current=ProductRead(
+            status=status,
+            message=message,
+            verification_code=verification_code,
+        ),
+        verification_code=verification_code,
+    )
+
+
+def _verify_candidate(
+    candidate: _AuthorizedCandidate,
+    *,
+    store: AssetStore,
+    verification: ProductVerificationSession,
+) -> ProductCohort:
+    verification.verify(run=candidate.run, store=store)
+    return ProductCohort(
         run=candidate.run,
-        cards=cards,
-        admissions=admissions,
+        cards=_build_cards(candidate, store=store),
+        admissions=_build_admissions(candidate),
         provider=str(candidate.intake["source_provider"]),
         evidence_grade=candidate.run.universe_snapshot.grade,
         owner_id=str(candidate.intake["owner_id"]),
-        verification_code="verified",
     )
 
 
 def _select_authorized_candidate(
     *, user: ProductUser, store: AssetStore
 ) -> _AuthorizedCandidate | None:
+    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(user=user)
+    if not intake_by_universe:
+        return None
+    run = next(_authorized_runs(intake_by_universe), None)
+    if run is None:
+        return None
+    return _candidate_for_run(
+        run=run,
+        store=store,
+        expected_owner=expected_owner,
+        expected_provider=expected_provider,
+        intake_by_universe=intake_by_universe,
+    )
+
+
+def _select_authorized_candidates(
+    *, user: ProductUser, store: AssetStore
+) -> tuple[_AuthorizedCandidate, ...]:
+    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(user=user)
+    if not intake_by_universe:
+        return ()
+    return tuple(
+        _candidate_for_run(
+            run=run,
+            store=store,
+            expected_owner=expected_owner,
+            expected_provider=expected_provider,
+            intake_by_universe=intake_by_universe,
+        )
+        for run in _authorized_runs(intake_by_universe)
+    )
+
+
+def _authorized_intakes(*, user: ProductUser) -> tuple[str, str, dict[str, DataAsset]]:
     expected_owner = DEMO_OWNER_ID if settings.DEMO_MODE else str(user.pk)
     expected_provider = "synthetic_demo" if settings.DEMO_MODE else TWELVE_DATA_PROVIDER
     intake_by_universe: dict[str, DataAsset] = {}
@@ -303,7 +555,7 @@ def _select_authorized_candidate(
         kind=PRODUCT_INTAKE_KIND,
         subject__contains=f":{expected_owner}:",
     ).order_by("-available_at", "-retrieved_at", "-id")
-    for asset in intake_assets:
+    for asset in intake_assets.iterator(chunk_size=25):
         subject_parts = asset.subject.split(":")
         if (
             len(subject_parts) != 4
@@ -315,21 +567,34 @@ def _select_authorized_candidate(
         if universe_slug in intake_by_universe:
             raise ValueError("Authorized product intake identity is ambiguous")
         intake_by_universe[universe_slug] = asset
-    if not intake_by_universe:
-        return None
-    run = (
+    return expected_owner, expected_provider, intake_by_universe
+
+
+def _authorized_runs(
+    intake_by_universe: Mapping[str, DataAsset],
+) -> Iterator[AnalysisRun]:
+    runs = (
         AnalysisRun.objects.select_related("universe_snapshot__universe")
         .filter(
             config_version=PRODUCT_VERSION,
             config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
             status="complete",
-            universe_snapshot__universe_id__in=intake_by_universe,
         )
         .order_by("-target_date", "-generated_at", "-id")
-        .first()
     )
-    if run is None:
-        return None
+    for run in runs.iterator(chunk_size=25):
+        if str(run.universe_snapshot.universe_id) in intake_by_universe:
+            yield run
+
+
+def _candidate_for_run(
+    *,
+    run: AnalysisRun,
+    store: AssetStore,
+    expected_owner: str,
+    expected_provider: str,
+    intake_by_universe: Mapping[str, DataAsset],
+) -> _AuthorizedCandidate:
     intake_asset = intake_by_universe[str(run.universe_snapshot.universe_id)]
     intake = json.loads(read_checksummed_bytes(store, intake_asset))
     if (
