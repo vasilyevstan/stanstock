@@ -535,6 +535,84 @@ unavailable until qualifying prospective outcomes exist. Each calculation
 also records the days between its latest verified SEC share basis and target
 as residual, unverified post-period split exposure.
 
+### `us-sec-long-v4`: entity growth, dilution, and one shared path
+
+**Implemented for explicit research use only; unactivated.** V4 is a distinct
+schema-2 method, `sec_entity_growth_dilution_multiple_reversion`. It does not
+replace the default `us-sec-long-v2`, activate `us-sec-long-v3`, or enter any
+scheduled issuance, observed, recommendation, opportunity, allocation, or
+simulation flow. The shared immutable outcome evaluator may evaluate a
+matured research-grade V4 row, but V4 remains excluded from observed,
+reportable, and headline performance. Its isolated V4 branch authenticates
+the physical valuation and ledger roles before price I/O, requires the exact
+target-date physical close in the evaluation vintage, and uses that physical
+value as the terminal-return denominator. A caller must name the exact tracked
+v4 config, request the long lane literally, use `issued_on_time=False`, and
+bind the exact reviewed price-baseline-v2, Twelve Data price, SEC
+fundamentals-v1, SEC CIK-v1 plus its raw ticker/exchange mapping, research
+snapshot, US/USD listing, and security identity.
+
+The v4 assessor selects the latest four annual period identities before
+testing whether they are favorable. It retains negative growth from positive
+levels and withholds gaps, incompatible aliases/units, nonpositive values,
+stale TTM inputs, diluted-EPS reconciliation failures, or share-basis breaks.
+Raw FCF authority scans cutoff/window-relevant configured Companyfacts
+observations, including the latest decision-visible source, and records
+`absent`, `present_complete`, or `present_normalization_incomplete`. Only
+`absent` permits net-income fallback; incomplete normalized closure withholds
+that entity. Peer cohorts lock ex ante at SIC-4/3/2 identity floors of 3/5/8,
+deduplicate companies, and never widen after evidence failures.
+
+There is no nominal per-share minimum. Entity metrics, diluted shares,
+derived per-share values, and prices must be finite and strictly positive, so
+a common split-equivalent rescaling of target and peers does not alter
+eligibility, peer selection, growth, dilution, returns, or confidence.
+Every attempted peer lock records the target classification and each
+deterministically examined SIC level, including no-floor candidates and their
+classification lineage.
+
+For annual entity metrics \(M_0...M_3\), target growth is the median of the
+three year-over-year rates after each is capped to `[-20%, 25%]`. Base
+dilution is `clamp(max(0, median(S_i/S_{i-1}-1)), 0, 15%)`; buybacks receive
+no growth credit. Bear/base/bull vary only growth delta, dilution multiplier,
+and peer-multiple multiplier. The final scenario dilution is capped at 15%.
+One five-year entity path fades by `[.80, .60, .40, .20, 0]` toward 2.5%,
+then translates once to per-share growth. Multiple reversion follows
+`[.14, .28, .42, .56, .70]`. The 3y and 5y views are exact year-3 and year-5
+slices of that same persisted path.
+
+The schema-2 evidence catalog is reconstructed from the complete locked
+eligible snapshot membership rather than accepted as its own attestation.
+It first proves one pinned SEC mapping asset and one exact reviewed
+ticker/CIK/exchange/listing row per cohort member, including the exact
+`Nasdaq -> XNAS` / `NYSE -> XNYS` rule. Every included SEC Companyfacts,
+submissions/history, normalized fact, filing, and SIC-classification asset is
+identity-checked and checksum-read.
+
+Every cohort price retains two roles from the same checksummed Parquet row:
+the unrounded physical close for valuation arithmetic and the six-decimal
+ledger close for persisted model price fields. The manifest is ordered as
+the mapping asset; each assessed owner's Companyfacts/current
+submissions/filename-sorted history bundle in cohort order; fact
+source/filing/context triples; classifications; and each cohort price's
+normalized/raw pair, with global first-occurrence deduplication only.
+For V4 outcomes, the physical role is authenticated against an exact
+target-date close and remains the realized-return denominator; the ledger
+role remains the six-decimal persistence value. Terminal maturity and
+benchmark computation retain the shared evaluator's existing session rules.
+
+These constants are policy assumptions, not optimized parameters.
+Damodaran and Nissim-Penman provide valuation/accounting context;
+Fama-French and Bhojraj-Lee/Bhojraj-Lee-Oler show both the usefulness and
+limits of industry/peer classifications; Vorst-Yohn informs disciplined
+forecast-evidence interpretation; FASB Statement 2 / ASC 730 and ASC 260
+define relevant reported R&D and diluted-EPS accounting; Lev-Sougiannis,
+Peters-Taylor, and Ewens-Peters-Wang motivate the explicit intangible-capital
+nonclaim; and Lo-MacKinlay motivates guarding against data snooping. None of
+those sources validates StanStock's constants or forecast accuracy.
+A separate cutoff-safe historical replay is required before activation and
+is outside this stage.
+
 ## Stage 5: walk-forward validation and uncertainty
 
 Research validation will recreate historical decision dates and expose each

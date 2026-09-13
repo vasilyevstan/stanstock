@@ -321,6 +321,74 @@ stays unresolved when evaluated and is excluded from advisory reporting
 denominators rather than being counted as a matured call. A stricter
 eligibility gate ships as a new versioned configuration; the prior version's
 config hash, behavior, and output payloads remain unchanged and reproducible.
+`us-sec-long-v4` is a separate **research-only, unactivated** schema-2
+experiment. It is available only through an explicit
+`analyze_snapshot(..., long_forecast_config_path="config/forecasts/us-sec-long-v4.yml",
+long_forecast_requested=True, issued_on_time=False)` call against the exact
+reviewed `us-price-baseline-v2` identity and a research-grade US/USD
+snapshot. It is not the default or scheduled method and cannot affect
+recommendations, opportunities, allocation, or simulations. A matured
+research-grade V4 row may be processed by the shared immutable outcome
+evaluator, but it remains excluded from observed, reportable, and headline
+performance. That shared flow has an isolated V4 baseline rule: it
+authenticates `calculation.target_price.valuation_value` against an exact
+target-date close and uses that physical value, not the six-decimal ledger
+price, as the realized-return denominator.
+
+V4 estimates reported-GAAP entity growth first, separately estimates dilution
+from weighted-average diluted shares, and translates entity growth to
+per-share growth exactly once. It uses one five-year fade and
+multiple-reversion path; the 3y result is year 3 of that path and the 5y
+result is year 5. FCF is operating cash flow less absolute capex. Net income
+is considered only when admitted raw FCF evidence is genuinely absent.
+Probability and numeric confidence are unavailable: stored confidence `0.00`
+is an unavailable sentinel and the UI renders words, never `0%`.
+Eligibility has no nominal per-share floor: every entity value, diluted-share
+denominator, derived per-share value, and price must instead be finite and
+strictly positive. A split-equivalent rescaling of every target and peer
+(shares multiplied by the same factor and prices/per-share figures divided by
+it) leaves eligibility, peer locking, growth, dilution, return paths, and
+confidence semantics unchanged.
+
+Every V4 calculation is bound to the byte hash and effective hash of its V4
+policy file, the canonical SEC fundamentals configuration, and the
+independent canonical SEC CIK configuration; the latter also pins the exact
+raw SEC ticker/exchange mapping hash. Every cohort listing must match one
+reviewed symbol/CIK/exchange row and the exact `Nasdaq -> XNAS` or
+`NYSE -> XNYS` rule before any SEC fact or peer evidence is used.
+
+The schema-2 evidence catalog is replayed from the complete locked eligible
+snapshot cohort. It separately records raw-FCF authority as `absent`,
+`present_complete`, or `present_normalization_incomplete`; only genuine
+absence permits net-income fallback. The source manifest follows one
+canonical order: the SEC mapping asset; each assessed owner's Companyfacts,
+current submissions, and filename-sorted submissions history; existing fact
+source/filing/context triples; classifications; then each cohort price's
+normalized Parquet and linked raw provider asset, with global
+first-occurrence deduplication. Every unique file is checksum-read.
+
+Price evidence retains the exact unrounded physical Parquet close for
+valuation and a separate six-decimal ledger close for Django decimal fields.
+Formula gates and return arithmetic use the former; `StockAnalysis` and
+`Prediction` price fields use only the latter. V4 outcome evaluation also
+uses the authenticated physical close as its denominator, requires that exact
+close on the prediction target date in the evaluation vintage, and rounds the
+result once to four decimals with half-even rounding. Both values, their
+role, and the normalized/raw asset identities are persisted and replayed.
+
+The accounting and valuation literature is context, not calibration:
+Damodaran and Nissim-Penman motivate separating operating growth from
+valuation; Fama-French and Bhojraj-Lee/Bhojraj-Lee-Oler motivate caution about
+industry grouping and peer multiples; FASB Statement 2 / ASC 730 and ASC 260
+explain the reported R&D and weighted diluted-share accounting boundaries;
+Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang show why omitted
+intangible capitalization must be disclosed rather than guessed;
+Vorst-Yohn motivates disciplined forecast-input interpretation; and
+Lo-MacKinlay motivates an out-of-sample, cutoff-safe replay before any
+activation claim. V4's caps, weights, fade, dilution multipliers, and
+multiple-reversion schedule are fixed policy assumptions, not fitted or
+optimized estimates.
+
 An explicit older `--target-date YYYY-MM-DD` is labeled
 research-grade. A successful target is idempotent; another invocation creates
 a skipped job and makes no provider requests.

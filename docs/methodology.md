@@ -731,6 +731,147 @@ differential test that executes the pre-change source against the same
 deterministic fixture and compares complete successful and withheld
 payloads.
 
+### Explicit research-only long-v4
+
+`us-sec-long-v4` is an unactivated schema-2 research method. It is admitted
+only through the exact tracked config with an explicit true long request,
+literal `issued_on_time=False`, an authoritative research snapshot, exact
+`us-price-baseline-v2` scoring identity, Twelve Data prices, SEC
+fundamentals-v1, the byte/effective/source-pinned SEC CIK-v1 configuration and
+raw ticker/exchange mapping, and active US/USD security identity. Every
+cohort listing must match one exact config/raw row and the reviewed
+`Nasdaq -> XNAS` or `NYSE -> XNYS` rule. Common stocks alone can enter the
+metric and peer calculations. A correctly mapped depositary receipt receives
+one explicit withheld 3y/5y pair after admission and never enters a peer
+cohort; no ADS ratio is inferred.
+
+V4 uses reported GAAP evidence without NOPAT, a tax proxy, invested capital,
+reinvestment, ROIC/ROIIC, sustainable growth, R&D capitalization, or a
+return-on-new-capital/project-IRR claim. FCF is `operating cash flow -
+abs(capex)`. For each assessed entity V4 derives configured duration
+observations from every Companyfacts asset underlying its cutoff-visible
+facts plus the latest decision-visible Companyfacts observation/source. It
+records raw authority as `absent`, `present_complete`, or
+`present_normalization_incomplete`. Net income is eligible only for
+`absent`; present but missing, incompatible, stale, nonpositive, or otherwise
+failed FCF blocks fallback, while incomplete normalized closure records
+`fcf_normalization_incomplete` for that entity. Weighted-average diluted
+shares are an accounting-period denominator, not a count of issued shares.
+
+For each target or peer the same nonrecursive assessor requires a newest-
+quarter-anchored homogeneous TTM metric and shares, no more than 200 days old,
+and the latest four distinct contiguous annual period identities. Each
+annual tuple spans 350-380 days, uses matching entity/share periods and
+compatible units, derivations, and source concepts, and has finite strictly
+positive entity values, diluted shares, derived per-share values, and prices.
+There is no nominal per-share floor. Reported diluted EPS is reconciled to
+net income/shares within an inclusive 15%, using exactly the larger absolute
+EPS as the relative-difference denominator (and zero difference when both
+values are exactly zero). Adjacent annual share bases and
+the TTM/latest-annual basis must also remain within 15%. Selecting periods
+before applying these tests prevents an older favorable tail from replacing
+new adverse evidence.
+
+Let \(M_i\) be the four annual entity metrics and \(S_i\) the matching diluted
+shares. V4 stores all three raw changes and computes:
+
+```text
+G_target = median(clamp(M_i / M_(i-1) - 1, -0.20, 0.25))
+D_base   = clamp(max(0, median(S_i / S_(i-1) - 1)), 0, 0.15)
+G_peer   = clamp(median(admitted_peer_G_target), -0.15, 0.25)
+```
+
+The peer cohort is locked *before* core evidence assessment at the first
+cutoff-safe SIC-4/3/2 cohort meeting identity floors 3/5/8. It excludes the
+target company, depositary receipts, inactive/non-US/non-USD listings, and
+deduplicates companies by ticker then permanent listing UUID. It never
+widens after evidence failures. Every admitted peer uses the target's metric
+family; unfavorable but valid evidence remains in the medians.
+Every attempted lock records the target classification, each examined
+SIC-4/3/2 prefix/floor/candidate set, and either the selected level or an
+explicit no-floor result. No-floor evidence retains every examined candidate
+and classification source.
+
+For scenario \(s\):
+
+```text
+T_s = clamp(G_target + delta_s, -0.20, 0.25)
+P_s = clamp(G_peer   + delta_s, -0.15, 0.25)
+E_s = clamp(0.5*T_s + 0.5*P_s, -0.15, 0.25)
+D_s = clamp(D_base * dilution_multiplier_s, 0, 0.15)
+g_per_share,t = (1 + g_entity,t) / (1 + D_s) - 1
+```
+
+Bear/base/bull use growth deltas `-.04/0/.03`, dilution multipliers
+`1.25/1/.75`, and peer-multiple multipliers `.80/1/1.15`. The single
+five-year entity path fades by `[.80,.60,.40,.20,0]` toward 2.5%; geometric
+multiple reversion progresses by `[.14,.28,.42,.56,.70]`. Levels and factors
+must independently produce the same return. The raw current multiple remains
+the return denominator while its capped value is only the reversion anchor.
+The stored 3y and 5y views are exact years 3 and 5 of one path.
+
+The V4 policy pins the canonical SEC fundamentals file bytes/effective hash,
+the canonical SEC CIK file bytes/effective hash, and the source hash of the
+raw ticker/exchange mapping. Before either immutable prediction is written,
+the service locks and reloads the complete eligible snapshot membership,
+reselects cutoff-safe classifications, recomputes the peer-lock trace, and
+replays the complete cohort.
+
+The schema-2 evidence manifest follows one deterministic traversal: the
+mapping asset; each assessed owner's Companyfacts, current submissions, and
+filename-sorted submissions history in cohort order; each fact's
+source/filing/context triple; classification assets; then each cohort price's
+normalized Parquet and linked raw payload, deduplicating only global first
+occurrences. All unique files are checksum-read.
+
+Outcome authentication first checks the persisted run, snapshot, cohort,
+mapping, prices, assessed owners, facts, classifications, peer lock, and both
+ordered manifests against database authority. Only after those checks pass
+does it checksum-read and re-derive the retained raw SEC closure for the target
+and actually assessed peers. A missing, unreadable, or changed Companyfacts,
+current-submissions, or submissions-history file yields the existing
+`identity_mismatch` unresolved outcome before any stock or benchmark lookup.
+This outcome replay performs no provider request, forecast rebuild, or reread
+of the issuance-price file.
+
+Each canonical price binds listing ID, provider symbol, exchange MIC,
+currency, session date, and both asset IDs/checksums while retaining two
+values from the exact physical Parquet cell. `P_val` is the finite positive,
+unrounded `Decimal(str(close))` and drives the exact per-share/multiple gate
+and scenario level returns. `P_ledger = canonical_long_v4_price(P_val)` is the
+six-decimal value used by `StockAnalysis.current_price`,
+`Prediction.price_at_prediction`, and ledger identity. Both roles are
+persisted and reconstructed from physical bytes; substituting the ledger
+value into valuation arithmetic or V4 outcome accounting fails replay.
+
+The shared outcome evaluator authenticates a V4 prediction's complete
+calculation, target, target-price, valuation-source, and ledger identities
+before loading evaluation prices. It then requires an exact target-date close
+whose `Decimal(str(close))` equals `P_val`; unlike legacy outcomes, it never
+uses a prior close for this baseline check. The terminal close still matures
+on the ordinary horizon session. Under decimal precision 64, V4 computes
+`terminal / P_val - 1` and quantizes exactly once to `0.0001` with
+`ROUND_HALF_EVEN`; that stored decimal drives direction, inclusive interval
+coverage, base error, and signed error. Benchmark calculation is unchanged.
+
+Confidence is not estimated. Both successful and withheld rows store `0.00`
+only as the schema-declared unavailable sentinel; successful status is
+`not_estimated_uncalibrated`, withheld status is
+`not_estimated_insufficient`, and positive-return probability is null. The
+UI renders those words rather than `0%`.
+
+Literature supplies context and cautions, not fitted coefficients:
+Damodaran on valuation and growth; Nissim-Penman on financial-statement-based
+forecasting; Fama-French on industry grouping; Vorst-Yohn on forecast-input
+interpretation; FASB Statement 2 / ASC 730 on expensed R&D and ASC 260 on
+diluted EPS; Lev-Sougiannis, Peters-Taylor, and Ewens-Peters-Wang on
+capitalized intangible-investment research; Bhojraj-Lee and
+Bhojraj-Lee-Oler on industry/peer classification and valuation; and
+Lo-MacKinlay on data-snooping risk. The caps, weights, scenario shifts, fades,
+and reversion rates are policy assumptions, not estimates optimized from
+those papers or from StanStock outcomes. A separate cutoff-safe historical
+replay is required before any activation decision.
+
 `manage.py audit_long_evidence` reports this selection read-only and offline
 from persisted evidence, without any provider call. It takes the forecast's
 three boundaries separately and explicitly -- `--target-date` for reporting
@@ -886,9 +1027,11 @@ error sum must be finite decimals. PostgreSQL numeric `NaN` is therefore
 malformed evidence; the constrained four-decimal columns reject positive and
 negative infinity at storage.
 
-The producer evaluates direction and scenario inclusion from the raw return,
-then stores actual return and signed error independently at four decimal
-places. That rounding loses information only at specific boundaries: either
+Legacy outcome producers evaluate direction and scenario inclusion from the
+raw float return, then store actual return and signed error independently at
+four decimal places. V4 is the explicit exception described above: its one
+half-even-quantized decimal drives every derived outcome field. For legacy
+rows, rounding loses information only at specific boundaries: either
 direction Boolean is compatible when stored actual return is zero, and either
 inclusion Boolean is compatible when stored actual return equals the stored
 bear or bull endpoint. Nonzero signs and values strictly inside or outside the

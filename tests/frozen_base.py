@@ -45,6 +45,7 @@ from pathlib import Path
 from types import ModuleType
 
 BASE_SHA = "38df10f014caf5ed81a57ac020b31f0dd634fd37"
+LONG_V4_BASE_SHA = "027d9435f1bc27fa1018d066c524ead806c1d245"
 
 
 class BaseRevisionUnavailableError(RuntimeError):
@@ -69,6 +70,17 @@ BASE_MODULE_PATHS: tuple[tuple[str, str], ...] = (
     ("stanstock.research.long_forecasts", "src/stanstock/research/long_forecasts.py"),
 )
 
+LONG_V4_BASE_MODULE_PATHS: tuple[tuple[str, str], ...] = (
+    *BASE_MODULE_PATHS,
+    ("stanstock.research.service", "src/stanstock/research/service.py"),
+)
+LONG_V4_BASE_EVIDENCE_PATHS: tuple[str, ...] = (
+    *(path for _name, path in LONG_V4_BASE_MODULE_PATHS),
+    "config/forecasts/us-sec-long-v1.yml",
+    "config/forecasts/us-sec-long-v2.yml",
+    "config/forecasts/us-sec-long-v3.yml",
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -79,6 +91,32 @@ class BaseModules:
     long_forecasts: ModuleType
     long_forecast_config: ModuleType
     sec_fundamentals: ModuleType
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenBaseProfile:
+    name: str
+    base_sha: str
+    module_paths: tuple[tuple[str, str], ...]
+    evidence_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExactBaseModules:
+    profile: FrozenBaseProfile
+    source_sha256: dict[str, str]
+    long_forecasts: ModuleType
+    long_forecast_config: ModuleType
+    sec_fundamentals: ModuleType
+    service: ModuleType | None
+
+
+LONG_V4_BASE_PROFILE = FrozenBaseProfile(
+    name="long-v1-v2-v3-at-long-v4-base",
+    base_sha=LONG_V4_BASE_SHA,
+    module_paths=LONG_V4_BASE_MODULE_PATHS,
+    evidence_paths=LONG_V4_BASE_EVIDENCE_PATHS,
+)
 
 
 def base_sources_available() -> bool:
@@ -102,18 +140,80 @@ def base_source_checksums() -> dict[str, str]:
 
 
 def _read_base_source(path: str) -> bytes:
+    return _read_revision_source(BASE_SHA, path)
+
+
+def _read_revision_source(revision: str, path: str) -> bytes:
     try:
         return subprocess.run(
-            ["git", "show", f"{BASE_SHA}:{path}"],
+            ["git", "show", f"{revision}:{path}"],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as error:
         raise BaseRevisionUnavailableError(
-            f"Base revision object {BASE_SHA}:{path} is not readable from the local "
+            f"Base revision object {revision}:{path} is not readable from the local "
             "git object database"
         ) from error
+
+
+def exact_base_sources_available(profile: FrozenBaseProfile) -> bool:
+    try:
+        exact_base_source_checksums(profile)
+    except BaseRevisionUnavailableError:
+        return False
+    return True
+
+
+def exact_base_source_checksums(profile: FrozenBaseProfile) -> dict[str, str]:
+    return {
+        path: hashlib.sha256(_read_revision_source(profile.base_sha, path)).hexdigest()
+        for path in profile.evidence_paths
+    }
+
+
+def exact_base_file_bytes(profile: FrozenBaseProfile, path: str) -> bytes:
+    if path not in profile.evidence_paths:
+        raise ValueError(f"{path!r} is not part of frozen profile {profile.name!r}")
+    return _read_revision_source(profile.base_sha, path)
+
+
+@contextmanager
+def exact_base_long_forecast_modules(
+    profile: FrozenBaseProfile,
+) -> Iterator[ExactBaseModules]:
+    """Import one named profile strictly from its pinned Git objects."""
+    original: dict[str, ModuleType | None] = {
+        name: sys.modules.get(name) for name, _path in profile.module_paths
+    }
+    loaded: dict[str, ModuleType] = {}
+    checksums = exact_base_source_checksums(profile)
+    try:
+        for name, path in profile.module_paths:
+            source = _read_revision_source(profile.base_sha, path)
+            module = _module_from_source(
+                name=name,
+                path=path,
+                source=source,
+                revision=profile.base_sha,
+            )
+            sys.modules[name] = module
+            loaded[name] = module
+        yield ExactBaseModules(
+            profile=profile,
+            source_sha256=checksums,
+            long_forecasts=loaded["stanstock.research.long_forecasts"],
+            long_forecast_config=loaded["stanstock.research.long_forecast_config"],
+            sec_fundamentals=loaded["stanstock.data.sec_fundamentals"],
+            service=loaded.get("stanstock.research.service"),
+        )
+    finally:
+        for name, module in original.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 @contextmanager
@@ -151,10 +251,16 @@ def base_long_forecast_modules() -> Iterator[BaseModules]:
                 sys.modules[name] = module
 
 
-def _module_from_source(*, name: str, path: str, source: bytes) -> ModuleType:
-    spec = importlib.util.spec_from_loader(name, loader=None, origin=f"{BASE_SHA}:{path}")
+def _module_from_source(
+    *,
+    name: str,
+    path: str,
+    source: bytes,
+    revision: str = BASE_SHA,
+) -> ModuleType:
+    spec = importlib.util.spec_from_loader(name, loader=None, origin=f"{revision}:{path}")
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     module.__file__ = str(REPO_ROOT / path)
-    exec(compile(source, f"<{BASE_SHA}:{path}>", "exec"), module.__dict__)
+    exec(compile(source, f"<{revision}:{path}>", "exec"), module.__dict__)
     return module

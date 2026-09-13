@@ -219,7 +219,13 @@
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
                       {% elif stock.has_explicit_long_forecasts %}
-                        {{ stock.three_year_forecast_scenario|scenario_range }}
+                        {% with scenario=stock.three_year_forecast_scenario %}
+                          {{ scenario|scenario_range }}
+                          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                            <small>Research-only / unactivated.</small>
+                            <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                          {% endif %}
+                        {% endwith %}
                       {% else %}
                         {{ stock.legacy_long_forecast_scenario|scenario_range }}
                       {% endif %}
@@ -231,7 +237,13 @@
                       {% if card.long_horizon_blocked %}
                         Forecast unavailable
                       {% elif stock.has_explicit_long_forecasts %}
-                        {{ stock.five_year_forecast_scenario|scenario_range }}
+                        {% with scenario=stock.five_year_forecast_scenario %}
+                          {{ scenario|scenario_range }}
+                          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+                            <small>Research-only / unactivated.</small>
+                            <small>Confidence: Not estimated / unavailable. Positive-return probability: unavailable.</small>
+                          {% endif %}
+                        {% endwith %}
                       {% else %}
                         Not issued
                       {% endif %}

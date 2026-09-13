@@ -368,6 +368,11 @@
         <article>
           {% with scenario=analysis.three_year_forecast_scenario %}
           <small>3-year advisory forecast</small>
+          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+            <span><strong>Research-only / unactivated.</strong> Deterministic, uncalibrated scenario policy; not a recommendation or probability forecast.</span>
+            <span>Confidence: Not estimated / unavailable. Positive-return probability: unavailable pending separate cutoff-safe historical replay review.</span>
+            <span>Reported GAAP evidence only; no intangible capitalization or return-on-new-capital claim. SIC peers are coarse.</span>
+          {% endif %}
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
             <span>{{ long_horizon_band_reason }}</span>
@@ -392,7 +397,26 @@
                 · {{ scenario.evidence_grade|display_label }} evidence
               </span>
             {% endif %}
-            {% if scenario.formula_inputs %}
+            {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+              {% if scenario.formula_inputs %}
+                <span>
+                  Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
+                  {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped_reversion_anchor %}
+                    (bounded reversion anchor {{ scenario.formula_inputs.current_multiple_capped_reversion_anchor|floatformat:"1" }}x)
+                  {% endif %}
+                  · target entity growth {{ scenario.formula_inputs.target_entity_growth|percentage }}
+                  · peer entity growth {{ scenario.formula_inputs.peer_entity_growth|percentage }}
+                  · base dilution assumption {{ scenario.formula_inputs.dilution_base|percentage }}
+                </span>
+              {% endif %}
+              <span>
+                Reported GAAP FCF or net income only; weighted diluted shares
+                are an accounting-period denominator, not an issuance count.
+                No invested-capital, ROIC/ROIIC, reinvestment, R&amp;D
+                capitalization, or return-on-new-capital inference is made.
+                SIC peers are a coarse classification.
+              </span>
+            {% elif scenario.formula_inputs %}
               <span>
                 Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
                 {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped %}
@@ -403,7 +427,16 @@
                 · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
               </span>
             {% endif %}
-            {% if scenario.split_basis.verified_through %}
+            {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+              {% if scenario.split_basis.assessed_through %}
+                <span>
+                  Diluted-share basis:
+                  {% if scenario.split_basis.assessment_status == "incompatible_or_unverified" %}Incompatible / unverified{% else %}Unverified{% endif %};
+                  assessed through {{ scenario.split_basis.assessed_through }}.
+                  Post-period split status remains unverified.
+                </span>
+              {% endif %}
+            {% elif scenario.split_basis.verified_through %}
               <span>
                 Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
                 the following {{ scenario.split_basis.post_period_exposure_days }}-day interval
@@ -424,6 +457,11 @@
         <article>
           {% with scenario=analysis.five_year_forecast_scenario %}
           <small>5-year advisory forecast</small>
+          {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+            <span><strong>Research-only / unactivated.</strong> Deterministic, uncalibrated scenario policy; not a recommendation or probability forecast.</span>
+            <span>Confidence: Not estimated / unavailable. Positive-return probability: unavailable pending separate cutoff-safe historical replay review.</span>
+            <span>Reported GAAP evidence only; no intangible capitalization or return-on-new-capital claim. SIC peers are coarse.</span>
+          {% endif %}
           {% if long_horizon_blocked %}
             <strong>Forecast unavailable</strong>
             <span>{{ long_horizon_band_reason }}</span>
@@ -448,7 +486,26 @@
                 · {{ scenario.evidence_grade|display_label }} evidence
               </span>
             {% endif %}
-            {% if scenario.formula_inputs %}
+            {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+              {% if scenario.formula_inputs %}
+                <span>
+                  Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
+                  {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped_reversion_anchor %}
+                    (bounded reversion anchor {{ scenario.formula_inputs.current_multiple_capped_reversion_anchor|floatformat:"1" }}x)
+                  {% endif %}
+                  · target entity growth {{ scenario.formula_inputs.target_entity_growth|percentage }}
+                  · peer entity growth {{ scenario.formula_inputs.peer_entity_growth|percentage }}
+                  · base dilution assumption {{ scenario.formula_inputs.dilution_base|percentage }}
+                </span>
+              {% endif %}
+              <span>
+                Reported GAAP FCF or net income only; weighted diluted shares
+                are an accounting-period denominator, not an issuance count.
+                No invested-capital, ROIC/ROIIC, reinvestment, R&amp;D
+                capitalization, or return-on-new-capital inference is made.
+                SIC peers are a coarse classification.
+              </span>
+            {% elif scenario.formula_inputs %}
               <span>
                 Current multiple {{ scenario.formula_inputs.current_multiple_raw|floatformat:"1" }}x
                 {% if scenario.formula_inputs.current_multiple_raw != scenario.formula_inputs.current_multiple_capped %}
@@ -459,7 +516,16 @@
                 · peer growth {{ scenario.formula_inputs.peer_growth|percentage }}
               </span>
             {% endif %}
-            {% if scenario.split_basis.verified_through %}
+            {% if scenario.method_version == "us-sec-long-v4" and scenario.schema_version == 2 %}
+              {% if scenario.split_basis.assessed_through %}
+                <span>
+                  Diluted-share basis:
+                  {% if scenario.split_basis.assessment_status == "incompatible_or_unverified" %}Incompatible / unverified{% else %}Unverified{% endif %};
+                  assessed through {{ scenario.split_basis.assessed_through }}.
+                  Post-period split status remains unverified.
+                </span>
+              {% endif %}
+            {% elif scenario.split_basis.verified_through %}
               <span>
                 Diluted-share basis verified through {{ scenario.split_basis.verified_through }};
                 the following {{ scenario.split_basis.post_period_exposure_days }}-day interval

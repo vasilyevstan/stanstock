@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
@@ -13,10 +14,26 @@ from django.db import IntegrityError, connection, transaction
 from django.test import override_settings
 from django.utils import timezone
 
+import stanstock.research.outcomes as outcomes_module
 from stanstock.data.asof import AsOfData
 from stanstock.data.assets import AssetStore, register_asset
-from stanstock.data.models import Company, Listing, Region, Security, Universe, UniverseSnapshot
+from stanstock.data.models import (
+    Company,
+    DataAsset,
+    Listing,
+    Region,
+    Security,
+    Universe,
+    UniverseSnapshot,
+)
 from stanstock.research.jobs import eligible_pending_predictions
+from stanstock.research.long_forecast_config import (
+    LONG_V4_EFFECTIVE_CONFIG_HASH,
+    LONG_V4_METHOD,
+    LONG_V4_RESEARCH_STATUS,
+    LONG_V4_VERSION,
+)
+from stanstock.research.long_forecasts_v4 import PROBABILITY_REASON, canonical_long_v4_price
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -29,7 +46,24 @@ from stanstock.research.outcomes import (
     HORIZON_SESSION_COUNTS,
     evaluate_prediction,
     evaluate_predictions,
+    resolve_outcome,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_outcome_tests_from_persisted_v4_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_persisted_authority",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_raw_sec_replay",
+        lambda **_kwargs: None,
+    )
 
 
 def test_forecast_horizon_session_counts_keep_legacy_identity() -> None:
@@ -262,6 +296,932 @@ def test_withheld_advisory_forecast_stays_unresolved_without_price_lookup(tmp_pa
     assert result.outcome.interval_covered is None
     assert result.outcome.error is None
     assert result.outcome.signed_error is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mutation", "expected_issue"),
+    [
+        ("prediction_version", "identity_mismatch"),
+        ("target_ticker", "target_identity_mismatch"),
+        ("normalized_asset_id", "target_price_identity_mismatch"),
+        ("valuation_source", "valuation_source_mismatch"),
+        ("valuation_value", "valuation_value_invalid"),
+        ("ledger_value", "ledger_value_mismatch"),
+    ],
+)
+def test_long_v4_invalid_baseline_identity_is_exhaustive_and_precedes_all_price_io(
+    mutation: str,
+    expected_issue: str,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    calculation = deepcopy(prediction.calculation)
+    target_price = calculation["target_price"]
+
+    if mutation == "prediction_version":
+        calculation["prediction_version"] = "copied-from-another-prediction"
+    elif mutation == "target_ticker":
+        calculation["target"]["ticker"] = "COPIED"
+    elif mutation == "normalized_asset_id":
+        target_price["normalized_asset_id"] = str(uuid4())
+        calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    elif mutation == "valuation_source":
+        target_price["valuation_source"] = "ledger_price"
+        calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    elif mutation == "valuation_value":
+        target_price["valuation_value"] = "NaN"
+        target_price["native_price"] = "NaN"
+        calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    else:
+        target_price["value"] = "100.000001"
+        target_price["ledger_value"] = "100.000001"
+        calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    def forbidden_loader(subject: str, through_date: date) -> pl.DataFrame:
+        calls.append((subject, through_date))
+        raise AssertionError("invalid long-v4 identity must not load prices")
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=forbidden_loader,
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata == {
+        "provider": "twelve_data",
+        "valuation_baseline": {
+            "role": "calculation.target_price.valuation_value",
+            "status": "authentication_failed",
+            "issue_codes": [expected_issue],
+        },
+    }
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_invalid_baseline_issue_order_is_stable() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    prediction.calculation = {}
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date,
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject=None,
+        price_loader=lambda _subject, _through: (_ for _ in ()).throw(
+            AssertionError("must not load")
+        ),
+    )
+
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == [
+        "identity_mismatch",
+        "target_identity_mismatch",
+        "target_price_identity_mismatch",
+        "valuation_source_mismatch",
+        "valuation_value_invalid",
+        "ledger_value_mismatch",
+    ]
+
+
+@pytest.mark.django_db
+def test_long_v4_cross_wired_selected_returns_fail_before_all_price_io() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    calculation = deepcopy(prediction.calculation)
+    calculation["selected_view"]["cumulative_returns"] = {
+        "bear": -0.0500,
+        "base": 0.2000,
+        "bull": 0.4000,
+    }
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(AssertionError("cross-wired V4 returns must not load prices"))
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == ["identity_mismatch"]
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_probability_and_confidence_semantics_are_immutable_identity() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    prediction.probability_positive = Decimal("0.5000")
+    prediction.confidence = Decimal("50.00")
+    prediction.confidence_status = "calibrated"
+    calculation = deepcopy(prediction.calculation)
+    calculation["probability_semantics"] = {
+        "status": "published",
+        "value": 0.5,
+        "reason": "",
+    }
+    calculation["confidence_semantics"] = {
+        "status": "calibrated",
+        "value": 50.0,
+        "schema": "percent",
+    }
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("invalid V4 probability semantics must not load prices")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == ["identity_mismatch"]
+    assert calls == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "forged_extra",
+        "duplicate",
+        "reordered",
+        "omitted",
+        "malformed_uuid",
+        "noncanonical_uuid",
+        "missing_db_asset",
+        "provider",
+        "kind",
+        "subject",
+        "relative_path",
+        "sha256",
+        "retrieved_at",
+        "available_at",
+        "post_generated",
+        "malformed_catalog",
+    ],
+)
+def test_long_v4_complete_manifest_closure_fails_before_all_price_io(
+    mutation: str,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    calculation = deepcopy(prediction.calculation)
+    prediction_manifest = deepcopy(prediction.source_assets)
+
+    def replace_mapping_entry(entry: dict[str, str]) -> None:
+        calculation["source_manifest"][0] = deepcopy(entry)
+        prediction_manifest[0] = deepcopy(entry)
+
+    if mutation == "forged_extra":
+        forged = deepcopy(calculation["source_manifest"][0])
+        forged["id"] = str(uuid4())
+        calculation["source_manifest"].append(deepcopy(forged))
+        prediction_manifest.append(deepcopy(forged))
+    elif mutation == "duplicate":
+        calculation["source_manifest"].append(deepcopy(calculation["source_manifest"][0]))
+        prediction_manifest.append(deepcopy(prediction_manifest[0]))
+    elif mutation == "reordered":
+        calculation["source_manifest"][0], calculation["source_manifest"][1] = (
+            calculation["source_manifest"][1],
+            calculation["source_manifest"][0],
+        )
+        prediction_manifest[0], prediction_manifest[1] = (
+            prediction_manifest[1],
+            prediction_manifest[0],
+        )
+    elif mutation == "omitted":
+        calculation["source_manifest"] = calculation["source_manifest"][1:]
+        prediction_manifest = prediction_manifest[1:]
+    elif mutation in {"malformed_uuid", "noncanonical_uuid", "missing_db_asset"}:
+        replacement = {
+            "malformed_uuid": "not-a-uuid",
+            "noncanonical_uuid": str(uuid4()).upper(),
+            "missing_db_asset": str(uuid4()),
+        }[mutation]
+        calculation["evidence_catalog"]["sec_mapping_authority"]["mapping_asset"]["id"] = (
+            replacement
+        )
+        calculation_entry = deepcopy(calculation["source_manifest"][0])
+        calculation_entry["id"] = replacement
+        replace_mapping_entry(calculation_entry)
+    elif mutation in {
+        "provider",
+        "kind",
+        "subject",
+        "relative_path",
+        "sha256",
+        "retrieved_at",
+        "available_at",
+    }:
+        entry = deepcopy(calculation["source_manifest"][0])
+        entry[mutation] = {
+            "provider": "forged_provider",
+            "kind": "forged_kind",
+            "subject": "forged_subject",
+            "relative_path": "forged/path.json",
+            "sha256": "f" * 64,
+            "retrieved_at": (prediction.generated_at - timedelta(seconds=1)).isoformat(),
+            "available_at": (prediction.generated_at - timedelta(seconds=1)).isoformat(),
+        }[mutation]
+        replace_mapping_entry(entry)
+    elif mutation == "post_generated":
+        future = prediction.generated_at + timedelta(seconds=1)
+        future_asset = DataAsset.objects.create(
+            provider="sec",
+            kind="sec_company_mapping",
+            subject="company_tickers_exchange",
+            relative_path=f"outcomes/{uuid4().hex}.json",
+            sha256="8" * 64,
+            retrieved_at=future,
+            available_at=future,
+        )
+        future_payload = _asset_identity_payload(future_asset)
+        calculation["evidence_catalog"]["sec_mapping_authority"]["mapping_asset"] = deepcopy(
+            future_payload
+        )
+        replace_mapping_entry(future_payload)
+    else:
+        calculation["evidence_catalog"]["raw_fcf_authority"] = {}
+
+    prediction.calculation = calculation
+    prediction.source_assets = prediction_manifest
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("invalid complete manifest must fail before price I/O")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata == {
+        "provider": "twelve_data",
+        "valuation_baseline": {
+            "role": "calculation.target_price.valuation_value",
+            "status": "authentication_failed",
+            "issue_codes": ["identity_mismatch"],
+        },
+    }
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_raw_sec_replay_failure_is_identity_mismatch_before_price_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_raw_sec_replay",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            outcomes_module.LongV4PersistedAuthorityError(
+                "Long-v4 raw SEC physical replay is incompatible"
+            )
+        ),
+    )
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(AssertionError("failed SEC replay must precede price I/O"))
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata == {
+        "provider": "twelve_data",
+        "valuation_baseline": {
+            "role": "calculation.target_price.valuation_value",
+            "status": "authentication_failed",
+            "issue_codes": ["identity_mismatch"],
+        },
+    }
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_peer_raw_asset_cannot_authenticate_target_price_closure() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    available_at = prediction.data_cutoff
+    peer_subject = "PEER:US"
+    peer_raw = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=peer_subject,
+        relative_path=f"outcomes/{uuid4().hex}.json",
+        sha256="3" * 64,
+        retrieved_at=available_at,
+        available_at=available_at,
+    )
+    peer_normalized = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject=peer_subject,
+        relative_path=f"outcomes/{uuid4().hex}.parquet",
+        sha256="4" * 64,
+        retrieved_at=available_at,
+        available_at=available_at,
+        metadata={
+            "raw_asset_id": str(peer_raw.pk),
+            "raw_sha256": peer_raw.sha256,
+        },
+    )
+    peer_raw_payload = _asset_identity_payload(peer_raw)
+    peer_normalized_payload = _asset_identity_payload(peer_normalized)
+    calculation = deepcopy(prediction.calculation)
+    target_price = calculation["target_price"]
+    target_price["raw_asset_id"] = peer_raw_payload["id"]
+    target_price["raw_asset_sha256"] = peer_raw_payload["sha256"]
+    target_price["raw_asset"] = peer_raw_payload
+    peer_price = {
+        **deepcopy(target_price),
+        "owner_listing_id": str(uuid4()),
+        "listing_id": str(uuid4()),
+        "subject": peer_subject,
+        "normalized_asset_id": peer_normalized_payload["id"],
+        "normalized_asset_sha256": peer_normalized_payload["sha256"],
+        "normalized_asset": peer_normalized_payload,
+        "raw_asset_id": peer_raw_payload["id"],
+        "raw_asset_sha256": peer_raw_payload["sha256"],
+        "raw_asset": peer_raw_payload,
+    }
+    calculation["evidence_catalog"]["prices"] = [deepcopy(target_price), peer_price]
+    calculation["source_manifest"] = [
+        deepcopy(calculation["source_manifest"][0]),
+        deepcopy(calculation["source_manifest"][1]),
+        peer_raw_payload,
+        peer_normalized_payload,
+    ]
+    prediction.source_assets = deepcopy(calculation["source_manifest"])
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("cross-subject raw closure must not load prices")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == [
+        "target_price_identity_mismatch"
+    ]
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_complete_peer_price_pair_cannot_authenticate_target_listing() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    peer_subject = "PEER:US"
+    peer_raw = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=peer_subject,
+        relative_path=f"outcomes/{uuid4().hex}.json",
+        sha256="6" * 64,
+        retrieved_at=prediction.generated_at,
+        available_at=prediction.generated_at,
+    )
+    peer_normalized = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject=peer_subject,
+        relative_path=f"outcomes/{uuid4().hex}.parquet",
+        sha256="7" * 64,
+        retrieved_at=prediction.generated_at,
+        available_at=prediction.generated_at,
+        metadata={
+            "raw_asset_id": str(peer_raw.pk),
+            "raw_sha256": peer_raw.sha256,
+        },
+    )
+    raw_payload = _asset_identity_payload(peer_raw)
+    normalized_payload = _asset_identity_payload(peer_normalized)
+    calculation = deepcopy(prediction.calculation)
+    target_price = calculation["target_price"]
+    target_price.update(
+        {
+            "subject": peer_subject,
+            "normalized_asset_id": normalized_payload["id"],
+            "normalized_asset_sha256": normalized_payload["sha256"],
+            "normalized_asset": normalized_payload,
+            "raw_asset_id": raw_payload["id"],
+            "raw_asset_sha256": raw_payload["sha256"],
+            "raw_asset": raw_payload,
+        }
+    )
+    calculation["price_subject"] = peer_subject
+    calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    calculation["source_manifest"] = [
+        deepcopy(calculation["source_manifest"][0]),
+        normalized_payload,
+        raw_payload,
+    ]
+    prediction.price_subject = peer_subject
+    prediction.source_assets = deepcopy(calculation["source_manifest"])
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("a peer price pair must not authenticate the target")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == [
+        "target_price_identity_mismatch"
+    ]
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_persisted_normalized_to_raw_relation_is_authenticated() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis)
+    unrelated_raw = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=prediction.price_subject,
+        relative_path=f"outcomes/{uuid4().hex}.json",
+        sha256="5" * 64,
+        retrieved_at=prediction.data_cutoff,
+        available_at=prediction.data_cutoff,
+    )
+    unrelated_payload = _asset_identity_payload(unrelated_raw)
+    calculation = deepcopy(prediction.calculation)
+    target_price = calculation["target_price"]
+    target_price["raw_asset_id"] = unrelated_payload["id"]
+    target_price["raw_asset_sha256"] = unrelated_payload["sha256"]
+    target_price["raw_asset"] = unrelated_payload
+    calculation["evidence_catalog"]["prices"] = [deepcopy(target_price)]
+    calculation["source_manifest"] = [
+        deepcopy(calculation["source_manifest"][0]),
+        deepcopy(calculation["source_manifest"][1]),
+        unrelated_payload,
+    ]
+    prediction.source_assets = deepcopy(calculation["source_manifest"])
+    prediction.calculation = calculation
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("unrelated persisted raw closure must not load prices")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == [
+        "target_price_identity_mismatch"
+    ]
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_long_v4_research_price_evidence_between_cutoff_and_issuance_matures(
+    tmp_path,
+) -> None:
+    _, analysis = _analysis()
+    data_cutoff = datetime(2026, 1, 2, 21, tzinfo=timezone.get_current_timezone())
+    generated_at = datetime(2026, 1, 10, 21, tzinfo=timezone.get_current_timezone())
+    source_available_at = datetime(2026, 1, 5, 12, tzinfo=timezone.get_current_timezone())
+    analysis.run.data_cutoff = data_cutoff
+    analysis.run.generated_at = generated_at
+    analysis.run.save(update_fields=["data_cutoff", "generated_at"])
+    prediction = _v4_prediction(
+        analysis,
+        source_available_at=source_available_at,
+    )
+    sessions = _business_dates_after(prediction.target_date, 756)
+    evaluation_time = _v4_evaluation_time()
+    store = AssetStore(tmp_path)
+    _register_price_asset(
+        store,
+        prediction.price_subject,
+        evaluation_time,
+        sessions,
+        [120.0] * len(sessions),
+        provider="twelve_data",
+    )
+
+    result = evaluate_prediction(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluation_time=evaluation_time,
+        store=store,
+    )
+
+    assert prediction.data_cutoff < source_available_at < prediction.generated_at
+    assert prediction.generated_at == prediction.analysis.run.generated_at
+    assert result.outcome.status == PredictionOutcome.Status.MATURED
+    assert result.outcome.actual_return == Decimal("0.2000")
+
+
+@pytest.mark.django_db
+def test_long_v4_price_evidence_after_issuance_fails_before_all_price_io() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(
+        analysis,
+        source_available_at=analysis.run.generated_at + timedelta(seconds=1),
+    )
+    calls: list[tuple[str, date]] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=prediction.target_date + timedelta(days=1200),
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, through_date: (
+            calls.append((subject, through_date))
+            or (_ for _ in ()).throw(
+                AssertionError("post-issuance evidence must fail before price I/O")
+            )
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == "Long-v4 valuation baseline could not be authenticated"
+    assert resolved.metadata["valuation_baseline"]["issue_codes"] == [
+        "identity_mismatch",
+        "target_price_identity_mismatch",
+    ]
+    assert calls == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("case", "expected_status", "expected_resolution"),
+    [
+        (
+            "missing",
+            PredictionOutcome.Status.UNRESOLVED,
+            "Evaluation price history has no exact target-date close",
+        ),
+        (
+            "equal",
+            PredictionOutcome.Status.MATURED,
+            "Matured after 756 observed sessions",
+        ),
+        (
+            "mismatch",
+            PredictionOutcome.Status.CORPORATE_EVENT,
+            "Target-date price changed in the evaluation vintage",
+        ),
+    ],
+)
+def test_long_v4_requires_exact_target_date_close(
+    case: str,
+    expected_status: str,
+    expected_resolution: str,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis, valuation_value=Decimal("100"))
+    sessions = _business_dates_after(prediction.target_date, 756)
+    dates = [prediction.target_date, *sessions]
+    closes = [100.0, *([110.0] * len(sessions))]
+    if case == "missing":
+        dates[0] = prediction.target_date - timedelta(days=1)
+    elif case == "mismatch":
+        closes[0] = 99.0
+    frame = pl.DataFrame({"date": dates, "close": closes})
+    calls: list[str] = []
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject=None,
+        price_loader=lambda subject, _through: calls.append(subject) or frame,
+    )
+
+    assert resolved.status == expected_status
+    assert expected_resolution in resolved.resolution
+    assert calls == [prediction.price_subject]
+    baseline = resolved.metadata["valuation_baseline"]
+    assert baseline["role"] == "calculation.target_price.valuation_value"
+    assert baseline["valuation_value"] == "100"
+    assert baseline["ledger_value"] == "100.000000"
+    assert baseline["comparison_type"] == "Decimal(str(target_close)) == valuation_value"
+    assert baseline["target_date"] == prediction.target_date.isoformat()
+    assert baseline["return_quantum"] == "0.0001"
+    assert baseline["rounding"] == "ROUND_HALF_EVEN"
+    if case == "missing":
+        assert baseline["status"] == "target_close_missing"
+        assert baseline["target_close"] is None
+    elif case == "equal":
+        assert baseline["status"] == "authenticated"
+        assert baseline["target_close"] == "100.0"
+    else:
+        assert baseline["status"] == "target_close_mismatch"
+        assert baseline["target_close"] == "99.0"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "terminal_close",
+        "bear",
+        "base",
+        "bull",
+        "expected_actual",
+        "expected_direction",
+        "expected_error",
+    ),
+    [
+        (
+            100.005,
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            True,
+            Decimal("0.0000"),
+        ),
+        (
+            100.015,
+            Decimal("0.0000"),
+            Decimal("0.0001"),
+            Decimal("0.0002"),
+            Decimal("0.0002"),
+            True,
+            Decimal("0.0001"),
+        ),
+        (
+            99.995,
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            Decimal("-0.0000"),
+            True,
+            Decimal("-0.0000"),
+        ),
+        (
+            99.985,
+            Decimal("-0.0002"),
+            Decimal("-0.0001"),
+            Decimal("0.0000"),
+            Decimal("-0.0002"),
+            True,
+            Decimal("-0.0001"),
+        ),
+    ],
+)
+def test_long_v4_decimal_return_drives_every_outcome_field(
+    terminal_close: float,
+    bear: Decimal,
+    base: Decimal,
+    bull: Decimal,
+    expected_actual: Decimal,
+    expected_direction: bool,
+    expected_error: Decimal,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(
+        analysis,
+        valuation_value=Decimal("100"),
+        bear=bear,
+        base=base,
+        bull=bull,
+    )
+    sessions = _business_dates_after(prediction.target_date, 756)
+    frame = pl.DataFrame(
+        {
+            "date": [prediction.target_date, *sessions],
+            "close": [100.0, *([terminal_close] * len(sessions))],
+        }
+    )
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject=None,
+        price_loader=lambda _subject, _through: frame,
+    )
+
+    assert resolved.status == PredictionOutcome.Status.MATURED
+    assert resolved.actual_return == expected_actual
+    assert resolved.success is None
+    assert resolved.direction_correct is expected_direction
+    assert resolved.interval_covered is True
+    assert resolved.error == expected_error
+    assert resolved.signed_error == expected_error
+
+
+@pytest.mark.django_db
+def test_long_v4_benchmark_behavior_matches_legacy_benchmark_path() -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis, valuation_value=Decimal("100"))
+    sessions = _business_dates_after(prediction.target_date, 756)
+    stock_frame = pl.DataFrame(
+        {
+            "date": [prediction.target_date, *sessions],
+            "close": [100.0, *([120.0] * len(sessions))],
+        }
+    )
+    benchmark_frame = pl.DataFrame(
+        {
+            "date": [prediction.target_date - timedelta(days=1), sessions[-1]],
+            "close": [200.0, 220.0],
+        }
+    )
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda subject, _through: (
+            benchmark_frame if subject == "BENCH" else stock_frame
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.MATURED
+    assert resolved.actual_return == Decimal("0.2000")
+    assert resolved.benchmark_return == Decimal("0.1")
+    assert "Benchmark return uses" in resolved.resolution
+
+
+@pytest.mark.django_db
+def test_long_v4_terminal_corporate_event_is_idempotently_skipped(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(analysis, valuation_value=Decimal("100"))
+    sessions = _business_dates_after(prediction.target_date, 756)
+    store = AssetStore(tmp_path)
+    evaluation_time = _v4_evaluation_time()
+    _register_price_asset(
+        store,
+        prediction.price_subject,
+        evaluation_time,
+        sessions,
+        [110.0] * len(sessions),
+        provider="twelve_data",
+        baseline_close=Decimal("99"),
+    )
+
+    first = evaluate_prediction(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluation_time=evaluation_time,
+        store=store,
+    )
+
+    def forbidden_price_frame(*_args, **_kwargs) -> pl.DataFrame:
+        raise AssertionError("terminal corporate event must not retry price I/O")
+
+    monkeypatch.setattr(AsOfData, "price_frame", forbidden_price_frame)
+    second = evaluate_prediction(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=sessions[-1],
+        evaluation_time=evaluation_time + timedelta(days=1),
+        store=store,
+    )
+
+    assert first.outcome.status == PredictionOutcome.Status.CORPORATE_EVENT
+    assert first.outcome.resolution == "Target-date price changed in the evaluation vintage"
+    assert second.action == "skipped"
+    assert second.outcome.pk == first.outcome.pk
+    assert second.outcome.metadata == first.outcome.metadata
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("guard", "expected_resolution"),
+    [
+        ("future", "Evaluation date is after actual evaluation time"),
+        ("before", "Evaluation date is before prediction target date"),
+        ("all_null", "Withheld forecast has no scenario to evaluate"),
+    ],
+)
+def test_long_v4_preserves_date_and_all_null_guard_order(
+    guard: str,
+    expected_resolution: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _v4_prediction(
+        analysis,
+        bear=None if guard == "all_null" else Decimal("-0.1"),
+        base=None if guard == "all_null" else Decimal("0.1"),
+        bull=None if guard == "all_null" else Decimal("0.2"),
+    )
+    prediction.calculation = {}
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_persisted_authority",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("date/all-null guards must precede DB authority")
+        ),
+    )
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_raw_sec_replay",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("date/all-null guards must precede SEC replay")
+        ),
+    )
+    evaluation_date = {
+        "future": date(2031, 1, 1),
+        "before": prediction.target_date - timedelta(days=1),
+        "all_null": prediction.target_date,
+    }[guard]
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="twelve_data",
+        evaluation_date=evaluation_date,
+        evaluated_at=_v4_evaluation_time(),
+        benchmark_subject="BENCH",
+        price_loader=lambda _subject, _through: (_ for _ in ()).throw(
+            AssertionError("guarded branch must not load")
+        ),
+    )
+
+    assert resolved.status == PredictionOutcome.Status.UNRESOLVED
+    assert resolved.resolution == expected_resolution
 
 
 @pytest.mark.django_db
@@ -722,6 +1682,45 @@ def test_evaluator_does_not_use_future_rows_in_eligible_asset(tmp_path) -> None:
     assert result.outcome.status == PredictionOutcome.Status.MATURED
     assert result.outcome.evaluation_date == sessions[-1]
     assert result.outcome.actual_return == Decimal("0.1")
+
+
+@pytest.mark.django_db
+def test_non_v4_outcome_keeps_prior_close_and_ledger_float_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+    )
+    sessions = _business_dates_after(prediction.target_date, 10)
+    frame = pl.DataFrame(
+        {
+            "date": [prediction.target_date - timedelta(days=1), *sessions],
+            "close": [100.0, *([110.0] * len(sessions))],
+        }
+    )
+    monkeypatch.setattr(
+        outcomes_module,
+        "_validate_long_v4_raw_sec_replay",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-V4 outcomes must not replay raw SEC evidence")
+        ),
+    )
+
+    resolved = resolve_outcome(
+        prediction,
+        provider="synthetic",
+        evaluation_date=sessions[-1],
+        evaluated_at=_evaluation_time(),
+        benchmark_subject=None,
+        price_loader=lambda _subject, _through: frame,
+    )
+
+    assert resolved.status == PredictionOutcome.Status.MATURED
+    assert resolved.actual_return == Decimal("0.1")
+    assert "valuation_baseline" not in resolved.metadata
 
 
 @pytest.mark.django_db
@@ -1203,8 +2202,16 @@ def _prediction(
     data_cutoff: datetime | None = None,
     source_assets: list[dict[str, str]] | None = None,
     evidence_role: Prediction.EvidenceRole = Prediction.EvidenceRole.DECISION,
+    evidence_grade: UniverseSnapshot.Grade = UniverseSnapshot.Grade.RESEARCH,
     price_provider: str = "",
     price_subject: str = "",
+    method_version: str = "",
+    config_hash: str = "b" * 64,
+    calculation: dict[str, object] | None = None,
+    probability_positive: Decimal | None = None,
+    confidence: Decimal = Decimal("60"),
+    confidence_status: str = "heuristic",
+    insufficiency_reason: str = "",
 ) -> Prediction:
     return Prediction.objects.create(
         analysis=analysis,
@@ -1213,25 +2220,207 @@ def _prediction(
         target_date=target_date or analysis.run.target_date,
         horizon=horizon,
         evidence_role=evidence_role,
+        evidence_grade=evidence_grade,
         price_provider=price_provider,
         price_subject=price_subject,
         price_at_prediction=price_at_prediction,
         bear_return=bear,
         base_return=base,
         bull_return=bull,
-        probability_positive=None,
-        confidence=Decimal("60"),
-        confidence_status="heuristic",
-        insufficiency_reason="",
+        probability_positive=probability_positive,
+        confidence=confidence,
+        confidence_status=confidence_status,
+        insufficiency_reason=insufficiency_reason,
         recommendation=recommendation,
         overall_score=Decimal("70"),
         component_scores={},
         model_version=version or f"outcome-{horizon.value}",
-        config_hash="b" * 64,
+        method_version=method_version,
+        config_hash=config_hash,
         data_cutoff=data_cutoff or analysis.run.generated_at,
         source_assets=source_assets or [],
+        calculation=calculation or {},
         code_revision="test",
     )
+
+
+def _v4_prediction(
+    analysis: StockAnalysis,
+    *,
+    valuation_value: Decimal = Decimal("100"),
+    bear: Decimal | None = Decimal("-0.1000"),
+    base: Decimal | None = Decimal("0.1000"),
+    bull: Decimal | None = Decimal("0.3000"),
+    source_available_at: datetime | None = None,
+) -> Prediction:
+    listing = analysis.listing
+    if not listing.provider_symbol:
+        listing.provider_symbol = listing.ticker
+        listing.save(update_fields=["provider_symbol"])
+    ledger_value = canonical_long_v4_price(valuation_value)
+    analysis.current_price = ledger_value
+    analysis.save(update_fields=["current_price"])
+    model_version = f"{LONG_V4_VERSION}-outcome-test"
+    source_available_at = source_available_at or analysis.run.data_cutoff
+    mapping_asset_row = DataAsset.objects.create(
+        provider="sec",
+        kind="sec_company_mapping",
+        subject="company_tickers_exchange",
+        relative_path=f"outcomes/{uuid4().hex}.json",
+        sha256="0" * 64,
+        retrieved_at=source_available_at,
+        available_at=source_available_at,
+    )
+    raw_asset_row = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="raw_price_history",
+        subject=listing.provider_symbol,
+        relative_path=f"outcomes/{uuid4().hex}.json",
+        sha256="2" * 64,
+        retrieved_at=source_available_at,
+        available_at=source_available_at,
+    )
+    normalized_asset_row = DataAsset.objects.create(
+        provider="twelve_data",
+        kind="price_history",
+        subject=listing.provider_symbol,
+        relative_path=f"outcomes/{uuid4().hex}.parquet",
+        sha256="1" * 64,
+        retrieved_at=source_available_at,
+        available_at=source_available_at,
+        metadata={
+            "raw_asset_id": str(raw_asset_row.pk),
+            "raw_sha256": raw_asset_row.sha256,
+        },
+    )
+    mapping_asset = _asset_identity_payload(mapping_asset_row)
+    normalized_asset = _asset_identity_payload(normalized_asset_row)
+    raw_asset = _asset_identity_payload(raw_asset_row)
+    target = {
+        "listing_id": str(listing.pk),
+        "ticker": listing.ticker,
+        "provider_symbol": listing.provider_symbol,
+        "exchange_mic": listing.exchange_mic,
+        "currency": listing.currency,
+        "region": listing.region,
+        "is_active": listing.is_active,
+        "valid_from": listing.valid_from.isoformat() if listing.valid_from else None,
+        "valid_to": listing.valid_to.isoformat() if listing.valid_to else None,
+        "security_id": str(listing.security_id),
+        "security_type": listing.security.security_type,
+        "company_id": str(listing.security.company_id),
+        "company_cik": listing.security.company.cik,
+        "company_name": listing.security.company.name,
+        "company_country": listing.security.company.country,
+    }
+    valuation_text = format(valuation_value, "f")
+    ledger_text = format(ledger_value, ".6f")
+    target_price = {
+        "owner_listing_id": str(listing.pk),
+        "listing_id": str(listing.pk),
+        "provider": "twelve_data",
+        "subject": listing.provider_symbol,
+        "exchange_mic": listing.exchange_mic,
+        "session_date": analysis.run.target_date.isoformat(),
+        "value": ledger_text,
+        "ledger_value": ledger_text,
+        "valuation_value": valuation_text,
+        "valuation_source": "normalized_parquet_target_close",
+        "native_price": valuation_text,
+        "currency": listing.currency,
+        "native_currency": listing.currency,
+        "applied_fx_rate": None,
+        "fx_conversion": False,
+        "normalized_asset_id": normalized_asset["id"],
+        "normalized_asset_sha256": normalized_asset["sha256"],
+        "raw_asset_id": raw_asset["id"],
+        "raw_asset_sha256": raw_asset["sha256"],
+        "normalized_asset": normalized_asset,
+        "raw_asset": raw_asset,
+    }
+    source_assets = [mapping_asset, normalized_asset, raw_asset]
+    calculation: dict[str, object] = {
+        "schema_version": 2,
+        "method": LONG_V4_METHOD,
+        "method_version": LONG_V4_VERSION,
+        "config_hash": LONG_V4_EFFECTIVE_CONFIG_HASH,
+        "research_status": LONG_V4_RESEARCH_STATUS,
+        "path_years": 5,
+        "target_date": analysis.run.target_date.isoformat(),
+        "return_basis": "split_adjusted_price_return",
+        "dividends_included": False,
+        "base_currency": "USD",
+        "fx_conversion": False,
+        "insufficiency_code": None,
+        "insufficiency_reason": "",
+        "probability_semantics": {
+            "status": "unavailable",
+            "value": None,
+            "reason": PROBABILITY_REASON,
+        },
+        "confidence_semantics": {
+            "status": "not_estimated_uncalibrated",
+            "value": 0.0,
+            "schema": "zero_is_unavailable_sentinel",
+        },
+        "target": target,
+        "target_price": target_price,
+        "evidence_catalog": {
+            "sec_mapping_authority": {"mapping_asset": mapping_asset},
+            "raw_fcf_authority": [],
+            "facts": [],
+            "classifications": [],
+            "prices": [deepcopy(target_price)],
+        },
+        "source_manifest": source_assets,
+        "forecast_horizon": Prediction.Horizon.THREE_YEAR,
+        "years": 3,
+        "selected_view": {
+            "horizon": Prediction.Horizon.THREE_YEAR,
+            "year": 3,
+            "cumulative_returns": {
+                "bear": float(bear) if bear is not None else None,
+                "base": float(base) if base is not None else None,
+                "bull": float(bull) if bull is not None else None,
+            },
+        },
+        "prediction_version": model_version,
+        "price_subject": listing.provider_symbol,
+        "evidence_grade": UniverseSnapshot.Grade.RESEARCH,
+    }
+    return _prediction(
+        analysis,
+        horizon=Prediction.Horizon.THREE_YEAR,
+        evidence_role=Prediction.EvidenceRole.ADVISORY,
+        price_provider="twelve_data",
+        price_subject=listing.provider_symbol,
+        price_at_prediction=ledger_value,
+        bear=bear,
+        base=base,
+        bull=bull,
+        version=model_version,
+        source_assets=source_assets,
+        method_version=LONG_V4_VERSION,
+        config_hash=LONG_V4_EFFECTIVE_CONFIG_HASH,
+        calculation=calculation,
+        confidence=Decimal("0.00"),
+        confidence_status="not_estimated_uncalibrated",
+        insufficiency_reason=PROBABILITY_REASON,
+        data_cutoff=analysis.run.data_cutoff,
+    )
+
+
+def _asset_identity_payload(asset: DataAsset) -> dict[str, str]:
+    return {
+        "id": str(asset.pk),
+        "provider": asset.provider,
+        "kind": asset.kind,
+        "subject": asset.subject,
+        "relative_path": asset.relative_path,
+        "sha256": asset.sha256,
+        "retrieved_at": asset.retrieved_at.isoformat(),
+        "available_at": asset.available_at.isoformat(),
+    }
 
 
 def _business_dates_after(start: date, count: int) -> list[date]:
@@ -1246,6 +2435,10 @@ def _business_dates_after(start: date, count: int) -> list[date]:
 
 def _evaluation_time() -> datetime:
     return datetime(2026, 12, 31, 12, tzinfo=timezone.get_current_timezone())
+
+
+def _v4_evaluation_time() -> datetime:
+    return datetime(2030, 12, 31, 12, tzinfo=timezone.get_current_timezone())
 
 
 def _register_price_asset(

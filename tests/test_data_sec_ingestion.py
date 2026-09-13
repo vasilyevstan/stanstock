@@ -439,66 +439,149 @@ def test_persisted_companyfacts_replays_after_interrupted_normalization(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    _listing()
+    listing = _listing()
     store = AssetStore(root=tmp_path)
     _mapping_asset(store)
-    companyfacts = {"content": _companyfacts_bytes()}
-    _patch_provider(monkeypatch, companyfacts)
+    initial_at = datetime(2026, 8, 15, 12, tzinfo=UTC)
+    correction_at = initial_at + timedelta(days=1)
+    companyfacts: dict[str, object] = {
+        "content": _companyfacts_bytes(),
+        "retrieved_at": initial_at,
+    }
+    submissions: dict[str, object] = {
+        "content": SUBMISSIONS_BYTES,
+        "retrieved_at": initial_at,
+    }
+    _patch_provider_with_clock(monkeypatch, companyfacts, submissions)
     original_fetch = sec.fetch_companyfacts
-    original_normalize = sec_ingestion._normalize_companyfacts
-    calls = {"fetch": 0, "normalize": 0}
+    original_persist = sec_ingestion._persist_fact_derivation
+    fetch_count = 0
+    fetch_allowed = True
 
     def fetch_companyfacts(cik: str) -> FundamentalSourcePayload:
-        calls["fetch"] += 1
+        nonlocal fetch_count
+        if not fetch_allowed:
+            raise AssertionError("retry must replay the durable raw observation")
+        fetch_count += 1
         return original_fetch(cik)
 
-    def normalize_companyfacts(**kwargs: object) -> tuple[int, int]:
-        calls["normalize"] += 1
-        if calls["normalize"] == 1:
-            raise RuntimeError("simulated normalization interruption")
-        return original_normalize(**kwargs)
-
     monkeypatch.setattr(sec, "fetch_companyfacts", fetch_companyfacts)
-    monkeypatch.setattr(sec_ingestion, "_normalize_companyfacts", normalize_companyfacts)
+    _controlled_clock(monkeypatch, initial_at)
     budget = SecRequestBudget(
         requests_per_second=5,
         enforce_spacing=False,
         require_enabled=False,
     )
 
-    with pytest.raises(RuntimeError, match="normalization interruption"):
+    initial = run_sec_ingestion(
+        config=load_sec_fundamentals_config(),
+        cik_config=_cik_config(),
+        universe_config=_universe(),
+        target_date=date(2026, 8, 14),
+        store=store,
+        budget=budget,
+    )
+    assert initial.facts_created == 5
+    before_fact_ids = set(FundamentalFact.objects.values_list("pk", flat=True))
+    before_link_ids = set(FundamentalFactEvidence.objects.values_list("pk", flat=True))
+    before_fact_count = len(before_fact_ids)
+    before_link_count = len(before_link_ids)
+
+    corrected = json.loads(_companyfacts_bytes(q1_revenue=101))
+    annual = corrected["facts"]["us-gaap"]["RevenueFromContractWithCustomerExcludingAssessedTax"][
+        "units"
+    ]["USD"][0]
+    annual["val"] = 351
+    companyfacts["content"] = json.dumps(corrected, sort_keys=True).encode()
+    companyfacts["retrieved_at"] = correction_at
+    submissions["content"] = SUBMISSIONS_BYTES.replace(
+        b"Electronic Computers",
+        b"Electronic Computers Corrected",
+    )
+    submissions["retrieved_at"] = correction_at
+    _controlled_clock(monkeypatch, correction_at)
+    changed_derivations = 0
+
+    def fail_on_second_changed_derivation(**kwargs: object):
+        nonlocal changed_derivations
+        derivation = kwargs["derivation"]
+        assert isinstance(derivation, sec_ingestion.SecFactDerivation)
+        if derivation.concept == "revenue" and derivation.value in {
+            Decimal("351"),
+            Decimal("101"),
+        }:
+            changed_derivations += 1
+            if changed_derivations == 2:
+                raise RuntimeError("simulated second derivation failure")
+        return original_persist(**kwargs)
+
+    monkeypatch.setattr(
+        sec_ingestion,
+        "_persist_fact_derivation",
+        fail_on_second_changed_derivation,
+    )
+
+    with pytest.raises(RuntimeError, match="second derivation failure"):
         run_sec_ingestion(
             config=load_sec_fundamentals_config(),
             cik_config=_cik_config(),
             universe_config=_universe(),
-            target_date=date(2026, 8, 14),
+            target_date=date(2026, 8, 15),
             store=store,
             budget=budget,
         )
+
+    assert changed_derivations == 2
+    assert FundamentalFact.objects.count() == before_fact_count
+    assert FundamentalFactEvidence.objects.count() == before_link_count
+    assert set(FundamentalFact.objects.values_list("pk", flat=True)) == before_fact_ids
+    assert set(FundamentalFactEvidence.objects.values_list("pk", flat=True)) == before_link_ids
+    listing.security.company.refresh_from_db()
+    correction_asset = DataAsset.objects.get(
+        provider="sec",
+        kind="sec_companyfacts",
+        subject=listing.security.company.cik,
+        retrieved_at=correction_at,
+    )
+    correction_event = SourceObservationEvent.objects.get(
+        source_asset=correction_asset,
+        observed_at=correction_at,
+    )
+    assert correction_event.content_sha256 == correction_asset.sha256
+
+    monkeypatch.setattr(sec_ingestion, "_persist_fact_derivation", original_persist)
+    fetch_allowed = False
+    fetches_before_retry = fetch_count
 
     recovered = run_sec_ingestion(
         config=load_sec_fundamentals_config(),
         cik_config=_cik_config(),
         universe_config=_universe(),
-        target_date=date(2026, 8, 14),
+        target_date=date(2026, 8, 15),
         store=store,
         budget=budget,
     )
+    recovered_fact_ids = set(FundamentalFact.objects.values_list("pk", flat=True))
+    recovered_link_ids = set(FundamentalFactEvidence.objects.values_list("pk", flat=True))
     skipped = run_sec_ingestion(
         config=load_sec_fundamentals_config(),
         cik_config=_cik_config(),
         universe_config=_universe(),
-        target_date=date(2026, 8, 14),
+        target_date=date(2026, 8, 15),
         store=store,
         budget=budget,
     )
 
-    assert calls == {"fetch": 1, "normalize": 2}
+    assert fetch_count == fetches_before_retry == 2
     assert recovered.companyfacts_fetched == 0
-    assert recovered.facts_created == 5
+    assert recovered.facts_created == 2
+    assert before_fact_ids < recovered_fact_ids
+    assert before_link_ids < recovered_link_ids
+    assert len(recovered_fact_ids) == before_fact_count + 2
+    assert len(recovered_link_ids) == before_link_count + 2
     assert skipped.facts_created == 0
-    assert FundamentalFact.objects.count() == 5
-    assert FundamentalFactEvidence.objects.count() == 5
+    assert set(FundamentalFact.objects.values_list("pk", flat=True)) == recovered_fact_ids
+    assert set(FundamentalFactEvidence.objects.values_list("pk", flat=True)) == recovered_link_ids
 
 
 def test_acceptance_enrichment_respects_its_later_source_retrieval(
