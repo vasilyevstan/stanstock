@@ -193,12 +193,28 @@ cutoff-safe immutable inputs and overlap-aware support; SEC facts must preserve
 full filing/period identity and exact availability; incompatible split/share
 bases and unsupported long-formula inputs are withheld rather than guessed.
 
+The reviewed prospective `research-product-v1` contract separates a
+six-month `us-relative-momentum-v1` decision from `us-price-fhs-v1` advisory
+price projections at 6m/12m/3y/5y. It does not convert historical advisory
+rows into decisions. A valid momentum decision has no price-range triplet;
+the all-null-advisory exclusion must not accidentally make that decision
+non-evaluable. Stable method identity is distinct from each immutable
+issuance/reissue identity. Unestimated scores, confidence and probabilities
+remain null under method-gated schema rules, never zero or legacy defaults.
+Conditional FHS projections, historical drift and zero-drift sensitivity
+are not calibrated probabilities, fair values or evidence of profitable
+forecasting. Monte Carlo path counts are not independent market observations.
+
 Prospective affordability work must also be price-scale invariant: nominal
 share price never raises research conviction, price-difference momentum is
 normalized, and liquidity gates use compatible dollar volume rather than raw
-share counts. Split-equivalent price/volume transformations must preserve
-scores and recommendations. Corrections use a new versioned configuration;
-historical hashes, predictions, and performance cohorts remain separate.
+share counts. Frozen scoring methods preserve their score/recommendation
+invariance. The prospective price product preserves raw momentum, relative
+volatility, return projections and dollar-turnover invariance; a separately
+disclosed affordability restriction may suppress a BUY suggestion or current
+promotion but never change the underlying research signal. Corrections use a
+new versioned configuration; historical hashes, predictions, and performance
+cohorts remain separate.
 Current USD price bands remain display/filter/execution metadata and show
 their session date. Under $10 is a 0%-new-allocation speculative watchlist,
 not a positive signal; it cannot enter highlights or newly constructed sample
@@ -211,6 +227,13 @@ construction classifies the decision-run reference close rather than mutable
 current market state. Existing holdings and frozen historical baskets are
 never rewritten, and missing current USD price state fails closed for new
 promotion.
+
+A reviewed price-only projection may be shown for a qualified Under-$10
+listing without activating investment or claiming a fundamental valuation.
+The captured owner-approved intake, adequate history, registered source
+closure and explicit method assumptions must be proved. Price-only
+projections do not satisfy the separate corporate-action, solvency, dilution
+or allocation activation controls.
 
 Investable ETF support preserves a separate evidence contract. A benchmark ETF
 reuses its single immutable provider series and credit, remains outside stock

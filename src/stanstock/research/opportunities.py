@@ -136,8 +136,12 @@ def assess_opportunity(
     )
     criteria = {
         "buy_recommendation": analysis.recommendation == Recommendation.BUY,
-        "score": analysis.overall_score >= mode_policy.min_score,
-        "confidence": analysis.confidence >= mode_policy.min_confidence,
+        "score": (
+            analysis.overall_score is not None and analysis.overall_score >= mode_policy.min_score
+        ),
+        "confidence": (
+            analysis.confidence is not None and analysis.confidence >= mode_policy.min_confidence
+        ),
         "risk": analysis.risk_class in mode_policy.allowed_risk_classes,
         "base_case": (
             base_case is not None and base_case > 0

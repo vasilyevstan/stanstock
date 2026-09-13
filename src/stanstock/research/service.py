@@ -3469,6 +3469,11 @@ def _create_prediction(
     source_assets: list[dict[str, Any]],
     code_revision_value: str,
 ) -> Prediction:
+    if analysis.overall_score is None or analysis.recommendation is None:
+        raise ValueError(
+            "Legacy prediction creation cannot consume a scoreless prospective analysis"
+        )
+    overall_score = analysis.overall_score
     horizon_value = str(horizon)
     price_provider, price_subject = _prediction_price_source(analysis, source_assets)
     return Prediction.objects.create(
@@ -3492,7 +3497,7 @@ def _create_prediction(
         confidence_status=scenario.confidence_status,
         insufficiency_reason=scenario.insufficiency_reason,
         recommendation=analysis.recommendation,
-        overall_score=analysis.overall_score,
+        overall_score=overall_score,
         component_scores=analysis.component_scores,
         model_version=model_version,
         method_version=analysis.run.config_version,
@@ -3519,7 +3524,7 @@ def _create_prediction(
                     "bull": scenario.bull,
                     "probability_positive": scenario.probability_positive,
                 },
-                "overall_score": float(analysis.overall_score),
+                "overall_score": float(overall_score),
                 "risk_score": (
                     float(analysis.risk_score) if analysis.risk_score is not None else None
                 ),

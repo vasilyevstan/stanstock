@@ -31,6 +31,7 @@ from exchange_calendars import get_calendar
 from base_service import (
     BASE_SHA,
     DEPENDENCY_MODULES,
+    LIVE_COMPATIBILITY_MODULES,
     REPO_ROOT,
     _read_base_source,
     base_research_service,
@@ -2565,7 +2566,7 @@ def test_dependency_binding_covers_every_changed_module_base_service_imports() -
         if head_path.read_bytes() != _read_base_source(relative_path):
             changed_and_imported.add(module_name)
 
-    missing = changed_and_imported - bound_names
+    missing = changed_and_imported - bound_names - LIVE_COMPATIBILITY_MODULES
     assert missing == set(), (
         f"base research/service.py imports {sorted(missing)}, whose content "
         "differs from base, but it is not bound in DEPENDENCY_MODULES"
@@ -2575,6 +2576,7 @@ def test_dependency_binding_covers_every_changed_module_base_service_imports() -
         "expected at least one base-imported module to differ from base in "
         "this slice; found none, which would make the assertion above vacuous"
     )
+    assert LIVE_COMPATIBILITY_MODULES <= changed_and_imported
 
 
 def test_historical_harness_dependency_order_and_hashes_are_exact() -> None:

@@ -13,19 +13,19 @@ multi-module dependency chain):** base `outcomes.py` imports exactly four
 `stanstock.*` modules -- `stanstock.data.asof` (`AsOfData`,
 `PriceFrameSchemaError`), `stanstock.data.assets` (`AssetStore`),
 `stanstock.data.models` (`DataAsset`), and `stanstock.research.models`
-(`Prediction`, `PredictionOutcome`, `Recommendation`). Every line this slice
-(and everything between base and head) has ever changed in those four files
-is a pure insertion relative to base: no base line was deleted or modified,
-only new top-level functions/methods were appended after it. A base
-`outcomes.py` bound alongside the *live* (head) versions of those four
-modules therefore sees exactly the same classes, exactly the same method
-bodies, and exactly the same behavior base `outcomes.py` shipped with --
-newer additions those four files may have gained are simply never reached by
-a call into base `outcomes.py`'s own unchanged code paths.
+(`Prediction`, `PredictionOutcome`, `Recommendation`). The three data
+dependencies remain pure insertions. `research.models` is intentionally a
+live compatibility dependency after the prospective nullable-schema slice:
+its field metadata and validation guards necessarily changed, while the
+legacy enum values and attributes consumed by the frozen base outcome code
+remain present. The frozen base/head outcome truth-table tests exercise those
+legacy paths directly; loading a second historical Django model class into
+the live app registry would itself be unsafe and is not used as proof.
 `test_dependency_modules_are_pure_insertions_since_base` in
 `tests/test_research_outcome_refresh_validation.py` proves this mechanically
 via `require_pure_insertion_since_base` below, rather than resting on this
-paragraph alone: every pre-existing base top-level statement (represented by
+paragraph alone for the three pure-insertion modules: every pre-existing base
+top-level statement (represented by
 its full `ast.dump(node, include_attributes=False)` -- covering decorators,
 bases, defaults, imports, and assignment structure, not merely a name) must
 have a semantically identical statement in head, in the same relative order.
@@ -71,14 +71,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTCOMES_MODULE = "stanstock.research.outcomes"
 OUTCOMES_PATH = "src/stanstock/research/outcomes.py"
 
-#: The four `stanstock.*` modules base `outcomes.py` imports, whose base and
+#: The three pure-insertion modules base `outcomes.py` imports, whose base and
 #: head bytes must be proven pure-insertion relative to each other for the
-#: single-module binding above to be sound. See module docstring.
+#: single-module binding above. `research.models` is covered by the explicit
+#: live-schema compatibility contract described in the module docstring.
 PURE_INSERTION_DEPENDENCY_PATHS: tuple[str, ...] = (
     "src/stanstock/data/asof.py",
     "src/stanstock/data/assets.py",
     "src/stanstock/data/models.py",
-    "src/stanstock/research/models.py",
 )
 
 #: The exact new top-level names each dependency file has gained since
@@ -111,7 +111,6 @@ SAFE_TOP_LEVEL_ADDITIONS: dict[str, frozenset[str]] = {
         }
     ),
     "src/stanstock/data/models.py": frozenset(),
-    "src/stanstock/research/models.py": frozenset(),
 }
 
 

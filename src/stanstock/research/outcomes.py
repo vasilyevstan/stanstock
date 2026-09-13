@@ -31,6 +31,7 @@ from stanstock.research.long_forecasts_v4 import (
     canonical_long_v4_price,
 )
 from stanstock.research.models import Prediction, PredictionOutcome, Recommendation
+from stanstock.research.price_product_config import MOMENTUM_METHOD_VERSION
 
 _LONG_V4_RETURN_QUANTUM = Decimal("0.0001")
 _LONG_V4_BASELINE_ROLE = "calculation.target_price.valuation_value"
@@ -285,21 +286,6 @@ def resolve_outcome(
             )
 
         actual_return = session.close / price_at_prediction - 1.0
-    success = (
-        _success(prediction, actual_return)
-        if (
-            not isinstance(actual_return, Decimal)
-            and prediction.evidence_role == Prediction.EvidenceRole.DECISION
-        )
-        else None
-    )
-    if prediction.evidence_role == Prediction.EvidenceRole.DECISION and success is None:
-        return _unresolved_outcome(
-            evaluation_date=session.observation_date,
-            resolution="HOLD success requires non-null stored bear and bull returns",
-            metadata={"provider": provider, "subject": subject},
-        )
-
     benchmark_return = None
     benchmark_resolution = ""
     if benchmark_subject:
@@ -308,6 +294,37 @@ def resolve_outcome(
             subject=benchmark_subject,
             target_date=prediction.target_date,
             evaluation_date=session.observation_date,
+        )
+    success = (
+        _success(
+            prediction,
+            actual_return,
+            benchmark_return=benchmark_return,
+        )
+        if (
+            not isinstance(actual_return, Decimal)
+            and prediction.evidence_role == Prediction.EvidenceRole.DECISION
+        )
+        else None
+    )
+    non_directional_momentum = (
+        prediction.method_version == MOMENTUM_METHOD_VERSION
+        and prediction.recommendation in (Recommendation.HOLD, None)
+    )
+    if (
+        prediction.evidence_role == Prediction.EvidenceRole.DECISION
+        and success is None
+        and not non_directional_momentum
+    ):
+        resolution = (
+            "Prospective momentum decision requires a benchmark return"
+            if prediction.method_version == MOMENTUM_METHOD_VERSION
+            else "HOLD success requires non-null stored bear and bull returns"
+        )
+        return _unresolved_outcome(
+            evaluation_date=session.observation_date,
+            resolution=resolution,
+            metadata={"provider": provider, "subject": subject},
         )
     error: Decimal | float | None = None
     direction_correct = None
@@ -1153,7 +1170,23 @@ def _benchmark_return(
     )
 
 
-def _success(prediction: Prediction, actual_return: float) -> bool | None:
+def _success(
+    prediction: Prediction,
+    actual_return: float,
+    *,
+    benchmark_return: float | None = None,
+) -> bool | None:
+    method_version = getattr(prediction, "method_version", "")
+    if method_version == MOMENTUM_METHOD_VERSION:
+        if prediction.recommendation in (Recommendation.HOLD, None):
+            return None
+        if benchmark_return is None:
+            return None
+        if prediction.recommendation == Recommendation.BUY:
+            return actual_return > 0 and actual_return > benchmark_return
+        if prediction.recommendation == Recommendation.AVOID:
+            return actual_return < 0 and actual_return < benchmark_return
+        return None
     if prediction.recommendation == Recommendation.BUY:
         return actual_return > 0
     if prediction.recommendation == Recommendation.AVOID:
@@ -1168,6 +1201,12 @@ def _success(prediction: Prediction, actual_return: float) -> bool | None:
 def _success_semantics(prediction: Prediction) -> str:
     if prediction.evidence_role == Prediction.EvidenceRole.ADVISORY:
         return "Advisory forecasts do not receive recommendation success labels"
+    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+        if prediction.recommendation == Recommendation.BUY:
+            return "BUY succeeds when stock return is positive and exceeds SPY"
+        if prediction.recommendation == Recommendation.AVOID:
+            return "AVOID succeeds when stock return is negative and below SPY"
+        return "HOLD or unavailable momentum decisions do not receive success labels"
     if prediction.recommendation == Recommendation.BUY:
         return "BUY succeeds when actual return is positive"
     if prediction.recommendation == Recommendation.AVOID:
