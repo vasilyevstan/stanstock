@@ -1623,7 +1623,7 @@ summary {
 
   .primary-nav {
     display: grid;
-    grid-column: 1 / -1;
+    grid-column: 2;
     width: 100%;
     grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: start;
