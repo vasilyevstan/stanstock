@@ -36,6 +36,31 @@ def test_status_requires_authentication(client) -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("product_enabled", [True, False])
+@pytest.mark.parametrize("next_url", ["", "/portfolios", "https://example.invalid/"])
+def test_sign_in_uses_product_landing_unless_a_safe_next_is_requested(
+    client, settings, product_enabled: bool, next_url: str
+) -> None:
+    settings.RESEARCH_PRODUCT_ENABLED = product_enabled
+    password = "synthetic-login-only"
+    user = get_user_model().objects.create_user(username="login-owner", password=password)
+
+    response = client.post(
+        reverse("login"),
+        {"username": user.username, "password": password, "next": next_url},
+        follow=True,
+    )
+
+    if next_url == "/portfolios":
+        assert response.redirect_chain == [(reverse("portfolios"), 302)]
+    else:
+        landing = "opportunities" if product_enabled else "status"
+        assert response.redirect_chain == [(reverse("index"), 302), (reverse(landing), 302)]
+    assert response.status_code == 200
+    assert client.session["_auth_user_id"] == str(user.pk)
+
+
+@pytest.mark.django_db
 @override_settings(SECURE_SSL_REDIRECT=True)
 def test_health_is_available_to_internal_container_probe_over_http(client) -> None:
     health = client.get(reverse("health"))

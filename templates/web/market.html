@@ -73,6 +73,7 @@
     <section class="panel">
       <p class="eyebrow">Coverage</p>
       <h2>Latest listings</h2>
+      <p class="muted">Showing {{ market_rows|length }} of {{ market_listing_count }} persisted market prices.</p>
       <dl class="key-values">
         {% for item in market_rows %}
           <div>
@@ -84,7 +85,7 @@
             </dd>
           </div>
         {% empty %}
-          <div><dt>State</dt><dd>Insufficient data</dd></div>
+          <div><dt>State</dt><dd>No persisted market prices.</dd></div>
         {% endfor %}
       </dl>
     </section>

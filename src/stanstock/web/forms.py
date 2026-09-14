@@ -43,6 +43,13 @@ CURRENCY_CHOICES: list[tuple[str, str]] = [
     ("GBP", "GBP"),
 ]
 
+PRODUCT_HORIZON_CHOICES: tuple[tuple[str, str], ...] = (
+    ("6m", "6 months"),
+    ("12m", "12 months"),
+    ("3y", "3 years"),
+    ("5y", "5 years"),
+)
+
 
 class OpportunityFilterForm(forms.Form):
     q = forms.CharField(required=False, label="Search")
@@ -103,6 +110,12 @@ class OpportunityFilterForm(forms.Form):
 
 class ResearchProductFilterForm(forms.Form):
     q = forms.CharField(required=False, label="Search")
+    horizon = forms.ChoiceField(
+        required=False,
+        choices=PRODUCT_HORIZON_CHOICES,
+        initial="6m",
+        widget=forms.HiddenInput(),
+    )
     direction = forms.ChoiceField(
         required=False,
         choices=[
@@ -132,6 +145,7 @@ class ResearchProductFilterForm(forms.Form):
             ("at_least_10", "$10 and above"),
         ],
         label="Decision-date reference price",
+        widget=forms.HiddenInput(),
     )
 
 

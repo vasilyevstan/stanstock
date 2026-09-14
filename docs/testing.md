@@ -21,6 +21,13 @@ Production settings and PostgreSQL migration/concurrency checks run separately
 with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
+Responsive browser cases require the Chromium binary matching the locked
+Playwright package. CI installs it with
+`uv run playwright install --with-deps chromium`; for a local environment
+with system libraries already available, use `uv run playwright install chromium`.
+Browser-dependent acceptance must run, not be reported as passing when its
+browser is absent.
+
 Documentation-only edits need no build, but these drafts still require a
 separate multi-model clarity/privacy review before publication.
 
@@ -64,6 +71,14 @@ The native end-to-end contract must persist real synthetic evidence, call the
 production writer, read through the fail-closed product reader, and render
 authenticated Opportunities and stock detail.
 
+Exercise the entry-point journey as well as direct routes: authenticated
+sign-in without a `next` destination, authenticated landing, recognizable
+Opportunities navigation, first-screen Under-$10 access,
+filter/horizon selection, pagination, and stock detail. Use synthetic
+representative lists for density and responsive measurements; do not repeat
+full retrospective simulations merely to populate a layout fixture. Keep a
+separate genuine native end-to-end case.
+
 Adversarial cases include:
 
 - wrong owner/provider/catalog identity;
@@ -75,10 +90,19 @@ Adversarial cases include:
 - stale target;
 - inaccessible display authorization;
 - unavailable projection/risk reasons;
+- 20-listing overview pages with stable filter/horizon query parameters;
+- first-screen navigation and no page overflow at narrow and desktop widths;
+- scoreless methods distinguished from missing legacy scores;
+- non-observed history distinguished from reportable outcomes pending data
+  or maturity, including mixed historical cohorts;
+- all-null advisory forecasts shown as non-evaluable, not awaiting maturity;
+- archived outcome counts separated by recorded evidence provenance;
 - responsive/keyboard-readable tables; and
 - separate observed, retrospective, archive, and synthetic labels.
 
 `/status` must remain operational rather than duplicate forecast cards.
+Progressive disclosure must not hide the summary of a restriction, a worse
+baseline result, an empty comparison scope, or numerical sensitivity failures.
 
 ## Scheduled and observed issuance coverage
 

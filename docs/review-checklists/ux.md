@@ -3,6 +3,24 @@
 Applies to any change touching templates, views that render data, or
 user-facing tables/charts. Reviewer: `stanstock-critic-tester`.
 
+## Navigation and information hierarchy
+
+- [ ] Exercise the user's entry-point journey, not only direct URLs. Primary
+      destinations retain recognizable names, and critical filtered views
+      are discoverable in the first viewport on narrow and desktop screens.
+- [ ] Overview pages are bounded and scannable; filters, selected horizons,
+      and pagination remain visible and coherent across navigation.
+- [ ] Actual results appear in the initial viewport rather than below a
+      large heading, preamble, or control stack. Row/DOM counts alone do not
+      prove usable density; inspect content positions and readable values.
+- [ ] Primary labels remain intact, secondary menus do not open over content
+      by default, and form submission preserves the selected view and filters.
+- [ ] Technical detail can be collapsed, but the summary of a restriction,
+      failure, adverse comparison, or unavailable result stays visible.
+- [ ] Method inapplicability, unavailable inputs, non-observed evidence,
+      pending outcomes, and non-evaluable forecasts are not presented as one
+      generic insufficiency state.
+
 ## Responsive and accessible tables
 
 - [ ] Data tables (analyses, predictions, holdings, trades) remain readable

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+from copy import copy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -17,7 +20,7 @@ from stanstock.data.models import DataAsset, UniverseMembership
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import StockCatalog
 from stanstock.data.research_product_demo import execute_demo_product_refresh
-from stanstock.portfolio.models import TrackedSymbol
+from stanstock.portfolio.models import Portfolio, PortfolioHolding, TrackedSymbol
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.outcomes import evaluate_prediction
 from stanstock.research.price_product_config import MOMENTUM_METHOD_VERSION
@@ -25,9 +28,13 @@ from stanstock.research.product_pipeline import (
     verify_price_product_output as real_product_verifier,
 )
 from stanstock.research.product_reader import (
+    ProductCohort,
+    ProductHistoryRead,
+    ProductRead,
     read_research_product,
     read_research_product_history,
 )
+from stanstock.web import product_views
 from test_research_product_jobs import (
     NOW,
     TARGET,
@@ -277,6 +284,7 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     client.force_login(owner)
     no_calculation = Mock(side_effect=AssertionError("GET must not calculate product output"))
     no_simulation = Mock(side_effect=AssertionError("GET must not run FHS paths"))
+    no_provider_fetch = Mock(side_effect=AssertionError("GET must not fetch provider data"))
     verifier = Mock(wraps=real_product_verifier)
     monkeypatch.setattr(
         "stanstock.research.product_reader.verify_price_product_output",
@@ -290,17 +298,21 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
         "stanstock.research.price_product.simulate_fhs_terminal_logs",
         no_simulation,
     )
+    monkeypatch.setattr(
+        "stanstock.data.providers.twelve_data.fetch_daily_price_series",
+        no_provider_fetch,
+    )
 
     opportunities = client.get(reverse("opportunities"))
     assert opportunities.status_code == 200
     content = opportunities.content.decode()
-    assert "Research opportunities" in content
+    assert "<h1>Opportunities</h1>" in content
     assert "CHEAP" in content
-    assert "Under $10 speculative research" in content
+    assert "Under $10 watch" in content
     assert "0% new allocation" in content
-    assert "Lower (p20)" in content
-    assert "Median (p50)" in content
-    assert "Upper (p80)" in content
+    assert "Lower p20" in content
+    assert "Median p50" in content
+    assert "Upper p80" in content
     assert all(label in content for label in ("6 months", "12 months", "3 years", "5 years"))
     assert "/100" not in content
     assert "Heuristic evidence score" not in content
@@ -311,6 +323,25 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     cheap_section = content.split("ZZRP", maxsplit=1)[0]
     assert "CHEAP" in cheap_section
 
+    immutable_counts = (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+    )
+    under_ten = client.get(reverse("opportunities"), {"price_band": "under_10"})
+    invalid = client.get(reverse("opportunities"), {"horizon": "tomorrow"})
+    assert under_ten.status_code == 200
+    assert "CHEAP" in under_ten.content.decode()
+    assert "Speculative watch only · 0% new allocation." in under_ten.content.decode()
+    assert invalid.status_code == 200
+    assert "Filters need attention." in invalid.content.decode()
+    assert immutable_counts == (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+    )
+    assert verifier.call_count == 3
+
     detail = client.get(reverse("stock-detail", args=[cheap.listing_id]))
     assert detail.status_code == 200
     detail_content = detail.content.decode()
@@ -318,9 +349,20 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     assert "T−252 through T−21" in detail_content
     assert "Forecasting skill is not established" in detail_content
     assert "8,192 deterministic PCG64 paths" in detail_content
-    assert verifier.call_count == 2
+    assert "Reference close" in detail_content
+    assert "Market date" in detail_content
+    assert "Provider" in detail_content
+    assert '<details class="panel source-provenance-details">' in detail_content
+    assert "Price coverage and retrieval details" in detail_content
+    assert "Retrieved" in detail_content
+    assert all(
+        f"<h3>{label}</h3>" in detail_content
+        for label in ("6 months", "12 months", "3 years", "5 years")
+    )
+    assert verifier.call_count == 4
     no_calculation.assert_not_called()
     no_simulation.assert_not_called()
+    no_provider_fetch.assert_not_called()
 
 
 def test_demo_refresh_uses_same_reader_and_primary_rendering(
@@ -471,16 +513,22 @@ def test_status_history_performance_and_my_list_keep_boundaries(live_product, cl
     my_list = client.get(reverse("my-list"))
 
     assert status.status_code == 200
-    assert b"OPERATIONAL" in status.content
+    assert b"READY" in status.content
+    assert b"analysed /" in status.content
+    assert b"not admitted" in status.content
     assert b"Lower (p20)" not in status.content
-    assert b"Forecast values belong on the Research screen" in status.content
-    assert b"126-session relative-momentum decisions" in history.content
-    assert b"FHS projection ledger" in history.content
+    assert "Forecast values belong on Opportunities" in " ".join(status.content.decode().split())
+    assert b"Data &amp; updates" in status.content
+    assert b"Listing entries" in history.content
+    assert b"Four advisory projections" in history.content
     assert b"Forecasting skill is not established" in performance.content
-    assert b"No canonical observed product outcome has matured yet" in performance.content
-    assert b"Captured research state" in my_list.content
-    assert b"changes next intake" not in my_list.content.lower()
-    assert b"does not mutate a captured historical cohort" in my_list.content
+    assert b"Better/worse refers to paired error" in performance.content
+    assert b"Not eligible for observed track record" in performance.content
+    assert b"No canonical observed product outcome has matured yet" not in performance.content
+    assert performance.context["observed_scope"]["decision"]["not_eligible_for_observed"] == 3
+    assert performance.context["observed_scope"]["decision"]["outcome_pending"] == 0
+    assert b"Research state" in my_list.content
+    assert b"next scheduled refresh" in my_list.content
 
 
 def test_verified_history_and_performance_span_runs_without_recounting_reissue(
@@ -508,6 +556,12 @@ def test_verified_history_and_performance_span_runs_without_recounting_reissue(
     assert verifier.call_count == 3
     assert performance.context["history"].current.run == current
     assert performance.context["decision_groups"] == [{"status": "matured", "count": 1}]
+    observed_scope = performance.context["observed_scope"]["decision"]
+    assert observed_scope["matured"] == 1
+    if current.issued_on_time:
+        assert observed_scope["outcome_pending"] > 0
+    else:
+        assert observed_scope["not_eligible_for_observed"] == 3
     assert b"No canonical observed product outcome has matured yet" not in performance.content
     no_simulation.assert_not_called()
 
@@ -526,10 +580,9 @@ def test_verified_history_and_performance_span_runs_without_recounting_reissue(
     }
     assert history_content.count("Matured") >= 2
     assert "historical evidence, not a current signal" in history_content
-    advisory_content = history_content.split('aria-label="FHS advisory ledger"', 1)[1]
-    assert "Observed · Twelve Data" in advisory_content
+    assert "Observed · Twelve Data" in history_content
     if not current.issued_on_time:
-        assert "Research · Twelve Data" in advisory_content
+        assert "Research · Twelve Data" in history_content
     no_simulation.assert_not_called()
 
     other = django_user_model.objects.create_user(username="history-other-owner")
@@ -590,3 +643,488 @@ def test_archive_and_disabled_rollback_do_not_reinterpret_product_rows(
     assert b"CHEAP" not in rollback.content
     assert b"No pre-product archived analysis is stored" in archive.content
     assert b"Archived research" in rollback.content
+
+
+def _synthetic_presentation_read(
+    *,
+    owner,
+    store: AssetStore,
+    card_count: int = 105,
+) -> ProductRead:
+    """Repeat one verified card only to exercise the bounded presentation adapter."""
+
+    verified = read_research_product(user=owner, store=store)
+    assert verified.available
+    under_ten = next(card for card in verified.cards if card.target_under_10)
+    return replace(verified, cards=(under_ten,) * card_count)
+
+
+def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
+    live_product,
+    client,
+    monkeypatch,
+    settings,
+):
+    """105 repeated synthetic presentation entries must not require 105 product runs."""
+
+    owner, store, _run = live_product
+    client.force_login(owner)
+    presentation = _synthetic_presentation_read(owner=owner, store=store)
+
+    def read_presentation(request):
+        request._stanstock_product_read = presentation
+        return presentation
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    landing = client.get(reverse("index"))
+    regular = client.get(reverse("opportunities"))
+    under_ten = client.get(
+        reverse("opportunities"),
+        {"price_band": "under_10", "horizon": "12m"},
+    )
+    submitted_filters = {
+        "q": "CHEAP",
+        "horizon": "12m",
+        "direction": presentation.cards[0].direction,
+        "risk": presentation.cards[0].relative_volatility_label,
+        "price_band": "under_10",
+    }
+    submitted = client.get(reverse("opportunities"), submitted_filters)
+    invalid = client.get(reverse("opportunities"), {"horizon": "tomorrow"})
+    market = client.get(reverse("market"))
+
+    assert landing.status_code == 302
+    assert landing.url == reverse("opportunities")
+    assert regular.status_code == 200
+    assert regular.content.count(b'class="compact-opportunity"') == 20
+    assert regular.context["opportunity_page"].paginator.count == 105
+    assert regular.content.count(b"Lower p20") == 20
+    assert b'href="/opportunities?price_band=under_10"' in regular.content
+    assert b'aria-current="page">Opportunities</a>' in regular.content
+    assert b"<summary>More</summary>" in regular.content
+    assert b"Data &amp; updates" in regular.content
+    assert b"Under $10 watch" in regular.content
+    # 20 of a deliberately synthetic 105-entry cohort is an 80% rendered
+    # listing reduction from the former expanded all-entry presentation.
+    assert 1 - (20 / len(presentation.cards)) >= 0.60
+    assert b'aria-current="page">Under $10</a>' in under_ten.content
+    assert b"12 months projections" in under_ten.content
+    assert b"horizon=12m&amp;price_band=under_10&amp;page=2" in under_ten.content
+    assert submitted.status_code == 200
+    for field, value in submitted_filters.items():
+        assert submitted.context["filter_form"].cleaned_data[field] == value
+    assert submitted.content.count(b'class="compact-opportunity"') == 20
+    assert b'type="hidden" name="price_band" value="under_10"' in submitted.content
+    submitted_query = submitted.context["pagination_query"]
+    assert "q=CHEAP" in submitted_query
+    assert "horizon=12m" in submitted_query
+    assert f"direction={presentation.cards[0].direction}" in submitted_query
+    assert f"risk={presentation.cards[0].relative_volatility_label}" in submitted_query
+    assert "price_band=under_10" in submitted_query
+    assert f"{submitted_query.replace('&', '&amp;')}&amp;page=2".encode() in submitted.content
+    assert invalid.status_code == 200
+    assert b"Filters need attention" in invalid.content
+    assert invalid.content.count(b'class="compact-opportunity"') == 0
+    assert market.status_code == 200
+    assert b'<details class="more-nav">' in market.content
+    assert b'<details class="more-nav" open>' not in market.content
+    assert b'href="/market" aria-current="page">Market</a>' in market.content
+    assert b'href="/opportunities?price_band=under_10"' in market.content
+
+    settings.RESEARCH_PRODUCT_ENABLED = False
+    legacy_landing = client.get(reverse("index"))
+    assert legacy_landing.status_code == 302
+    assert legacy_landing.url == reverse("status")
+
+
+def test_native_portfolio_momentum_copy_has_no_fabricated_score_or_sample_builder(
+    live_product,
+    client,
+):
+    owner, _store, run = live_product
+    client.force_login(owner)
+    listing = run.stocks.order_by("listing__ticker").first().listing
+    portfolio = Portfolio.objects.create(
+        owner=owner,
+        name="Native research holding",
+        base_currency="USD",
+        cash_balance=0,
+    )
+    PortfolioHolding.objects.create(
+        portfolio=portfolio,
+        listing=listing,
+        quantity=1,
+        average_cost=listing.latest_market_data.close,
+    )
+
+    detail = client.get(reverse("portfolio-detail", args=[portfolio.id]))
+    portfolios = client.get(reverse("portfolios"))
+
+    assert detail.status_code == 200
+    assert b"No overall score" in detail.content
+    assert b"6-month momentum method" in detail.content
+    assert b"Action is not repeated here." in detail.content
+    assert b"Recorded action:" not in detail.content
+    assert b"None/100" not in detail.content
+    assert b"Check verified current research" in detail.content
+    assert portfolios.status_code == 200
+    assert b"Sample builder unavailable for the active momentum method" in portfolios.content
+    assert b'name="action" value="sample"' not in portfolios.content
+
+
+def test_native_momentum_portfolio_with_null_action_never_renders_literal_none(
+    live_product,
+    client,
+):
+    """A contract-valid unavailable active-method action remains method-only here."""
+
+    owner, _store, run = live_product
+    client.force_login(owner)
+    source_analysis = run.stocks.order_by("listing__ticker").first()
+    assert source_analysis is not None
+    portfolio = Portfolio.objects.create(
+        owner=owner,
+        name="Unavailable momentum holding",
+        base_currency="USD",
+        cash_balance=0,
+    )
+    PortfolioHolding.objects.create(
+        portfolio=portfolio,
+        listing=source_analysis.listing,
+        quantity=1,
+        average_cost=source_analysis.current_price,
+    )
+    unavailable_run = AnalysisRun.objects.create(
+        generated_at=run.generated_at + timedelta(seconds=1),
+        data_cutoff=run.data_cutoff,
+        target_date=run.target_date,
+        universe_snapshot=run.universe_snapshot,
+        config_version=run.config_version,
+        config_hash=run.config_hash,
+        code_revision=run.code_revision,
+    )
+    unavailable_analysis = StockAnalysis(
+        run=unavailable_run,
+        listing=source_analysis.listing,
+        current_price=source_analysis.current_price,
+        daily_change=source_analysis.daily_change,
+        overall_score=None,
+        recommendation=None,
+        risk_score=None,
+        risk_class=source_analysis.risk_class,
+        confidence=None,
+        confidence_status="not_estimated",
+        data_quality={"momentum_insufficiency_reason": "synthetic_unavailable_action"},
+    )
+    unavailable_analysis.clean()
+    unavailable_analysis.save()
+
+    detail = client.get(reverse("portfolio-detail", args=[portfolio.id]))
+
+    assert detail.status_code == 200
+    content = detail.content.decode()
+    assert "No overall score — this is the 6-month momentum method." in content
+    assert "Action is not repeated here." in content
+    assert "Check verified current research" in content
+    assert "Recorded action: None" not in content
+    assert "None/100" not in content
+
+
+@pytest.mark.parametrize(
+    ("reader_status", "message", "verification_code"),
+    (
+        ("stale", "The recorded cohort is stale.", "product_target_stale"),
+        ("unauthorized", "Provider display authorization is unavailable.", ""),
+        ("absent", "No verified cohort is available.", ""),
+        (
+            "disabled",
+            "The primary research product is disabled; archived evidence remains available.",
+            "",
+        ),
+        (
+            "integrity_failed",
+            "Active research output was suppressed because evidence could not be verified.",
+            "product_reader_shape_invalid",
+        ),
+    ),
+)
+def test_my_list_unavailable_reader_states_are_not_presented_as_refresh_pending(
+    live_product,
+    client,
+    monkeypatch,
+    settings,
+    reader_status,
+    message,
+    verification_code,
+):
+    """Unavailable reader states retain their recorded cause rather than a time claim."""
+
+    owner, _store, _run = live_product
+    client.force_login(owner)
+    TrackedSymbol.objects.create(owner=owner, symbol="UNAVAILABLE")
+    product = ProductRead(
+        status=reader_status,
+        message=message,
+        verification_code=verification_code,
+    )
+    monkeypatch.setattr(product_views, "_read", lambda _request: product)
+    if reader_status == "disabled":
+        settings.RESEARCH_PRODUCT_ENABLED = False
+        monkeypatch.setattr(product_views, "_has_product_output", lambda: True)
+
+    response = client.get(reverse("my-list"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Research source unavailable." in content
+    assert message in content
+    assert "Checked at the next scheduled refresh." not in content
+    if verification_code:
+        assert "Verification state:" in content
+    expected_state = (
+        "Source failed" if reader_status == "integrity_failed" else "Source unavailable"
+    )
+    assert expected_state in content
+
+
+def test_my_list_marks_only_an_available_unadmitted_symbol_as_refresh_pending(live_product):
+    owner, _store, _run = live_product
+    preference = TrackedSymbol.objects.create(owner=owner, symbol="PENDING")
+    available = ProductRead(status="available", message="Verified product available.")
+
+    item = product_views._my_list_item(
+        preference=preference,
+        admission=None,
+        card=None,
+        product=available,
+    )
+
+    assert item["state"] == "Pending"
+    assert item["state_detail"] == "Checked at the next scheduled refresh."
+
+
+def test_history_marks_a_synthetic_all_null_advisory_as_not_evaluable(
+    live_product,
+    client,
+    monkeypatch,
+):
+    """Presentation-only adversarial row: no persisted immutable row is altered."""
+
+    owner, store, _run = live_product
+    client.force_login(owner)
+    current = _synthetic_presentation_read(owner=owner, store=store, card_count=1)
+    card = current.cards[0]
+    original = card.advisory_predictions[0]
+    withheld = copy(original)
+    withheld.bear_return = None
+    withheld.base_return = None
+    withheld.bull_return = None
+    withheld_projection = replace(
+        card.projections[0],
+        lower_return=None,
+        median_return=None,
+        upper_return=None,
+        lower_price=None,
+        median_price=None,
+        upper_price=None,
+        insufficiency_reason="forecast_withheld",
+    )
+    adapted_card = replace(
+        card,
+        advisory_predictions=(withheld, *card.advisory_predictions[1:]),
+        projections=(withheld_projection, *card.projections[1:]),
+    )
+    cohort = ProductCohort(
+        run=current.run,
+        cards=(adapted_card,),
+        admissions=current.admissions,
+        provider=current.provider,
+        evidence_grade=current.evidence_grade,
+        owner_id=current.owner_id,
+    )
+    history = ProductHistoryRead(
+        status="available",
+        message="Synthetic presentation history",
+        current=current,
+        cohorts=(cohort,),
+    )
+
+    def read_history(request):
+        request._stanstock_product_read = current
+        return history
+
+    monkeypatch.setattr(product_views, "_read_history", read_history)
+    response = client.get(reverse("predictions"))
+
+    assert response.status_code == 200
+    assert b"Not evaluable" in response.content
+    assert b"forecast withheld" in response.content
+    assert b"Not matured" not in response.content
+
+
+@pytest.fixture
+def chromium_browser():
+    """Return the Playwright API without starting a driver during collection."""
+
+    return pytest.importorskip(
+        "playwright.sync_api",
+        reason="Playwright is not installed",
+    )
+
+
+@pytest.mark.parametrize("viewport", ((375, 812), (1440, 900)))
+def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
+    live_product,
+    client,
+    chromium_browser,
+    monkeypatch,
+    viewport: tuple[int, int],
+):
+    """Use the existing browser only for synthetic layout acceptance evidence."""
+
+    owner, store, _run = live_product
+    client.force_login(owner)
+    presentation = _synthetic_presentation_read(owner=owner, store=store)
+
+    def read_presentation(request):
+        request._stanstock_product_read = presentation
+        return presentation
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    response = client.get(reverse("opportunities"))
+    market_response = client.get(reverse("market"))
+    assert response.status_code == 200
+    assert market_response.status_code == 200
+
+    css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "stanstock.css"
+    with chromium_browser.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+            try:
+                page.set_content(response.content.decode())
+                page.add_style_tag(path=str(css_path))
+                assert page.locator(".compact-opportunity").count() == 20
+                assert page.locator(".compact-projection").count() == 20
+                assert page.evaluate("document.documentElement.scrollWidth") <= page.evaluate(
+                    "document.documentElement.clientWidth"
+                )
+                for selector in (".compact-opportunity-facts", ".compact-projection"):
+                    widths = page.locator(selector).evaluate_all(
+                        "(elements) => elements.map((element) => "
+                        "[element.scrollWidth, element.clientWidth])"
+                    )
+                    assert all(
+                        scroll_width <= client_width for scroll_width, client_width in widths
+                    )
+
+                opportunity_nav = page.get_by_role("link", name="Opportunities", exact=True)
+                nav_metrics = opportunity_nav.evaluate(
+                    "(element) => ({"
+                    "scrollWidth: element.scrollWidth, "
+                    "clientWidth: element.clientWidth, "
+                    "whiteSpace: getComputedStyle(element).whiteSpace, "
+                    "fontSize: parseFloat(getComputedStyle(element).fontSize), "
+                    "height: element.getBoundingClientRect().height"
+                    "})"
+                )
+                assert nav_metrics["scrollWidth"] <= nav_metrics["clientWidth"]
+                assert nav_metrics["whiteSpace"] == "nowrap"
+                assert page.locator(".brand").get_attribute("aria-label") == "StanStock home"
+                primary_nav_metrics = page.locator(".primary-nav-links a").evaluate_all(
+                    "(elements) => elements.map((element) => ({"
+                    "fontSize: parseFloat(getComputedStyle(element).fontSize), "
+                    "height: element.getBoundingClientRect().height, "
+                    "top: element.getBoundingClientRect().top"
+                    "}))"
+                )
+                compact_horizons = page.locator(".horizon-links a")
+                assert compact_horizons.all_inner_texts() == ["6m", "12m", "3y", "5y"]
+                assert compact_horizons.evaluate_all(
+                    "(elements) => elements.map((element) => element.getAttribute('aria-label'))"
+                ) == [
+                    "6 months projections",
+                    "12 months projections",
+                    "3 years projections",
+                    "5 years projections",
+                ]
+                if viewport[0] == 375:
+                    assert all(metric["fontSize"] >= 14 for metric in primary_nav_metrics)
+                    assert all(metric["height"] >= 32 for metric in primary_nav_metrics)
+                    assert len({metric["top"] for metric in primary_nav_metrics}) <= 2
+                else:
+                    search_widths = page.locator(
+                        ".product-search-field input, .product-search .primary-button"
+                    ).evaluate_all(
+                        "(elements) => elements.map((element) => "
+                        "element.getBoundingClientRect().width)"
+                    )
+                    assert search_widths[1] < search_widths[0]
+                    assert search_widths[1] <= 120
+                assert (
+                    page.locator("#opportunity-list-title").inner_text() == "6 months projections"
+                )
+
+                first_projection = page.locator(".compact-projection").first
+                projection_boxes = first_projection.locator("div").evaluate_all(
+                    "(elements) => elements.map((element) => {"
+                    "const box = element.getBoundingClientRect(); "
+                    "return {top: box.top, scrollWidth: element.scrollWidth, "
+                    "clientWidth: element.clientWidth};"
+                    "})"
+                )
+                assert len(projection_boxes) == 3
+                assert (
+                    max(item["top"] for item in projection_boxes)
+                    - min(item["top"] for item in projection_boxes)
+                    <= 1
+                )
+                assert all(item["scrollWidth"] <= item["clientWidth"] for item in projection_boxes)
+
+                under_ten = page.get_by_role("link", name="Under $10").first
+                assert under_ten.bounding_box()["y"] < viewport[1]
+                card_boxes = page.locator(".compact-opportunity").evaluate_all(
+                    "(elements) => elements.map((element) => {"
+                    "const box = element.getBoundingClientRect(); "
+                    "return {top: box.top, bottom: box.bottom};"
+                    "})"
+                )
+                complete_cards = [
+                    box for box in card_boxes if box["top"] >= 0 and box["bottom"] <= viewport[1]
+                ]
+                if viewport[0] == 375:
+                    assert card_boxes[0]["top"] >= 0
+                    assert card_boxes[0]["top"] <= 600
+                    assert card_boxes[0]["bottom"] - card_boxes[0]["top"] <= 250
+                    layout_boxes = page.locator(
+                        ".site-header, .opportunities-heading, .opportunity-controls, "
+                        ".opportunity-results-heading, .opportunity-scenario-note"
+                    ).evaluate_all(
+                        "(elements) => elements.map((element) => {"
+                        "const box = element.getBoundingClientRect(); "
+                        "return {className: element.className, top: box.top, bottom: box.bottom};"
+                        "})"
+                    )
+                    assert card_boxes[0]["bottom"] <= viewport[1], (
+                        f"first_card={card_boxes[0]}; layout={layout_boxes}"
+                    )
+                else:
+                    assert card_boxes[0]["top"] <= 500
+                    assert card_boxes[0]["bottom"] - card_boxes[0]["top"] <= 140
+                    assert len(complete_cards) >= 3
+
+                page.locator(".advanced-filters summary").focus()
+                page.keyboard.press("Enter")
+                assert page.locator(".advanced-filters").get_attribute("open") == ""
+            finally:
+                page.close()
+
+            market_page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+            try:
+                market_page.set_content(market_response.content.decode())
+                market_page.add_style_tag(path=str(css_path))
+                assert market_page.locator(".more-nav").get_attribute("open") is None
+            finally:
+                market_page.close()
+        finally:
+            browser.close()

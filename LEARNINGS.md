@@ -50,6 +50,12 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **A working deep link does not establish discoverability.** Product
+  acceptance must begin at the landing page and follow normal navigation to
+  critical views, including the first narrow-screen viewport. Correct data
+  behind a renamed link or an unbounded wall of cards is not a usable result.
+  A smaller DOM also does not prove density: measure actual result positions
+  and readable values, not only element counts.
 - **New profile dispatches must retain command-level operational guards.**
   Both native and legacy scheduled refreshes check the installed timezone
   against the machine timezone before starting work. An independently safe

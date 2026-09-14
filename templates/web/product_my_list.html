@@ -6,18 +6,17 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Private intake preference</p>
+      <p class="eyebrow">Private stock list</p>
       <h1>My List</h1>
       <p class="lede">
-        Add or remove a preference for the next bounded intake. A preference
-        change does not mutate a captured historical cohort, fetch data, place
-        a trade, or rewrite research.
+        Add or remove a stock for the next scheduled refresh. This does not
+        fetch data now, place a trade, or rewrite recorded research.
       </p>
     </div>
   </section>
 
   <section class="panel" aria-labelledby="add-symbol">
-    <h2 id="add-symbol">Add a supported symbol</h2>
+    <h2 id="add-symbol">Add stock</h2>
     <form method="post" class="stack">
       {% csrf_token %}
       {% for field in form %}
@@ -26,15 +25,25 @@
         {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
         {% if field.errors %}<div class="field-error" role="alert">{{ field.errors }}</div>{% endif %}
       {% endfor %}
-      <button class="primary-button" type="submit">Add for next intake</button>
+      <button class="primary-button" type="submit">Add stock</button>
     </form>
   </section>
+
+  {% if not product.available %}
+    <div class="error-box" role="alert">
+      <strong>Research source unavailable.</strong>
+      <p>{{ product.message }}</p>
+      {% if product.verification_code %}
+        <small>Verification state: {{ product.verification_code|display_label }}</small>
+      {% endif %}
+    </div>
+  {% endif %}
 
   <section aria-labelledby="preference-state">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">Preference versus captured evidence</p>
-        <h2 id="preference-state">Tracked symbols</h2>
+        <p class="eyebrow">Saved stocks</p>
+        <h2 id="preference-state">Research state</h2>
       </div>
     </div>
     <div class="responsive-table" tabindex="0" aria-label="My List captured research states">
@@ -42,9 +51,9 @@
         <thead>
           <tr>
             <th scope="col">Symbol</th>
-            <th scope="col">Current preference</th>
-            <th scope="col">Captured research state</th>
-            <th scope="col">History qualification</th>
+            <th scope="col">Saved</th>
+            <th scope="col">State</th>
+            <th scope="col">Closes</th>
             <th scope="col">Action</th>
           </tr>
         </thead>
@@ -58,31 +67,24 @@
                   {{ item.preference.symbol }}
                 {% endif %}
               </th>
-              <td>Saved for next intake<small>Added {{ item.preference.created_at }}</small></td>
+              <td>Added {{ item.preference.created_at }}</td>
               <td>
-                {% if item.admission %}
-                  {{ item.admission.status|display_label }}
-                  <small>{{ item.admission.reason_code|display_label }} · captured {{ item.admission.captured_role }}</small>
-                  {% if item.card %}
-                    <small>{{ item.card.direction|display_label }} · {% if item.card.suggestion %}{{ item.card.suggestion|upper }}{% else %}suggestion unavailable{% endif %}</small>
-                  {% endif %}
-                {% else %}
-                  Pending next intake
-                  <small>Not part of the displayed historical cohort.</small>
-                {% endif %}
+                <strong>{{ item.state }}</strong>
+                <small>{{ item.state_detail|display_label }}</small>
+                {% if item.card %}<small>{{ item.card.direction|display_label }} · {% if item.card.suggestion %}{{ item.card.suggestion|upper }}{% else %}action unavailable{% endif %}</small>{% endif %}
               </td>
               <td>
-                {% if item.admission.required_closes != None %}
-                  {{ item.admission.available_closes }} of {{ item.admission.required_closes }} closes
-                  {% if item.admission.missing_closes %}<small>Missing {{ item.admission.missing_closes }}</small>{% endif %}
+                {% if item.admission and item.admission.required_closes != None %}
+                  {{ item.admission.available_closes }} available / {{ item.admission.required_closes }} required
+                  {% if item.admission.missing_closes %}<small>{{ item.admission.missing_closes }} missing</small>{% endif %}
                 {% else %}
-                  Not measured in this cohort
+                  Not measured yet
                 {% endif %}
               </td>
               <td>
                 <form method="post" action="{% url 'tracked-symbol-delete' item.preference.id %}" class="inline-form">
                   {% csrf_token %}
-                  <button class="danger-button" type="submit">Remove for next intake</button>
+                  <button class="danger-button" type="submit">Remove</button>
                 </form>
               </td>
             </tr>

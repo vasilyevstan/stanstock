@@ -157,6 +157,59 @@ nav form {
   margin: 0;
 }
 
+.primary-nav {
+  position: relative;
+}
+
+.primary-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.primary-nav-links a {
+  white-space: nowrap;
+}
+
+.primary-nav a[aria-current="page"] {
+  color: var(--accent);
+  font-weight: 800;
+  text-decoration-thickness: 0.16em;
+}
+
+.more-nav {
+  position: relative;
+}
+
+.more-nav summary {
+  padding: 0.25rem 0;
+}
+
+.more-nav-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 0.55rem);
+  right: 0;
+  display: grid;
+  min-width: 12rem;
+  gap: 0.2rem;
+  padding: 0.5rem;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  box-shadow: 0 0.7rem 2rem rgb(0 0 0 / 28%);
+}
+
+.more-nav-menu a {
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.4rem;
+}
+
+.more-nav-menu a:hover {
+  background: rgb(104 215 186 / 12%);
+}
+
 .link-button {
   padding: 0;
   color: var(--muted);
@@ -880,10 +933,12 @@ tbody tr:last-child td {
 }
 
 summary {
+  max-width: 100%;
   width: fit-content;
   color: var(--accent);
   cursor: pointer;
   font-weight: 750;
+  overflow-wrap: anywhere;
 }
 
 .speculative-note,
@@ -936,6 +991,442 @@ summary {
 
 .archive-link {
   margin-top: 2rem;
+}
+
+.opportunity-controls {
+  display: grid;
+  gap: 0.9rem;
+  margin-bottom: 2.5rem;
+}
+
+.price-band-links,
+.horizon-links {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.band-link,
+.horizon-links a,
+.clear-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2.45rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.band-link span {
+  min-width: 1.45rem;
+  padding-inline: 0.35rem;
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  text-align: center;
+}
+
+.band-link.is-active,
+.horizon-links a[aria-current="page"] {
+  color: #04110d;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 850;
+}
+
+.clear-link {
+  color: var(--muted);
+  border-color: transparent;
+  text-decoration: underline;
+}
+
+.horizon-links > span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.product-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 0.6rem;
+}
+
+.product-search label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.product-search input[type="text"] {
+  grid-column: 1;
+  width: 100%;
+  min-height: 2.65rem;
+  padding: 0.55rem 0.65rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+}
+
+.product-search .primary-button {
+  grid-column: 2;
+  margin: 0;
+}
+
+.advanced-filters {
+  grid-column: 3;
+  align-self: center;
+}
+
+.advanced-filters[open] {
+  grid-column: 1 / -1;
+}
+
+.advanced-filters .filter-bar {
+  margin-bottom: 0;
+}
+
+.compact-opportunity-list,
+.issuance-list {
+  display: grid;
+  gap: 0.8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compact-opportunity,
+.issuance-entry {
+  min-width: 0;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+}
+
+.compact-opportunity header,
+.issuance-entry header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.compact-opportunity h3,
+.issuance-entry h3,
+.compact-opportunity p,
+.issuance-entry p {
+  margin: 0;
+}
+
+.compact-opportunity header p,
+.issuance-entry header p {
+  color: var(--muted);
+}
+
+.compact-opportunity-facts,
+.compact-projection,
+.issuance-summary,
+.advisory-history-list,
+.track-record-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0.85rem 0 0;
+}
+
+.issuance-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.compact-opportunity-facts div,
+.compact-projection div,
+.issuance-summary div,
+.advisory-history-list div,
+.track-record-counts div {
+  min-width: 0;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.compact-opportunity-facts dt,
+.compact-projection dt,
+.issuance-summary dt,
+.advisory-history-list dt,
+.track-record-counts dt {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.compact-opportunity-facts dd,
+.compact-projection dd,
+.issuance-summary dd,
+.advisory-history-list dd,
+.track-record-counts dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.compact-projection dd,
+.issuance-summary dd {
+  font-weight: 750;
+}
+
+.compact-projection small,
+.issuance-summary small,
+.advisory-history-list small {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.compact-opportunity > .speculative-note,
+.compact-opportunity > .muted,
+.issuance-entry > details {
+  margin-top: 0.8rem;
+}
+
+.opportunities-page {
+  padding-top: 1.35rem;
+}
+
+.opportunities-heading {
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.opportunities-heading h1 {
+  max-width: none;
+  margin-bottom: 0.2rem;
+  font-size: clamp(2rem, 3vw, 2.35rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
+}
+
+.opportunities-heading .lede {
+  font-size: 0.92rem;
+}
+
+.opportunity-run-stamp {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.opportunity-run-stamp strong {
+  color: var(--text);
+}
+
+.opportunity-controls {
+  gap: 0.55rem;
+  margin-bottom: 0.9rem;
+}
+
+.price-band-links,
+.horizon-links {
+  gap: 0.4rem;
+}
+
+.band-link,
+.horizon-links a,
+.clear-link {
+  min-height: 2.1rem;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.86rem;
+}
+
+.under-ten-allocation-note {
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.product-search {
+  grid-template-columns: minmax(0, 20rem) auto auto;
+  gap: 0.5rem;
+}
+
+.product-search-field {
+  display: grid;
+  grid-column: auto;
+  gap: 0.2rem;
+}
+
+.product-search input[type="text"] {
+  grid-column: auto;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.product-search .primary-button {
+  grid-column: auto;
+  width: fit-content;
+  justify-self: start;
+  min-height: 2.35rem;
+  margin: 0;
+  padding: 0.45rem 0.8rem;
+}
+
+.advanced-filters {
+  grid-column: auto;
+}
+
+.opportunity-results-heading {
+  align-items: center;
+  margin: 0.85rem 0 0.3rem;
+}
+
+.opportunity-results-heading h2 {
+  font-size: 1.2rem;
+}
+
+.opportunity-scenario-note {
+  margin: 0 0 0.55rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.compact-opportunity {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.95fr) minmax(18rem, 1.2fr) minmax(21rem, 1.45fr);
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.65rem 0.8rem;
+}
+
+.compact-opportunity header {
+  grid-column: 1;
+}
+
+.compact-opportunity-facts,
+.compact-projection {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+}
+
+.compact-opportunity-facts {
+  grid-column: 2;
+}
+
+.compact-projection {
+  grid-column: 3;
+}
+
+.compact-opportunity-facts div,
+.compact-projection div {
+  padding: 0.15rem 0.55rem;
+  border-top: 0;
+  border-left: 1px solid var(--border);
+}
+
+.compact-opportunity-facts div:first-child,
+.compact-projection div:first-child {
+  border-left: 0;
+}
+
+.compact-opportunity-facts dt,
+.compact-projection dt {
+  font-size: 0.7rem;
+}
+
+.compact-opportunity-facts dd,
+.compact-projection dd {
+  margin-top: 0.1rem;
+  font-size: 0.87rem;
+  line-height: 1.3;
+}
+
+.compact-opportunity > .speculative-note,
+.compact-opportunity > .muted {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.compact-opportunity > .speculative-note {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.source-provenance-details {
+  margin: 0.75rem 0 0;
+}
+
+.qualification-details,
+.operational-details,
+.archived-methodology {
+  margin-top: 2rem;
+}
+
+.track-record-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+  margin-top: 1rem;
+}
+
+.track-record-grid > section,
+.comparison-scope {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+}
+
+.track-record-counts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.comparison-partition {
+  margin-top: 1.5rem;
+}
+
+.comparison-partition h3 {
+  margin-bottom: 0.65rem;
+}
+
+.comparison-scope + .comparison-scope {
+  margin-top: 0.8rem;
+}
+
+.comparison-scope h4 {
+  margin: 0;
+}
+
+.comparison-scope p {
+  margin: 0.55rem 0;
+  color: var(--muted);
+}
+
+.comparison-summary {
+  margin: 0.7rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.comparison-summary li + li {
+  margin-top: 0.45rem;
+}
+
+.comparison-scope details {
+  margin-top: 0.8rem;
 }
 
 .active-methodology {
@@ -1092,6 +1583,10 @@ summary {
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .issuance-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 540px) {
@@ -1105,32 +1600,95 @@ summary {
   }
 
   .header-content {
-    min-height: 4rem;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 0;
+    gap: 0.25rem 0.5rem;
+    padding-block: 0.35rem;
   }
 
-  .brand small {
+  .brand > span:not(.brand-mark) {
     display: none;
   }
 
-  .header-content {
-    flex-wrap: wrap;
-    padding-block: 0.65rem;
+  .brand {
+    gap: 0;
   }
 
-  nav {
+  .brand-mark {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.55rem;
+  }
+
+  .primary-nav {
+    display: grid;
+    grid-column: 2;
     width: 100%;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    padding-bottom: 0.25rem;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: start;
+    gap: 0.2rem 0.45rem;
+    padding: 0;
   }
 
-  nav a,
-  nav .link-button {
+  .primary-nav-links {
+    display: flex;
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.2rem 0.55rem;
+  }
+
+  .primary-nav-links a,
+  .primary-nav .link-button,
+  .more-nav summary {
+    min-height: 2rem;
+    padding: 0.3rem 0.1rem;
+    font-size: 0.875rem;
+    letter-spacing: normal;
+    text-align: center;
     white-space: nowrap;
   }
 
+  .primary-nav-links a {
+    overflow-wrap: normal;
+  }
+
+  .more-nav {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .primary-nav form {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  .more-nav-menu {
+    right: 0;
+    left: auto;
+  }
+
   .page {
-    padding-block: 2rem 3rem;
+    padding-block: 1.25rem 2rem;
+  }
+
+  .opportunities-page {
+    padding-top: 0.85rem;
+  }
+
+  .opportunities-heading {
+    display: block;
+    margin-bottom: 0.65rem;
+  }
+
+  .opportunities-heading h1 {
+    font-size: 2rem;
+  }
+
+  .opportunity-run-stamp {
+    margin-top: 0.25rem;
+    text-align: left;
   }
 
   .status-grid {
@@ -1141,12 +1699,66 @@ summary {
   .compact-filter,
   .metric-grid,
   .detail-grid,
-  .projection-grid {
+  .projection-grid,
+  .track-record-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .product-search {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .product-search-field {
+    grid-column: 1;
+  }
+
+  .product-search .primary-button {
+    grid-column: 2;
+  }
+
+  .advanced-filters {
+    grid-column: 1 / -1;
+  }
+
+  .issuance-summary,
+  .advisory-history-list,
+  .track-record-counts {
     grid-template-columns: 1fr;
   }
 
   .research-card-header {
     display: grid;
+  }
+
+  .issuance-entry header {
+    display: grid;
+  }
+
+  .compact-opportunity {
+    grid-template-columns: 1fr;
+    gap: 0.45rem;
+    padding: 0.6rem;
+  }
+
+  .compact-opportunity header,
+  .compact-opportunity-facts,
+  .compact-projection {
+    grid-column: 1;
+  }
+
+  .compact-opportunity-facts div,
+  .compact-projection div {
+    padding: 0.2rem 0.35rem;
+  }
+
+  .compact-opportunity-facts dt,
+  .compact-projection dt {
+    font-size: 0.68rem;
+  }
+
+  .compact-opportunity-facts dd,
+  .compact-projection dd {
+    font-size: 0.82rem;
   }
 
   .projection-card dl div,

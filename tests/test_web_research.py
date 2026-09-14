@@ -1168,6 +1168,23 @@ def test_methodology_page_discloses_policy_and_uncertainty_boundaries(
 
 
 @pytest.mark.django_db
+def test_active_methodology_labels_legacy_panels_as_archived(
+    authenticated_client,
+    settings,
+) -> None:
+    settings.RESEARCH_PRODUCT_ENABLED = True
+
+    response = authenticated_client.get(reverse("methodology"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Active research-product-v1" in content
+    assert "Archived methods — not used by the active product" in content
+    assert '<details class="panel archived-methodology">' in content
+    assert "out-of-sample evaluation" not in content
+
+
+@pytest.mark.django_db
 def test_opportunities_display_every_price_band_including_empty_bands(
     authenticated_client,
     persisted_analysis: StockAnalysis,
@@ -4545,6 +4562,31 @@ def test_market_overview_uses_persisted_latest_market_data(
     assert persisted_analysis.listing.ticker in content
     assert "Technology" in content
     assert "+1.2%" in content
+    assert "Showing 1 of 1 persisted market prices." in content
+
+
+@pytest.mark.django_db
+def test_archive_performance_separates_recorded_outcome_provenance(
+    authenticated_client,
+    persisted_analysis: StockAnalysis,
+) -> None:
+    prediction = Prediction.objects.get(analysis=persisted_analysis)
+    PredictionOutcome.objects.create(
+        prediction=prediction,
+        evaluated_at=timezone.now(),
+        evaluation_date=timezone.localdate(),
+        status=PredictionOutcome.Status.UNRESOLVED,
+        resolution="Synthetic unavailable source",
+    )
+
+    response = authenticated_client.get(reverse("archive-performance"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    for label in ("Grade", "Source", "Provider", "On time"):
+        assert label in content
+    assert "Unknown" in content
+    assert "no skill claim is inferred here." in content
 
 
 @pytest.mark.django_db

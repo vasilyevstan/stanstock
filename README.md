@@ -171,7 +171,10 @@ ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 
 ## Authenticated pages
 
-- `/opportunities` — primary price-research cards and filters;
+- `/opportunities` — the landing page: a paginated stock comparison with
+  price-band filters and a selectable 6m, 12m, 3y, or 5y projection;
+- `/opportunities?price_band=under_10` — the directly accessible Under-$10
+  research view, still restricted to 0% new allocation;
 - `/stocks/<listing-id>` — method assumptions, source closure, decision, and
   all projection horizons;
 - `/my-list` — captured saved-candidate state and current persisted prices;
@@ -186,6 +189,18 @@ ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 
 All data-bearing pages require authentication. `/healthz` exposes only coarse
 readiness.
+
+Start with **Opportunities** to compare stocks, **Under $10** for speculative
+research, or **My List** to manage saved names. Each stock's detail page shows
+all four projection horizons. **More** contains Market, prediction history,
+Simulations, data status, and methodology. Operational status is not the
+research landing page.
+
+Forecast availability, BUY eligibility, and a measured track record are
+different states. Research-grade or synthetic records do not become observed
+evidence by waiting; a withheld all-null forecast is not evaluable. The
+scoreless momentum method also does not supply a legacy overall score or
+qualify a legacy scored sample basket.
 
 ## Integrity guarantees
 

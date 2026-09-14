@@ -185,15 +185,24 @@ retry. SPY is reused once and stays outside stock membership.
 
 Use authenticated pages and local commands together:
 
+Start from `/`, not only bookmarked deep links. In product mode it opens
+Opportunities; the normal navigation must expose Opportunities and Under $10
+without searching a long page. Follow the Under-$10 control and a stock
+detail link, then inspect the remaining surfaces below. Check both a narrow
+and desktop viewport. Direct HTTP success alone does not establish that a
+user can find or understand the view.
+
 1. `/status`: operational health, target freshness, admission, jobs, and
    verification;
 2. `/opportunities` and detail: expected product, target, source grade,
-   direction, risk, and four projection horizons;
+   direction, risk, selected-horizon comparison, and all four horizons on
+   detail; pagination must preserve filters;
 3. `/my-list`: saved/pending/admitted states without provider fetch;
 4. `/predictions`: one decision plus four advisory rows per qualified
    listing;
 5. `/performance`: observed cohorts separate from registered retrospective
-   evidence;
+   evidence, with non-observed, pending, and non-evaluable states distinguished
+   and adverse comparison/numerical summaries still visible;
 6. `launchd_refresh status`: installed trigger and timezone; and
 7. `verify_assets`: registered file existence and checksums.
 

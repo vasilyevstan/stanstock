@@ -169,7 +169,7 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 LOGIN_URL = "login"
-LOGIN_REDIRECT_URL = "status"
+LOGIN_REDIRECT_URL = "index"
 LOGOUT_REDIRECT_URL = "login"
 
 DATA_DIR = Path(os.getenv("STANSTOCK_DATA_DIR", BASE_DIR / "var" / "data")).resolve()
