@@ -42,6 +42,9 @@ jobs:
       - name: Type-check
         run: uv run mypy src
 
+      - name: Install Chromium for synthetic browser tests
+        run: uv run playwright install --with-deps chromium
+
       - name: Run tests
         run: uv run pytest --cov=stanstock --cov-report=term-missing
 

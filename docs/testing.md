@@ -21,6 +21,13 @@ Production settings and PostgreSQL migration/concurrency checks run separately
 with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
+Responsive browser cases require the Chromium binary matching the locked
+Playwright package. CI installs it with
+`uv run playwright install --with-deps chromium`; for a local environment
+with system libraries already available, use `uv run playwright install chromium`.
+Browser-dependent acceptance must run, not be reported as passing when its
+browser is absent.
+
 Documentation-only edits need no build, but these drafts still require a
 separate multi-model clarity/privacy review before publication.
 
@@ -65,7 +72,8 @@ production writer, read through the fail-closed product reader, and render
 authenticated Opportunities and stock detail.
 
 Exercise the entry-point journey as well as direct routes: authenticated
-landing, recognizable Opportunities navigation, first-screen Under-$10 access,
+sign-in without a `next` destination, authenticated landing, recognizable
+Opportunities navigation, first-screen Under-$10 access,
 filter/horizon selection, pagination, and stock detail. Use synthetic
 representative lists for density and responsive measurements; do not repeat
 full retrospective simulations merely to populate a layout fixture. Keep a

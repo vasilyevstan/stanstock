@@ -1641,7 +1641,7 @@ def test_my_list_markup_is_semantic_responsive_and_marks_navigation_active(clien
     content = response.content.decode()
 
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in content
-    assert '<a href="/my-list" aria-current="page">My list</a>' in content
+    assert '<a href="/my-list" aria-current="page">My List</a>' in content
     assert '<div class="table-scroll" tabindex="0" aria-label="My tracked symbols">' in content
     assert '<th scope="col">Symbol</th>' in content
     assert "<table" in content
