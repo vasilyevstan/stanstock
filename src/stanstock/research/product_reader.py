@@ -827,7 +827,7 @@ def _build_admissions(candidate: _AuthorizedCandidate) -> tuple[ProductAdmission
             ProductAdmission(
                 symbol=str(symbol),
                 status=str(raw["status"]),
-                reason_code=str(raw.get("reason_code") or ""),
+                reason_code=str(raw.get("reason") or raw.get("reason_code") or ""),
                 captured_role=(
                     "saved"
                     if symbol in saved_symbols

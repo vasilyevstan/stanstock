@@ -203,6 +203,39 @@ def observed_product_history(tmp_path, monkeypatch, django_user_model, settings,
     return owner, store, original, reissue, current
 
 
+def test_native_history_shortfall_retains_its_recorded_admission_reason(
+    tmp_path, monkeypatch, django_user_model, settings
+):
+    from stanstock.data.research_product_jobs import execute_daily_research_job
+
+    settings.RESEARCH_PRODUCT_ENABLED = True
+    settings.DEMO_MODE = False
+    owner, store, path, resolve, fetch = make_product_environment(
+        tmp_path, monkeypatch, django_user_model
+    )
+    resolve.side_effect = None
+    resolve.return_value = "synthetic-test-token"
+    fetch.side_effect = lambda symbol, **kwargs: _series(symbol, closes=100)
+    job = execute_daily_research_job(
+        target_date=TARGET,
+        owner=owner,
+        store=store,
+        core_config_path=path,
+        enforce_rate_limit=False,
+    )
+    assert job.status == "success"
+
+    product = read_research_product(user=owner, store=store)
+
+    assert product.available
+    admission = next(item for item in product.admissions if item.symbol == "CHEAP")
+    assert admission.status == "insufficient_history"
+    assert admission.reason_code == "price_history_insufficient"
+    assert admission.available_closes == 100
+    assert admission.missing_closes == 657
+    assert admission.bootstrap_attempted is True
+
+
 def test_real_reader_verifies_once_and_projects_complete_recorded_result(live_product, monkeypatch):
     owner, store, run = live_product
     verifier = Mock(wraps=real_product_verifier)
@@ -215,6 +248,9 @@ def test_real_reader_verifies_once_and_projects_complete_recorded_result(live_pr
 
     assert result.status == "available"
     assert result.run == run
+    assert all(
+        admission.reason_code for admission in result.admissions if admission.status != "admitted"
+    )
     assert {card.listing.provider_symbol for card in result.cards} == {
         "AAPL",
         "MSFT",

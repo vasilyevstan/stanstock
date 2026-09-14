@@ -64,6 +64,14 @@ STUDY_EVIDENCE_CONTRACT = "research-product-study-evidence@1"
 _STUDY_SCOPE = "all_selected"
 _PARTITION_ORDER = ("development", "validation", "final_holdout")
 _HORIZON_ORDER = ("6m", "12m", "3y", "5y")
+_CONVERGENCE_QUANTILE_ORDER = ("p20", "p50", "p80")
+_CONVERGENCE_HORIZON_SESSIONS = {
+    "6m": 126,
+    "12m": 252,
+    "3y": 756,
+    "5y": 1260,
+}
+_CONVERGENCE_THRESHOLD_RULE = "max(0.01 return, 0.02 * production_interval_width)"
 _BASELINE_ORDER = ("zero_log_drift_gaussian", "historical_log_drift_gaussian")
 _METRIC_ORDER = (
     "median_absolute_error",
@@ -122,6 +130,23 @@ class ProductStudyComparisonRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductStudyConvergenceSummary:
+    """Verified aggregate counts for the frozen historical-anchor precision check."""
+
+    production_paths: int
+    diagnostic_paths: int
+    threshold_rule: str
+    observation_count: int
+    available_quantile_comparison_count: int
+    exceeded_count: int
+    unavailable_count: int
+
+    @property
+    def has_available_quantile_comparisons(self) -> bool:
+        return self.available_quantile_comparison_count > 0
+
+
+@dataclass(frozen=True, slots=True)
 class ProductStudyScopeView:
     partition: str
     partition_label: str
@@ -160,6 +185,7 @@ class ProductStudyRead:
     holdout_complete_through: date | None = None
     disclosures: tuple[str, ...] = ()
     partitions: tuple[ProductStudyPartitionView, ...] = ()
+    convergence_summary: ProductStudyConvergenceSummary | None = None
     verification_code: str = ""
 
     @property
@@ -415,6 +441,7 @@ def _build_study_read(
         document.get("paired_model_comparisons"),
         "paired model comparisons",
     )
+    convergence_summary = _convergence_summary(document=document, protocol=protocol)
 
     aggregate_by_scope: dict[tuple[str, str], dict[str, Any]] = {}
     for row in aggregates:
@@ -475,7 +502,97 @@ def _build_study_read(
         holdout_complete_through=_date_value(protocol, "holdout_complete_through"),
         disclosures=disclosures,
         partitions=tuple(partitions),
+        convergence_summary=convergence_summary,
         verification_code="verified",
+    )
+
+
+def _convergence_summary(
+    *,
+    document: Mapping[str, Any],
+    protocol: Mapping[str, Any],
+) -> ProductStudyConvergenceSummary:
+    """Read complete stored convergence aggregates without replaying the study.
+
+    The report schema has one aggregate for each frozen
+    ``partition × horizon × quantile`` identity.  Treat an absent, duplicate,
+    or internally inconsistent aggregate as an integrity failure instead of
+    displaying an apparent all-clear with zero counts.
+    """
+
+    production_paths = _positive_int_value(protocol, "production_paths")
+    diagnostic_paths = _positive_int_value(protocol, "diagnostic_paths")
+    threshold_rule = _string_value(protocol, "convergence_threshold_rule")
+    if diagnostic_paths <= production_paths or threshold_rule != _CONVERGENCE_THRESHOLD_RULE:
+        raise ValueError("Registered study convergence protocol is invalid")
+
+    aggregates = _list_of_mappings(document.get("convergence_aggregates"), "convergence aggregates")
+    expected_identities = {
+        (partition, horizon, quantile)
+        for partition in _PARTITION_ORDER
+        for horizon in _HORIZON_ORDER
+        for quantile in _CONVERGENCE_QUANTILE_ORDER
+    }
+    expected_fields = {
+        "partition",
+        "horizon",
+        "horizon_sessions",
+        "quantile",
+        "observation_count",
+        "exceeded_count",
+        "unavailable_count",
+        "max_movement",
+        "max_threshold",
+        "unavailable_reasons",
+    }
+    if len(aggregates) != len(expected_identities):
+        raise ValueError("Registered study convergence aggregate shape is invalid")
+
+    seen_identities: set[tuple[str, str, str]] = set()
+    observation_count = 0
+    available_count = 0
+    exceeded_count = 0
+    unavailable_count = 0
+    for aggregate in aggregates:
+        if set(aggregate) != expected_fields:
+            raise ValueError("Registered study convergence aggregate shape is invalid")
+        partition = _string_value(aggregate, "partition")
+        horizon = _string_value(aggregate, "horizon")
+        quantile = _string_value(aggregate, "quantile")
+        identity = (partition, horizon, quantile)
+        if identity not in expected_identities or identity in seen_identities:
+            raise ValueError("Registered study convergence aggregate identity is invalid")
+        if _int_value(aggregate, "horizon_sessions") != _CONVERGENCE_HORIZON_SESSIONS[horizon]:
+            raise ValueError("Registered study convergence horizon is invalid")
+
+        observations = _nonnegative_int_value(aggregate, "observation_count")
+        unavailable = _nonnegative_int_value(aggregate, "unavailable_count")
+        exceeded = _nonnegative_int_value(aggregate, "exceeded_count")
+        reason_count = _unavailable_reason_count(aggregate.get("unavailable_reasons"))
+        if unavailable > observations:
+            raise ValueError("Registered study convergence unavailable count is invalid")
+        available = observations - unavailable
+        if exceeded > available:
+            raise ValueError("Registered study convergence exceeded count is invalid")
+        if reason_count != unavailable:
+            raise ValueError("Registered study convergence unavailable reasons are invalid")
+
+        seen_identities.add(identity)
+        observation_count += observations
+        available_count += available
+        exceeded_count += exceeded
+        unavailable_count += unavailable
+
+    if seen_identities != expected_identities:
+        raise ValueError("Registered study convergence aggregate scope is incomplete")
+    return ProductStudyConvergenceSummary(
+        production_paths=production_paths,
+        diagnostic_paths=diagnostic_paths,
+        threshold_rule=threshold_rule,
+        observation_count=observation_count,
+        available_quantile_comparison_count=available_count,
+        exceeded_count=exceeded_count,
+        unavailable_count=unavailable_count,
     )
 
 
@@ -883,6 +1000,32 @@ def _int_value(mapping: Mapping[str, Any], key: str) -> int:
     if type(value) is not int:
         raise ValueError(f"{key} must be an integer")
     return value
+
+
+def _positive_int_value(mapping: Mapping[str, Any], key: str) -> int:
+    value = _int_value(mapping, key)
+    if value <= 0:
+        raise ValueError(f"{key} must be positive")
+    return value
+
+
+def _nonnegative_int_value(mapping: Mapping[str, Any], key: str) -> int:
+    value = _int_value(mapping, key)
+    if value < 0:
+        raise ValueError(f"{key} must be nonnegative")
+    return value
+
+
+def _unavailable_reason_count(value: object) -> int:
+    reasons = _mapping(value, "convergence unavailable reasons")
+    count = 0
+    for reason, reason_count in reasons.items():
+        if not reason:
+            raise ValueError("convergence unavailable reason must be non-empty")
+        if type(reason_count) is not int or reason_count < 0:
+            raise ValueError("convergence unavailable reason count is invalid")
+        count += reason_count
+    return count
 
 
 def _optional_decimal(value: object) -> Decimal | None:

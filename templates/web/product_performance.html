@@ -119,6 +119,33 @@
           inclusion is not automatically better for a 60% interval.
         </li>
       </ul>
+      {% if registered_study.convergence_summary %}
+        <section class="notice" aria-labelledby="historical-anchor-convergence">
+          <h3 id="historical-anchor-convergence">Historical anchor numerical sensitivity</h3>
+          <p>
+            <strong>HISTORICAL ANCHOR numerical sensitivity:</strong>
+            8,192 production paths versus 16,384 diagnostic paths. Across
+            {{ registered_study.convergence_summary.available_quantile_comparison_count }}
+            available quantile comparisons,
+            {{ registered_study.convergence_summary.exceeded_count }} exceeded the frozen
+            <code>max(0.01 return, 0.02 * production interval width)</code> threshold.
+            {{ registered_study.convergence_summary.unavailable_count }} diagnostics could not
+            be assessed; they are not treated as zero failures.
+          </p>
+          {% if not registered_study.convergence_summary.has_available_quantile_comparisons %}
+            <p>
+              <strong>No numerical pass conclusion is available.</strong>
+              Zero available quantile comparisons is not a pass, even when the stored
+              exceeded count is zero.
+            </p>
+          {% endif %}
+          <p class="muted">
+            These are numerical precision checks, not extra market outcomes or calibrated
+            skill. Diagnostic exceedances remain disclosed; they do not tune or alter
+            issuance, and the current forecasts remain available.
+          </p>
+        </section>
+      {% endif %}
       {% for disclosure in registered_study.disclosures %}
         <p class="muted">{{ disclosure }}</p>
       {% endfor %}

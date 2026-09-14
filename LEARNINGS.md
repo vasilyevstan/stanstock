@@ -50,6 +50,11 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Numerical precision warnings are not predictive evidence.** A frozen
+  retrospective diagnostic can reproduce exactly while its upper quantile
+  moves beyond the declared tolerance when paths are doubled. Preserve the
+  recorded failure, disclose available and unavailable comparisons separately,
+  and never tune the frozen operator against that observation.
 - **Provider exception imports still cross the provider boundary.** Domain
   readers obtain `ProviderConfigurationError` through `data.provider_policy`,
   not `data.providers.exceptions`. Run the fast architecture tests when
@@ -83,8 +88,9 @@ reviews and should not be re-litigated without an explicit new decision.
   to a one-ULP input change; do not weaken production precision or hashing.
 - **Dependency diagnostics are command output too.** A count-only summary
   does not protect private symbols when HTTP-client logs contain request URLs.
-  Privacy regressions must cover logging as well as stdout while preserving
-  explicit failure reporting.
+  Protect native acquisition services, not only command wrappers. Overlapping
+  suppression scopes restore logger levels only after the last scope exits;
+  warnings and explicit failure reporting remain visible.
 - **Range availability and probability support are separate facts.** A finite
   bear/base/bull range can remain usable when positive-return probability is
   withheld. Render these states independently, keep stored reasons visible,

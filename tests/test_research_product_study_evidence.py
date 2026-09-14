@@ -97,6 +97,39 @@ def _study_report(run: AnalysisRun, store: AssetStore, generated_at: datetime) -
     )
 
 
+def _convergence_aggregates(report: dict[str, object]) -> list[dict[str, object]]:
+    aggregates = report.get("convergence_aggregates")
+    assert isinstance(aggregates, list)
+    for aggregate in aggregates:
+        assert isinstance(aggregate, dict)
+    return aggregates
+
+
+def _set_convergence_counts(
+    report: dict[str, object],
+    *,
+    observation_count: int,
+    exceeded_count: int,
+    unavailable_count: int,
+) -> None:
+    aggregates = _convergence_aggregates(report)
+    for aggregate in aggregates:
+        aggregate.update(
+            observation_count=0,
+            exceeded_count=0,
+            unavailable_count=0,
+            unavailable_reasons={},
+        )
+    aggregates[0].update(
+        observation_count=observation_count,
+        exceeded_count=exceeded_count,
+        unavailable_count=unavailable_count,
+        unavailable_reasons=(
+            {} if unavailable_count == 0 else {"historical_anchor_data_missing": unavailable_count}
+        ),
+    )
+
+
 def test_register_price_product_study_is_idempotent_without_other_db_mutations(
     demo_product, monkeypatch
 ) -> None:
@@ -285,6 +318,154 @@ def test_registered_study_reader_fails_closed_on_forged_metadata_row(
 
     assert result.status == "integrity_failed"
     assert result.verification_code == "product_study_registry_ambiguous"
+
+
+def test_registered_study_reader_surfaces_stored_convergence_counts(
+    demo_product,
+    client,
+    monkeypatch,
+) -> None:
+    viewer, store, run = demo_product
+    report = serialize_price_product_study(
+        _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
+    )
+    _set_convergence_counts(
+        report,
+        observation_count=5,
+        exceeded_count=3,
+        unavailable_count=2,
+    )
+    _register_price_product_study(report=report, store=store)
+
+    study = read_registered_price_product_study(user=viewer, store=store)
+
+    assert study.status == "available"
+    assert study.convergence_summary is not None
+    assert study.convergence_summary.production_paths == 8192
+    assert study.convergence_summary.diagnostic_paths == 16384
+    assert study.convergence_summary.observation_count == 5
+    assert study.convergence_summary.available_quantile_comparison_count == 3
+    assert study.convergence_summary.exceeded_count == 3
+    assert study.convergence_summary.unavailable_count == 2
+    assert study.convergence_summary.has_available_quantile_comparisons is True
+
+    no_paths = Mock(side_effect=AssertionError("GET must not run Monte Carlo paths"))
+    no_calculation = Mock(side_effect=AssertionError("GET must not calculate a new study"))
+    monkeypatch.setattr("stanstock.research.price_product.simulate_fhs_terminal_logs", no_paths)
+    monkeypatch.setattr(
+        "stanstock.research.product_pipeline.calculate_price_product",
+        no_calculation,
+    )
+    client.force_login(viewer)
+    response = client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    assert response.context["registered_study"].convergence_summary == study.convergence_summary
+    content = " ".join(response.content.decode().split())
+    assert "HISTORICAL ANCHOR numerical sensitivity" in content
+    assert "8,192 production paths versus 16,384 diagnostic paths" in content
+    assert "3 available quantile comparisons" in content
+    assert "3 exceeded the frozen" in content
+    assert "2 diagnostics could not be assessed" in content
+    assert "not extra market outcomes or calibrated" in content
+    assert "do not tune or alter" in content
+    no_paths.assert_not_called()
+    no_calculation.assert_not_called()
+
+
+def test_registered_study_reader_marks_zero_available_convergence_as_not_a_pass(
+    demo_product,
+    client,
+) -> None:
+    viewer, store, run = demo_product
+    report = serialize_price_product_study(
+        _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
+    )
+    _set_convergence_counts(
+        report,
+        observation_count=4,
+        exceeded_count=0,
+        unavailable_count=4,
+    )
+    _register_price_product_study(report=report, store=store)
+
+    study = read_registered_price_product_study(user=viewer, store=store)
+
+    assert study.status == "available"
+    assert study.convergence_summary is not None
+    assert study.convergence_summary.available_quantile_comparison_count == 0
+    assert study.convergence_summary.exceeded_count == 0
+    assert study.convergence_summary.unavailable_count == 4
+    assert study.convergence_summary.has_available_quantile_comparisons is False
+
+    client.force_login(viewer)
+    response = client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    content = " ".join(response.content.decode().split())
+    assert "0 available quantile comparisons" in content
+    assert "No numerical pass conclusion is available." in content
+    assert "Zero available quantile comparisons is not a pass" in content
+    assert "not treated as zero failures" in content
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    (
+        "absent",
+        "malformed",
+        "duplicate",
+        "boolean_count",
+        "negative_count",
+        "unavailable_exceeds_observation",
+        "exceeded_exceeds_available",
+    ),
+)
+def test_registered_study_reader_fails_closed_on_invalid_convergence_aggregates(
+    demo_product,
+    invalid_kind,
+) -> None:
+    viewer, store, run = demo_product
+    report = serialize_price_product_study(
+        _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
+    )
+    if invalid_kind == "absent":
+        report.pop("convergence_aggregates")
+    elif invalid_kind == "malformed":
+        report["convergence_aggregates"] = "not-a-list"
+    else:
+        aggregates = _convergence_aggregates(report)
+        aggregate = aggregates[0]
+        if invalid_kind == "duplicate":
+            aggregates.append(aggregate.copy())
+        elif invalid_kind == "boolean_count":
+            aggregate["observation_count"] = True
+        elif invalid_kind == "negative_count":
+            aggregate["observation_count"] = -1
+        elif invalid_kind == "unavailable_exceeds_observation":
+            aggregate.update(
+                observation_count=1,
+                unavailable_count=2,
+                exceeded_count=0,
+                unavailable_reasons={"historical_anchor_data_missing": 2},
+            )
+        elif invalid_kind == "exceeded_exceeds_available":
+            aggregate.update(
+                observation_count=3,
+                unavailable_count=1,
+                exceeded_count=3,
+                unavailable_reasons={"historical_anchor_data_missing": 1},
+            )
+        else:
+            raise AssertionError(f"Unexpected invalid convergence aggregate case: {invalid_kind}")
+    _register_price_product_study(report=report, store=store)
+
+    result = read_registered_price_product_study(user=viewer, store=store)
+
+    assert result.status == "integrity_failed"
+    assert result.available is False
+    assert result.convergence_summary is None
+    assert result.verification_code == "product_study_evidence_invalid"
 
 
 def test_registered_study_rendering_surfaces_real_worse_and_empty_scopes_in_demo_mode(
