@@ -50,6 +50,10 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **New profile dispatches must retain command-level operational guards.**
+  Both native and legacy scheduled refreshes check the installed timezone
+  against the machine timezone before starting work. An independently safe
+  UTC issuance deadline does not replace this installation check.
 - **Numerical precision warnings are not predictive evidence.** A frozen
   retrospective diagnostic can reproduce exactly while its upper quantile
   moves beyond the declared tolerance when paths are doubled. Preserve the

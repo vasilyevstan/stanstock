@@ -210,6 +210,7 @@ class Command(BaseCommand):
         )
 
         try:
+            _validate_runtime_timezone()
             result = execute_scheduled_research_refresh(core_config_path=config_path)
         except EXPECTED_STAGE_ERRORS as exc:
             raise CommandError(f"Scheduled research refresh failed ({type(exc).__name__})") from exc

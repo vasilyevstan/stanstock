@@ -102,9 +102,43 @@ def _run_command() -> str:
     return output.getvalue()
 
 
+def test_native_profile_rejects_changed_machine_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+) -> None:
+    settings.RESEARCH_PRODUCT_ENABLED = True
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "America/New_York",
+    )
+
+    def forbidden_refresh(**_kwargs: object) -> None:
+        pytest.fail("Timezone drift must be rejected before native refresh dispatch")
+
+    monkeypatch.setattr(
+        research_product_refresh,
+        "execute_scheduled_research_refresh",
+        forbidden_refresh,
+    )
+    with pytest.raises(
+        CommandError, match=r"Scheduled research refresh failed \(ValueError\)"
+    ) as error:
+        _run_command()
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "Reinstall the LaunchAgent" in str(error.value.__cause__)
+    assert not JobRun.objects.exists()
+
+
 def test_native_profile_ignores_legacy_success_and_replays_exact_registered_output(
     scheduled_environment: tuple[Any, Any, Any, Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "Europe/Tallinn",
+    )
     owner, store, _path, resolve, fetch = scheduled_environment
     JobRun.objects.create(
         job_name="scheduled_refresh",
