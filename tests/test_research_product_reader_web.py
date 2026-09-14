@@ -721,10 +721,7 @@ def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
     assert f"direction={presentation.cards[0].direction}" in submitted_query
     assert f"risk={presentation.cards[0].relative_volatility_label}" in submitted_query
     assert "price_band=under_10" in submitted_query
-    assert (
-        f"{submitted_query.replace('&', '&amp;')}&amp;page=2".encode()
-        in submitted.content
-    )
+    assert f"{submitted_query.replace('&', '&amp;')}&amp;page=2".encode() in submitted.content
     assert invalid.status_code == 200
     assert b"Filters need attention" in invalid.content
     assert invalid.content.count(b'class="compact-opportunity"') == 0
@@ -1018,8 +1015,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                         "[element.scrollWidth, element.clientWidth])"
                     )
                     assert all(
-                        scroll_width <= client_width
-                        for scroll_width, client_width in widths
+                        scroll_width <= client_width for scroll_width, client_width in widths
                     )
 
                 opportunity_nav = page.get_by_role("link", name="Opportunities", exact=True)
@@ -1078,9 +1074,11 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                     "})"
                 )
                 assert len(projection_boxes) == 3
-                assert max(item["top"] for item in projection_boxes) - min(
-                    item["top"] for item in projection_boxes
-                ) <= 1
+                assert (
+                    max(item["top"] for item in projection_boxes)
+                    - min(item["top"] for item in projection_boxes)
+                    <= 1
+                )
                 assert all(item["scrollWidth"] <= item["clientWidth"] for item in projection_boxes)
 
                 under_ten = page.get_by_role("link", name="Under $10").first
@@ -1092,9 +1090,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                     "})"
                 )
                 complete_cards = [
-                    box
-                    for box in card_boxes
-                    if box["top"] >= 0 and box["bottom"] <= viewport[1]
+                    box for box in card_boxes if box["top"] >= 0 and box["bottom"] <= viewport[1]
                 ]
                 if viewport[0] == 375:
                     assert card_boxes[0]["top"] >= 0

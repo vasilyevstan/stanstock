@@ -1180,7 +1180,7 @@ def test_active_methodology_labels_legacy_panels_as_archived(
     content = response.content.decode()
     assert "Active research-product-v1" in content
     assert "Archived methods — not used by the active product" in content
-    assert "<details class=\"panel archived-methodology\">" in content
+    assert '<details class="panel archived-methodology">' in content
     assert "out-of-sample evaluation" not in content
 
 

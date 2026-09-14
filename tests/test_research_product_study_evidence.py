@@ -559,9 +559,7 @@ def test_registered_study_rendering_surfaces_real_worse_and_empty_scopes_in_demo
     assert "Comparison unavailable." in content
     assert "No Eligible Observations" in content
     expected_detail_rows = sum(
-        len(scope.rows)
-        for partition in study.partitions
-        for scope in partition.scopes
+        len(scope.rows) for partition in study.partitions for scope in partition.scopes
     )
     assert expected_detail_rows == 168
     comparison_partitions = response.context["comparison_partitions"]

@@ -178,8 +178,7 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
             "clear_filters_query": "",
             "pagination_query": _product_querystring(active_filter_values, page=None),
             "advanced_filters_active": any(
-                active_filter_values.get(field)
-                for field in ("direction", "suggestion", "risk")
+                active_filter_values.get(field) for field in ("direction", "suggestion", "risk")
             ),
             "admission_reason_counts": sorted(admission_reasons.items()),
             "unavailable_admissions": tuple(
@@ -294,11 +293,7 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
         return legacy_views.prediction_history_page(request)
     history = _read_history(request)
     product = history.current
-    issuance_cards = [
-        card
-        for cohort in history.cohorts
-        for card in cohort.cards
-    ]
+    issuance_cards = [card for cohort in history.cohorts for card in cohort.cards]
     issuance_page = Paginator(issuance_cards, _OPPORTUNITIES_PAGE_SIZE).get_page(
         request.GET.get("page")
     )
@@ -569,9 +564,11 @@ def _observed_performance_groups(
                 ),
             ),
         ):
-            for status, count in outcomes.values("status").annotate(
-                count=Count("prediction")
-            ).values_list("status", "count"):
+            for status, count in (
+                outcomes.values("status")
+                .annotate(count=Count("prediction"))
+                .values_list("status", "count")
+            ):
                 scope[name][str(status)] += int(count)
     return (
         [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
