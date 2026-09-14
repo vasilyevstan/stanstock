@@ -153,14 +153,16 @@ pending CI/deployment gates, or a dirty runtime approaching refresh. It may
 replace an owner only when that owner is unavailable or failed. Only the
 orchestrator performs git/release/deployment actions.
 
-## Current blockers
+## Release acceptance
 
-Before publication/activation:
+Each release records the following evidence at its exact head. These are
+standing requirements, not a live list of unfinished work; consult the
+[release record](../README.md#release-status) for the current result:
 
-- finish integration corrections;
-- complete independent integrity and critic reviews;
-- complete exact-head CI/regression validation;
-- complete separate documentation clarity/privacy review;
-- complete the private fixed-denominator operational acceptance;
-- register real retrospective evidence without hiding failures; and
-- obtain final-validator release acceptance.
+- reviewed integration and focused validation;
+- independent integrity and critic approvals;
+- complete exact-head CI/regression results;
+- separate documentation clarity/privacy review;
+- private fixed-denominator operational acceptance;
+- real registered retrospective evidence without hidden failures; and
+- final-validator release acceptance.

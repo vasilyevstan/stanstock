@@ -1,7 +1,8 @@
 # Limitations
 
-> Release state: see [README](../README.md#release-status). The replacement
-> product is implemented but not yet independently accepted or activated.
+> Release state: see [README](../README.md#release-status). These limitations
+> apply to `research-product-v1` before and after release or local activation;
+> implementation and deployment do not establish predictive skill.
 
 ## Research-product limits
 

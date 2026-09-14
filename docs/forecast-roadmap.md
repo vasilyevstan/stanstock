@@ -21,7 +21,7 @@ of gain, calibrated confidence, fair value, or automatic trade.
 Each qualified listing produces one analysis and exactly five immutable
 prediction rows. See [Price research](price-research.md).
 
-## Implemented slices awaiting release
+## Implemented product
 
 - strict tracked product/config and bounded-universe identities;
 - exact momentum, risk, recommendation, and fixed-parameter FHS math;
@@ -29,7 +29,7 @@ prediction rows. See [Price research](price-research.md).
 - catalog/history qualification and missing-history bootstrap;
 - captured qualified membership with SPY outside stock membership;
 - exact five-row writer and registered calculation/output proof;
-- credential-before-reuse recovery ordering;
+- verified reuse before credential resolution or provider spending;
 - genuine offline `synthetic_demo`;
 - shared fail-closed reader;
 - primary Opportunities, detail, My List, status, history, performance, and
@@ -39,23 +39,26 @@ prediction rows. See [Price research](price-research.md).
 - versioned scheduled/manual refresh profile; and
 - recorded-parent catalog recovery.
 
-This list describes code present on the integration branch, not accepted
-deployment evidence.
+This inventory describes implemented capabilities. The release record
+separately identifies the exact committed code, independent reviews, CI, and
+installation-specific operational evidence.
 
-## Release gates still required
+## Required release evidence
 
-The orchestrator must bind each result to the final exact head:
+For each release, the orchestrator binds completed evidence to the final exact
+head. This standing checklist is not a list of currently unfinished work; see
+the [release record](../README.md#release-status) for status:
 
-1. finish the integrated source corrections and local validation;
-2. run independent research-integrity review;
-3. run adversarial critic-tester review and the complete regression/CI set;
-4. complete separate multi-model documentation clarity/privacy review;
-5. perform the private fixed-denominator usefulness acceptance;
-6. generate/register real retrospective evidence, retaining empty and
+1. reviewed integration and local validation;
+2. independent research-integrity approval;
+3. adversarial critic-tester approval and the complete regression/CI set;
+4. separate multi-model documentation clarity/privacy review;
+5. private fixed-denominator usefulness acceptance;
+6. real registered retrospective evidence, retaining empty and
    worse-than-baseline results;
-7. prove serving and scheduler profile alignment;
-8. prove clean-revision/on-time issuance safety; and
-9. obtain final-validator release acceptance.
+7. serving and scheduler profile alignment;
+8. clean-revision/on-time issuance safety; and
+9. final-validator release acceptance.
 
 No fixture count, simulated path count, code-coverage percentage, or
 calculation success alone satisfies these gates.

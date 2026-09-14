@@ -63,6 +63,10 @@ def demo_product(settings, tmp_path, monkeypatch, django_user_model):
 def live_product(settings, tmp_path, monkeypatch, django_user_model):
     settings.RESEARCH_PRODUCT_ENABLED = True
     settings.DEMO_MODE = False
+    monkeypatch.setattr(
+        "httpx.Client.send",
+        Mock(side_effect=AssertionError("Product-study evidence tests must not use the network")),
+    )
     monkeypatch.setenv("STANSTOCK_CODE_REVISION", "a" * 40)
     monkeypatch.setattr(
         "stanstock.research.product_pipeline.clean_git_revision",
@@ -321,11 +325,11 @@ def test_registered_study_reader_fails_closed_on_forged_metadata_row(
 
 
 def test_registered_study_reader_surfaces_stored_convergence_counts(
-    demo_product,
+    live_product,
     client,
     monkeypatch,
 ) -> None:
-    viewer, store, run = demo_product
+    viewer, store, run = live_product
     report = serialize_price_product_study(
         _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
     )
@@ -374,10 +378,10 @@ def test_registered_study_reader_surfaces_stored_convergence_counts(
 
 
 def test_registered_study_reader_marks_zero_available_convergence_as_not_a_pass(
-    demo_product,
+    live_product,
     client,
 ) -> None:
-    viewer, store, run = demo_product
+    viewer, store, run = live_product
     report = serialize_price_product_study(
         _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
     )
@@ -422,10 +426,10 @@ def test_registered_study_reader_marks_zero_available_convergence_as_not_a_pass(
     ),
 )
 def test_registered_study_reader_fails_closed_on_invalid_convergence_aggregates(
-    demo_product,
+    live_product,
     invalid_kind,
 ) -> None:
-    viewer, store, run = demo_product
+    viewer, store, run = live_product
     report = serialize_price_product_study(
         _study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC))
     )

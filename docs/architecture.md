@@ -1,8 +1,9 @@
 # Architecture
 
 > Release state: see the centralized [README status](../README.md#release-status).
-> This document describes the implemented `research-product-v1` contract
-> awaiting release and activation.
+> This document describes the implemented `research-product-v1` contract.
+> Candidate activation, protected release, and each installation's deployment
+> state are distinct; they are recorded in the release evidence.
 
 StanStock is one Django modular monolith. Module boundaries protect evidence,
 authorization, and point-in-time correctness; they are not a reason to add
