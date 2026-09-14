@@ -21,6 +21,15 @@ Production settings and PostgreSQL migration/concurrency checks run separately
 with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
+CI partitions the complete pytest collection into price-product modules
+(`test_research_product_*.py` and `test_research_price_product*.py`) and their
+complement. Both retain the 40-minute execution limit; neither drops tests
+or changes assertions. The required `quality` check fails unless both
+partitions, including their checks, succeed. Coverage shown by each partition
+is partial; `make check` remains the complete local run. A failed partition
+stops at its first failure so its traceback is available without waiting for
+the job timeout. PostgreSQL integrity and container checks remain separate.
+
 Responsive browser cases require the Chromium binary matching the locked
 Playwright package. CI installs it with
 `uv run playwright install --with-deps chromium`; for a local environment
@@ -103,6 +112,11 @@ result is recorded rather than tuned away. Numeric calibration metrics are
 outside this change; a future study requires a separately reviewed protocol.
 
 ## Reader and UI coverage
+
+The fixed synthetic demo uses its fixture's end date, not the moving live
+market date, in both current and history readers. Exercise a later read clock
+without regenerating the source; real-provider stale-session rejection must
+remain unchanged.
 
 The native end-to-end contract must persist real synthetic evidence, call the
 production writer, read through the fail-closed product reader, and render

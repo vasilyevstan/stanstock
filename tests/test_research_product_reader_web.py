@@ -365,20 +365,28 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     no_provider_fetch.assert_not_called()
 
 
+@pytest.mark.parametrize("read_time", (NOW, NOW + timedelta(days=370)))
 def test_demo_refresh_uses_same_reader_and_primary_rendering(
-    settings, tmp_path, django_user_model, client
+    settings, tmp_path, django_user_model, client, monkeypatch, read_time
 ):
     settings.RESEARCH_PRODUCT_ENABLED = True
     settings.DEMO_MODE = True
     settings.DATA_DIR = tmp_path
+    monkeypatch.setattr(timezone, "now", lambda: NOW)
     execute_demo_product_refresh(store=AssetStore(tmp_path))
     viewer = django_user_model.objects.create_user(username="demo-viewer")
+    before = (DataAsset.objects.count(), Prediction.objects.count())
+    monkeypatch.setattr(timezone, "now", lambda: read_time)
     client.force_login(viewer)
 
     result = read_research_product(user=viewer, store=AssetStore(tmp_path))
     response = client.get(reverse("opportunities"))
+    history = read_research_product_history(user=viewer, store=AssetStore(tmp_path))
 
     assert result.status == "available"
+    assert history.current.available
+    assert history.current.run == result.run
+    assert (DataAsset.objects.count(), Prediction.objects.count()) == before
     assert result.owner_id == "synthetic-demo"
     assert {card.listing.ticker for card in result.cards} == {
         "ZZRPUP",

@@ -13,10 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: quality
+  checks:
+    name: checks (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, price-product]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -46,7 +50,17 @@ jobs:
         run: uv run playwright install --with-deps chromium
 
       - name: Run tests
-        run: uv run pytest --cov=stanstock --cov-report=term-missing
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+        run: |
+          if [ "$TEST_SUITE" = core ]; then
+            uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 \
+              --ignore-glob='tests/test_research_product_*.py' \
+              --ignore-glob='tests/test_research_price_product*.py'
+          else
+            uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 \
+              tests/test_research_product_*.py tests/test_research_price_product*.py
+          fi
 
       - name: Check migration drift
         run: uv run python manage.py makemigrations --check --dry-run
@@ -60,6 +74,18 @@ jobs:
           DJANGO_ALLOWED_HOSTS: "localhost"
           DATABASE_URL: "postgresql://stanstock:stanstock@localhost:5432/stanstock"
         run: uv run python manage.py check --deploy --settings=stanstock.settings.prod
+
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [checks]
+    if: always()
+    steps:
+      - name: Require every complete test partition
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: test "$CHECKS_RESULT" = success
 
   postgresql:
     name: postgresql

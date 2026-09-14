@@ -50,6 +50,15 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Frozen dependency contracts can protect shared helpers too.** An optional
+  argument on `register_asset` violated the older outcome verifier's
+  pure-insertion proof even though its default was unchanged. Keep that
+  entry point intact; the separately verified frequency publisher registers
+  its explicit schema without modifying the frozen dependency.
+- **Fixed synthetic data has a fixed freshness reference.** Demo current and
+  history readers use the generated fixture's end date. Advancing the real
+  market calendar must not expire that demonstration or generate new source
+  rows; live provider cohorts still require the current eligible session.
 - **Matching quantiles do not authenticate event counts.** A registered
   simulation-frequency report must be derived internally and bind its complete
   source projection, including zero-drift prices/returns and withheld reasons.

@@ -23,7 +23,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 
 from stanstock.core.verification_types import RefreshVerificationError
-from stanstock.data.assets import AssetStore, read_checksummed_bytes, register_asset
+from stanstock.data.assets import AssetStore, read_checksummed_bytes
 from stanstock.data.models import DataAsset, ProviderRecord
 from stanstock.data.provider_policy import (
     TWELVE_DATA_PROVIDER,
@@ -187,11 +187,12 @@ def _register_product_frequencies(
                 logical_sha256=logical_sha256,
             )
             stored = store.write_bytes(relative_path, payload)
-            asset = register_asset(
+            asset = DataAsset.objects.create(
                 provider="stanstock",
                 kind=FREQUENCY_EVIDENCE_KIND,
                 subject=subject,
-                stored=stored,
+                relative_path=stored.relative_path,
+                sha256=stored.sha256,
                 retrieved_at=derived_at,
                 available_at=derived_at,
                 schema_version=FREQUENCY_SCHEMA,

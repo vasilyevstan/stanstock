@@ -37,6 +37,7 @@ from stanstock.data.provider_policy import (
 )
 from stanstock.data.research_product import PRODUCT_INTAKE_KIND, product_membership_payload
 from stanstock.data.research_product_demo import DEMO_OWNER_ID
+from stanstock.data.research_product_demo import END_DATE as DEMO_TARGET_DATE
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
@@ -260,6 +261,13 @@ class _AuthorizedCandidate:
     intake: dict[str, object]
 
 
+def _expected_current_target() -> date:
+    if settings.DEMO_MODE:
+        return DEMO_TARGET_DATE
+    target, _grade = resolve_us_target_date(decision_time=timezone.now())
+    return target
+
+
 def read_research_product(
     *,
     user: ProductUser,
@@ -313,7 +321,7 @@ def read_research_product(
             status="absent",
             message="No verified active research-product cohort is available for this account.",
         )
-    expected_target, _expected_grade = resolve_us_target_date(decision_time=timezone.now())
+    expected_target = _expected_current_target()
     if candidate.run.target_date != expected_target:
         return ProductRead(
             status="stale",
@@ -458,7 +466,7 @@ def read_research_product_history(
         )
 
     newest = cohorts[0]
-    expected_target, _expected_grade = resolve_us_target_date(decision_time=timezone.now())
+    expected_target = _expected_current_target()
     if newest.run.target_date == expected_target:
         current = _product_read_from_cohort(newest)
     else:
