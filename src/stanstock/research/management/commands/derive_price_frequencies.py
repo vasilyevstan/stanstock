@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from stanstock.data.assets import open_asset_store
 from stanstock.research.models import AnalysisRun
@@ -17,7 +17,7 @@ from stanstock.research.product_frequency_evidence import (
 class Command(BaseCommand):
     help = "Derive or verify terminal simulation frequencies for one product run."
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--run", required=True, help="Immutable AnalysisRun UUID")
         parser.add_argument(
             "--verify",
@@ -25,7 +25,7 @@ class Command(BaseCommand):
             help="Re-derive and compare registered bytes without writing.",
         )
 
-    def handle(self, *args, **options) -> str:
+    def handle(self, *args: object, **options: object) -> str:
         try:
             run_id = UUID(str(options["run"]))
         except (TypeError, ValueError) as exc:
@@ -35,7 +35,7 @@ class Command(BaseCommand):
             raise CommandError("The requested analysis run does not exist")
         store = open_asset_store()
         try:
-            if options["verify"]:
+            if bool(options["verify"]):
                 verify_registered_product_frequencies(run=run, store=store)
                 self.stdout.write("Frequency evidence verified.")
             else:

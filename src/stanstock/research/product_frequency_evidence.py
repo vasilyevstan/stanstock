@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from django.conf import settings
-from django.db import OperationalError, transaction
+from django.db import OperationalError, connection, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
@@ -32,6 +33,8 @@ from stanstock.data.provider_policy import (
 from stanstock.research.config import code_revision
 from stanstock.research.models import AnalysisRun, Prediction
 from stanstock.research.price_product import (
+    PriceProductInputError,
+    _withheld_projection,
     complete_input_hash,
     deterministic_seed,
     filter_historical_returns,
@@ -54,13 +57,44 @@ from stanstock.research.price_product_frequencies import (
     method_identity_sha256,
 )
 from stanstock.research.price_product_study import load_price_product_sources
-from stanstock.research.product_pipeline import verify_price_product_output
+from stanstock.research.product_pipeline import _jsonable, verify_price_product_output
 
 FREQUENCY_EVIDENCE_KIND = "research_product_frequency_evidence"
 FREQUENCY_EVIDENCE_CONTRACT = "research-product-frequency-evidence@1"
 FrequencyReadStatus = Literal["available", "absent", "disabled", "integrity_failed", "unauthorized"]
 _HORIZONS = ("6m", "12m", "3y", "5y")
 _DEMO_OWNER_ID = "synthetic-demo"
+_FREQUENCY_ROW_KEYS = {
+    "horizon",
+    "sessions",
+    "path_count",
+    "counts",
+    "zero_drift_counts",
+    "ledger_returns",
+    "insufficiency_reason",
+    "projection",
+    "input_hash",
+    "seed",
+    "effective_config_hash",
+    "method_identity_sha256",
+    "source_assets",
+}
+_FREQUENCY_LISTING_KEYS = {"listing_id", "horizons"}
+_PROJECTION_KEYS = {
+    "horizon",
+    "sessions",
+    "quantile_levels",
+    "central_model_mass",
+    "raw_returns",
+    "ledger_returns",
+    "raw_prices",
+    "ledger_prices",
+    "zero_drift_raw_returns",
+    "zero_drift_ledger_returns",
+    "zero_drift_raw_prices",
+    "zero_drift_ledger_prices",
+    "insufficiency_reason",
+}
 
 
 class FrequencyViewer(Protocol):
@@ -160,6 +194,7 @@ def _register_product_frequencies(
                 stored=stored,
                 retrieved_at=derived_at,
                 available_at=derived_at,
+                schema_version=FREQUENCY_SCHEMA,
                 metadata=metadata,
             )
             if _assets_for_run(locked_run).count() != 1:
@@ -170,11 +205,36 @@ def _register_product_frequencies(
         # is recoverable; an unrelated database error must remain loud.
         if not _is_expected_registration_contention(exc):
             raise
-        existing = _single_asset_for_run(run)
+        return _committed_winner_after_contention(run=run, store=store)
+
+
+def _committed_winner_after_contention(*, run: AnalysisRun, store: AssetStore) -> DataAsset:
+    """Bounded SQLite-only recovery after its missing-row writer race.
+
+    PostgreSQL's source-row lock serializes this operation. SQLite instead
+    rejects the loser while the winner transaction is in flight, so re-query
+    only after the failed transaction has exited. No caller retry is needed,
+    and only the exact, checksum-validated winner is ever returned.
+    """
+
+    if connection.vendor != "sqlite":
+        raise OperationalError("Frequency registration lock contention was not recoverable")
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            existing = _single_asset_for_run(run)
+        except OperationalError as exc:
+            if not _is_expected_registration_contention(exc):
+                raise
+            existing = None
         if existing is not None:
             _validate_registered_asset(existing, store=store, expected_run=run, verify_source=True)
             return existing
-        raise
+        if time.monotonic() >= deadline:
+            raise OperationalError(
+                "Frequency registration winner did not commit before retry deadline"
+            )
+        time.sleep(0.025)
 
 
 def read_registered_product_frequencies(
@@ -225,6 +285,7 @@ def read_registered_product_frequencies(
             "absent",
             "Model-estimated probabilities were not derived at this decision time.",
             source_run_id=run.id,
+            verification_code="frequency_not_derived_at_decision_time",
         )
     try:
         document = _validate_registered_asset(
@@ -234,8 +295,15 @@ def read_registered_product_frequencies(
             expected_owner=expected_owner,
             expected_provider=expected_provider,
             decision_time=decision_time,
+            verify_source=True,
         )
         return _read_document(document)
+    except ProviderConfigurationError:
+        return ProductFrequencyRead(
+            "unauthorized",
+            "Current display authorization does not permit this frequency evidence.",
+            verification_code="frequency_display_unauthorized",
+        )
     except (RefreshVerificationError, KeyError, TypeError, ValueError):
         return ProductFrequencyRead(
             "integrity_failed",
@@ -388,15 +456,6 @@ def _derive_listing(
     *, source: Any, run: AnalysisRun, config: PriceProductConfig, store: AssetStore
 ) -> dict[str, Any]:
     product_input = source.selection.product_input
-    # ``_LoadedStudySource`` has already parsed and bound this exact artifact.
-    # The frozen ledger remains an independent compatibility owner.
-    filtered = filter_historical_returns(
-        product_input.stock.closes,
-        burn_in=config.simulation.filter_burn_in,
-        variance_target_weight=config.simulation.variance_target_weight,
-        variance_persistence=config.simulation.variance_persistence,
-        innovation_weight=config.simulation.innovation_weight,
-    )
     input_hash = complete_input_hash(product_input)
     seed = deterministic_seed(
         method_version=FHS_METHOD_VERSION,
@@ -405,16 +464,6 @@ def _derive_listing(
         target_date=product_input.target_date,
     )
     simulation = config.simulation
-    terminals = simulate_fhs_terminal_logs(
-        filtered,
-        seed=seed,
-        horizons=tuple(sessions for _name, sessions in simulation.horizons),
-        path_count=simulation.production_paths,
-        diagnostic_max_paths=simulation.diagnostic_max_paths,
-        variance_target_weight=simulation.variance_target_weight,
-        variance_persistence=simulation.variance_persistence,
-        innovation_weight=simulation.innovation_weight,
-    )
     forecast = _forecast_from_source(source, store=store)
     if forecast.get("seed") != seed or forecast.get("path_count") != simulation.production_paths:
         raise ValueError("Frequency source forecast seed or path count is invalid")
@@ -427,32 +476,68 @@ def _derive_listing(
     }
     if set(predictions) != set(_HORIZONS):
         raise ValueError("Frequency source has incomplete advisory prediction identity")
+    withheld_reason = None
+    try:
+        filtered = filter_historical_returns(
+            product_input.stock.closes,
+            burn_in=simulation.filter_burn_in,
+            variance_target_weight=simulation.variance_target_weight,
+            variance_persistence=simulation.variance_persistence,
+            innovation_weight=simulation.innovation_weight,
+        )
+        terminals = simulate_fhs_terminal_logs(
+            filtered,
+            seed=seed,
+            horizons=tuple(sessions for _name, sessions in simulation.horizons),
+            path_count=simulation.production_paths,
+            diagnostic_max_paths=simulation.diagnostic_max_paths,
+            variance_target_weight=simulation.variance_target_weight,
+            variance_persistence=simulation.variance_persistence,
+            innovation_weight=simulation.innovation_weight,
+        )
+    except PriceProductInputError as exc:
+        terminals = None
+        withheld_reason = exc.reason_code
     rows = []
     for index, (horizon, sessions) in enumerate(simulation.horizons):
-        projected = projection_from_terminal_logs(
-            horizon=horizon,
-            sessions=sessions,
-            terminal_logs=terminals.with_drift[index],
-            zero_drift_logs=terminals.zero_drift[index],
-            target_close=product_input.stock.closes[-1],
-            quantiles=simulation.quantiles,
-            quantile_method=simulation.quantile_method,
-            return_places=config.rounding.return_decimal_places,
-            price_places=config.rounding.price_decimal_places,
-        )
+        if terminals is None:
+            if withheld_reason is None:
+                raise ValueError("Frequency simulation is absent without a withholding reason")
+            projected = _withheld_projection(
+                horizon, sessions, simulation.quantiles, withheld_reason
+            )
+        else:
+            projected = projection_from_terminal_logs(
+                horizon=horizon,
+                sessions=sessions,
+                terminal_logs=terminals.with_drift[index],
+                zero_drift_logs=terminals.zero_drift[index],
+                target_close=product_input.stock.closes[-1],
+                quantiles=simulation.quantiles,
+                quantile_method=simulation.quantile_method,
+                return_places=config.rounding.return_decimal_places,
+                price_places=config.rounding.price_decimal_places,
+            )
         original = _forecast_projection(forecast, horizon)
-        if _ledger_triplet(projected) != _ledger_triplet_from_raw(original):
-            raise ValueError("Frequency replay does not match the frozen projection ledger")
+        projected_payload = _jsonable(asdict(projected))
+        if original != projected_payload:
+            raise ValueError("Frequency replay does not match the frozen projection payload")
         prediction = predictions[horizon]
         if _ledger_triplet(projected) != _prediction_triplet(prediction):
             raise ValueError("Frequency replay does not match the immutable prediction ledger")
-        frequency = classify_terminal_log_returns(
-            terminals.with_drift[index],
-            horizon=horizon,
-            sessions=sessions,
-            path_count=simulation.production_paths,
-            zero_drift_logs=terminals.zero_drift[index],
-            insufficiency_reason=projected.insufficiency_reason,
+        frequency = (
+            HorizonFrequencies(
+                horizon, sessions, simulation.production_paths, None, None, withheld_reason
+            )
+            if terminals is None
+            else classify_terminal_log_returns(
+                terminals.with_drift[index],
+                horizon=horizon,
+                sessions=sessions,
+                path_count=simulation.production_paths,
+                zero_drift_logs=terminals.zero_drift[index],
+                insufficiency_reason=projected.insufficiency_reason,
+            )
         )
         rows.append(
             _frequency_row(
@@ -461,13 +546,20 @@ def _derive_listing(
                 seed=seed,
                 source=source,
                 projected=projected,
+                projection_payload=projected_payload,
             )
         )
     return {"listing_id": str(product_input.listing_id), "horizons": rows}
 
 
 def _frequency_row(
-    frequency: HorizonFrequencies, *, input_hash: str, seed: int, source: Any, projected: Any
+    frequency: HorizonFrequencies,
+    *,
+    input_hash: str,
+    seed: int,
+    source: Any,
+    projected: Any,
+    projection_payload: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "horizon": frequency.horizon,
@@ -477,6 +569,7 @@ def _frequency_row(
         "zero_drift_counts": _counts_document(frequency.zero_drift_counts),
         "ledger_returns": _ledger_document(_ledger_triplet(projected)),
         "insufficiency_reason": frequency.insufficiency_reason,
+        "projection": projection_payload,
         "input_hash": input_hash,
         "seed": seed,
         "effective_config_hash": PRODUCT_EFFECTIVE_CONFIG_HASH,
@@ -620,12 +713,20 @@ def _validate_registered_asset(
     if decision_time is not None and asset.available_at > decision_time:
         raise ValueError("Frequency evidence was not available at the decision time")
     if (
-        asset.sha256 != hashlib.sha256(payload).hexdigest()
-        or asset.metadata.get("logical_report_sha256") != _logical_sha256(document)
-        or asset.metadata.get("source_run_id") != str(expected_run.id)
+        asset.provider != "stanstock"
+        or asset.kind != FREQUENCY_EVIDENCE_KIND
+        or asset.schema_version != FREQUENCY_SCHEMA
+        or asset.sha256 != hashlib.sha256(payload).hexdigest()
         or asset.subject != _subject(expected_run)
         or asset.available_at != derived_at
         or asset.retrieved_at != derived_at
+        or asset.metadata
+        != _metadata(
+            document=document,
+            run=expected_run,
+            derived_at=derived_at,
+            logical_sha256=_logical_sha256(document),
+        )
     ):
         raise ValueError("Frequency evidence metadata does not bind its document")
     if (
@@ -648,6 +749,8 @@ def _validate_registered_asset(
         or document.get("path_count") != load_price_product_config().simulation.production_paths
     ):
         raise ValueError("Frequency evidence source-run binding is invalid")
+    if document["owner_id"] != _owner_id(run=expected_run, store=store):
+        raise ValueError("Frequency evidence owner does not bind its source intake")
     if expected_owner is not None and document.get("owner_id") != expected_owner:
         raise ProviderConfigurationError("Frequency evidence owner does not match")
     if expected_provider is not None and document.get("source_provider") != expected_provider:
@@ -695,10 +798,15 @@ def _verify_reader_row_bindings(
             or raw.get("effective_config_hash") != PRODUCT_EFFECTIVE_CONFIG_HASH
             or raw.get("method_identity_sha256") != method_identity_sha256()
             or item.ledger_returns != _prediction_triplet(prediction)
+            or document.get("source_provider") != prediction.price_provider
         ):
             raise ValueError("Frequency evidence row does not bind its immutable prediction")
         forecast = calculation.get("forecast")
-        if not isinstance(forecast, Mapping) or raw.get("seed") != forecast.get("seed"):
+        if (
+            not isinstance(forecast, Mapping)
+            or raw.get("seed") != forecast.get("seed")
+            or raw.get("projection") != _forecast_projection(forecast, item.frequency.horizon)
+        ):
             raise ValueError("Frequency evidence row seed does not bind the source forecast")
 
 
@@ -715,7 +823,7 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
     expected: set[tuple[str, str]] = set()
     values: list[RegisteredFrequency] = []
     for listing in rows:
-        if not isinstance(listing, Mapping):
+        if not isinstance(listing, Mapping) or set(listing) != _FREQUENCY_LISTING_KEYS:
             raise ValueError("Frequency listing row is invalid")
         listing_id = UUID(str(listing["listing_id"]))
         horizons = listing.get("horizons")
@@ -729,7 +837,10 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
             if horizon not in _HORIZONS or (str(listing_id), horizon) in expected:
                 raise ValueError("Frequency horizon identity is ambiguous")
             if (
-                not isinstance(raw.get("input_hash"), str)
+                set(raw) != _FREQUENCY_ROW_KEYS
+                or not isinstance(raw.get("projection"), Mapping)
+                or set(raw["projection"]) != _PROJECTION_KEYS
+                or not isinstance(raw.get("input_hash"), str)
                 or len(raw["input_hash"]) != 64
                 or type(raw.get("seed")) is not int
                 or raw.get("effective_config_hash") != PRODUCT_EFFECTIVE_CONFIG_HASH
@@ -771,7 +882,7 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
 def _read_counts(raw: object, *, path_count: int) -> BucketCounts | None:
     if raw is None:
         return None
-    if not isinstance(raw, Mapping):
+    if not isinstance(raw, Mapping) or set(raw) != {"loss", "flat_to_20", "above_20", "large_loss"}:
         raise ValueError("Frequency counts are malformed")
     try:
         values = tuple(raw[key] for key in ("loss", "flat_to_20", "above_20", "large_loss"))
@@ -795,7 +906,11 @@ def _read_counts(raw: object, *, path_count: int) -> BucketCounts | None:
 def _read_ledger(raw: object) -> tuple[Decimal, Decimal, Decimal] | None:
     if raw is None:
         return None
-    if not isinstance(raw, Mapping):
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != {"lower", "median", "upper"}
+        or any(not isinstance(value, str) for value in raw.values())
+    ):
         raise ValueError("Frequency ledger returns are malformed")
     try:
         result = tuple(Decimal(str(raw[key])) for key in ("lower", "median", "upper"))
@@ -911,10 +1026,13 @@ def _validate_document_shape(document: Mapping[str, Any]) -> None:
         "code_revision",
     }
     source_run = document.get("source_run")
+    execution = document.get("execution")
     if (
         set(document) != expected
         or not isinstance(source_run, Mapping)
         or set(source_run) != source_keys
+        or not isinstance(execution, Mapping)
+        or set(execution) != {"code_revision"}
         or not isinstance(document.get("owner_id"), str)
         or not isinstance(document.get("source_provider"), str)
         or document.get("source_provider") not in {"synthetic_demo", "twelve_data"}

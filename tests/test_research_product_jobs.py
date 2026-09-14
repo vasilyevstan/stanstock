@@ -752,9 +752,19 @@ def test_postgresql_frequency_registration_has_one_winner_and_retry_reads_its_by
     """Two independent PostgreSQL connections publish exactly one immutable report."""
 
     environment = make_product_environment(tmp_path, monkeypatch, django_user_model)
+    _owner, store, _path, resolve, fetch = environment
+    # Arrange the immutable source through the established synthetic
+    # acquisition fixture. The actual concurrent evidence writers below must
+    # use only that source and may not resolve a credential or fetch again.
+    resolve.side_effect = None
+    resolve.return_value = "synthetic-test-token"
+    fetch.side_effect = lambda symbol, **_kwargs: _series(symbol)
     job = _run(environment, derive_frequencies=False)
     run_id = str(job.details["analysis_run_id"])
-    _owner, store, _path, resolve, fetch = environment
+    resolve.reset_mock()
+    fetch.reset_mock()
+    resolve.side_effect = AssertionError("frequency registration must not resolve credentials")
+    fetch.side_effect = AssertionError("frequency registration must not fetch provider data")
     start = Barrier(2)
 
     def register_from_independent_connection() -> tuple[str, bytes]:

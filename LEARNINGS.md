@@ -50,6 +50,17 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Matching quantiles do not authenticate event counts.** A registered
+  simulation-frequency report must be derived internally and bind its complete
+  source projection, including zero-drift prices/returns and withheld reasons.
+  Strict registry/schema checks protect structure; offline re-derivation, not
+  a three-quantile match, tests the semantic counts.
+- **Additive reports must preserve genuine withholding.** A qualified flat
+  price history can produce a valid immutable run with withheld FHS scenarios.
+  Derived reporting must retain that reason and null counts, not fail a
+  previously successful daily or scheduled job. Execute both revisions against
+  successful and genuinely withheld fixtures, including a retained real
+  legacy parent; a fabricated empty `stages` dictionary proves no replay.
 - **A working deep link does not establish discoverability.** Product
   acceptance must begin at the landing page and follow normal navigation to
   critical views, including the first narrow-screen viewport. Correct data
@@ -80,7 +91,10 @@ reviews and should not be re-litigated without an explicit new decision.
   rather than trusting supplied metrics, preserves actual generation and
   registration times, and rejects future or pre-source chronology. A genuine
   provider reconstruction need not be observed to support a labelled
-  retrospective report.
+  retrospective report. Capture derived-report publication after expensive
+  calculation and lock wait, in the winning registration section. Semantic
+  re-verification preserves that original publication/execution metadata
+  rather than comparing it to a later application's revision.
 - **Display authorization is current, not captured forever.** Owner-bound
   readers revalidate the active account and current provider license even
   when source intake was authorized. License reassignment must not make an

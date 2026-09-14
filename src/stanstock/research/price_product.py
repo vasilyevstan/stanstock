@@ -1020,6 +1020,8 @@ def projection_from_terminal_logs(
 ) -> HorizonProjection:
     """Project existing terminal paths without changing simulation semantics."""
 
+    if not (np.all(np.isfinite(terminal_logs)) and np.all(np.isfinite(zero_drift_logs))):
+        return _withheld_projection(horizon, sessions, quantiles, "simulation_nonfinite")
     return _projection_from_terminal_logs(
         horizon=horizon,
         sessions=sessions,

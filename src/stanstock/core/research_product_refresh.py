@@ -1047,6 +1047,14 @@ def _verify_recorded_frequency_stage(
 
     recorded = parent.details.get("frequency_verification")
     if recorded is None:
+        has_child = JobRun.objects.filter(
+            job_name="research_product_frequency_v1",
+            region=REGION,
+            target_date=target_date,
+            status=JobRun.Status.SUCCESS,
+        ).exists()
+        if has_child or FREQUENCY_STAGE in parent.details:
+            raise ValueError("Scheduled frequency verification binding is missing")
         return
     if not isinstance(recorded, dict):
         raise ValueError("Scheduled frequency verification block is invalid")

@@ -3,7 +3,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
+from stanstock.research.price_product import projection_from_terminal_logs
 from stanstock.research.price_product_frequencies import (
     BucketCounts,
     classify_terminal_log_returns,
@@ -60,3 +62,23 @@ def test_hamilton_shares_are_exhaustive_but_nonzero_rounding_tails_are_honest() 
     assert tuple(
         item.label for item in display_shares(BucketCounts(0, 0, 8192, 0), path_count=8192)
     ) == ("0%", "0%", "100%")
+
+
+@pytest.mark.parametrize("invalid", (np.nan, np.inf, -np.inf))
+def test_projection_delegate_preserves_frozen_nonfinite_withholding(invalid) -> None:
+    projection = projection_from_terminal_logs(
+        horizon="6m",
+        sessions=126,
+        terminal_logs=np.asarray([0.0, invalid], dtype=np.float64),
+        zero_drift_logs=np.asarray([0.0, 0.0], dtype=np.float64),
+        target_close=100.0,
+        quantiles=(0.2, 0.5, 0.8),
+        quantile_method="linear",
+        return_places=4,
+        price_places=2,
+    )
+    assert projection.insufficiency_reason == "simulation_nonfinite"
+    assert projection.ledger_returns is None
+    assert projection.ledger_prices is None
+    assert projection.zero_drift_ledger_returns is None
+    assert projection.zero_drift_ledger_prices is None

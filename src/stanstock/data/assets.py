@@ -199,6 +199,7 @@ def register_asset(
     available_at: datetime | None = None,
     period_start: date | None = None,
     period_end: date | None = None,
+    schema_version: str = "1",
     metadata: dict[str, object] | None = None,
 ) -> DataAsset:
     now = timezone.now()
@@ -212,5 +213,6 @@ def register_asset(
         available_at=available_at or now,
         period_start=period_start,
         period_end=period_end,
+        schema_version=schema_version,
         metadata=metadata or {},
     )

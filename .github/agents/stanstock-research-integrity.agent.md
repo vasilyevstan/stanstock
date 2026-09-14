@@ -90,6 +90,17 @@ record; the summary below is not a substitute for reading it.
   cutoff. Shrinkage and probability gates use overlap-aware effective support,
   calendar/regime diversity, and fixed versioned thresholds rather than raw
   stock-row counts.
+- **Derived simulation frequencies**: event shares belong to a separate,
+  exact-run, append-only report, not the original prediction probability or
+  confidence fields. They are model simulation shares, never validated market
+  odds. Require exhaustive terminal-return counts, exact boundary ties,
+  complete drift/zero-drift projection and source binding, strict registry
+  schema/metadata, actual winner-side publication time, and offline semantic
+  re-derivation across later application revisions. Matching quantiles alone
+  cannot authenticate counts. A genuinely withheld source stays withheld
+  without failing otherwise completed source work. New scheduled child
+  verification is separate from frozen canonical replay; execute retained
+  base-written evidence rather than accepting a hand-built legacy placeholder.
 - **SEC filing semantics**: raw identity mapping, submissions history, and
   Companyfacts are preserved before normalization. Facts use exact accession
   acceptance times (or a documented conservative fallback), full

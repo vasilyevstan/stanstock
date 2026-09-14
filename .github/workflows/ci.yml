@@ -93,6 +93,11 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen --all-groups
 
+      - name: Prepare static manifest for native rendering regressions
+        env:
+          DJANGO_SECRET_KEY: "ci-only-postgresql-test-secret"
+        run: uv run python manage.py collectstatic --noinput --verbosity 0 --settings=stanstock.settings.dev
+
       - name: Run PostgreSQL integrity regressions
         env:
           POSTGRES_USER: "stanstock"

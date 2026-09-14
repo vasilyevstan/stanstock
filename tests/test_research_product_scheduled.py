@@ -240,6 +240,53 @@ def test_completed_new_parent_rechecks_frequency_sibling_before_skip_recovery(
     fetch.assert_not_called()
 
 
+def test_new_parent_cannot_be_made_legacy_by_removing_frequency_bindings(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "Europe/Tallinn",
+    )
+    owner, _store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    parent = _parent(owner)
+    parent.details.pop("frequency_verification")
+    parent.details.pop("frequencies")
+    parent.save(update_fields=["details"])
+    resolve.reset_mock()
+    fetch.reset_mock()
+
+    with pytest.raises(CommandError, match=r"Scheduled research refresh failed \(ValueError\)"):
+        _run_command()
+
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_legacy_parent_without_frequency_child_skips_frequency_verification(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+) -> None:
+    owner, store, _path, _resolve, _fetch = scheduled_environment
+    parent = JobRun.objects.create(
+        job_name=product_job_name(SCHEDULED_RESEARCH_JOB, _identity(owner)),
+        region="us",
+        target_date=TARGET,
+        attempt=1,
+        status=JobRun.Status.SUCCESS,
+        finished_at=NOW,
+        details={"profile": "research_product_v1", "stages": {}},
+    )
+
+    research_product_refresh._verify_recorded_frequency_stage(
+        parent=parent,
+        target_date=TARGET,
+        owner_id=_identity(owner)["owner_id"],
+        store=store,
+    )
+
+
 def test_manual_daily_product_is_research_only_and_cannot_occupy_scheduled_identity(
     scheduled_environment,
 ):

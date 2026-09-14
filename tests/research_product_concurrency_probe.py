@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -24,7 +23,7 @@ def main() -> None:
 
     from django.contrib.auth import get_user_model
     from django.core.management import call_command
-    from django.db import OperationalError, connections
+    from django.db import connections
 
     from stanstock.data import research_product_jobs
     from stanstock.data.models import DataAsset, Listing
@@ -66,11 +65,6 @@ def main() -> None:
 
         def derive_frequency() -> str:
             try:
-                return str(register_product_frequencies(run=source_run, store=_store).id)
-            except OperationalError:
-                # SQLite may reject the loser while its winner has not yet
-                # committed. A bounded explicit retry must recover it.
-                time.sleep(0.1)
                 return str(register_product_frequencies(run=source_run, store=_store).id)
             finally:
                 connections["default"].close()
