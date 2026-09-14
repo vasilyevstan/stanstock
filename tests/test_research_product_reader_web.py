@@ -1074,6 +1074,12 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.add_style_tag(path=str(css_path))
                 assert page.locator(".compact-opportunity").count() == 20
                 assert page.locator(".compact-projection").count() == 20
+                note = page.locator(".opportunity-scenario-note")
+                assert note.is_visible()
+                note_text = note.inner_text()
+                assert "Model-estimated probabilities:" in note_text
+                assert "Shares of model simulations; not validated real-world odds." in note_text
+                assert "Advisory only." in note_text
                 assert all(
                     projection.frequency_status == "available"
                     for card in presentation.cards
