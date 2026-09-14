@@ -117,7 +117,9 @@ checks complete input/seed/projection identity, and admits the complete
 canonical report. Three matching quantiles are a compatibility check, not
 authentication of a distribution. No writer accepts caller-authored counts.
 Idempotent registration recovers committed evidence before replay and
-serializes publication without rewriting the source run.
+serializes file publication and the durable database commit under the existing
+run-scoped cross-process job lock, without rewriting the source run. Blob paths
+use the complete published-byte hash, not a timestamp-free logical identity.
 
 The report's actual publication time controls availability. Current history
 can show a labelled later reconstruction, but an earlier as-of request cannot
@@ -126,6 +128,8 @@ check exact-run identity, current owner/display rights and registered bytes
 without simulation; explicit offline verification re-derives the contents.
 
 New scheduled parents keep a separate frequency-child verification block.
+The child shares the parent's owner/issuance/product namespace; compatibility
+with an earlier fixed-name child still requires the exact owner-bound source.
 Existing canonical source verification and historical replay payloads stay
 unchanged. A source run can remain valid when its frequency report is absent
 or fails; the UI exposes that summary state separately and retains an

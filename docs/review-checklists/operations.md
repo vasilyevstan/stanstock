@@ -5,6 +5,12 @@ Reviewer: `stanstock-critic-tester`.
 
 ## Idempotent jobs
 
+- [ ] Independently retryable children retain every owner/issuance/product
+      dimension of the parent's identity; same-target owner reassignment
+      cannot recover another owner's successful child.
+- [ ] Concurrent timestamped report publication uses distinct publisher
+      clocks and verifies final registered bytes, not only row counts; its
+      file lock covers the database commit.
 - [ ] A scheduled or recompute job is idempotent for its `(job_name, region,
       target_date, attempt)` key; re-running it for the same target date does
       not duplicate rows or double-charge external quota.

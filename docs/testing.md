@@ -22,11 +22,13 @@ with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
 CI partitions the complete pytest collection into price-product modules
-(`test_research_product_*.py` and `test_research_price_product*.py`) and their
-complement. Both retain the 40-minute execution limit; neither drops tests
-or changes assertions. The required `quality` check fails unless both
-partitions, including their checks, succeed. Coverage shown by each partition
-is partial; `make check` remains the complete local run. A failed partition
+(`test_research_product_*.py` and `test_research_price_product*.py`), the
+expensive `test_research_product_study_evidence.py` subset, and the non-product
+complement. Each test belongs to exactly one partition. All retain the
+40-minute execution limit; none drops tests or changes assertions. The
+required `quality` check fails unless all partitions, including their checks,
+succeed. Coverage shown by each partition is partial; `make check` remains
+the complete local run. A failed partition
 stops at its first failure so its traceback is available without waiting for
 the job timeout. PostgreSQL integrity and container checks remain separate.
 
@@ -93,8 +95,13 @@ Cover:
 - registration accepting only source identity, not caller-authored statistics;
 - actual publication time, earlier as-of invisibility, future-clock refusal,
   and no inherited prediction on-time status;
-- idempotent recovery before replay, one committed report under concurrency,
-  and explicit SQLite contention/recovery distinct from PostgreSQL row locks;
+- idempotent recovery before replay, distinct concurrent publication clocks,
+  one committed report/file with verified final bytes, and cross-process
+  SQLite locking through the durable commit;
+- safe retry after a failed registry insert without overwriting an earlier
+  unpublished blob or inheriting its publication time;
+- owner/issuance/product-bound children across owner reassignment, including
+  source-checked compatibility with earlier fixed-name children;
 - byte-identical frozen success and withheld output in base/head reproduction;
 - unchanged historical parent verification and separate new-child evidence;
 - source-complete but summary-missing/failed states and retained median/range;

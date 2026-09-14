@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pytest
 from django.core.management import call_command
-from django.db import OperationalError
+from django.db import OperationalError, transaction
 from django.urls import reverse
 from django.utils import timezone
 
@@ -94,6 +94,46 @@ def _assert_report_rejected(user, run, store):
     assert not result.available
     with pytest.raises((ValueError, RefreshVerificationError)):
         verify_registered_product_frequencies(run=run, store=store)
+
+
+def test_publication_cannot_release_its_lock_before_an_outer_transaction_commits(source_demo):
+    _user, store = source_demo
+    run = AnalysisRun.objects.get()
+    with transaction.atomic():
+        with pytest.raises(RuntimeError, match="durable atomic"):
+            register_product_frequencies(run=run, store=store)
+    assert not DataAsset.objects.filter(kind=FREQUENCY_EVIDENCE_KIND).exists()
+    assert not list((store.root / "research" / "frequencies").rglob("*.json"))
+
+
+def test_failed_insert_does_not_make_a_later_publication_overwrite_its_blob(
+    source_demo, monkeypatch
+):
+    _user, store = source_demo
+    run = AnalysisRun.objects.get()
+    published_at = timezone.now() + timedelta(seconds=1)
+    monkeypatch.setattr(timezone, "now", lambda: published_at)
+
+    def fail_insert(**_kwargs):
+        raise OperationalError("synthetic publication failure")
+
+    with monkeypatch.context() as failed:
+        failed.setattr(DataAsset.objects, "create", fail_insert)
+        with pytest.raises(OperationalError, match="synthetic publication failure"):
+            register_product_frequencies(run=run, store=store)
+    assert not DataAsset.objects.filter(kind=FREQUENCY_EVIDENCE_KIND).exists()
+    unpublished = list((store.root / "research" / "frequencies").rglob("*.json"))
+    assert len(unpublished) == 1
+    original_bytes = unpublished[0].read_bytes()
+    published_at += timedelta(seconds=1)
+
+    asset = register_product_frequencies(run=run, store=store)
+
+    assert store.resolve(asset.relative_path) != unpublished[0]
+    assert unpublished[0].read_bytes() == original_bytes
+    assert DataAsset.objects.filter(kind=FREQUENCY_EVIDENCE_KIND).count() == 1
+    assert store.resolve(asset.relative_path).stem == asset.sha256
+    evidence._validate_registered_asset(asset, store=store, expected_run=run, verify_source=True)
 
 
 def test_native_synthetic_run_registers_complete_four_horizon_evidence(registered_demo) -> None:

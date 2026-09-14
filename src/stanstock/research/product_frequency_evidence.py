@@ -22,6 +22,7 @@ from django.db import OperationalError, connection, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
+from stanstock.core.jobs import target_job_lock
 from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.assets import AssetStore, read_checksummed_bytes
 from stanstock.data.models import DataAsset, ProviderRecord
@@ -158,12 +159,17 @@ def _register_product_frequencies(
     )
     logical_sha256 = _logical_sha256(logical_document)
     subject = _subject(run)
-    relative_path = f"research/frequencies/{PRODUCT_VERSION}/{run.id}/{logical_sha256[:16]}.json"
     try:
-        with transaction.atomic():
-            # PostgreSQL serializes concurrent registrations against this
-            # immutable source row. SQLite obtains its write lock at insert;
-            # an unavailable lock is loud rather than a duplicate report.
+        with (
+            target_job_lock(
+                job_name=f"{FREQUENCY_EVIDENCE_KIND}:{run.pk}",
+                region="us",
+                target_date=run.target_date,
+            ),
+            transaction.atomic(durable=True),
+        ):
+            # Keep file publication and the durable registry commit inside
+            # the same cross-process lock, including on SQLite.
             locked_run = AnalysisRun.objects.select_for_update(of=("self",)).get(pk=run.pk)
             existing = _single_asset_for_run(locked_run)
             if existing is not None:
@@ -180,6 +186,8 @@ def _register_product_frequencies(
                 derived_at=derived_at,
             )
             payload = _canonical_bytes(document)
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            relative_path = f"research/frequencies/{PRODUCT_VERSION}/{run.id}/{payload_sha256}.json"
             metadata = _metadata(
                 document=document,
                 run=locked_run,

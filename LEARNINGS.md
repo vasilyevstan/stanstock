@@ -50,6 +50,15 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **A frozen clock can hide a publication race.** Concurrent reports may
+  have the same logical hash but different timestamped bytes. Exercise
+  distinct publisher clocks and verify final file checksums, not just row
+  counts. Frequency publication now holds the existing cross-process lock
+  through its durable commit and addresses blobs by their complete bytes.
+- **Child idempotency must carry the parent's owner identity.** A fixed-name
+  frequency child collided after a legitimate same-target owner reassignment.
+  Namespace it by owner, issuance, and product, and bind any legacy child to
+  the exact authorized source before reuse.
 - **Frozen dependency contracts can protect shared helpers too.** An optional
   argument on `register_asset` violated the older outcome verifier's
   pure-insertion proof even though its default was unchanged. Keep that

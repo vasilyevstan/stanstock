@@ -211,6 +211,51 @@ def test_native_profile_ignores_legacy_success_and_replays_exact_registered_outp
         verified_catalog_references_for_symbols(symbols=("NEW",), store=store)
 
 
+@pytest.mark.parametrize("legacy_child", (False, True))
+def test_frequency_child_follows_reassigned_owner_without_reusing_another_issuance(
+    scheduled_environment, settings, django_user_model, legacy_child
+):
+    first_owner, store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    first_parent = _parent(first_owner)
+    first_child = JobRun.objects.get(
+        pk=first_parent.details["frequency_verification"]["child_job_run_id"]
+    )
+    if legacy_child:
+        first_child.job_name = "research_product_frequency_v1"
+        first_child.save(update_fields=["job_name"])
+    second_owner = django_user_model.objects.create_user(username="replacement-owner")
+    settings.OWNER_USERNAME = second_owner.username
+
+    _run_command()
+
+    second_parent = _parent(second_owner)
+    second_child = JobRun.objects.get(
+        pk=second_parent.details["frequency_verification"]["child_job_run_id"]
+    )
+    assert second_child.pk != first_child.pk
+    assert second_child.status == JobRun.Status.SUCCESS
+    assert second_child.job_name == product_job_name(
+        "research_product_frequency_v1", _identity(second_owner)
+    )
+    assert (
+        first_parent.details["frequency_verification"]["frequency_asset_id"]
+        != second_parent.details["frequency_verification"]["frequency_asset_id"]
+    )
+    for owner, parent in ((first_owner, first_parent), (second_owner, second_parent)):
+        settings.OWNER_USERNAME = owner.username
+        replayed = replay_recorded_scheduled_refresh(parent)
+        assert str(replayed.analysis_run.pk) == parent.details["verification"]["analysis_run_id"]
+        assert "skipped" in _run_command()
+        asset = DataAsset.objects.get(
+            pk=parent.details["frequency_verification"]["frequency_asset_id"]
+        )
+        assert asset.metadata["owner_id"] == str(owner.pk)
+    assert DataAsset.objects.filter(kind="research_product_frequency_evidence").count() == 2
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
 def test_completed_new_parent_rechecks_frequency_sibling_before_skip_recovery(
     scheduled_environment: tuple[Any, Any, Any, Any, Any],
     monkeypatch: pytest.MonkeyPatch,

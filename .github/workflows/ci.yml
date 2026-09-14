@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, price-product]
+        suite: [core, price-product, price-study]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -53,14 +53,25 @@ jobs:
         env:
           TEST_SUITE: ${{ matrix.suite }}
         run: |
-          if [ "$TEST_SUITE" = core ]; then
-            uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 \
-              --ignore-glob='tests/test_research_product_*.py' \
-              --ignore-glob='tests/test_research_price_product*.py'
-          else
-            uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 \
-              tests/test_research_product_*.py tests/test_research_price_product*.py
-          fi
+          case "$TEST_SUITE" in
+            core)
+              selection=(--ignore-glob='tests/test_research_product_*.py'
+                         --ignore-glob='tests/test_research_price_product*.py')
+              ;;
+            price-study)
+              selection=(tests/test_research_product_study_evidence.py)
+              ;;
+            price-product)
+              selection=()
+              for path in tests/test_research_product_*.py tests/test_research_price_product*.py; do
+                if [ "$path" != tests/test_research_product_study_evidence.py ]; then
+                  selection+=("$path")
+                fi
+              done
+              ;;
+            *) exit 1 ;;
+          esac
+          uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 "${selection[@]}"
 
       - name: Check migration drift
         run: uv run python manage.py makemigrations --check --dry-run

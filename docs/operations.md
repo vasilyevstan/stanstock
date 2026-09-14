@@ -212,9 +212,19 @@ issuance is labelled as a later reconstruction, cannot appear in an earlier
 as-of read, and cannot inherit the original prediction's on-time status.
 Preserve the source revision separately from the derivation revision.
 
+Publication reuses the existing run-scoped cross-process job lock through a
+durable database commit. New registration inside an application-owned outer
+transaction is rejected; do not release the file lock before registration
+commits. Blobs are addressed by their complete published bytes. A failed
+insert can leave an unregistered blob, which is never served or overwritten;
+a later retry records its own publication time in a distinct blob.
+
 For new refreshes, summary generation is independently retryable. A failed
 summary does not rewrite a completed source run; recovery identifies and
 reuses completed children rather than paying for another acquisition.
+Frequency child names include the owner, issuance key, and product identity.
+An earlier fixed-name child is reusable only when it binds the same owner's
+exact completed source; another owner's same-target success is not a retry.
 Historical parent verification remains unchanged for runs without a summary
 stage. Product availability and summary availability are separate facts:
 an old complete run is not proof that its probabilities were derived.

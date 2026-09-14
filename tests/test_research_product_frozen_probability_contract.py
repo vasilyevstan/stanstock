@@ -89,6 +89,14 @@ def _label(path: tuple[str, ...]) -> str:
 
 
 def _is_additive(path: tuple[str, ...], *, parent_job_key: str | None) -> bool:
+    frequency_job_key = (
+        parent_job_key.replace(
+            "scheduled_refresh_research_v1:", "research_product_frequency_v1:", 1
+        )
+        if parent_job_key is not None
+        and parent_job_key.startswith("scheduled_refresh_research_v1:")
+        else None
+    )
     return (
         (
             len(path) >= 2
@@ -98,7 +106,7 @@ def _is_additive(path: tuple[str, ...], *, parent_job_key: str | None) -> bool:
         or (
             len(path) >= 3
             and path[:2] == ("scheduled", "job_runs")
-            and path[2].startswith("research_product_frequency_v1|")
+            and path[2] == frequency_job_key
         )
         or (
             len(path) >= 4

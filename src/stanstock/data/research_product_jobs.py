@@ -88,6 +88,7 @@ from stanstock.research.service import analyze_snapshot
 RESEARCH_INTAKE_JOB = "research_intake_v1"
 DAILY_RESEARCH_JOB = "daily_research_v1"
 SCHEDULED_RESEARCH_JOB = "scheduled_refresh_research_v1"
+FREQUENCY_RESEARCH_JOB = "research_product_frequency_v1"
 
 
 def execute_daily_research_job(
@@ -605,7 +606,12 @@ def _successful_attempt(job: JobRun) -> JobRun:
 
 def product_job_name(kind: str, identity: dict[str, str]) -> str:
     """Use the existing target uniqueness guard for each explicit owner issuance."""
-    if kind not in {DAILY_RESEARCH_JOB, RESEARCH_INTAKE_JOB, SCHEDULED_RESEARCH_JOB}:
+    if kind not in {
+        DAILY_RESEARCH_JOB,
+        RESEARCH_INTAKE_JOB,
+        SCHEDULED_RESEARCH_JOB,
+        FREQUENCY_RESEARCH_JOB,
+    }:
         raise ValueError("Unknown research product job kind")
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()

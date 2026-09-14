@@ -640,7 +640,7 @@ def _recover_scheduled(*, store: Any) -> dict[str, Any]:
             "The retained parent already carries the additive bindings "
             f"{sorted(forbidden)}, so it is not a frozen old-source parent"
         )
-    if JobRun.objects.filter(job_name="research_product_frequency_v1").exists():
+    if JobRun.objects.filter(job_name__startswith="research_product_frequency_v1").exists():
         raise ProbeError("The retained state already contains an additive frequency child")
 
     execution = research_product_refresh.execute_scheduled_research_refresh(

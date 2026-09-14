@@ -53,6 +53,7 @@ from stanstock.data.research_product import (
 )
 from stanstock.data.research_product_jobs import (
     DAILY_RESEARCH_JOB,
+    FREQUENCY_RESEARCH_JOB,
     RESEARCH_INTAKE_JOB,
     SCHEDULED_RESEARCH_JOB,
     execute_daily_research_job,
@@ -96,6 +97,7 @@ MARKET_STAGE = "market"
 EVALUATION_STAGE = "evaluation"
 PORTFOLIO_STAGE = "portfolio_snapshots"
 FREQUENCY_STAGE = "frequencies"
+FREQUENCY_JOB = FREQUENCY_RESEARCH_JOB
 STAGE_NAMES = frozenset({MARKET_STAGE, EVALUATION_STAGE, PORTFOLIO_STAGE})
 SATISFIED_DOWNSTREAM_STATUSES = frozenset({JobRun.Status.SUCCESS, JobRun.Status.SKIPPED})
 EXPECTED_STAGE_ERRORS = (OSError, ProviderError, ValueError)
@@ -946,6 +948,33 @@ def _resolve_product_stage(
     return referenced
 
 
+def _frequency_job_name(owner_id: str) -> str:
+    return product_job_name(
+        FREQUENCY_JOB,
+        {"owner_id": owner_id, "issuance_key": ISSUANCE_KEY, "product": PRODUCT_VERSION},
+    )
+
+
+def _legacy_frequency_child(
+    *, target_date: date, owner_id: str, store: AssetStore
+) -> JobRun | None:
+    legacy = JobRun.objects.filter(
+        job_name=FREQUENCY_JOB,
+        region=REGION,
+        target_date=target_date,
+        status=JobRun.Status.SUCCESS,
+    )
+    if not legacy.exists():
+        return None
+    source = _completed_scheduled_run(target_date=target_date, owner_id=owner_id, store=store)
+    if source is None:
+        return None
+    matches = list(legacy.filter(details__analysis_run_id=str(source.pk))[:2])
+    if len(matches) > 1:
+        raise ValueError("Legacy scheduled frequency child is ambiguous")
+    return matches[0] if matches else None
+
+
 def _run_frequency_stage(
     *,
     parent: JobRun,
@@ -956,7 +985,7 @@ def _run_frequency_stage(
 ) -> JobRun:
     """Execute a recoverable derived-only child without altering the frozen stage map."""
 
-    job_name = "research_product_frequency_v1"
+    job_name = _frequency_job_name(owner_id)
 
     def task(_child: JobRun) -> JobExecutionResult:
         completed = _completed_scheduled_run(
@@ -980,11 +1009,9 @@ def _run_frequency_stage(
         )
 
     try:
-        child = execute_target_job(
-            job_name=job_name,
-            region=REGION,
-            target_date=target_date,
-            task=task,
+        legacy = _legacy_frequency_child(target_date=target_date, owner_id=owner_id, store=store)
+        child = legacy or execute_target_job(
+            job_name=job_name, region=REGION, target_date=target_date, task=task
         )
     except EXPECTED_STAGE_ERRORS:
         failed = (
@@ -1048,12 +1075,13 @@ def _verify_recorded_frequency_stage(
     recorded = parent.details.get("frequency_verification")
     if recorded is None:
         has_child = JobRun.objects.filter(
-            job_name="research_product_frequency_v1",
+            job_name=_frequency_job_name(owner_id),
             region=REGION,
             target_date=target_date,
             status=JobRun.Status.SUCCESS,
         ).exists()
-        if has_child or FREQUENCY_STAGE in parent.details:
+        legacy = _legacy_frequency_child(target_date=target_date, owner_id=owner_id, store=store)
+        if has_child or legacy is not None or FREQUENCY_STAGE in parent.details:
             raise ValueError("Scheduled frequency verification binding is missing")
         return
     if not isinstance(recorded, dict):
@@ -1085,7 +1113,7 @@ def _verify_frequency_stage(
     """Verify the sibling evidence without extending frozen parent stages."""
 
     if (
-        child.job_name != "research_product_frequency_v1"
+        child.job_name not in {_frequency_job_name(owner_id), FREQUENCY_JOB}
         or child.region != REGION
         or child.target_date != target_date
         or child.status != JobRun.Status.SUCCESS

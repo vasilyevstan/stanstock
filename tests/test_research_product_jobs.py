@@ -736,6 +736,9 @@ def test_distinct_concurrent_issuances_share_the_target_acquisition_lock(tmp_pat
         "listings": 3,
         "history_requests": 1,
         "frequency_assets": 1,
+        "different_publication_clocks": True,
+        "winner_bytes_verified": True,
+        "report_files": 1,
     }
 
 
