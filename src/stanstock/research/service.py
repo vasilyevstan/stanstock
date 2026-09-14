@@ -13,7 +13,7 @@ from functools import lru_cache
 from importlib.metadata import version as package_version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 import polars as pl
@@ -117,6 +117,8 @@ from stanstock.research.medium_forecasts import (
     serialize_medium_forecast_panel,
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
+from stanstock.research.price_product import SourceExecutionBinding
+from stanstock.research.price_product_config import default_price_product_config_path
 from stanstock.research.provenance import source_data_mode
 from stanstock.research.refresh_evidence import (
     ANALYSIS_OUTPUT_MANIFEST_KIND,
@@ -153,6 +155,9 @@ from stanstock.research.under10 import (
     canonical_json,
     qualify_under10_sec_facts,
 )
+
+if TYPE_CHECKING:
+    from stanstock.research.product_pipeline import ProductPersistedAnalysis
 
 #: `data_quality` key carrying the unactivated Under-$10 shadow assessment.
 #: It is written only when a *new* analysis qualifies; an absent key means
@@ -2222,7 +2227,7 @@ def analyze_snapshot(
     sample_support: dict[str, int] | None = None,
     output_paths: AnalysisOutputPaths | None = None,
     long_forecast_requested: bool | None = None,
-) -> list[PersistedAnalysis]:
+) -> Sequence[PersistedAnalysis | ProductPersistedAnalysis]:
     """Analyze every eligible member of `universe_snapshot`.
 
     An OBSERVED-grade `universe_snapshot` produces exactly one
@@ -2258,6 +2263,44 @@ def analyze_snapshot(
     generated_at = decision_time or timezone.now()
     if long_forecast_requested is not None and not isinstance(long_forecast_requested, bool):
         raise ValueError("long_forecast_requested must be a boolean")
+    if issued_on_time is not None and not isinstance(issued_on_time, bool):
+        raise ValueError("issued_on_time must be a boolean when supplied")
+    if (
+        config_path is not None
+        and config_path.resolve() == default_price_product_config_path().resolve()
+    ):
+        # The prospective product has scoreless rows and a fixed five-row
+        # method multiset.  Keep this public dispatcher as the one entry
+        # point, but do not feed it through the frozen weighted pipeline.
+        from stanstock.research.product_pipeline import issue_price_product_snapshot
+
+        if benchmark_subject is None:
+            raise ValueError("research-product-v1 requires an explicit benchmark_subject")
+        source_execution = (
+            SourceExecutionBinding(mode="synthetic_demo", evidence_grade="research")
+            if provider == "synthetic_demo"
+            else SourceExecutionBinding(
+                mode="provider",
+                evidence_grade=(
+                    "observed"
+                    if universe_snapshot.grade == UniverseSnapshot.Grade.OBSERVED
+                    else "research"
+                ),
+            )
+        )
+        product_results = issue_price_product_snapshot(
+            universe_snapshot=universe_snapshot,
+            decision_time=generated_at,
+            target_date=target_date or generated_at.date(),
+            provider=provider,
+            benchmark_subject=benchmark_subject,
+            source_execution=source_execution,
+            store=store or open_asset_store(),
+            code_revision=code_revision(),
+            issued_on_time=issued_on_time is True,
+            output_paths=output_paths,
+        )
+        return product_results
     logical_target_date = target_date or generated_at.date()
     explicit_long_config: LongForecastConfig | None = None
     explicit_v4_config: LongForecastV4Config | None = None
@@ -3469,6 +3512,11 @@ def _create_prediction(
     source_assets: list[dict[str, Any]],
     code_revision_value: str,
 ) -> Prediction:
+    if analysis.overall_score is None or analysis.recommendation is None:
+        raise ValueError(
+            "Legacy prediction creation cannot consume a scoreless prospective analysis"
+        )
+    overall_score = analysis.overall_score
     horizon_value = str(horizon)
     price_provider, price_subject = _prediction_price_source(analysis, source_assets)
     return Prediction.objects.create(
@@ -3492,7 +3540,7 @@ def _create_prediction(
         confidence_status=scenario.confidence_status,
         insufficiency_reason=scenario.insufficiency_reason,
         recommendation=analysis.recommendation,
-        overall_score=analysis.overall_score,
+        overall_score=overall_score,
         component_scores=analysis.component_scores,
         model_version=model_version,
         method_version=analysis.run.config_version,
@@ -3519,7 +3567,7 @@ def _create_prediction(
                     "bull": scenario.bull,
                     "probability_positive": scenario.probability_positive,
                 },
-                "overall_score": float(analysis.overall_score),
+                "overall_score": float(overall_score),
                 "risk_score": (
                     float(analysis.risk_score) if analysis.risk_score is not None else None
                 ),

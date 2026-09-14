@@ -1,0 +1,8 @@
+schema_version: 1
+config_version: research-product-universe-v1
+core_universe: us_liquid_starter_v1.yaml
+core_sha256: 5159829122cc7e53d15b7c55a5c9bbed2f23e9f2ad94f72a1dbb943c8fc89128
+maximum_core_names: 100
+maximum_saved_names: 20
+benchmark_symbol: SPY
+required_closes: 757

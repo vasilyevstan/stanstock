@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Archived prediction ledger · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Pre-product append-only evidence</p>
+      <h1>Archived prediction ledger</h1>
+      <p class="lede">
+        research-product-v1 is excluded. Every row keeps its original method,
+        horizon, evidence role, and recommendation semantics.
+      </p>
+    </div>
+  </section>
+  <div class="responsive-table" tabindex="0" aria-label="Archived prediction ledger">
+    <table class="compact-table">
+      <thead>
+        <tr><th scope="col">Stock</th><th scope="col">Target</th><th scope="col">Configuration</th><th scope="col">Role</th><th scope="col">Horizon</th><th scope="col">Method</th><th scope="col">Outcome</th></tr>
+      </thead>
+      <tbody>
+        {% for prediction in predictions %}
+          <tr>
+            <th scope="row"><a href="{% url 'archive-stock-detail' prediction.listing_id %}">{{ prediction.listing.ticker }}</a></th>
+            <td>{{ prediction.target_date }}</td>
+            <td>{{ prediction.analysis.run.config_version }}</td>
+            <td>{{ prediction.evidence_role|display_label }}</td>
+            <td>{{ prediction.horizon|display_label }}</td>
+            <td>{{ prediction.method_version|default:"Legacy method" }}</td>
+            <td>{% if prediction.outcome %}{{ prediction.outcome.status|display_label }}{% else %}Not matured{% endif %}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="7">No archived prediction is stored.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -60,6 +60,25 @@ record; the summary below is not a substitute for reading it.
   separate. Advisory 6m/12m/3y/5y outputs cannot alter BUY/HOLD/AVOID,
   opportunity highlights, or headline decision hit rates; on-time issuance
   does not upgrade research-grade training evidence.
+- **Prospective price product**: `research-product-v1` has a separately
+  reviewed six-month momentum decision and four FHS advisory projections.
+  Do not confuse a valid decision's inapplicable null price triplet with a
+  non-evaluable all-null advisory. Preserve unique issuance/reissue identity
+  separately from stable method identity, method-gated nullable fields and
+  every legacy outcome contract. Verify exact stock/benchmark momentum
+  endpoints, variance/residual indexing and centering, cumulative-return
+  quantiles, complete input/calendar hashes and deterministic sampling.
+  Simulated path counts are not independent observations; p20/p80 describes
+  60% model mass, not calibrated coverage. Historical-drift continuation and
+  zero-drift sensitivity are explicit assumptions, not fair values or gain
+  probabilities. Keep the retrospective protocol frozen before holdout
+  evaluation and preserve physical/source checks without HTTP Monte Carlo.
+  Require paired horizon/partition support and cohort-first means. Interval
+  width/inclusion are not standalone skill verdicts. Registered studies must
+  calculate from full selected immutable sources, distinguish study/source
+  revisions and real registration chronology, and accept honestly labelled
+  provider research-grade reconstruction without claiming observed history.
+  Price adjustment documentation alone cannot prove volume compatibility.
 - **Forecast units and outcomes**: stored scenario and actual values use the
   same cumulative price-return basis. Annualized values are derived for
   display only, cash yield is not mixed into price-return forecasts, and
@@ -100,12 +119,18 @@ record; the summary below is not a substitute for reading it.
   default score.
 - **Price-scale invariance**: nominal share price cannot be alpha or valuation
   evidence. Verify that split-equivalent price/volume rescaling leaves every
-  prospective normalized factor, score, recommendation, and eligibility gate
-  unchanged; price-difference momentum is normalized and liquidity is
-  dollar-denominated. Raw share volume cannot satisfy a new BUY gate.
+  normalized factor and compatible dollar liquidity unchanged. Frozen methods
+  retain their score/recommendation invariance. In the prospective price
+  product, raw momentum, relative volatility and return projections stay
+  invariant; the separately disclosed affordability restriction may suppress
+  a BUY suggestion or promotion without changing that signal.
+  Price-difference momentum is normalized and liquidity is dollar-denominated.
+  Raw share volume cannot satisfy a new BUY gate.
 - **Neutral affordability bands**: current USD bands use the latest valid
   persisted close and show its session date, but never enter score,
-  confidence, valuation, or recommendation arithmetic. Under $10 remains a
+  confidence, valuation, or raw research-signal arithmetic. A reviewed
+  prospective affordability gate is distinct from that signal and must be
+  named as the reason for any suppressed BUY suggestion. Under $10 remains a
   0%-new-allocation speculative watchlist, is excluded from new highlights
   and sample construction, and does not erase existing holdings or frozen
   historical baskets. Disclosure must separate released reusable foundations
@@ -116,6 +141,10 @@ record; the summary below is not a substitute for reading it.
   activation context. Current UI bands use `LatestMarketData`; run-dated
   sample construction must instead classify the immutable analysis reference
   close, and missing current USD state fails closed for promotion.
+  Qualified price-only FHS projections do not require SEC valuation inputs,
+  but they do require captured owner-approved admission, adequate history,
+  source closure and explicit assumptions. They never activate allocation
+  or satisfy missing corporate-action, solvency or dilution controls.
 - **ETF identity and isolation**: an investable benchmark ETF reuses its one
   immutable provider series without duplicate requests or credits, remains
   outside stock universe membership, and is rejected explicitly by stock

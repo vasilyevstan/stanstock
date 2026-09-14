@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Archived performance cohorts · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Separated historical evidence</p>
+      <h1>Archived performance cohorts</h1>
+      <p class="lede">
+        Counts remain split by original configuration, method, evidence role,
+        and horizon. They are not pooled with active momentum or FHS evidence,
+        and no new success rate is inferred here.
+      </p>
+    </div>
+  </section>
+  <div class="responsive-table" tabindex="0" aria-label="Archived performance cohorts">
+    <table class="compact-table">
+      <thead>
+        <tr><th scope="col">Configuration</th><th scope="col">Method</th><th scope="col">Role</th><th scope="col">Horizon</th><th scope="col">Outcome state</th><th scope="col">Count</th></tr>
+      </thead>
+      <tbody>
+        {% for group in groups %}
+          <tr>
+            <td>{{ group.prediction__analysis__run__config_version }}</td>
+            <td>{{ group.prediction__method_version|default:"Legacy method" }}</td>
+            <td>{{ group.prediction__evidence_role|display_label }}</td>
+            <td>{{ group.prediction__horizon|display_label }}</td>
+            <td>{{ group.status|display_label }}</td>
+            <td>{{ group.count }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6">No archived outcomes are stored.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from django.urls import path
 
-from stanstock.web import views
+from stanstock.web import product_views, views
 
 urlpatterns = [
     path("", views.index, name="index"),
     path("healthz", views.health, name="health"),
-    path("status", views.status_page, name="status"),
-    path("opportunities", views.opportunities_page, name="opportunities"),
-    path("stocks/<uuid:listing_id>", views.stock_detail_page, name="stock-detail"),
+    path("status", product_views.status_page, name="status"),
+    path("opportunities", product_views.opportunities_page, name="opportunities"),
+    path("stocks/<uuid:listing_id>", product_views.stock_detail_page, name="stock-detail"),
     path("etfs/<uuid:listing_id>", views.etf_detail_page, name="etf-detail"),
     path("market", views.market_overview_page, name="market"),
-    path("predictions", views.prediction_history_page, name="predictions"),
-    path("performance", views.performance_page, name="performance"),
-    path("my-list", views.my_list_page, name="my-list"),
+    path("predictions", product_views.prediction_history_page, name="predictions"),
+    path("performance", product_views.performance_page, name="performance"),
+    path("my-list", product_views.my_list_page, name="my-list"),
     path(
         "my-list/<uuid:tracked_symbol_id>/delete",
         views.tracked_symbol_delete,
@@ -38,4 +38,24 @@ urlpatterns = [
         name="simulation-detail",
     ),
     path("methodology", views.methodology_page, name="methodology"),
+    path(
+        "archive/opportunities",
+        product_views.archive_opportunities_page,
+        name="archive-opportunities",
+    ),
+    path(
+        "archive/stocks/<uuid:listing_id>",
+        product_views.archive_stock_detail_page,
+        name="archive-stock-detail",
+    ),
+    path(
+        "archive/predictions",
+        product_views.archive_prediction_history_page,
+        name="archive-predictions",
+    ),
+    path(
+        "archive/performance",
+        product_views.archive_performance_page,
+        name="archive-performance",
+    ),
 ]

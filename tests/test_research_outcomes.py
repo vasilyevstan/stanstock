@@ -1554,6 +1554,32 @@ def test_duplicate_benchmark_session_dates_do_not_block_stock_maturity(tmp_path)
 
 
 @pytest.mark.django_db
+def test_legacy_matured_decision_clean_retains_exact_validation_message() -> None:
+    _, analysis = _analysis()
+    prediction = _prediction(
+        analysis,
+        horizon=Prediction.Horizon.SHORT,
+        recommendation=Recommendation.BUY,
+    )
+    outcome = PredictionOutcome(
+        prediction=prediction,
+        evaluated_at=_evaluation_time(),
+        evaluation_date=prediction.target_date + timedelta(days=20),
+        status=PredictionOutcome.Status.MATURED,
+        actual_return=Decimal("0.1000"),
+        success=None,
+        resolution="missing success",
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        outcome.clean()
+
+    assert caught.value.message_dict == {
+        "success": ["Matured decision outcomes require a success value."]
+    }
+
+
+@pytest.mark.django_db
 def test_existing_matured_outcome_is_idempotently_skipped(tmp_path) -> None:
     listing, analysis = _analysis()
     prediction = _prediction(

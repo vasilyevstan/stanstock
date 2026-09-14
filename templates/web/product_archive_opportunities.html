@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}Archived research · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Retained historical methods</p>
+      <h1>Archived research</h1>
+      <p class="lede">
+        This view excludes research-product-v1. Scores, confidence heuristics,
+        recommendations, and horizons below keep the meaning they had under
+        their original configuration.
+      </p>
+    </div>
+    {% if archive_run %}
+      <div class="run-stamp"><small>Archived target</small><strong>{{ archive_run.target_date }}</strong><span>{{ archive_run.config_version }}</span></div>
+    {% endif %}
+  </section>
+  <div class="responsive-table" tabindex="0" aria-label="Archived analyses">
+    <table class="compact-table">
+      <thead>
+        <tr>
+          <th scope="col">Stock</th>
+          <th scope="col">Original configuration</th>
+          <th scope="col">Original score</th>
+          <th scope="col">Original recommendation</th>
+          <th scope="col">Original confidence heuristic</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for analysis in analyses %}
+          <tr>
+            <th scope="row"><a href="{% url 'archive-stock-detail' analysis.listing_id %}">{{ analysis.listing.ticker }}</a><small>{{ analysis.listing.security.company.name }}</small></th>
+            <td>{{ analysis.run.config_version }}</td>
+            <td>{{ analysis.overall_score|default_if_none:"Unavailable" }}</td>
+            <td>{{ analysis.recommendation|upper }}</td>
+            <td>{{ analysis.confidence|default_if_none:"Unavailable" }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5">No pre-product archived analysis is stored.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

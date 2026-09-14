@@ -16,7 +16,7 @@ jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -95,6 +95,7 @@ jobs:
           POSTGRES_USER: "stanstock"
           POSTGRES_PASSWORD: "stanstock"
           DJANGO_SECRET_KEY: "ci-only-postgresql-test-secret"
+          STANSTOCK_RESEARCH_PRODUCT_ENABLED: "false"
         run: |
           export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/stanstock"
           uv run pytest -q \
@@ -110,6 +111,10 @@ jobs:
             tests/test_medium_forecast_v2.py::test_postgresql_v2_writer_locks_complete_authority_through_prediction_create[append] \
             tests/test_medium_forecast_v2.py::test_postgresql_v2_writer_locks_complete_authority_through_prediction_create[create] \
             tests/test_medium_forecast_v2.py::test_postgresql_analyze_snapshot_holds_advisory_parent_locks_to_outer_commit \
+            tests/test_research_product_schema.py \
+            tests/test_research_product_parent_guards.py \
+            tests/test_research_product_scheduled.py \
+            tests/test_research_product_study_evidence.py::test_registered_study_reader_fails_closed_on_forged_metadata_row \
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \
             tests/test_research_outcomes.py::test_outcome_role_integrity_triggers_are_installed \

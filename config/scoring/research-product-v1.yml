@@ -1,0 +1,67 @@
+schema_version: 1
+product_version: research-product-v1
+payload_schema: research-product@1
+calendar: XNYS
+currency: USD
+price_provider: twelve_data
+benchmark_subject: SPY
+return_basis: split_adjusted_price_return
+dividends_included: false
+required_closes: 757
+momentum:
+  method_version: us-relative-momentum-v1
+  lookback_sessions: 252
+  skip_sessions: 21
+  decision_horizon_sessions: 126
+simulation:
+  method_version: us-price-fhs-v1
+  return_observations: 756
+  filter_burn_in: 252
+  production_paths: 8192
+  diagnostic_max_paths: 16384
+  maximum_horizon_sessions: 1260
+  prng: PCG64
+  random_index_order: path_major
+  residual_sampling: iid_with_replacement
+  variance_target_weight: 0.01
+  variance_persistence: 0.94
+  innovation_weight: 0.05
+  quantile_method: linear
+  quantiles:
+    - 0.20
+    - 0.50
+    - 0.80
+  horizons:
+    6m: 126
+    12m: 252
+    3y: 756
+    5y: 1260
+risk:
+  annualization_sessions: 252
+  drawdown_return_sessions: 252
+  liquidity_sessions: 20
+  buy_max_relative_volatility: 2.0
+  buy_minimum_drawdown: -0.50
+  buy_minimum_dollar_turnover: 5000000.0
+  buy_minimum_target_close: 10.0
+rounding:
+  return_decimal_places: 4
+  price_decimal_places: 6
+  mode: ROUND_HALF_EVEN
+universe:
+  core_config: config/universes/us_liquid_starter_v1.yaml
+  maximum_saved_names: 20
+  benchmark_excluded_from_membership: true
+replay:
+  evidence_label: current-universe_current-vintage_retrospective-math-replay
+  fixed_epoch: "2019-09-03"
+  development_end_exclusive: "2024-01-01"
+  validation_start: "2024-01-01"
+  validation_end_exclusive: "2025-01-01"
+  holdout_start: "2025-01-01"
+  holdout_complete_through: "2026-09-11"
+  anchor_spacing: evaluated_horizon_sessions
+  purge_partition_crossings: true
+  comparators:
+    - zero_log_drift_gaussian
+    - historical_log_drift_gaussian

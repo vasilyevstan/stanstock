@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from stanstock.research.config import code_revision
 from stanstock.research.models import Prediction, StockAnalysis
+from stanstock.research.price_product_config import PRODUCT_VERSION
 from stanstock.research.scenarios import _scenario
 from stanstock.research.service import AnalysisComputation, append_predictions
 from stanstock.research.types import (
@@ -43,6 +44,16 @@ class Command(BaseCommand):
             )
         except (ValueError, StockAnalysis.DoesNotExist) as exc:
             raise CommandError(str(exc)) from exc
+        if (
+            analysis.run.config_version == PRODUCT_VERSION
+            or analysis.overall_score is None
+            or analysis.confidence is None
+            or analysis.recommendation is None
+        ):
+            raise CommandError(
+                "The legacy predict command cannot append prospective scoreless "
+                "research-product predictions."
+            )
         generated_at = timezone.now()
         model_version = options.get("model_version") or _prediction_model_version(
             str(analysis.run.config_version), generated_at
@@ -84,6 +95,17 @@ def _supported_horizons(analysis: StockAnalysis) -> tuple[str, ...]:
 
 
 def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
+    if (
+        analysis.overall_score is None
+        or analysis.confidence is None
+        or analysis.recommendation is None
+    ):
+        raise CommandError(
+            "The legacy predict command requires numeric score/confidence and a recommendation."
+        )
+    overall_score = analysis.overall_score
+    confidence = analysis.confidence
+    recommendation = analysis.recommendation
     component_payload = (
         analysis.component_scores if isinstance(analysis.component_scores, dict) else {}
     )
@@ -92,9 +114,9 @@ def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
     horizons = component_payload.get(
         "horizons",
         {
-            "short": float(analysis.overall_score),
-            "medium": float(analysis.overall_score),
-            "long": float(analysis.overall_score),
+            "short": float(overall_score),
+            "medium": float(overall_score),
+            "long": float(overall_score),
         },
     )
     horizon_mapping = horizons if isinstance(horizons, dict) else {}
@@ -106,9 +128,9 @@ def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
         coverage=float(data_quality.get("coverage", 0.0)),
     )
     aggregate = AggregateScore(
-        overall=float(analysis.overall_score),
+        overall=float(overall_score),
         horizon_scores={str(key): float(value) for key, value in horizon_mapping.items()},
-        confidence=float(analysis.confidence),
+        confidence=float(confidence),
         confidence_status=analysis.confidence_status,
         component_scores=component_scores,
         missingness_penalty=1.0,
@@ -125,7 +147,7 @@ def _computation_from_analysis(analysis: StockAnalysis) -> AnalysisComputation:
         scenarios=scenarios,
         risk_score=float(analysis.risk_score) if analysis.risk_score is not None else None,
         risk_class=analysis.risk_class,
-        recommendation=analysis.recommendation,
+        recommendation=recommendation,
         reasons=list(analysis.reasons),
         risks=list(analysis.risks),
         data_quality=cast(dict[str, Any], data_quality),

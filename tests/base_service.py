@@ -114,6 +114,13 @@ DEPENDENCY_MODULES: tuple[tuple[str, str], ...] = (
     ("stanstock.research.service", "src/stanstock/research/service.py"),
 )
 
+# Django model classes cannot safely be re-executed from historical source
+# into an already-populated app registry. The prospective schema migration
+# changes field metadata while preserving every legacy field/enum consumed by
+# base service. Frozen base/head payload tests therefore use the live
+# compatible model class and compare the service outputs themselves.
+LIVE_COMPATIBILITY_MODULES = frozenset({"stanstock.research.models"})
+
 #: Backward-compatible name for the module/path this harness centers on.
 SERVICE_PATH = "src/stanstock/research/service.py"
 

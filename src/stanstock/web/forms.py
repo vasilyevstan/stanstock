@@ -101,6 +101,40 @@ class OpportunityFilterForm(forms.Form):
             ]
 
 
+class ResearchProductFilterForm(forms.Form):
+    q = forms.CharField(required=False, label="Search")
+    direction = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "All directions"),
+            ("positive", "Positive"),
+            ("negative", "Negative"),
+            ("mixed", "Mixed"),
+            ("unavailable", "Unavailable"),
+        ],
+        label="Research direction",
+    )
+    suggestion = forms.ChoiceField(
+        required=False,
+        choices=[("", "All suggestions"), *Recommendation.choices],
+        label="Research suggestion",
+    )
+    risk = forms.ChoiceField(
+        required=False,
+        choices=[("", "All relative-volatility bands"), *RiskClass.choices],
+        label="Relative volatility",
+    )
+    price_band = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "All reference prices"),
+            ("under_10", "Under $10"),
+            ("at_least_10", "$10 and above"),
+        ],
+        label="Decision-date reference price",
+    )
+
+
 class TrackedSymbolForm(forms.Form):
     symbol = forms.CharField(
         max_length=32,

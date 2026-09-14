@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}My List · StanStock{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <p class="eyebrow">Private intake preference</p>
+      <h1>My List</h1>
+      <p class="lede">
+        Add or remove a preference for the next bounded intake. A preference
+        change does not mutate a captured historical cohort, fetch data, place
+        a trade, or rewrite research.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="add-symbol">
+    <h2 id="add-symbol">Add a supported symbol</h2>
+    <form method="post" class="stack">
+      {% csrf_token %}
+      {% for field in form %}
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+        {% if field.errors %}<div class="field-error" role="alert">{{ field.errors }}</div>{% endif %}
+      {% endfor %}
+      <button class="primary-button" type="submit">Add for next intake</button>
+    </form>
+  </section>
+
+  <section aria-labelledby="preference-state">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Preference versus captured evidence</p>
+        <h2 id="preference-state">Tracked symbols</h2>
+      </div>
+    </div>
+    <div class="responsive-table" tabindex="0" aria-label="My List captured research states">
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th scope="col">Symbol</th>
+            <th scope="col">Current preference</th>
+            <th scope="col">Captured research state</th>
+            <th scope="col">History qualification</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <th scope="row">
+                {% if item.card %}
+                  <a href="{% url 'stock-detail' item.card.analysis.listing_id %}">{{ item.preference.symbol }}</a>
+                {% else %}
+                  {{ item.preference.symbol }}
+                {% endif %}
+              </th>
+              <td>Saved for next intake<small>Added {{ item.preference.created_at }}</small></td>
+              <td>
+                {% if item.admission %}
+                  {{ item.admission.status|display_label }}
+                  <small>{{ item.admission.reason_code|display_label }} · captured {{ item.admission.captured_role }}</small>
+                  {% if item.card %}
+                    <small>{{ item.card.direction|display_label }} · {% if item.card.suggestion %}{{ item.card.suggestion|upper }}{% else %}suggestion unavailable{% endif %}</small>
+                  {% endif %}
+                {% else %}
+                  Pending next intake
+                  <small>Not part of the displayed historical cohort.</small>
+                {% endif %}
+              </td>
+              <td>
+                {% if item.admission.required_closes != None %}
+                  {{ item.admission.available_closes }} of {{ item.admission.required_closes }} closes
+                  {% if item.admission.missing_closes %}<small>Missing {{ item.admission.missing_closes }}</small>{% endif %}
+                {% else %}
+                  Not measured in this cohort
+                {% endif %}
+              </td>
+              <td>
+                <form method="post" action="{% url 'tracked-symbol-delete' item.preference.id %}" class="inline-form">
+                  {% csrf_token %}
+                  <button class="danger-button" type="submit">Remove for next intake</button>
+                </form>
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="5">My List is empty.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

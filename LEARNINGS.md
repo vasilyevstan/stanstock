@@ -50,10 +50,51 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **New profile dispatches must retain command-level operational guards.**
+  Both native and legacy scheduled refreshes check the installed timezone
+  against the machine timezone before starting work. An independently safe
+  UTC issuance deadline does not replace this installation check.
+- **Numerical precision warnings are not predictive evidence.** A frozen
+  retrospective diagnostic can reproduce exactly while its upper quantile
+  moves beyond the declared tolerance when paths are doubled. Preserve the
+  recorded failure, disclose available and unavailable comparisons separately,
+  and never tune the frozen operator against that observation.
+- **Provider exception imports still cross the provider boundary.** Domain
+  readers obtain `ProviderConfigurationError` through `data.provider_policy`,
+  not `data.providers.exceptions`. Run the fast architecture tests when
+  adding domain modules; extensive behavioral coverage does not enforce an
+  import-layer rule.
+- **Historical losses and descriptive interval metrics are different.**
+  Compare losses on identical horizon/partition support with equal
+  target-cohort weights. Narrower intervals and higher inclusion are not
+  standalone evidence of improvement; interval score penalizes both width
+  and misses. MAE of the median forecast is a mean, not a median of errors.
+- **A report's source revision is not its execution revision.** Retrospective
+  output records both. Registration calculates the complete selected cohort
+  rather than trusting supplied metrics, preserves actual generation and
+  registration times, and rejects future or pre-source chronology. A genuine
+  provider reconstruction need not be observed to support a labelled
+  retrospective report.
+- **Display authorization is current, not captured forever.** Owner-bound
+  readers revalidate the active account and current provider license even
+  when source intake was authorized. License reassignment must not make an
+  old account's captured cohort readable through a direct service call.
+- **Child validation alone cannot protect parent-owned contracts.**
+  Method/config guards must cover parent configuration updates and
+  reparenting, while permitting unchanged saves and unrelated legacy rows.
+- **Immutable rows need an isolated concurrency-test lifecycle.** Django's
+  DELETE-based transaction-test flush correctly fails on committed immutable
+  predictions. Use a disposable migrated database/process for those tests;
+  do not disable production triggers to make teardown pass.
+- **Portable hash fixtures need portable inputs.** Transcendental synthetic
+  input generation can differ across platforms. Use exactly representable
+  inputs for a literal content-hash golden and separately prove sensitivity
+  to a one-ULP input change; do not weaken production precision or hashing.
 - **Dependency diagnostics are command output too.** A count-only summary
   does not protect private symbols when HTTP-client logs contain request URLs.
-  Privacy regressions must cover logging as well as stdout while preserving
-  explicit failure reporting.
+  Protect native acquisition services, not only command wrappers. Overlapping
+  suppression scopes restore logger levels only after the last scope exits;
+  warnings and explicit failure reporting remain visible.
 - **Range availability and probability support are separate facts.** A finite
   bear/base/bull range can remain usable when positive-return probability is
   withheld. Render these states independently, keep stored reasons visible,

@@ -10,6 +10,11 @@ from django.db.models.base import ModelBase
 
 from stanstock.data.models import Listing, UniverseSnapshot
 from stanstock.research.forecasting import scenario_from_document
+from stanstock.research.price_product_config import (
+    FHS_METHOD_VERSION,
+    MOMENTUM_METHOD_VERSION,
+    PRODUCT_VERSION,
+)
 
 
 class Recommendation(models.TextChoices):
@@ -50,17 +55,48 @@ class AnalysisRun(models.Model):
     def __str__(self) -> str:
         return f"{self.target_date}:{self.config_version}:{self.status}"
 
+    def clean(self) -> None:
+        super().clean()
+        if not self.pk:
+            return
+        original = (
+            type(self)
+            .objects.filter(pk=self.pk)
+            .values(
+                "config_version",
+                "config_hash",
+            )
+            .first()
+        )
+        if not original or not self.stocks.exists():
+            return
+        original_touches_product = original["config_version"] == PRODUCT_VERSION
+        current_touches_product = self.config_version == PRODUCT_VERSION
+        if original_touches_product or current_touches_product:
+            if (
+                original["config_version"] != self.config_version
+                or original["config_hash"] != self.config_hash
+            ):
+                raise ValidationError(
+                    "Research-product analysis runs with stock analyses cannot "
+                    "change config_version or config_hash."
+                )
+
 
 class StockAnalysis(models.Model):
     run = models.ForeignKey(AnalysisRun, on_delete=models.CASCADE, related_name="stocks")
     listing = models.ForeignKey(Listing, on_delete=models.PROTECT)
     current_price = models.DecimalField(max_digits=20, decimal_places=6)
     daily_change = models.DecimalField(max_digits=12, decimal_places=6, null=True)
-    overall_score = models.DecimalField(max_digits=6, decimal_places=2)
-    recommendation = models.CharField(max_length=8, choices=Recommendation)
+    overall_score = models.DecimalField(max_digits=6, decimal_places=2, null=True)
+    recommendation = models.CharField(  # noqa: DJ001 - unavailable is SQL NULL by contract
+        max_length=8,
+        choices=Recommendation,
+        null=True,
+    )
     risk_score = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     risk_class = models.CharField(max_length=12, choices=RiskClass)
-    confidence = models.DecimalField(max_digits=6, decimal_places=2)
+    confidence = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     confidence_status = models.CharField(max_length=32, default="heuristic")
     component_scores = models.JSONField(default=dict)
     forecast_scenarios = models.JSONField(default=dict)
@@ -79,7 +115,10 @@ class StockAnalysis(models.Model):
                 name="unique_analysis_listing",
             ),
             models.CheckConstraint(
-                condition=models.Q(overall_score__gte=0, overall_score__lte=100),
+                condition=(
+                    models.Q(overall_score__isnull=True)
+                    | models.Q(overall_score__gte=0, overall_score__lte=100)
+                ),
                 name="analysis_score_in_range",
             ),
             models.CheckConstraint(
@@ -87,13 +126,104 @@ class StockAnalysis(models.Model):
                 name="analysis_risk_in_range",
             ),
             models.CheckConstraint(
-                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                condition=(
+                    models.Q(confidence__isnull=True)
+                    | models.Q(confidence__gte=0, confidence__lte=100)
+                ),
                 name="analysis_confidence_in_range",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        overall_score__isnull=True,
+                        confidence__isnull=True,
+                        confidence_status="not_estimated",
+                    )
+                    | models.Q(
+                        overall_score__isnull=False,
+                        confidence__isnull=False,
+                        recommendation__isnull=False,
+                    )
+                ),
+                name="analysis_nullable_shape_valid",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.run_id}:{self.listing_id}:{self.overall_score}"
+
+    def clean(self) -> None:
+        super().clean()
+        if self.pk:
+            original = type(self).objects.filter(pk=self.pk).values("run_id").first()
+            if original and original["run_id"] != self.run_id:
+                original_parent = (
+                    AnalysisRun.objects.filter(pk=original["run_id"])
+                    .values(
+                        "config_version",
+                    )
+                    .first()
+                )
+                current_parent = (
+                    AnalysisRun.objects.filter(pk=self.run_id)
+                    .values(
+                        "config_version",
+                    )
+                    .first()
+                )
+                if (original_parent and original_parent["config_version"] == PRODUCT_VERSION) or (
+                    current_parent and current_parent["config_version"] == PRODUCT_VERSION
+                ):
+                    raise ValidationError(
+                        {
+                            "run": (
+                                "Persisted stock analyses cannot be reparented "
+                                "into or out of research-product-v1."
+                            )
+                        }
+                    )
+        if not self.run_id:
+            return
+        run = (
+            AnalysisRun.objects.filter(pk=self.run_id)
+            .values(
+                "config_version",
+                "config_hash",
+            )
+            .first()
+        )
+        if run is None:
+            return
+        prospective = run["config_version"] == PRODUCT_VERSION
+        if prospective:
+            errors: dict[str, str] = {}
+            if self.overall_score is not None:
+                errors["overall_score"] = "Prospective price research does not estimate a score."
+            if self.risk_score is not None:
+                errors["risk_score"] = "Prospective price research does not aggregate risk."
+            if self.confidence is not None:
+                errors["confidence"] = "Prospective price research does not estimate confidence."
+            if self.confidence_status != "not_estimated":
+                errors["confidence_status"] = (
+                    "Prospective price research confidence_status must be not_estimated."
+                )
+            if self.recommendation is None:
+                quality = self.data_quality if isinstance(self.data_quality, dict) else {}
+                if not quality.get("momentum_insufficiency_reason"):
+                    errors["recommendation"] = (
+                        "An unavailable prospective recommendation requires a momentum "
+                        "insufficiency reason."
+                    )
+            if errors:
+                raise ValidationError(errors)
+            return
+        legacy_nulls = {
+            field: "Legacy analyses require this value."
+            for field in ("overall_score", "confidence", "recommendation")
+            if getattr(self, field) is None
+        }
+        if legacy_nulls:
+            raise ValidationError(legacy_nulls)
 
     def scenario_for_horizon(self, horizon: str) -> dict[str, Any]:
         return scenario_from_document(
@@ -204,11 +334,15 @@ class Prediction(models.Model):
     base_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     bull_return = models.DecimalField(max_digits=10, decimal_places=4, null=True)
     probability_positive = models.DecimalField(max_digits=6, decimal_places=4, null=True)
-    confidence = models.DecimalField(max_digits=6, decimal_places=2)
+    confidence = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     confidence_status = models.CharField(max_length=32)
     insufficiency_reason = models.CharField(max_length=240, blank=True)
-    recommendation = models.CharField(max_length=8, choices=Recommendation)
-    overall_score = models.DecimalField(max_digits=6, decimal_places=2)
+    recommendation = models.CharField(  # noqa: DJ001 - inapplicable/unavailable is SQL NULL
+        max_length=8,
+        choices=Recommendation,
+        null=True,
+    )
+    overall_score = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     component_scores = models.JSONField(default=dict)
     model_version = models.CharField(max_length=40)
     method_version = models.CharField(max_length=40, blank=True, db_index=True)
@@ -226,11 +360,17 @@ class Prediction(models.Model):
                 name="unique_prediction_version",
             ),
             models.CheckConstraint(
-                condition=models.Q(overall_score__gte=0, overall_score__lte=100),
+                condition=(
+                    models.Q(overall_score__isnull=True)
+                    | models.Q(overall_score__gte=0, overall_score__lte=100)
+                ),
                 name="prediction_score_in_range",
             ),
             models.CheckConstraint(
-                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                condition=(
+                    models.Q(confidence__isnull=True)
+                    | models.Q(confidence__gte=0, confidence__lte=100)
+                ),
                 name="prediction_confidence_in_range",
             ),
             models.CheckConstraint(
@@ -280,11 +420,66 @@ class Prediction(models.Model):
                         horizon__in=("short", "medium", "long"),
                     )
                     | models.Q(
+                        evidence_role="decision",
+                        horizon="6m",
+                        method_version=MOMENTUM_METHOD_VERSION,
+                    )
+                    | models.Q(
                         evidence_role="advisory",
                         horizon__in=("6m", "12m", "3y", "5y"),
                     )
                 ),
                 name="prediction_horizon_role_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        method_version=MOMENTUM_METHOD_VERSION,
+                        evidence_role="decision",
+                        horizon="6m",
+                        overall_score__isnull=True,
+                        confidence__isnull=True,
+                        confidence_status="not_estimated",
+                        probability_positive__isnull=True,
+                        bear_return__isnull=True,
+                        base_return__isnull=True,
+                        bull_return__isnull=True,
+                    )
+                    & (
+                        models.Q(
+                            recommendation__isnull=False,
+                            recommendation__in=("buy", "hold", "avoid"),
+                        )
+                        | (
+                            models.Q(recommendation__isnull=True)
+                            & ~models.Q(insufficiency_reason="")
+                        )
+                    )
+                    | models.Q(
+                        method_version=FHS_METHOD_VERSION,
+                        evidence_role="advisory",
+                        horizon__in=("6m", "12m", "3y", "5y"),
+                        overall_score__isnull=True,
+                        confidence__isnull=True,
+                        confidence_status="not_estimated",
+                        recommendation__isnull=True,
+                        probability_positive__isnull=True,
+                    )
+                    | (
+                        ~models.Q(
+                            method_version__in=(
+                                MOMENTUM_METHOD_VERSION,
+                                FHS_METHOD_VERSION,
+                            )
+                        )
+                        & models.Q(
+                            overall_score__isnull=False,
+                            confidence__isnull=False,
+                            recommendation__isnull=False,
+                        )
+                    )
+                ),
+                name="prediction_prospective_shape_valid",
             ),
         ]
 
@@ -307,6 +502,69 @@ class Prediction(models.Model):
             using=using,
             update_fields=update_fields,
         )
+
+    def clean(self) -> None:
+        super().clean()
+        if not self.analysis_id:
+            return
+        run = (
+            StockAnalysis.objects.filter(pk=self.analysis_id)
+            .values(
+                "run__config_version",
+                "run__config_hash",
+            )
+            .first()
+        )
+        if run is None:
+            return
+        run_version = run["run__config_version"]
+        prospective_method = self.method_version in {
+            MOMENTUM_METHOD_VERSION,
+            FHS_METHOD_VERSION,
+        }
+        if run_version != PRODUCT_VERSION:
+            if prospective_method:
+                raise ValidationError(
+                    {"method_version": "Prospective methods require research-product-v1."}
+                )
+            legacy_nulls = {
+                field: "Legacy predictions require this value."
+                for field in ("overall_score", "confidence", "recommendation")
+                if getattr(self, field) is None
+            }
+            if legacy_nulls:
+                raise ValidationError(legacy_nulls)
+            return
+        if not prospective_method:
+            raise ValidationError(
+                {"method_version": "research-product-v1 permits only its reviewed methods."}
+            )
+        if self.config_hash != run["run__config_hash"]:
+            raise ValidationError(
+                {
+                    "config_hash": (
+                        "Prospective predictions must match the owning AnalysisRun config_hash."
+                    )
+                }
+            )
+        if self.overall_score is not None or self.confidence is not None:
+            raise ValidationError(
+                "Prospective price research does not estimate score or confidence."
+            )
+        if self.confidence_status != "not_estimated" or self.probability_positive is not None:
+            raise ValidationError("Prospective confidence and probability must remain unestimated.")
+        if self.method_version == FHS_METHOD_VERSION and self.recommendation is not None:
+            raise ValidationError(
+                {"recommendation": "Advisory FHS projections have no recommendation."}
+            )
+        if (
+            self.method_version == MOMENTUM_METHOD_VERSION
+            and self.recommendation is None
+            and not self.insufficiency_reason
+        ):
+            raise ValidationError(
+                {"recommendation": "Unavailable momentum requires an insufficiency reason."}
+            )
 
     def delete(
         self,
@@ -386,11 +644,22 @@ class PredictionOutcome(models.Model):
         super().clean()
         if self.status != self.Status.MATURED or not self.prediction_id:
             return
-        if (
-            self.prediction.evidence_role == Prediction.EvidenceRole.DECISION
-            and self.success is None
-        ):
-            raise ValidationError({"success": "Matured decision outcomes require a success value."})
+        if self.prediction.evidence_role == Prediction.EvidenceRole.DECISION:
+            prospective_non_directional = (
+                self.prediction.method_version == MOMENTUM_METHOD_VERSION
+                and self.prediction.recommendation in (Recommendation.HOLD, None)
+            )
+            if prospective_non_directional and self.success is not None:
+                raise ValidationError(
+                    {"success": "Prospective HOLD/unavailable outcomes must not claim success."}
+                )
+            if not prospective_non_directional and self.success is None:
+                message = (
+                    "Matured directional decision outcomes require success."
+                    if self.prediction.method_version == MOMENTUM_METHOD_VERSION
+                    else "Matured decision outcomes require a success value."
+                )
+                raise ValidationError({"success": message})
         if (
             self.prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
             and self.success is not None

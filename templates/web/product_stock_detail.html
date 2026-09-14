@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% load stanstock %}
+
+{% block title %}{% if card %}{{ card.listing.ticker }}{% else %}Research unavailable{% endif %} · StanStock{% endblock %}
+
+{% block content %}
+  {% if not card %}
+    <div class="error-box" role="alert">
+      <h1>Active stock research suppressed</h1>
+      <p>{{ product.message }}</p>
+      {% if product.verification_code %}<small>{{ product.verification_code|display_label }}</small>{% endif %}
+    </div>
+  {% else %}
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">{{ card.captured_role }} member · verified price research</p>
+        <h1>{{ card.listing.ticker }}</h1>
+        <p class="lede">{{ card.listing.security.company.name }}</p>
+      </div>
+      <div class="decision-card">
+        <small>126-session research suggestion</small>
+        <strong>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</strong>
+        <span>{{ card.direction|display_label }} raw momentum</span>
+      </div>
+    </section>
+
+    <dl class="source-strip">
+      <div><dt>Reference close</dt><dd>{{ card.analysis.current_price|price }} USD</dd></div>
+      <div><dt>Market date</dt><dd>{{ card.analysis.run.target_date }}</dd></div>
+      <div><dt>Evidence grade</dt><dd>{{ card.decision_prediction.evidence_grade|display_label }}</dd></div>
+      <div><dt>Provider</dt><dd>{{ card.decision_prediction.price_provider|display_label }}</dd></div>
+      <div><dt>Price coverage</dt><dd>{{ card.source_period_start }} – {{ card.source_period_end }}</dd></div>
+      <div><dt>Retrieved</dt><dd>{{ card.source_retrieved_at }}</dd></div>
+    </dl>
+
+    {% if card.target_under_10 %}
+      <div class="speculative-note">
+        <strong>Under $10 · speculative watch · 0% new allocation.</strong>
+        A positive momentum direction remains HOLD and cannot be promoted or
+        enter a newly constructed sample basket.
+      </div>
+    {% endif %}
+
+    <section aria-labelledby="projection-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Conditional price paths</p>
+          <h2 id="projection-title">Lower / Median / Upper projections</h2>
+        </div>
+      </div>
+      <p class="muted">
+        p20 / p50 / p80 define the central 60% of fixed-model path mass, not
+        calibrated real-world probability. Median is not a mean or fair value.
+      </p>
+      <div class="projection-grid projection-grid-detail">
+        {% for projection in card.projections %}
+          <article class="projection-card">
+            <h3>{{ projection.label }}</h3>
+            <p>{{ projection.sessions }} sessions</p>
+            {% if projection.available %}
+              <dl>
+                <div><dt>Lower (p20)</dt><dd>{{ projection.lower_return|percentage }}<small>{{ projection.lower_price|price }} USD</small></dd></div>
+                <div><dt>Median (p50)</dt><dd>{{ projection.median_return|percentage }}<small>{{ projection.median_price|price }} USD</small></dd></div>
+                <div><dt>Upper (p80)</dt><dd>{{ projection.upper_return|percentage }}<small>{{ projection.upper_price|price }} USD</small></dd></div>
+              </dl>
+              <details>
+                <summary>Same-shock zero-log-drift sensitivity</summary>
+                <dl>
+                  <div><dt>Lower</dt><dd>{{ projection.zero_drift_lower_return|percentage }}</dd></div>
+                  <div><dt>Median</dt><dd>{{ projection.zero_drift_median_return|percentage }}</dd></div>
+                  <div><dt>Upper</dt><dd>{{ projection.zero_drift_upper_return|percentage }}</dd></div>
+                </dl>
+                <small>This subtracts the estimated drift from the same simulated shocks; it is not a separate model.</small>
+              </details>
+            {% else %}
+              <p>Projection withheld: {{ projection.insufficiency_reason|display_label }}.</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <div class="detail-grid product-method-grid">
+      <section class="panel">
+        <h2>Momentum decision</h2>
+        <p>
+          The stock and SPY use identical endpoints: T−252 through T−21.
+          Positive requires both positive stock skipped-month momentum and
+          positive benchmark-relative log momentum; negative requires both
+          to be negative. Other combinations are mixed.
+        </p>
+        <dl class="product-detail-list">
+          <div><dt>Stock skipped-month price return</dt><dd>{{ card.stock_price_return|percentage }}</dd></div>
+          <div><dt>SPY log momentum</dt><dd>{{ card.benchmark_log_momentum|floatformat:4 }}</dd></div>
+          <div><dt>Relative log momentum</dt><dd>{{ card.relative_log_momentum|floatformat:4 }}</dd></div>
+        </dl>
+      </section>
+      <section class="panel">
+        <h2>Risk and suggestion restrictions</h2>
+        <dl class="product-detail-list">
+          <div><dt>Relative volatility</dt><dd>{{ card.relative_volatility|floatformat:2 }}× SPY · {{ card.relative_volatility_label|display_label }}</dd></div>
+          <div><dt>Maximum 252-session drawdown</dt><dd>{{ card.maximum_drawdown|percentage }}</dd></div>
+          <div><dt>20-session mean dollar turnover</dt><dd>{% if card.average_dollar_turnover_20d != None %}${{ card.average_dollar_turnover_20d|floatformat:"0g" }}{% else %}Unavailable{% endif %}</dd></div>
+        </dl>
+        {% if card.blocking_reasons %}
+          <ul>{% for reason in card.blocking_reasons %}<li>{{ reason|display_label }}</li>{% endfor %}</ul>
+        {% endif %}
+      </section>
+      <section class="panel">
+        <h2>Filtered historical simulation</h2>
+        <p>
+          The fixed operator uses 756 split-adjusted daily USD price returns
+          excluding dividends, a 252-return filter burn-in, 504 centered and
+          rescaled residuals, fixed variance weights 0.01 / 0.94 / 0.05,
+          and 8,192 deterministic PCG64 paths. Results use linear quantiles
+          and ledger rounding recorded at issuance.
+        </p>
+      </section>
+      <section class="panel">
+        <h2>Important uncertainty</h2>
+        <p>
+          Projection drift continues the trailing three-year mean log return.
+          The model does not estimate parameter uncertainty or explicitly
+          model dividends, regime changes, delisting, mergers, symbol changes,
+          or future corporate events. Forecasting skill is not established.
+        </p>
+        <p>
+          Momentum and FHS drift can disagree because they answer different
+          questions. No range changes the immutable momentum suggestion.
+        </p>
+      </section>
+    </div>
+    <p><a href="{% url 'methodology' %}">Full methodology and published foundations</a></p>
+    <p><a href="{% url 'archive-stock-detail' card.analysis.listing_id %}">Archived evidence for this listing</a> keeps its historical interpretation.</p>
+  {% endif %}
+{% endblock %}

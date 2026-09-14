@@ -1601,6 +1601,24 @@ def _differential_scenarios() -> list[dict[str, object]]:
             "final_close": 95.0,
             "with_benchmark": False,
         },
+        {
+            "id": "legacy_decision_benchmark_gap",
+            "horizon": Prediction.Horizon.SHORT,
+            "recommendation": Recommendation.BUY,
+            "evidence_role": Prediction.EvidenceRole.DECISION,
+            "final_close": 111.0,
+            "with_benchmark": True,
+            "benchmark_gap": True,
+        },
+        {
+            "id": "legacy_advisory_benchmark_gap",
+            "horizon": Prediction.Horizon.SIX_MONTH,
+            "recommendation": Recommendation.HOLD,
+            "evidence_role": Prediction.EvidenceRole.ADVISORY,
+            "final_close": 105.0,
+            "with_benchmark": True,
+            "benchmark_gap": True,
+        },
     ]
 
 
@@ -1628,14 +1646,28 @@ def test_base_and_head_evaluate_prediction_agree(
     benchmark_subject = ""
     if scenario["with_benchmark"]:
         benchmark_subject = BENCHMARK_SUBJECT
-        _register_price_asset(
-            store,
-            benchmark_subject,
-            evaluation_time,
-            sessions,
-            [100.0 + i * 0.5 for i in range(available_sessions)],
-            baseline_date=analysis.run.target_date,
-        )
+        if scenario.get("benchmark_gap"):
+            _register_price_asset(
+                store,
+                benchmark_subject,
+                evaluation_time,
+                [
+                    analysis.run.target_date - timedelta(days=1),
+                    sessions[-2],
+                    sessions[-1] + timedelta(days=3),
+                ],
+                [100.0, 110.0, 9999.0],
+                baseline_date=None,
+            )
+        else:
+            _register_price_asset(
+                store,
+                benchmark_subject,
+                evaluation_time,
+                sessions,
+                [100.0 + i * 0.5 for i in range(available_sessions)],
+                baseline_date=analysis.run.target_date,
+            )
 
     def _make_prediction(version: str) -> Prediction:
         return _prediction(
@@ -1777,12 +1809,12 @@ def test_guard_short_circuit_never_constructs_asset_store(
 
 def test_dependency_modules_are_pure_insertions_since_base() -> None:
     """Mechanically proves the assumption `base_outcomes.py`'s docstring
-    states in prose: every top-level statement the four dependency modules
+    states in prose: every top-level statement in the pure-insertion dependency modules
     had in base -- compared by full AST semantics, not merely a name --
     still has a semantically identical statement in head in the same
     relative order, and every new head-only statement is an explicitly
     allowlisted, name-bound addition. Binding only `research.outcomes` from
-    base -- while the *live* head versions of its four imports remain in
+    base -- while the *live* compatible dependency versions remain in
     `sys.modules` -- therefore reproduces exactly base's own behavior."""
     if not base_outcomes_available():
         pytest.skip("base revision is not in the local git object database")

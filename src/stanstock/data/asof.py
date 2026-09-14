@@ -431,7 +431,12 @@ def _bound_volume(raw: object) -> int | None:
 
 
 def verified_price_fields(
-    asset: DataAsset, *, cutoff: datetime, target_date: date, close_places: int
+    asset: DataAsset,
+    *,
+    cutoff: datetime,
+    target_date: date,
+    close_places: int,
+    store: AssetStore | None = None,
 ) -> VerifiedPriceFields:
     """Re-read `asset` and extract its exact target-date/previous-session fields.
 
@@ -443,7 +448,7 @@ def verified_price_fields(
     summary row.
     """
     try:
-        read = AsOfData(cutoff).price_frame_for_asset_with_diagnostics(
+        read = AsOfData(cutoff, store).price_frame_for_asset_with_diagnostics(
             asset=asset, through_date=target_date
         )
         if read.invalid_session_date_rows != 0:

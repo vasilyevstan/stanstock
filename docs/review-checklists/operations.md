@@ -35,6 +35,10 @@ Reviewer: `stanstock-critic-tester`.
 
 ## Local scheduling
 
+- [ ] Manual research and automation have separate captured issuance
+      identities. The scheduled identity is reserved, and serving, demo and
+      scheduling use one explicit product flag without implicit archive
+      substitution. Completed recovery preserves current display rights.
 - [ ] The LaunchAgent records and rechecks the machine IANA timezone, and its
       chosen wall-clock time is validated after regular/early XNYS closes,
       across DST changes, and before the next session opening.

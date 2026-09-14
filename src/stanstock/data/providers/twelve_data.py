@@ -136,6 +136,57 @@ def fetch_daily_price_series(
         timeout=DEFAULT_TIMEOUT,
     )
     payload = _load_response(result, context=f"daily prices for {normalized_symbol}")
+    return _price_series_from_payload(
+        payload,
+        symbol=normalized_symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjustment=adjustment,
+        retrieved_at=datetime.now(tz=UTC),
+        source_url=result.url,
+        raw_bytes=result.content,
+    )
+
+
+def parse_daily_price_series(
+    raw_bytes: bytes,
+    *,
+    symbol: str,
+    retrieved_at: datetime,
+    source_url: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    adjustment: str = "splits",
+) -> PriceSeries:
+    """Reproduce a registered provider response without credentials or network."""
+    normalized_symbol = _normalize_symbol(symbol)
+    if adjustment not in SUPPORTED_ADJUSTMENTS:
+        raise ValueError("Persisted price adjustment is unsupported")
+    payload = _load_json_payload(raw_bytes, context=f"daily prices for {normalized_symbol}")
+    return _price_series_from_payload(
+        payload,
+        symbol=normalized_symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjustment=adjustment,
+        retrieved_at=retrieved_at,
+        source_url=source_url,
+        raw_bytes=raw_bytes,
+    )
+
+
+def _price_series_from_payload(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    start_date: date | None,
+    end_date: date | None,
+    adjustment: str,
+    retrieved_at: datetime,
+    source_url: str,
+    raw_bytes: bytes,
+) -> PriceSeries:
+    normalized_symbol = symbol
     try:
         meta = _required_mapping(payload, "meta", context=normalized_symbol)
         returned_symbol = _required_text(meta, "symbol", context=normalized_symbol).upper()
@@ -168,9 +219,9 @@ def fetch_daily_price_series(
         symbol=normalized_symbol,
         currency=_optional_text(meta.get("currency")),
         bars=bars,
-        retrieved_at=datetime.now(tz=UTC),
-        source_url=result.url,
-        raw_bytes=result.content,
+        retrieved_at=retrieved_at,
+        source_url=source_url,
+        raw_bytes=raw_bytes,
         exchange=_optional_text(meta.get("exchange")),
         mic_code=_optional_text(meta.get("mic_code")),
         instrument_type=_optional_text(meta.get("type")),

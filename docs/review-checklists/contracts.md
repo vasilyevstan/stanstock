@@ -23,6 +23,9 @@ consumed by another app/module or by an external caller. Reviewer:
 
 ## Model and service interfaces
 
+- [ ] A parent-owned method/config contract is protected against parent
+      updates and child reparenting, including direct database operations;
+      unchanged saves and unrelated legacy contracts still work.
 - [ ] A changed method signature in `stanstock.data.asof.AsOfData`,
       `stanstock.data.assets.AssetStore`, or another shared service updates
       every call site in the same slice.

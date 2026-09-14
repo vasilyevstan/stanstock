@@ -46,7 +46,9 @@ select {
 
 button,
 a,
-input {
+input,
+select,
+summary {
   outline-offset: 3px;
 }
 
@@ -58,6 +60,8 @@ select {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+select:focus-visible,
+summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid var(--focus);
 }
@@ -94,6 +98,17 @@ input:focus-visible,
   color: #211700;
   background: var(--warning);
   font-size: 0.88rem;
+}
+
+.archive-banner {
+  padding-block: 0.65rem;
+  color: #2b1b00;
+  background: #e8b95c;
+  font-size: 0.9rem;
+}
+
+.archive-banner a {
+  font-weight: 800;
 }
 
 .header-content {
@@ -730,6 +745,204 @@ tbody tr:last-child td {
   border-color: rgb(246 199 91 / 45%);
 }
 
+.research-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(25rem, 100%), 1fr));
+  gap: 1rem;
+}
+
+.research-card {
+  min-width: 0;
+  padding: clamp(1rem, 2.5vw, 1.35rem);
+  overflow-wrap: anywhere;
+  background: linear-gradient(145deg, var(--panel-strong), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.research-card-speculative,
+.under-ten-section {
+  border-color: rgb(246 199 91 / 55%);
+}
+
+.research-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.research-card-header h3 {
+  font-size: 1.4rem;
+}
+
+.research-card-header p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.research-summary,
+.source-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(9rem, 100%), 1fr));
+  gap: 0.75rem;
+  margin-block: 1rem;
+}
+
+.research-summary div,
+.source-strip div {
+  min-width: 0;
+  padding: 0.7rem;
+  background: rgb(9 17 29 / 40%);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+}
+
+.research-summary small,
+.research-summary strong,
+.research-summary span,
+.source-strip dt,
+.source-strip dd {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.research-summary small,
+.research-summary span,
+.source-strip dt {
+  color: var(--muted);
+}
+
+.projection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin-block: 1rem;
+}
+
+.projection-grid-detail {
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+}
+
+.projection-card {
+  min-width: 0;
+  padding: 0.85rem;
+  overflow-wrap: anywhere;
+  background: rgb(9 17 29 / 48%);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+}
+
+.projection-card h3,
+.projection-card h4,
+.projection-card p {
+  margin-bottom: 0.35rem;
+}
+
+.projection-card small {
+  color: var(--muted);
+}
+
+.projection-card dl,
+.product-detail-list {
+  margin: 0.75rem 0 0;
+}
+
+.projection-card dl div,
+.product-detail-list div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  padding-block: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+
+.projection-card dt,
+.product-detail-list dt {
+  color: var(--muted);
+}
+
+.projection-card dd,
+.product-detail-list dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.projection-card dd small {
+  display: block;
+}
+
+.research-card details,
+.projection-card details {
+  margin-top: 0.8rem;
+}
+
+summary {
+  width: fit-content;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.speculative-note,
+.promotion-note {
+  padding: 0.75rem;
+  color: var(--muted);
+  background: rgb(246 199 91 / 8%);
+  border: 1px solid rgb(246 199 91 / 45%);
+  border-radius: 0.65rem;
+}
+
+.promotion-note {
+  background: rgb(104 215 186 / 8%);
+  border-color: rgb(104 215 186 / 45%);
+}
+
+.inline-symbols {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0;
+  list-style: none;
+}
+
+.inline-symbols a {
+  display: inline-flex;
+  padding: 0.4rem 0.7rem;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.under-ten-section {
+  margin-top: 2.5rem;
+  padding: 1rem;
+  border: 1px solid rgb(246 199 91 / 45%);
+  border-radius: 0.9rem;
+}
+
+.responsive-table {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.responsive-table table {
+  min-width: 680px;
+}
+
+.archive-link {
+  margin-top: 2rem;
+}
+
+.active-methodology {
+  margin-bottom: 1rem;
+  border-color: rgb(104 215 186 / 55%);
+}
+
 .under10-panel {
   /* Every value here is untrusted, stored text (reasons, dates, monetary
      strings, IDs): a single long unbroken run must wrap inside the panel
@@ -927,8 +1140,23 @@ tbody tr:last-child td {
   .filter-bar,
   .compact-filter,
   .metric-grid,
-  .detail-grid {
+  .detail-grid,
+  .projection-grid {
     grid-template-columns: 1fr;
+  }
+
+  .research-card-header {
+    display: grid;
+  }
+
+  .projection-card dl div,
+  .product-detail-list div {
+    grid-template-columns: 1fr;
+  }
+
+  .projection-card dd,
+  .product-detail-list dd {
+    text-align: left;
   }
 
   .status-card p {

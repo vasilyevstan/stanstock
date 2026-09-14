@@ -393,6 +393,15 @@ def _apply_conversion(
     return converted.select(ordered).sort(sort_keys)
 
 
+def _legacy_signal_score(analysis: StockAnalysis) -> float:
+    if analysis.overall_score is None:
+        raise SimulationWorkflowError(
+            "Scoreless prospective research cannot be interpreted as a legacy "
+            "numeric backtest signal."
+        )
+    return float(analysis.overall_score)
+
+
 def build_signals_for_backtest(
     *,
     snapshot: UniverseSnapshot,
@@ -420,6 +429,12 @@ def build_signals_for_backtest(
         raise SimulationWorkflowError(
             f"No persisted signals found for snapshot {snapshot.id} with target dates "
             f"between {start_date} and {end_date}."
+        )
+
+    if any(analysis.overall_score is None for analysis in analyses):
+        raise SimulationWorkflowError(
+            "Scoreless prospective research cannot be interpreted as a legacy "
+            "numeric backtest signal."
         )
 
     if price_panel is not None and price_panel.height > 0:
@@ -487,7 +502,7 @@ def build_signals_for_backtest(
             {
                 "date": a.run.target_date,
                 "listing_id": str(a.listing_id),
-                "score": float(a.overall_score),
+                "score": _legacy_signal_score(a),
                 "symbol": a.listing.ticker,
                 "generated_at": a.run.generated_at,
                 "data_cutoff": a.run.data_cutoff,

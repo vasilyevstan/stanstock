@@ -31,6 +31,10 @@ from stanstock.research.long_forecasts_v4 import (
     canonical_long_v4_price,
 )
 from stanstock.research.models import Prediction, PredictionOutcome, Recommendation
+from stanstock.research.price_product_config import (
+    MOMENTUM_METHOD_VERSION,
+    PRODUCT_BENCHMARK_SUBJECT,
+)
 
 _LONG_V4_RETURN_QUANTUM = Decimal("0.0001")
 _LONG_V4_BASELINE_ROLE = "calculation.target_price.valuation_value"
@@ -158,6 +162,23 @@ def resolve_outcome(
             },
         )
 
+    if (
+        prediction.method_version == MOMENTUM_METHOD_VERSION
+        and benchmark_subject != PRODUCT_BENCHMARK_SUBJECT
+    ):
+        return _unresolved_outcome(
+            evaluation_date=evaluation_date,
+            resolution=(
+                "Prospective momentum decision requires configured benchmark subject "
+                f"{PRODUCT_BENCHMARK_SUBJECT}"
+            ),
+            metadata={
+                "provider": provider,
+                "benchmark_subject": benchmark_subject or "",
+                "expected_benchmark_subject": PRODUCT_BENCHMARK_SUBJECT,
+            },
+        )
+
     long_v4_baseline: _LongV4Baseline | None = None
     if prediction.method_version == LONG_V4_VERSION:
         long_v4_baseline, baseline_issues = _authenticate_long_v4_baseline(
@@ -260,12 +281,19 @@ def resolve_outcome(
                 metadata={"provider": provider, "subject": subject},
             )
 
-        evaluation_baseline = _close_at_or_before(price_frame, prediction.target_date)
+        momentum = prediction.method_version == MOMENTUM_METHOD_VERSION
+        evaluation_baseline = (
+            _close_on_date(price_frame, prediction.target_date)
+            if momentum
+            else _close_at_or_before(price_frame, prediction.target_date)
+        )
         if evaluation_baseline is None:
             return _unresolved_outcome(
                 evaluation_date=session.observation_date,
                 resolution=(
-                    "Evaluation price history has no baseline close at or before target date"
+                    "Momentum evaluation requires an exact target-date stock close"
+                    if momentum
+                    else "Evaluation price history has no baseline close at or before target date"
                 ),
                 metadata={"provider": provider, "subject": subject},
             )
@@ -285,29 +313,63 @@ def resolve_outcome(
             )
 
         actual_return = session.close / price_at_prediction - 1.0
+    benchmark_return = None
+    benchmark_resolution = ""
+    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+        benchmark_return, benchmark_resolution = _momentum_benchmark_return(
+            price_loader=price_loader,
+            subject=PRODUCT_BENCHMARK_SUBJECT,
+            target_date=prediction.target_date,
+            evaluation_date=session.observation_date,
+        )
+        if benchmark_return is None:
+            return _unresolved_outcome(
+                evaluation_date=session.observation_date,
+                resolution=benchmark_resolution,
+                metadata={
+                    "provider": provider,
+                    "subject": subject,
+                    "benchmark_subject": PRODUCT_BENCHMARK_SUBJECT,
+                    "benchmark_resolution": benchmark_resolution,
+                },
+            )
+    elif benchmark_subject:
+        benchmark_return, benchmark_resolution = _benchmark_return(
+            price_loader=price_loader,
+            subject=benchmark_subject,
+            target_date=prediction.target_date,
+            evaluation_date=session.observation_date,
+        )
     success = (
-        _success(prediction, actual_return)
+        _success(
+            prediction,
+            actual_return,
+            benchmark_return=benchmark_return,
+        )
         if (
             not isinstance(actual_return, Decimal)
             and prediction.evidence_role == Prediction.EvidenceRole.DECISION
         )
         else None
     )
-    if prediction.evidence_role == Prediction.EvidenceRole.DECISION and success is None:
+    non_directional_momentum = (
+        prediction.method_version == MOMENTUM_METHOD_VERSION
+        and prediction.recommendation in (Recommendation.HOLD, None)
+    )
+    if (
+        prediction.evidence_role == Prediction.EvidenceRole.DECISION
+        and success is None
+        and not non_directional_momentum
+    ):
+        resolution = (
+            "Prospective momentum decision requires a benchmark return"
+            if prediction.method_version == MOMENTUM_METHOD_VERSION
+            else "HOLD success requires non-null stored bear and bull returns"
+        )
         return _unresolved_outcome(
             evaluation_date=session.observation_date,
-            resolution="HOLD success requires non-null stored bear and bull returns",
+            resolution=resolution,
             metadata={"provider": provider, "subject": subject},
-        )
-
-    benchmark_return = None
-    benchmark_resolution = ""
-    if benchmark_subject:
-        benchmark_return, benchmark_resolution = _benchmark_return(
-            price_loader=price_loader,
-            subject=benchmark_subject,
-            target_date=prediction.target_date,
-            evaluation_date=session.observation_date,
         )
     error: Decimal | float | None = None
     direction_correct = None
@@ -1153,7 +1215,52 @@ def _benchmark_return(
     )
 
 
-def _success(prediction: Prediction, actual_return: float) -> bool | None:
+def _momentum_benchmark_return(
+    *,
+    price_loader: PriceLoader,
+    subject: str,
+    target_date: date,
+    evaluation_date: date,
+) -> tuple[float | None, str]:
+    try:
+        frame = price_loader(subject, evaluation_date)
+        target = _close_on_date(frame, target_date)
+        evaluation = _close_on_date(frame, evaluation_date)
+    except (
+        DataAsset.DoesNotExist,
+        PriceFrameSchemaError,
+        ValueError,
+        PriceSessionDataError,
+    ) as exc:
+        return None, f"Prospective momentum benchmark unavailable: {exc}"
+    if target is None:
+        return None, "Prospective momentum benchmark has no exact target-date close"
+    if evaluation is None:
+        return None, "Prospective momentum benchmark has no exact maturity-session close"
+    return evaluation.close / target.close - 1.0, (
+        f"Prospective momentum benchmark return uses exact "
+        f"{target.observation_date.isoformat()} to "
+        f"{evaluation.observation_date.isoformat()} closes"
+    )
+
+
+def _success(
+    prediction: Prediction,
+    actual_return: float,
+    *,
+    benchmark_return: float | None = None,
+) -> bool | None:
+    method_version = getattr(prediction, "method_version", "")
+    if method_version == MOMENTUM_METHOD_VERSION:
+        if prediction.recommendation in (Recommendation.HOLD, None):
+            return None
+        if benchmark_return is None:
+            return None
+        if prediction.recommendation == Recommendation.BUY:
+            return actual_return > 0 and actual_return > benchmark_return
+        if prediction.recommendation == Recommendation.AVOID:
+            return actual_return < 0 and actual_return < benchmark_return
+        return None
     if prediction.recommendation == Recommendation.BUY:
         return actual_return > 0
     if prediction.recommendation == Recommendation.AVOID:
@@ -1168,6 +1275,12 @@ def _success(prediction: Prediction, actual_return: float) -> bool | None:
 def _success_semantics(prediction: Prediction) -> str:
     if prediction.evidence_role == Prediction.EvidenceRole.ADVISORY:
         return "Advisory forecasts do not receive recommendation success labels"
+    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+        if prediction.recommendation == Recommendation.BUY:
+            return "BUY succeeds when stock return is positive and exceeds SPY"
+        if prediction.recommendation == Recommendation.AVOID:
+            return "AVOID succeeds when stock return is negative and below SPY"
+        return "HOLD or unavailable momentum decisions do not receive success labels"
     if prediction.recommendation == Recommendation.BUY:
         return "BUY succeeds when actual return is positive"
     if prediction.recommendation == Recommendation.AVOID:

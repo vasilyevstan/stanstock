@@ -43,6 +43,7 @@ from stanstock.data.asof import (
     raw_price_asset_for,
 )
 from stanstock.data.assets import (
+    AssetStore,
     asset_ref_for,
     open_asset_store,
     read_checksummed_bytes,
@@ -106,6 +107,23 @@ _MEDIUM_HORIZONS = MEDIUM_HORIZONS
 _LONG_HORIZONS = LONG_HORIZONS
 _ADVISORY_HORIZONS = _MEDIUM_HORIZONS | _LONG_HORIZONS
 _PRICE_HISTORY_KIND = "price_history"
+
+
+def verify_price_product_output(
+    *,
+    run: AnalysisRun,
+    store: AssetStore,
+    replay: bool = False,
+) -> None:
+    """Verify the prospective five-row product through its independent proof.
+
+    Kept as a narrow public verification extension so callers do not mistake
+    the frozen legacy medium/long manifest verifier for the product contract.
+    Importing here avoids a module-level cycle with the product writer.
+    """
+    from stanstock.research.product_pipeline import verify_price_product_output as verify
+
+    verify(run=run, store=store, replay=replay)
 
 
 @dataclass(slots=True)

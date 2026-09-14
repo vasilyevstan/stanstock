@@ -1,0 +1,102 @@
+{% load stanstock %}
+<article class="research-card{% if card.target_under_10 %} research-card-speculative{% endif %}">
+  <header class="research-card-header">
+    <div>
+      <p class="eyebrow">{{ card.captured_role }} cohort member</p>
+      <a href="{% url 'stock-detail' card.analysis.listing_id %}">
+        <h3>{{ card.listing.ticker }}</h3>
+      </a>
+      <p>{{ card.listing.security.company.name }} · {{ card.listing.exchange_mic }}</p>
+    </div>
+    {% if card.suggestion %}
+      <span class="recommendation recommendation-{{ card.suggestion }}">{{ card.suggestion|upper }}</span>
+    {% else %}
+      <span class="badge">Suggestion unavailable</span>
+    {% endif %}
+  </header>
+
+  <div class="research-summary">
+    <div>
+      <small>Raw direction</small>
+      <strong>{{ card.direction|display_label }}</strong>
+    </div>
+    <div>
+      <small>Decision horizon</small>
+      <strong>{{ card.decision_horizon_sessions }} sessions</strong>
+    </div>
+    <div>
+      <small>Reference close</small>
+      <strong>{{ card.analysis.current_price|price }} USD</strong>
+      <span>{{ card.analysis.run.target_date }}</span>
+    </div>
+    <div>
+      <small>Relative volatility</small>
+      <strong>{{ card.relative_volatility_label|display_label }}</strong>
+      <span>{% if card.relative_volatility != None %}{{ card.relative_volatility|floatformat:2 }}× SPY{% else %}Unavailable{% endif %}</span>
+    </div>
+  </div>
+
+  {% if card.target_under_10 %}
+    <div class="speculative-note">
+      <strong>Speculative watch · 0% new allocation.</strong>
+      The price-only research remains visible, but this listing cannot be
+      promoted to BUY, highlighted, or added to a new sample basket.
+    </div>
+  {% elif card.current_promotion_eligible %}
+    <p class="promotion-note">
+      Current display qualification passed using an independently bound
+      {{ card.current_price|price }} USD close for {{ card.current_price_date }}.
+    </p>
+  {% endif %}
+
+  <div class="projection-grid" aria-label="{{ card.listing.ticker }} four-horizon projections">
+    {% for projection in card.projections %}
+      <section class="projection-card">
+        <h4>{{ projection.label }}</h4>
+        <small>{{ projection.sessions }} sessions · p20 / p50 / p80</small>
+        {% if projection.available %}
+          <dl>
+            <div>
+              <dt>Lower (p20)</dt>
+              <dd>{{ projection.lower_return|percentage }} · {{ projection.lower_price|price }} USD</dd>
+            </div>
+            <div>
+              <dt>Median (p50)</dt>
+              <dd>{{ projection.median_return|percentage }} · {{ projection.median_price|price }} USD</dd>
+            </div>
+            <div>
+              <dt>Upper (p80)</dt>
+              <dd>{{ projection.upper_return|percentage }} · {{ projection.upper_price|price }} USD</dd>
+            </div>
+          </dl>
+        {% else %}
+          <p>Projection withheld.</p>
+          <small>{{ projection.insufficiency_reason|display_label }}</small>
+        {% endif %}
+      </section>
+    {% endfor %}
+  </div>
+
+  <details>
+    <summary>Risk, source, and restrictions</summary>
+    <dl class="product-detail-list">
+      <div><dt>Maximum 252-session drawdown</dt><dd>{{ card.maximum_drawdown|percentage }}</dd></div>
+      <div><dt>Annualized volatility</dt><dd>{{ card.annualized_volatility|percentage }}</dd></div>
+      <div><dt>20-session mean dollar turnover</dt><dd>{% if card.average_dollar_turnover_20d != None %}${{ card.average_dollar_turnover_20d|floatformat:"0g" }}{% else %}Unavailable{% endif %}</dd></div>
+      <div><dt>Source coverage</dt><dd>{{ card.source_period_start }} through {{ card.source_period_end }}</dd></div>
+      <div><dt>Evidence</dt><dd>{{ card.decision_prediction.evidence_grade|display_label }} · {{ card.decision_prediction.price_provider|display_label }}</dd></div>
+    </dl>
+    {% if card.blocking_reasons %}
+      <p><strong>Suggestion restrictions</strong></p>
+      <ul>
+        {% for reason in card.blocking_reasons %}<li>{{ reason|display_label }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if card.risk_insufficiency_reasons %}
+      <p><strong>Unavailable risk inputs</strong></p>
+      <ul>
+        {% for reason in card.risk_insufficiency_reasons %}<li>{{ reason|display_label }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  </details>
+</article>

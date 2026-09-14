@@ -134,6 +134,59 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       diversity, fallback level, shrinkage weight, and comparison with the
       unconditional and SPY-relative baselines.
 
+## Prospective price research product
+
+- [ ] `research-product-v1` keeps the six-month momentum decision distinct
+      from the four FHS advisory projections. Stable method identity and
+      unique immutable issuance/reissue identity are not interchangeable;
+      both six-month rows and valid same-target reissues remain representable.
+- [ ] Nullable score/confidence/recommendation permissions are method-gated
+      across model validation and database protection. Legacy rows retain
+      their original contracts; null never becomes a fabricated zero.
+- [ ] Stock and benchmark skipped-month momentum use identical session
+      endpoints. Required common-session history is complete, with no
+      interpolation or unreported gaps.
+- [ ] Variance indexing, innovation centering/rescaling and future variance
+      recursion match the frozen operator. Return quantiles come from
+      cumulative return paths, not variance innovations or summed simple
+      returns. Linear p20/p80 represents 60% model mass, not calibrated
+      real-world coverage; the median is not the mean or a stop-loss.
+- [ ] Drift continuation, variance assumptions, residual sampling and the
+      same-shock zero-drift sensitivity are explicit. Simulated path counts
+      do not increase independent empirical support or unlock probability.
+- [ ] Seed identity, complete input/calendar hashes and declared numeric
+      precision reproduce the output. Whole-triplet numerical failures
+      remain explicit rather than clipped into plausible values.
+- [ ] The comparison protocol is frozen before real holdout evaluation.
+      Current-universe/current-vintage reconstruction, cohort counts,
+      insufficient maturity and baseline failures remain visible; none is
+      represented as observed historical skill.
+- [ ] Paired comparisons use identical listing/anchor/maturity support within
+      each horizon/partition and equal target-cohort means. Width and inclusion
+      do not independently imply better forecasts; MAE means mean absolute
+      error of the median forecast.
+- [ ] Registered studies calculate the full selected cohort rather than trust
+      caller-authored metrics. Source and execution revisions, report
+      generation and actual registration availability remain distinct;
+      chronology rejects future/pre-source output. Provider research-grade
+      sources remain valid for explicitly retrospective evidence.
+- [ ] Compatible volume is proven separately; split-adjusted price provenance
+      alone cannot unlock a dollar-liquidity BUY gate.
+- [ ] A valid momentum decision's null price triplet is not treated as an
+      all-null advisory. Method-specific BUY/AVOID benchmark comparisons
+      and HOLD/unavailable null success do not change legacy evaluation.
+- [ ] Owner-approved saved-name intent is captured before provider work;
+      authorized qualifying history is reused before credentials/quota.
+      Qualified names reach actual immutable research membership and output.
+      Pending candidates are not counted as successfully analyzed.
+- [ ] HTTP readers retain independent manifest, source identity and physical
+      integrity checks without Monte Carlo replay. Legacy numeric consumers
+      reject unsupported prospective methods instead of using null as zero
+      or silently selecting a stale old run.
+- [ ] Actual operational coverage uses the declared fixed denominator and
+      exact target records/assets, not fixture success or a narrowed sample.
+      The default serving and scheduled paths use the reviewed product.
+
 ## SEC fact normalization and long forecasts
 
 - [ ] Official symbol/exchange/CIK mapping, submissions history (including
@@ -192,8 +245,10 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       reason to raise score/confidence; affordability bands remain outside
       research arithmetic.
 - [ ] A split-equivalent transformation (`price * k`, `volume / k`) preserves
-      every prospective normalized momentum/liquidity factor, score,
-      recommendation, and eligibility decision.
+      normalized momentum and compatible dollar liquidity. Frozen methods
+      retain score/recommendation invariance. The prospective price product
+      also preserves raw signal, relative volatility and return projections;
+      its disclosed affordability restriction is evaluated separately.
 - [ ] MACD-like price-difference indicators are normalized by a compatible
       positive price basis before cross-security scoring.
 - [ ] Liquidity used in scoring or BUY gates is dollar-denominated from
@@ -206,7 +261,9 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       not pooled across materially different versions.
 - [ ] Current USD price bands use the latest valid persisted close, display
       its session date, and never enter score, confidence, valuation, or
-      recommendation arithmetic.
+      raw research-signal arithmetic. A separately reviewed prospective
+      affordability gate may suppress BUY/promotion but must not relabel the
+      underlying signal or claim price-derived alpha.
 - [ ] Under $10 is labeled as a speculative watchlist with a 0%
       new-allocation cap; it is excluded from new opportunity highlights and
       sample construction without removing existing holdings or rewriting
@@ -216,8 +273,9 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       close at the run target. Later mutable closes cannot change archive and
       rebuild composition, and missing current USD state fails closed for
       promotion.
-- [ ] Under-$10 long-horizon output says `Forecast unavailable` and separates
-      released reusable foundations from unreleased activation controls.
+- [ ] Legacy Under-$10 fundamental/opportunity output says
+      `Forecast unavailable` and separates released reusable foundations
+      from unreleased activation controls.
       Point-in-time SEC adverse-versus-missing behavior, long-v2
       diluted-share/per-share continuity assessment, and the deterministic
       3y/5y engine are foundations only, not candidate approvals. Dedicated
@@ -226,6 +284,11 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       allocation remains 0%, every activation gate remains false, and joint
       review plus candidate-specific eligibility remain required. A reviewed
       verified split/reverse-split source remains unreleased.
+- [ ] A separately reviewed price-only product may show qualified Under-$10
+      conditional price projections with their own history/source evidence
+      and assumptions. This is not fundamental valuation, investment
+      activation, or satisfaction of corporate-action/solvency/dilution gates;
+      new allocation remains zero and BUY promotion stays blocked.
 
 ## Tracked contributions and allocation plans
 
