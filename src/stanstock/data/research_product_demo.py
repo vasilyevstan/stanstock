@@ -39,6 +39,7 @@ from stanstock.research.price_product_config import (
     default_price_product_config_path,
     load_price_product_config,
 )
+from stanstock.research.product_frequency_evidence import register_product_frequencies
 from stanstock.research.product_pipeline import select_product_source
 from stanstock.research.service import analyze_snapshot
 
@@ -86,6 +87,7 @@ def execute_demo_product_refresh(
         if intake is not None:
             completed = _completed_product_run(intake, store=store)
             if completed is not None:
+                register_product_frequencies(run=completed, store=store)
                 return JobExecutionResult(details=_details(intake, completed))
         listings = tuple(_listing(spec) for spec in DEMO_STOCKS)
         if intake is None:
@@ -184,6 +186,7 @@ def execute_demo_product_refresh(
             config_path=default_price_product_config_path(),
             store=store,
         )
+        register_product_frequencies(run=results[0].run, store=store)
         return JobExecutionResult(details=_details(intake, results[0].run))
 
     # All historical targets share the same immutable synthetic source files.

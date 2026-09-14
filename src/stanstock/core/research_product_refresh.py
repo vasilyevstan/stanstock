@@ -75,6 +75,11 @@ from stanstock.research.price_product_config import (
     PRODUCT_EFFECTIVE_CONFIG_HASH,
     PRODUCT_VERSION,
 )
+from stanstock.research.product_frequency_evidence import (
+    FREQUENCY_EVIDENCE_KIND,
+    _register_product_frequencies,
+    _validate_registered_asset,
+)
 from stanstock.research.product_pipeline import (
     CALCULATION_ARTIFACT_KIND,
     verify_price_product_output,
@@ -90,6 +95,7 @@ REGION = "us"
 MARKET_STAGE = "market"
 EVALUATION_STAGE = "evaluation"
 PORTFOLIO_STAGE = "portfolio_snapshots"
+FREQUENCY_STAGE = "frequencies"
 STAGE_NAMES = frozenset({MARKET_STAGE, EVALUATION_STAGE, PORTFOLIO_STAGE})
 SATISFIED_DOWNSTREAM_STATUSES = frozenset({JobRun.Status.SUCCESS, JobRun.Status.SKIPPED})
 EXPECTED_STAGE_ERRORS = (OSError, ProviderError, ValueError)
@@ -178,6 +184,12 @@ def execute_scheduled_research_refresh(
             replayed_prior.append(
                 replay_recorded_research_product_refresh(prior, store=asset_store)
             )
+            _verify_recorded_frequency_stage(
+                parent=prior,
+                target_date=target_date,
+                owner_id=identity["owner_id"],
+                store=asset_store,
+            )
         return None
 
     def parent_task(parent: JobRun) -> JobExecutionResult:
@@ -233,6 +245,7 @@ def execute_scheduled_research_refresh(
                 store=asset_store,
                 core_config_path=config_path,
                 enforce_rate_limit=enforce_rate_limit,
+                derive_frequencies=False,
             ),
         )
         if market is None or market.status not in {
@@ -242,6 +255,15 @@ def execute_scheduled_research_refresh(
             raise ValueError("Scheduled research market stage produced no complete output")
 
         downstream_failures: list[str] = []
+        frequency = _run_frequency_stage(
+            parent=parent,
+            details=details,
+            target_date=target_date,
+            owner_id=identity["owner_id"],
+            store=asset_store,
+        )
+        if frequency.status not in SATISFIED_DOWNSTREAM_STATUSES:
+            downstream_failures.append(FREQUENCY_STAGE)
         evaluation = _run_stage(
             parent=parent,
             details=details,
@@ -922,6 +944,170 @@ def _resolve_product_stage(
             f"The research parent {stage_name!r} skip does not resolve to a success",
         )
     return referenced
+
+
+def _run_frequency_stage(
+    *,
+    parent: JobRun,
+    details: dict[str, Any],
+    target_date: date,
+    owner_id: str,
+    store: AssetStore,
+) -> JobRun:
+    """Execute a recoverable derived-only child without altering the frozen stage map."""
+
+    job_name = "research_product_frequency_v1"
+
+    def task(_child: JobRun) -> JobExecutionResult:
+        completed = _completed_scheduled_run(
+            target_date=target_date,
+            owner_id=owner_id,
+            store=store,
+        )
+        if completed is None:
+            raise ValueError("Frequency stage has no complete scheduled source run")
+        asset = _register_product_frequencies(
+            run=completed,
+            store=store,
+            derivation_source="scheduled_stage",
+        )
+        return JobExecutionResult(
+            details={
+                "analysis_run_id": str(completed.id),
+                "frequency_asset_id": str(asset.id),
+                "frequency_asset_sha256": asset.sha256,
+            }
+        )
+
+    try:
+        child = execute_target_job(
+            job_name=job_name,
+            region=REGION,
+            target_date=target_date,
+            task=task,
+        )
+    except EXPECTED_STAGE_ERRORS:
+        failed = (
+            JobRun.objects.filter(job_name=job_name, region=REGION, target_date=target_date)
+            .order_by("-attempt")
+            .first()
+        )
+        details[FREQUENCY_STAGE] = {
+            "status": JobRun.Status.FAILED if failed is None else failed.status,
+            "job_run_id": None if failed is None else str(failed.id),
+        }
+        _persist_parent_details(parent, details)
+        return failed or JobRun(
+            job_name=job_name,
+            region=REGION,
+            target_date=target_date,
+            status=JobRun.Status.FAILED,
+        )
+    success = child
+    if child.status == JobRun.Status.SKIPPED:
+        reference = child.details.get("successful_run_id")
+        success = JobRun.objects.get(
+            pk=reference,
+            job_name=job_name,
+            region=REGION,
+            target_date=target_date,
+            status=JobRun.Status.SUCCESS,
+        )
+    details[FREQUENCY_STAGE] = {
+        "status": child.status,
+        "job_run_id": str(child.id),
+        "analysis_run_id": success.details.get("analysis_run_id"),
+        "frequency_asset_id": success.details.get("frequency_asset_id"),
+        "frequency_asset_sha256": success.details.get("frequency_asset_sha256"),
+    }
+    details["frequency_verification"] = _verify_frequency_stage(
+        child=success,
+        target_date=target_date,
+        owner_id=owner_id,
+        store=store,
+    )
+    _persist_parent_details(parent, details)
+    return child
+
+
+def _verify_recorded_frequency_stage(
+    *,
+    parent: JobRun,
+    target_date: date,
+    owner_id: str,
+    store: AssetStore,
+) -> None:
+    """Recheck a new parent's optional sibling evidence before skip recovery.
+
+    Frozen parents predate the sibling stage and intentionally have no such
+    field; their canonical replay remains byte-for-byte governed by the
+    original verifier.  Once the field exists, however, a parent cannot use
+    the completed-parent shortcut without independently revalidating it.
+    """
+
+    recorded = parent.details.get("frequency_verification")
+    if recorded is None:
+        return
+    if not isinstance(recorded, dict):
+        raise ValueError("Scheduled frequency verification block is invalid")
+    try:
+        child_id = UUID(str(recorded["child_job_run_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Scheduled frequency verification block is invalid") from exc
+    child = JobRun.objects.filter(pk=child_id).first()
+    if child is None:
+        raise ValueError("Scheduled frequency verification child is unavailable")
+    actual = _verify_frequency_stage(
+        child=child,
+        target_date=target_date,
+        owner_id=owner_id,
+        store=store,
+    )
+    if actual != recorded:
+        raise ValueError("Scheduled frequency verification block does not match its child")
+
+
+def _verify_frequency_stage(
+    *,
+    child: JobRun,
+    target_date: date,
+    owner_id: str,
+    store: AssetStore,
+) -> dict[str, object]:
+    """Verify the sibling evidence without extending frozen parent stages."""
+
+    if (
+        child.job_name != "research_product_frequency_v1"
+        or child.region != REGION
+        or child.target_date != target_date
+        or child.status != JobRun.Status.SUCCESS
+        or not isinstance(child.details, dict)
+    ):
+        raise ValueError("Scheduled frequency child identity is invalid")
+    try:
+        run_id = UUID(str(child.details["analysis_run_id"]))
+        asset_id = UUID(str(child.details["frequency_asset_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Scheduled frequency child details are invalid") from exc
+    source = _completed_scheduled_run(target_date=target_date, owner_id=owner_id, store=store)
+    run = AnalysisRun.objects.filter(pk=run_id).first()
+    asset = DataAsset.objects.filter(pk=asset_id).first()
+    if (
+        source is None
+        or run != source
+        or asset is None
+        or asset.kind != FREQUENCY_EVIDENCE_KIND
+        or asset.sha256 != child.details.get("frequency_asset_sha256")
+    ):
+        raise ValueError("Scheduled frequency child does not bind its exact source evidence")
+    _validate_registered_asset(asset, store=store, expected_run=run, verify_source=True)
+    return {
+        "status": "verified",
+        "child_job_run_id": str(child.id),
+        "analysis_run_id": str(run.id),
+        "frequency_asset_id": str(asset.id),
+        "frequency_asset_sha256": asset.sha256,
+    }
 
 
 def _run_stage(

@@ -21,6 +21,10 @@ predictions. The 6m decision and 6m advisory row are distinct.
 `probability_positive` are unavailable for this product. Missing values stay
 null with reasons; they are not zero.
 
+The probability-first presentation adds a separate immutable report of
+fixed-model outcome shares. It does not populate those original probability
+fields, change the five-row output, or establish calibration.
+
 ## Shared inputs
 
 The active operators require an exact common XNYS-session window:
@@ -92,6 +96,23 @@ are in [Price research](price-research.md#filtered-historical-simulation).
 Historical drift extrapolation and the same-shock zero-drift sensitivity are
 shown separately. Their difference exposes drift dependence; it is not a
 third model or proof that either path is likely.
+
+### Probability-first presentation
+
+The same terminal paths are counted in three exhaustive ranges: **Loss**
+(`R < 0`), **Flat to +20%** (`0 <= R <= 0.20`), and **Above +20%**
+(`R > 0.20`). Displayed percentages are shares of model simulations, not
+validated real-world odds. Median return remains visible, with the
+p20/p50/p80 price range and exact counts in details.
+
+The nested below-minus-20% event concerns the ending return, not an interim
+drawdown. All bands use cumulative price returns over the selected horizon;
+none is annualized. A later-derived report has its own availability timestamp,
+cannot enter an earlier as-of read, and cannot inherit prediction on-time
+status. Missing summary evidence does not hide an otherwise valid projection.
+
+See [Model-estimated probabilities](price-research.md#model-estimated-probabilities)
+for the exact event, rounding, provenance, and nonclaim contract.
 
 ## Volume provenance
 

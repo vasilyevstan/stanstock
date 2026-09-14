@@ -14,6 +14,7 @@ from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.http import Http404, HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
@@ -32,6 +33,7 @@ from stanstock.research.product_reader import (
     ProductAdmission,
     ProductCard,
     ProductHistoryRead,
+    ProductProjection,
     ProductRead,
     ProductVerificationSession,
     read_research_product,
@@ -250,10 +252,13 @@ def stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpResponse:
                 status=503,
             )
         raise Http404("Stock is not in the verified active research cohort")
+    selected_horizon = request.GET.get("horizon", "6m")
+    if selected_horizon not in dict(PRODUCT_HORIZON_CHOICES):
+        selected_horizon = "6m"
     return render(
         request,
         "web/product_stock_detail.html",
-        {"product": product, "card": card},
+        {"product": product, "card": card, "selected_horizon": selected_horizon},
     )
 
 
@@ -293,11 +298,15 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
         return legacy_views.prediction_history_page(request)
     history = _read_history(request)
     product = history.current
+    selected_horizon, horizon_error = _selected_product_horizon(request)
     issuance_cards = [card for cohort in history.cohorts for card in cohort.cards]
     issuance_page = Paginator(issuance_cards, _OPPORTUNITIES_PAGE_SIZE).get_page(
         request.GET.get("page")
     )
-    history_entries = [_history_entry(card) for card in issuance_page.object_list]
+    history_entries = [
+        _history_entry(card=card, selected_horizon=selected_horizon)
+        for card in issuance_page.object_list
+    ]
     return render(
         request,
         "web/product_history.html",
@@ -310,11 +319,24 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
             # compact issuance adapter below.
             "decision_cards": list(issuance_page.object_list),
             "history_entries": history_entries,
+            "selected_horizon": selected_horizon,
+            "selected_horizon_label": dict(PRODUCT_HORIZON_CHOICES)[selected_horizon],
+            "horizon_links": tuple(
+                {
+                    "value": value,
+                    "label": label,
+                    "active": selected_horizon == value,
+                    "query": f"horizon={value}",
+                }
+                for value, label in PRODUCT_HORIZON_CHOICES
+            ),
+            "horizon_error": horizon_error,
+            "pagination_query": f"horizon={selected_horizon}",
         },
     )
 
 
-def _history_entry(card: ProductCard) -> dict[str, object]:
+def _history_entry(*, card: ProductCard, selected_horizon: str) -> dict[str, object]:
     advisory_by_horizon = {
         prediction.horizon: prediction for prediction in card.advisory_predictions
     }
@@ -326,6 +348,7 @@ def _history_entry(card: ProductCard) -> dict[str, object]:
             {
                 "prediction": prediction,
                 "projection": projection,
+                "frequency_status": projection.frequency_status,
                 "non_evaluable": non_evaluable,
                 "outcome_label": (
                     "Not evaluable — forecast withheld"
@@ -334,10 +357,16 @@ def _history_entry(card: ProductCard) -> dict[str, object]:
                 ),
             }
         )
+    selected_advisory = next(
+        entry
+        for entry in advisory_entries
+        if cast(ProductProjection, entry["projection"]).horizon == selected_horizon
+    )
     return {
         "card": card,
         "decision_outcome_label": _outcome_label(card.decision_prediction),
         "advisories": advisory_entries,
+        "selected_advisory": selected_advisory,
     }
 
 
@@ -590,6 +619,7 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
         if not _has_product_output():
             return legacy_views.my_list_page(request)
     owner = cast(User, request.user)
+    selected_horizon, horizon_error = _selected_product_horizon(request)
     form = TrackedSymbolForm()
     invalid = False
     if request.method == "POST":
@@ -613,7 +643,7 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
                     )
                 else:
                     messages.info(request, f"{preference.symbol} is already in My list.")
-                return redirect("my-list")
+                return redirect(f"{reverse('my-list')}?horizon={selected_horizon}")
     product = _read(request)
     admission_by_symbol = {item.symbol: item for item in product.admissions}
     card_by_symbol = {card.listing.provider_symbol: card for card in product.cards}
@@ -623,6 +653,7 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
             admission=admission_by_symbol.get(preference.symbol),
             card=card_by_symbol.get(preference.symbol),
             product=product,
+            selected_horizon=selected_horizon,
         )
         for preference in TrackedSymbol.objects.filter(owner=owner).order_by("symbol", "created_at")
     ]
@@ -633,6 +664,18 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
             "product": product,
             "form": form,
             "items": items,
+            "selected_horizon": selected_horizon,
+            "selected_horizon_label": dict(PRODUCT_HORIZON_CHOICES)[selected_horizon],
+            "horizon_links": tuple(
+                {
+                    "value": value,
+                    "label": label,
+                    "active": selected_horizon == value,
+                    "query": f"horizon={value}",
+                }
+                for value, label in PRODUCT_HORIZON_CHOICES
+            ),
+            "horizon_error": horizon_error,
         },
         status=400 if invalid else 200,
     )
@@ -644,6 +687,7 @@ def _my_list_item(
     admission: ProductAdmission | None,
     card: ProductCard | None,
     product: ProductRead,
+    selected_horizon: str = "6m",
 ) -> dict[str, object]:
     if not product.available:
         state = "Source failed" if product.status == "integrity_failed" else "Source unavailable"
@@ -660,13 +704,28 @@ def _my_list_item(
     else:
         state = "Research unavailable"
         state_detail = admission.reason_code
+    projection = (
+        next((item for item in card.projections if item.horizon == selected_horizon), None)
+        if card is not None
+        else None
+    )
     return {
         "preference": preference,
         "admission": admission,
         "card": card,
         "state": state,
         "state_detail": state_detail,
+        "projection": projection,
     }
+
+
+def _selected_product_horizon(request: HttpRequest) -> tuple[str, str]:
+    """Accept only the frozen product horizons without silently forwarding one."""
+
+    selected = request.GET.get("horizon") or request.POST.get("horizon", "6m")
+    if selected in dict(PRODUCT_HORIZON_CHOICES):
+        return selected, ""
+    return "6m", "Choose one of the available product horizons."
 
 
 def _has_product_output() -> bool:

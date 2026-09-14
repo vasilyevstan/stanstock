@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -23,10 +24,12 @@ def main() -> None:
 
     from django.contrib.auth import get_user_model
     from django.core.management import call_command
-    from django.db import connections
+    from django.db import OperationalError, connections
 
+    from stanstock.data import research_product_jobs
     from stanstock.data.models import DataAsset, Listing
     from stanstock.research.models import AnalysisRun, Prediction
+    from stanstock.research.product_frequency_evidence import register_product_frequencies
     from test_research_product_jobs import _run, _series, make_product_environment
 
     call_command("migrate", verbosity=0)
@@ -36,6 +39,12 @@ def main() -> None:
         resolve.side_effect = None
         resolve.return_value = "synthetic-test-token"
         fetch.side_effect = lambda symbol, **_kwargs: _series(symbol)
+        original_frequency_writer = research_product_jobs.register_product_frequencies
+        monkeypatch.setattr(
+            research_product_jobs,
+            "register_product_frequencies",
+            lambda **_kw: None,
+        )
 
         def execute(key: str) -> str:
             try:
@@ -47,6 +56,33 @@ def main() -> None:
             statuses = list(executor.map(execute, ("first", "second")))
 
         assert statuses == ["success", "success"]
+        monkeypatch.setattr(
+            research_product_jobs,
+            "register_product_frequencies",
+            original_frequency_writer,
+        )
+        source_run = AnalysisRun.objects.order_by("generated_at").first()
+        assert source_run is not None
+
+        def derive_frequency() -> str:
+            try:
+                return str(register_product_frequencies(run=source_run, store=_store).id)
+            except OperationalError:
+                # SQLite may reject the loser while its winner has not yet
+                # committed. A bounded explicit retry must recover it.
+                time.sleep(0.1)
+                return str(register_product_frequencies(run=source_run, store=_store).id)
+            finally:
+                connections["default"].close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            frequency_ids = list(executor.map(lambda _value: derive_frequency(), (1, 2)))
+        frequency_assets = DataAsset.objects.filter(
+            kind="research_product_frequency_evidence",
+            subject=f"research-product-v1:frequencies:{source_run.id}",
+        )
+        assert frequency_assets.count() == 1
+        assert len(set(frequency_ids)) == 1
         assert DataAsset.objects.filter(kind="price_history", subject="CHEAP").count() == 1
         resolve.assert_called_once()
         fetch.assert_called_once()
@@ -59,6 +95,7 @@ def main() -> None:
                         provider_symbol__in=["AAPL", "MSFT", "CHEAP"]
                     ).count(),
                     "history_requests": fetch.call_count,
+                    "frequency_assets": frequency_assets.count(),
                 }
             )
         )

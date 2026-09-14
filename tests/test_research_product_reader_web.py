@@ -310,9 +310,9 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     assert "CHEAP" in content
     assert "Under $10 watch" in content
     assert "0% new allocation" in content
-    assert "Lower p20" in content
-    assert "Median p50" in content
-    assert "Upper p80" in content
+    assert "Median return" in content
+    assert all(label in content for label in ("Loss", "Flat to +20%", "Above +20%"))
+    assert "Shares of model simulations; not validated real-world odds." in content
     assert all(label in content for label in ("6 months", "12 months", "3 years", "5 years"))
     assert "/100" not in content
     assert "Heuristic evidence score" not in content
@@ -531,6 +531,56 @@ def test_status_history_performance_and_my_list_keep_boundaries(live_product, cl
     assert b"next scheduled refresh" in my_list.content
 
 
+def test_native_selected_horizon_flows_from_search_to_detail_my_list_and_history(
+    live_product, client
+):
+    """Native registered evidence, rather than a DTO mock, drives all links."""
+
+    owner, _store, run = live_product
+    client.force_login(owner)
+    cheap = StockAnalysis.objects.get(run=run, listing__provider_symbol="CHEAP")
+
+    opportunities = client.get(
+        reverse("opportunities"),
+        {"q": "CHEAP", "horizon": "3y", "price_band": "under_10"},
+    )
+    assert opportunities.status_code == 200
+    assert b"3 years projections" in opportunities.content
+    detail_url = f"{reverse('stock-detail', args=[cheap.listing_id])}?horizon=3y"
+    assert detail_url.encode() in opportunities.content
+
+    detail = client.get(detail_url)
+    assert detail.status_code == 200
+    detail_content = detail.content.decode()
+    assert 'class="projection-card is-selected-horizon"' in detail_content
+    assert detail_content.index("Median return:") < detail_content.index("Lower (p20)")
+    assert "Loss (R &lt; 0)" in detail_content
+    assert "Flat to +20% (0 ≤ R ≤ +20%)" in detail_content
+    assert "Above +20% (R &gt; +20%)" in detail_content
+    assert "Ranges, exact path counts, and sensitivity" in detail_content
+
+    my_list = client.get(reverse("my-list"), {"horizon": "3y"})
+    assert my_list.status_code == 200
+    my_list_content = my_list.content.decode()
+    assert "3 years median:" in my_list_content
+    assert detail_url in my_list_content
+    assert "Flat to +20% (0% to +20%)" in my_list_content
+    invalid_my_list = client.get(reverse("my-list"), {"horizon": "tomorrow"})
+    assert invalid_my_list.status_code == 200
+    assert b"Choose one of the available product horizons." in invalid_my_list.content
+
+    history = client.get(reverse("predictions"), {"horizon": "3y"})
+    assert history.status_code == 200
+    history_content = history.content.decode()
+    assert "3 years model-estimated probabilities" in history_content
+    assert detail_url in history_content
+    assert "Median return:" in history_content
+    assert "Flat to +20% (0 ≤ R ≤ +20%)" in history_content
+    invalid_history = client.get(reverse("predictions"), {"horizon": "tomorrow"})
+    assert invalid_history.status_code == 200
+    assert b"Choose one of the available product horizons." in invalid_history.content
+
+
 def test_verified_history_and_performance_span_runs_without_recounting_reissue(
     observed_product_history,
     client,
@@ -607,11 +657,16 @@ def test_my_list_add_remove_actions_remain_owner_scoped_and_csrf_posted(live_pro
     client.force_login(owner)
     preference = TrackedSymbol.objects.get(owner=owner, symbol="CHEAP")
 
-    removed = client.post(reverse("tracked-symbol-delete", args=[preference.id]))
-    added = client.post(reverse("my-list"), {"symbol": "CHEAP"})
+    removed = client.post(
+        reverse("tracked-symbol-delete", args=[preference.id]),
+        {"horizon": "5y"},
+    )
+    added = client.post(reverse("my-list"), {"symbol": "CHEAP", "horizon": "5y"})
 
     assert removed.status_code == 302
     assert added.status_code == 302
+    assert removed.url == f"{reverse('my-list')}?horizon=5y"
+    assert added.url == f"{reverse('my-list')}?horizon=5y"
     assert TrackedSymbol.objects.filter(owner=owner, symbol="CHEAP").count() == 1
 
 
@@ -698,7 +753,7 @@ def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
     assert regular.status_code == 200
     assert regular.content.count(b'class="compact-opportunity"') == 20
     assert regular.context["opportunity_page"].paginator.count == 105
-    assert regular.content.count(b"Lower p20") == 20
+    assert regular.content.count(b"Loss") == 20
     assert b'href="/opportunities?price_band=under_10"' in regular.content
     assert b'aria-current="page">Opportunities</a>' in regular.content
     assert b"<summary>More</summary>" in regular.content
@@ -992,8 +1047,13 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
 
     monkeypatch.setattr(product_views, "_read", read_presentation)
     response = client.get(reverse("opportunities"))
+    searched_response = client.get(
+        reverse("opportunities"),
+        {"q": "CHEAP", "horizon": "12m", "price_band": "under_10"},
+    )
     market_response = client.get(reverse("market"))
     assert response.status_code == 200
+    assert searched_response.status_code == 200
     assert market_response.status_code == 200
 
     css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "stanstock.css"
@@ -1006,6 +1066,14 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.add_style_tag(path=str(css_path))
                 assert page.locator(".compact-opportunity").count() == 20
                 assert page.locator(".compact-projection").count() == 20
+                assert all(
+                    projection.frequency_status == "available"
+                    for card in presentation.cards
+                    for projection in card.projections
+                )
+                assert page.locator(".probability-cell").first.inner_text().startswith("Loss")
+                assert "Flat to +20%" in page.locator(".compact-projection").first.inner_text()
+                assert "Above +20%" in page.locator(".compact-projection").first.inner_text()
                 assert page.evaluate("document.documentElement.scrollWidth") <= page.evaluate(
                     "document.documentElement.clientWidth"
                 )
@@ -1116,6 +1184,22 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.locator(".advanced-filters summary").focus()
                 page.keyboard.press("Enter")
                 assert page.locator(".advanced-filters").get_attribute("open") == ""
+
+                # This uses the real GET submission adapter and registered
+                # frequencies, then checks the rendered selected-horizon
+                # result in Chromium rather than only a context DTO.
+                page.set_content(searched_response.content.decode())
+                page.add_style_tag(path=str(css_path))
+                assert (
+                    page.locator("#opportunity-list-title").inner_text() == "12 months projections"
+                )
+                assert page.locator('input[name="horizon"]').input_value() == "12m"
+                assert page.locator('input[name="price_band"]').input_value() == "under_10"
+                assert (
+                    page.locator(".compact-opportunity a")
+                    .first.get_attribute("href")
+                    .endswith("?horizon=12m")
+                )
             finally:
                 page.close()
 

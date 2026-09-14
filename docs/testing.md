@@ -65,6 +65,43 @@ Release validation must cover:
 - no partial output served after failure; and
 - no provider call from ordinary authenticated GET.
 
+## Model-outcome summary coverage
+
+The immutable FHS prediction contract stays unchanged. A separate report must
+derive internally from the same deterministic terminal arrays, rather than
+trust supplied counts or infer probabilities from quantiles.
+
+Cover:
+
+- complete Loss / Flat to +20% / Above +20% partition, boundary ties, and
+  nested terminal loss below -20%;
+- unchanged 8,192-path denominator, including nonfinite/withheld failure;
+- deterministic counts and same-shock zero-drift sensitivity;
+- group rounding, symbolic small/extreme labels, exact counts, unsigned
+  probability shares versus signed returns, and no real-world guarantees;
+- full canonical source/listing/horizon/input/seed/projection identity;
+- same-quantile/different-count forgery detected by offline re-derivation;
+- registration accepting only source identity, not caller-authored statistics;
+- actual publication time, earlier as-of invisibility, future-clock refusal,
+  and no inherited prediction on-time status;
+- idempotent recovery before replay, one committed report under concurrency,
+  and explicit SQLite contention/recovery distinct from PostgreSQL row locks;
+- byte-identical frozen success and withheld output in base/head reproduction;
+- unchanged historical parent verification and separate new-child evidence;
+- source-complete but summary-missing/failed states and retained median/range;
+- exact-run history binding rather than substituting current probabilities;
+- no simulation, calculation, write, credential resolution, or fetch on GET;
+- one native synthetic issuance-to-report-to-reader-to-rendered-UI chain;
+- selected horizon across Opportunities, Under $10, stock detail and My List;
+  and
+- the existing mobile complete-card, desktop three-row, readable-navigation,
+  and overflow limits on both local and Linux browser environments.
+
+Numerical path-doubling comparisons describe precision only. They do not
+establish calibration or add independent market observations, and an adverse
+result is recorded rather than tuned away. Numeric calibration metrics are
+outside this change; a future study requires a separately reviewed protocol.
+
 ## Reader and UI coverage
 
 The native end-to-end contract must persist real synthetic evidence, call the

@@ -44,6 +44,16 @@ from stanstock.research.price_product_config import (
     PRODUCT_EFFECTIVE_CONFIG_HASH,
     PRODUCT_VERSION,
 )
+from stanstock.research.price_product_frequencies import (
+    DisplayShare,
+    HorizonFrequencies,
+    display_shares,
+)
+from stanstock.research.product_frequency_evidence import (
+    ProductFrequencyRead,
+    RegisteredFrequency,
+    read_registered_product_frequencies,
+)
 from stanstock.research.product_pipeline import verify_price_product_output
 
 ReaderStatus = Literal[
@@ -87,6 +97,12 @@ class ProductProjection:
     zero_drift_median_return: Decimal | None
     zero_drift_upper_return: Decimal | None
     insufficiency_reason: str
+    frequencies: HorizonFrequencies | None = None
+    frequency_status: str = "absent"
+    frequency_reason: str = ""
+    frequency_derived_at: datetime | None = None
+    frequency_shares: tuple[DisplayShare, ...] = ()
+    zero_drift_frequency_shares: tuple[DisplayShare, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -186,6 +202,7 @@ class ProductCohort:
     provider: str
     evidence_grade: str
     owner_id: str
+    frequency_read: ProductFrequencyRead | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +331,7 @@ def read_research_product(
             candidate,
             store=asset_store,
             verification=ProductVerificationSession(),
+            user=user,
         )
     except RefreshVerificationError as exc:
         return ProductRead(
@@ -411,6 +429,7 @@ def read_research_product_history(
                 candidate,
                 store=asset_store,
                 verification=request_verification,
+                user=user,
             )
             for candidate in candidates
         )
@@ -498,15 +517,23 @@ def _verify_candidate(
     *,
     store: AssetStore,
     verification: ProductVerificationSession,
+    user: ProductUser,
 ) -> ProductCohort:
     verification.verify(run=candidate.run, store=store)
+    frequency_read = read_registered_product_frequencies(
+        user=user,
+        run=candidate.run,
+        decision_time=timezone.now(),
+        store=store,
+    )
     return ProductCohort(
         run=candidate.run,
-        cards=_build_cards(candidate, store=store),
+        cards=_build_cards(candidate, store=store, frequency_read=frequency_read),
         admissions=_build_admissions(candidate),
         provider=str(candidate.intake["source_provider"]),
         evidence_grade=candidate.run.universe_snapshot.grade,
         owner_id=str(candidate.intake["owner_id"]),
+        frequency_read=frequency_read,
     )
 
 
@@ -644,7 +671,12 @@ def _require_current_display_authorization(
     validate_provider_usage(record, owner_id=owner_id)
 
 
-def _build_cards(candidate: _AuthorizedCandidate, *, store: AssetStore) -> tuple[ProductCard, ...]:
+def _build_cards(
+    candidate: _AuthorizedCandidate,
+    *,
+    store: AssetStore,
+    frequency_read: ProductFrequencyRead,
+) -> tuple[ProductCard, ...]:
     analyses = list(
         StockAnalysis.objects.select_related(
             "listing__security__company",
@@ -676,6 +708,7 @@ def _build_cards(candidate: _AuthorizedCandidate, *, store: AssetStore) -> tuple
                 else "captured"
             ),
             store=store,
+            frequency_read=frequency_read,
         )
         for analysis in analyses
     ]
@@ -688,6 +721,7 @@ def _card(
     rows: list[Prediction],
     captured_role: str,
     store: AssetStore,
+    frequency_read: ProductFrequencyRead,
 ) -> ProductCard:
     decision = next(
         row
@@ -709,7 +743,17 @@ def _card(
     projections_raw = forecast.get("projections")
     if not isinstance(projections_raw, list):
         raise ValueError("Product forecast projections are missing")
-    projections = tuple(_projection(_mapping(raw)) for raw in projections_raw)
+    frequencies = {
+        (item.listing_id, item.frequency.horizon): item for item in frequency_read.frequencies
+    }
+    projections = tuple(
+        _projection(
+            _mapping(raw),
+            registered=frequencies.get((analysis.listing_id, str(_mapping(raw)["horizon"]))),
+            frequency_read=frequency_read,
+        )
+        for raw in projections_raw
+    )
     if tuple(item.horizon for item in projections) != ("6m", "12m", "3y", "5y"):
         raise ValueError("Product forecast horizons are invalid")
     source_refs = decision.source_assets
@@ -790,12 +834,30 @@ def _card(
     )
 
 
-def _projection(raw: Mapping[str, object]) -> ProductProjection:
+def _projection(
+    raw: Mapping[str, object],
+    *,
+    registered: RegisteredFrequency | None = None,
+    frequency_read: ProductFrequencyRead | None = None,
+) -> ProductProjection:
     horizon = str(raw["horizon"])
     returns = _optional_mapping(raw.get("ledger_returns"))
     prices = _optional_mapping(raw.get("ledger_prices"))
     sensitivity = _optional_mapping(raw.get("zero_drift_ledger_returns"))
-    return ProductProjection(
+    frequency_shares = (
+        ()
+        if registered is None or registered.frequency.counts is None
+        else display_shares(registered.frequency.counts, path_count=registered.frequency.path_count)
+    )
+    zero_drift_frequency_shares = (
+        ()
+        if registered is None or registered.frequency.zero_drift_counts is None
+        else display_shares(
+            registered.frequency.zero_drift_counts,
+            path_count=registered.frequency.path_count,
+        )
+    )
+    projection = ProductProjection(
         horizon=horizon,
         label=HORIZON_LABELS[horizon],
         sessions=_int_value(raw, "sessions"),
@@ -809,7 +871,30 @@ def _projection(raw: Mapping[str, object]) -> ProductProjection:
         zero_drift_median_return=_triplet_value(sensitivity, "median"),
         zero_drift_upper_return=_triplet_value(sensitivity, "upper"),
         insufficiency_reason=_optional_string(raw.get("insufficiency_reason")) or "",
+        frequencies=None if registered is None else registered.frequency,
+        frequency_status=(frequency_read.status if frequency_read is not None else "absent"),
+        frequency_reason=(frequency_read.verification_code if frequency_read is not None else ""),
+        frequency_derived_at=(frequency_read.derived_at if frequency_read is not None else None),
+        frequency_shares=frequency_shares,
+        zero_drift_frequency_shares=zero_drift_frequency_shares,
     )
+    if registered is not None and registered.ledger_returns != _projection_ledger(projection):
+        raise ValueError(
+            "Frequency evidence projection ledger does not match the source projection"
+        )
+    return projection
+
+
+def _projection_ledger(
+    projection: ProductProjection,
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    if (
+        projection.lower_return is None
+        or projection.median_return is None
+        or projection.upper_return is None
+    ):
+        return None
+    return projection.lower_return, projection.median_return, projection.upper_return
 
 
 def _build_admissions(candidate: _AuthorizedCandidate) -> tuple[ProductAdmission, ...]:

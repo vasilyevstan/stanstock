@@ -56,32 +56,58 @@
       <div class="section-heading">
         <div>
           <p class="eyebrow">Conditional price paths</p>
-          <h2 id="projection-title">Lower / Median / Upper projections</h2>
+          <h2 id="projection-title">Model-estimated probabilities</h2>
         </div>
       </div>
       <p class="muted">
-        p20 / p50 / p80 define the central 60% of fixed-model path mass, not
-        calibrated real-world probability. Median is not a mean or fair value.
+        Shares of model simulations; not validated real-world odds. Median is
+        not a mean or fair value.
       </p>
       <div class="projection-grid projection-grid-detail">
         {% for projection in card.projections %}
-          <article class="projection-card">
+          <article class="projection-card{% if projection.horizon == selected_horizon %} is-selected-horizon{% endif %}">
             <h3>{{ projection.label }}</h3>
             <p>{{ projection.sessions }} sessions</p>
             {% if projection.available %}
-              <dl>
-                <div><dt>Lower (p20)</dt><dd>{{ projection.lower_return|percentage }}<small>{{ projection.lower_price|price }} USD</small></dd></div>
-                <div><dt>Median (p50)</dt><dd>{{ projection.median_return|percentage }}<small>{{ projection.median_price|price }} USD</small></dd></div>
-                <div><dt>Upper (p80)</dt><dd>{{ projection.upper_return|percentage }}<small>{{ projection.upper_price|price }} USD</small></dd></div>
-              </dl>
+              <p><strong>Median return:</strong> {{ projection.median_return|percentage }} <small>{{ projection.median_price|price }} USD at the reference close</small></p>
+              {% if projection.frequency_status == "available" %}
+                <section class="frequency-summary" aria-label="{{ projection.label }} model-estimated probabilities">
+                  <p><strong>Shares of model simulations; not validated real-world odds.</strong></p>
+                  <dl>
+                    {% for share in projection.frequency_shares %}
+                      <div>
+                        <dt>{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20%{% else %}Above +20%{% endif %}</dt>
+                        <dd>{{ share.label }} <small>{{ share.count }} of 8,192 paths</small></dd>
+                      </div>
+                    {% endfor %}
+                  </dl>
+                  {% if projection.frequency_derived_at %}<small>Published {{ projection.frequency_derived_at }}. This does not itself establish an on-time probability claim.</small>{% endif %}
+                </section>
+              {% else %}
+                <p class="field-error"><strong>Model-estimated probabilities unavailable.</strong> {{ projection.frequency_reason|display_label }}</p>
+              {% endif %}
               <details>
-                <summary>Same-shock zero-log-drift sensitivity</summary>
+                <summary>Ranges, exact path counts, and sensitivity</summary>
+                <dl>
+                  <div><dt>Lower (p20)</dt><dd>{{ projection.lower_return|percentage }}<small>{{ projection.lower_price|price }} USD</small></dd></div>
+                  <div><dt>Median (p50)</dt><dd>{{ projection.median_return|percentage }}<small>{{ projection.median_price|price }} USD</small></dd></div>
+                  <div><dt>Upper (p80)</dt><dd>{{ projection.upper_return|percentage }}<small>{{ projection.upper_price|price }} USD</small></dd></div>
+                </dl>
+                {% if projection.frequency_status == "available" %}
+                  <p>These are three exhaustive outcomes from 8,192 paths.</p>
+                  <ul>{% for share in projection.frequency_shares %}<li>{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20% (0 ≤ R ≤ +20%){% else %}Above +20% (R &gt; +20%){% endif %}: {{ share.count }} of 8,192 paths</li>{% endfor %}</ul>
+                  <p>Of which, finish more than 20% down (R &lt; −20%): {{ projection.frequencies.counts.large_loss }} of 8,192 paths.</p>
+                {% endif %}
+                <h4>Same-shock zero-log-drift sensitivity</h4>
                 <dl>
                   <div><dt>Lower</dt><dd>{{ projection.zero_drift_lower_return|percentage }}</dd></div>
                   <div><dt>Median</dt><dd>{{ projection.zero_drift_median_return|percentage }}</dd></div>
                   <div><dt>Upper</dt><dd>{{ projection.zero_drift_upper_return|percentage }}</dd></div>
                 </dl>
                 <small>This subtracts the estimated drift from the same simulated shocks; it is not a separate model.</small>
+                {% if projection.frequency_status == "available" %}
+                  <ul>{% for share in projection.zero_drift_frequency_shares %}<li>{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20%{% else %}Above +20%{% endif %}: {{ share.label }} ({{ share.count }} paths)</li>{% endfor %}</ul>
+                {% endif %}
               </details>
             {% else %}
               <p>Projection withheld: {{ projection.insufficiency_reason|display_label }}.</p>

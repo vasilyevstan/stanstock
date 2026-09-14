@@ -181,6 +181,13 @@ def test_native_profile_ignores_legacy_success_and_replays_exact_registered_outp
     assert Prediction.objects.filter(analysis__run=run).count() == 15
     assert parent.details["verification"]["stock_analysis_count"] == 3
     assert parent.details["verification"]["prediction_count"] == 15
+    frequency_verification = parent.details["frequency_verification"]
+    assert frequency_verification["status"] == "verified"
+    assert frequency_verification["analysis_run_id"] == str(run.id)
+    assert DataAsset.objects.filter(
+        pk=frequency_verification["frequency_asset_id"],
+        kind="research_product_frequency_evidence",
+    ).exists()
     assert DataAsset.objects.filter(kind=PRODUCT_INTAKE_KIND).count() == 1
     assert DataAsset.objects.filter(kind=PRODUCT_MEMBERSHIP_KIND).count() == 1
     assert DataAsset.objects.filter(kind=CALCULATION_ARTIFACT_KIND).count() == 3
@@ -202,6 +209,35 @@ def test_native_profile_ignores_legacy_success_and_replays_exact_registered_outp
     parent.save(update_fields=["details"])
     with pytest.raises(TrackedSymbolValidationError, match="unavailable or invalid"):
         verified_catalog_references_for_symbols(symbols=("NEW",), store=store)
+
+
+def test_completed_new_parent_rechecks_frequency_sibling_before_skip_recovery(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tampered child cannot ride the successful-parent skip shortcut."""
+
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "Europe/Tallinn",
+    )
+    owner, _store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    parent = _parent(owner)
+    child = JobRun.objects.get(pk=parent.details["frequency_verification"]["child_job_run_id"])
+    child.details["frequency_asset_sha256"] = "forged"
+    child.save(update_fields=["details"])
+    resolve.reset_mock()
+    fetch.reset_mock()
+
+    with pytest.raises(CommandError, match=r"Scheduled research refresh failed \(ValueError\)"):
+        _run_command()
+
+    # The integrity check is entirely local: no provider resolution or fetch
+    # happens while refusing a corrupted completed parent.
+    resolve.assert_not_called()
+    fetch.assert_not_called()
 
 
 def test_manual_daily_product_is_research_only_and_cannot_occupy_scheduled_identity(

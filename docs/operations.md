@@ -118,7 +118,7 @@ keychain onboarding alone does not configure unattended access. Do not place
 populated secret values in the plist or command arguments. Confirm the
 recorded and machine timezone agree using `launchd_refresh status`.
 
-The research profile uses version-specific parent, daily, and intake jobs:
+The research profile uses version-specific parent and child jobs:
 
 - scheduled parent;
 - market/intake/issuance;
@@ -128,6 +128,12 @@ The research profile uses version-specific parent, daily, and intake jobs:
 The parent independently verifies recorded child identities, intake,
 membership, exact five-row output, calculations, manifests, and physical
 assets. A success status alone is insufficient.
+
+Refreshes created by the summary-enabled version additionally record a
+separately verified model-outcome derivation child. Older parents retain
+their original verification payload; their success does not imply a summary
+exists. See [Derived model-outcome summaries](#derived-model-outcome-summaries)
+for that independent stage and explicit old-run reconstruction.
 
 ### Fresh observed issuance
 
@@ -181,6 +187,44 @@ analyzed.
 Adding/removing My List names affects the next intake, not an already captured
 retry. SPY is reused once and stays outside stock membership.
 
+## Derived model-outcome summaries
+
+The probability-first view uses a separate registered report from the same
+deterministic paths as the immutable FHS projection. It is not a new issuance,
+a calibration study, or a provider fetch.
+
+To derive or recover the report for one existing run, use the same private
+environment and data directory as the application:
+
+```bash
+uv run python manage.py derive_price_frequencies --run '<analysis-run-uuid>'
+uv run python manage.py derive_price_frequencies --run '<analysis-run-uuid>' --verify
+```
+
+The first command recovers an already committed report before expensive
+replay, or internally derives and registers one from the run's verified
+sources. `--verify` is an offline, no-write semantic comparison, not merely a
+file-checksum check. Neither command accepts externally supplied statistics,
+bulk-backfills all runs, contacts a provider, or creates a prediction.
+
+Reports use their actual publication time. A manual derivation for an older
+issuance is labelled as a later reconstruction, cannot appear in an earlier
+as-of read, and cannot inherit the original prediction's on-time status.
+Preserve the source revision separately from the derivation revision.
+
+For new refreshes, summary generation is independently retryable. A failed
+summary does not rewrite a completed source run; recovery identifies and
+reuses completed children rather than paying for another acquisition.
+Historical parent verification remains unchanged for runs without a summary
+stage. Product availability and summary availability are separate facts:
+an old complete run is not proof that its probabilities were derived.
+
+At rollout, capture the exact current source run and eligible-listing
+denominator before deriving its report. Retain immutable evidence,
+preferences, portfolios, holdings, and the existing schedule. A missing or
+failed report must show a precise summary state without hiding an
+independently valid median/range.
+
 ## Serving checks
 
 Use authenticated pages and local commands together:
@@ -195,11 +239,14 @@ user can find or understand the view.
 1. `/status`: operational health, target freshness, admission, jobs, and
    verification;
 2. `/opportunities` and detail: expected product, target, source grade,
-   direction, risk, selected-horizon comparison, and all four horizons on
-   detail; pagination must preserve filters;
-3. `/my-list`: saved/pending/admitted states without provider fetch;
+   direction, risk, selected-horizon probabilities and median, and all four
+   horizons on detail; pagination and detail links must preserve the selected
+   horizon and applicable filters;
+3. `/my-list`: saved/pending/admitted states and admitted-stock summaries
+   without provider fetch;
 4. `/predictions`: one decision plus four advisory rows per qualified
-   listing;
+   listing, with each probability summary bound to that exact issuance and
+   later reconstruction labelled explicitly;
 5. `/performance`: observed cohorts separate from registered retrospective
    evidence, with non-observed, pending, and non-evaluable states distinguished
    and adverse comparison/numerical summaries still visible;

@@ -104,6 +104,33 @@ asset references, input/calendar hash, configuration identity, result shape,
 and output manifest. The reader verifies those records and physical bytes; it
 does not rerun Monte Carlo trajectories during HTTP GET.
 
+## Derived outcome-frequency evidence
+
+The probability-first display does not change the frozen prediction schema
+or calculation payload. A separate run-bound `DataAsset` records internally
+derived integer outcome counts from the same deterministic terminal paths.
+The pure frequency operator and its evidence registration/reader form one
+bounded extension; there is no new forecasting service or provider.
+
+Registration reconstructs only the original run's verified immutable sources,
+checks complete input/seed/projection identity, and admits the complete
+canonical report. Three matching quantiles are a compatibility check, not
+authentication of a distribution. No writer accepts caller-authored counts.
+Idempotent registration recovers committed evidence before replay and
+serializes publication without rewriting the source run.
+
+The report's actual publication time controls availability. Current history
+can show a labelled later reconstruction, but an earlier as-of request cannot
+see it. Its timing never inherits `Prediction.issued_on_time`. HTTP readers
+check exact-run identity, current owner/display rights and registered bytes
+without simulation; explicit offline verification re-derives the contents.
+
+New scheduled parents keep a separate frequency-child verification block.
+Existing canonical source verification and historical replay payloads stay
+unchanged. A source run can remain valid when its frequency report is absent
+or fails; the UI exposes that summary state separately and retains an
+independently valid median/range.
+
 ## Runtime profiles
 
 `STANSTOCK_RESEARCH_PRODUCT_ENABLED` maps to

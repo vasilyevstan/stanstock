@@ -49,6 +49,16 @@
         <strong>Recorded cohort</strong>
       </article>
       <article class="status-card">
+        <h3>Model-estimated probabilities</h3>
+        {% if product.cards and product.cards.0.projections.0.frequency_status == "available" %}
+          <p>Registered summary available separately from the original run and forecast state.</p>
+          <strong>Uncalibrated</strong>
+        {% else %}
+          <p>Not derived for this issuance, or its registered evidence could not be verified.</p>
+          <strong>Unavailable</strong>
+        {% endif %}
+      </article>
+      <article class="status-card">
         <h3>Next scheduled refresh</h3>
         <p>
           {% if scheduler.error %}

@@ -1006,6 +1006,33 @@ def _validate_series(
         )
 
 
+def projection_from_terminal_logs(
+    *,
+    horizon: str,
+    sessions: int,
+    terminal_logs: npt.NDArray[np.float64],
+    zero_drift_logs: npt.NDArray[np.float64],
+    target_close: float,
+    quantiles: tuple[float, float, float],
+    quantile_method: Literal["linear"],
+    return_places: int,
+    price_places: int,
+) -> HorizonProjection:
+    """Project existing terminal paths without changing simulation semantics."""
+
+    return _projection_from_terminal_logs(
+        horizon=horizon,
+        sessions=sessions,
+        terminal_logs=terminal_logs,
+        zero_drift_logs=zero_drift_logs,
+        target_close=target_close,
+        quantiles=quantiles,
+        quantile_method=quantile_method,
+        return_places=return_places,
+        price_places=price_places,
+    )
+
+
 def _projection_from_terminal_logs(
     *,
     horizon: str,

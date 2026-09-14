@@ -42,6 +42,16 @@
         subtracts horizon drift without changing sampled shocks.
       </p>
       <p>
+        <strong>Model-estimated probabilities</strong> are shares of the same
+        8,192 terminal simulations, not validated real-world odds. For each
+        6m, 12m, 3y, and 5y cumulative split-adjusted price return excluding
+        dividends, paths are exhaustively classified as Loss (R &lt; 0), Flat
+        to +20% (0 ≤ R ≤ 20%), or Above +20% (R &gt; 20%). Boundaries are
+        fixed in log-return space; zero and +20% are in the middle outcome.
+        The detail-only “more than 20% down” value is R &lt; −20%, not an
+        intraperiod drawdown. More paths are not calibration evidence.
+      </p>
+      <p>
         Long horizons are especially exposed to drift estimation, regime,
         survivorship, delisting, merger, symbol-change, and parameter
         uncertainty. Future corporate events are not modeled. Forecasting
