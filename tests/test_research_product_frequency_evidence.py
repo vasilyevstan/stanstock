@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data import research_product_demo
-from stanstock.data.assets import AssetStore, register_asset
+from stanstock.data.assets import AssetStore
 from stanstock.data.models import DataAsset, Listing
 from stanstock.data.research_product_demo import execute_demo_product_refresh
 from stanstock.research import product_frequency_evidence as evidence
@@ -77,13 +77,14 @@ def _plant_report(run, store, logical, *, metadata_changes=None, asset_changes=N
         "kind": FREQUENCY_EVIDENCE_KIND,
         "schema_version": evidence.FREQUENCY_SCHEMA,
         "subject": evidence._subject(run),
-        "stored": stored,
+        "relative_path": stored.relative_path,
+        "sha256": stored.sha256,
         "retrieved_at": published_at,
         "available_at": published_at,
         "metadata": metadata,
     }
     arguments.update(asset_changes or {})
-    return register_asset(**arguments)
+    return DataAsset.objects.create(**arguments)
 
 
 def _assert_report_rejected(user, run, store):
