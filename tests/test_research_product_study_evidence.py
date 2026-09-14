@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from html.parser import HTMLParser
 from unittest.mock import Mock
 
 import pytest
@@ -21,10 +22,13 @@ from stanstock.research.price_product_study import (
 )
 from stanstock.research.product_study_evidence import (
     STUDY_EVIDENCE_KIND,
+    ProductStudyComparisonRow,
+    ProductStudyScopeView,
     _register_price_product_study,
     read_registered_price_product_study,
     register_price_product_study,
 )
+from stanstock.web.product_views import _comparison_scope_summaries
 from test_research_product_jobs import (
     TARGET,
     _persist_price_series,
@@ -33,6 +37,38 @@ from test_research_product_jobs import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+class _ClosedDetailsTextParser(HTMLParser):
+    """Collect text that is, or is not, nested in a closed native disclosure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._details_open: list[bool] = []
+        self.outside_closed_details: list[str] = []
+        self.inside_closed_details: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag == "details":
+            self._details_open.append(any(name == "open" for name, _value in attrs))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "details":
+            self._details_open.pop()
+
+    def handle_data(self, data: str) -> None:
+        if not data.strip():
+            return
+        destination = (
+            self.inside_closed_details
+            if any(not is_open for is_open in self._details_open)
+            else self.outside_closed_details
+        )
+        destination.append(data)
 
 
 @pytest.fixture
@@ -366,13 +402,19 @@ def test_registered_study_reader_surfaces_stored_convergence_counts(
     assert response.status_code == 200
     assert response.context["registered_study"].convergence_summary == study.convergence_summary
     content = " ".join(response.content.decode().split())
-    assert "HISTORICAL ANCHOR numerical sensitivity" in content
-    assert "8,192 production paths versus 16,384 diagnostic paths" in content
-    assert "3 available quantile comparisons" in content
-    assert "3 exceeded the frozen" in content
-    assert "2 diagnostics could not be assessed" in content
-    assert "not extra market outcomes or calibrated" in content
-    assert "do not tune or alter" in content
+    assert "Historical anchor diagnostic" in content
+    assert "<strong>Available:</strong> 3" in content
+    assert "<strong>Exceeded:</strong> 3" in content
+    assert "<strong>Unavailable:</strong> 2" in content
+    assert (
+        f"{study.convergence_summary.production_paths} production paths with "
+        f"{study.convergence_summary.diagnostic_paths} diagnostic paths"
+    ) in content
+    assert (
+        "Numerical precision checks are not market outcomes, calibration, or a skill claim."
+        in content
+    )
+    assert "Exceedances remain disclosed and do not alter issuance." in content
     no_paths.assert_not_called()
     no_calculation.assert_not_called()
 
@@ -407,10 +449,17 @@ def test_registered_study_reader_marks_zero_available_convergence_as_not_a_pass(
 
     assert response.status_code == 200
     content = " ".join(response.content.decode().split())
-    assert "0 available quantile comparisons" in content
-    assert "No numerical pass conclusion is available." in content
-    assert "Zero available quantile comparisons is not a pass" in content
-    assert "not treated as zero failures" in content
+    assert "<strong>Available:</strong> 0" in content
+    assert "<strong>Exceeded:</strong> 0" in content
+    assert "<strong>Unavailable:</strong> 4" in content
+    assert (
+        "<strong>Comparison unavailable.</strong> Zero available comparisons is not a pass."
+        in content
+    )
+    assert (
+        "Numerical precision checks are not market outcomes, calibration, or a skill claim."
+        in content
+    )
 
 
 @pytest.mark.parametrize(
@@ -507,8 +556,134 @@ def test_registered_study_rendering_surfaces_real_worse_and_empty_scopes_in_demo
     assert worse_row.baseline_label in content
     assert "Candidate worse" in content
     assert empty_scope.horizon_label in content
-    assert "No candidate actual observations yet." in content
-    assert "No paired actual observations yet" in content
+    assert "Comparison unavailable." in content
+    assert "No Eligible Observations" in content
+    expected_detail_rows = sum(
+        len(scope.rows)
+        for partition in study.partitions
+        for scope in partition.scopes
+    )
+    assert expected_detail_rows == 168
+    comparison_partitions = response.context["comparison_partitions"]
+    scope_entries = [
+        scope_entry
+        for partition_entry in comparison_partitions
+        for scope_entry in partition_entry["scopes"]
+    ]
+    assert all(len(scope_entry["baseline_summaries"]) <= 2 for scope_entry in scope_entries)
+    assert response.content.count(b'class="comparison-detail-row"') == expected_detail_rows
+    assert response.content.count(b'class="comparison-baseline-summary"') == sum(
+        len(scope_entry["baseline_summaries"]) for scope_entry in scope_entries
+    )
+    expected_adverse_summaries = sum(
+        summary["has_candidate_worse"]
+        for scope_entry in scope_entries
+        for summary in scope_entry["baseline_summaries"]
+    )
+    assert (
+        response.content.count(b'class="field-error comparison-adverse"')
+        == expected_adverse_summaries
+    )
+    assert b"<details open>" not in response.content
+    assert response.content.index(b'id="numerical-sensitivity"') < response.content.index(
+        b'id="historical-comparison"'
+    )
+
+
+def test_comparison_summary_retains_worse_state_when_median_error_is_better() -> None:
+    """One median-error context row cannot suppress another metric's adverse state."""
+
+    median_error = ProductStudyComparisonRow(
+        baseline_model="synthetic_baseline",
+        baseline_label="Synthetic baseline",
+        metric_name="median_absolute_error",
+        metric_label="Mean absolute error of the median forecast",
+        paired_observation_count=7,
+        paired_target_cohort_count=3,
+        candidate_average=Decimal("0.10"),
+        baseline_average=Decimal("0.20"),
+        mean_difference_candidate_minus_baseline=Decimal("-0.10"),
+        assessment="Candidate better",
+        unavailable_reason=None,
+    )
+    worse_metric = ProductStudyComparisonRow(
+        baseline_model="synthetic_baseline",
+        baseline_label="Synthetic baseline",
+        metric_name="interval_width",
+        metric_label="Interval width",
+        paired_observation_count=7,
+        paired_target_cohort_count=3,
+        candidate_average=Decimal("0.40"),
+        baseline_average=Decimal("0.20"),
+        mean_difference_candidate_minus_baseline=Decimal("0.20"),
+        assessment="Candidate worse",
+        unavailable_reason=None,
+    )
+    unavailable_metric = ProductStudyComparisonRow(
+        baseline_model="synthetic_baseline",
+        baseline_label="Synthetic baseline",
+        metric_name="interval_inclusion",
+        metric_label="Interval inclusion",
+        paired_observation_count=0,
+        paired_target_cohort_count=0,
+        candidate_average=None,
+        baseline_average=None,
+        mean_difference_candidate_minus_baseline=None,
+        assessment="Unavailable",
+        unavailable_reason="historical_anchor_data_missing",
+    )
+    scope = ProductStudyScopeView(
+        partition="synthetic_partition",
+        partition_label="Synthetic partition",
+        horizon="6m",
+        horizon_label="6 months",
+        target_cohort_count=3,
+        distinct_listing_count=3,
+        unavailable_count=1,
+        insufficient_reason=None,
+        rows=(median_error, worse_metric, unavailable_metric),
+    )
+
+    summaries = _comparison_scope_summaries(scope)
+
+    assert len(summaries) == 1
+    assert summaries[0]["context_row"] == median_error
+    assert summaries[0]["assessments"] == (
+        "Candidate better",
+        "Candidate worse",
+        "Unavailable",
+    )
+    assert summaries[0]["unavailable_reasons"] == ("historical_anchor_data_missing",)
+    assert summaries[0]["has_candidate_worse"] is True
+
+
+def test_registered_study_qualifications_are_not_hidden_in_a_closed_disclosure(
+    demo_product,
+    client,
+) -> None:
+    """Synthetic demo qualifications must remain visible beside comparisons."""
+
+    viewer, store, run = demo_product
+    _register_price_product_study(
+        report=_study_report(run, store, datetime(2026, 9, 13, 18, tzinfo=UTC)),
+        store=store,
+    )
+    study = read_registered_price_product_study(user=viewer, store=store)
+    assert study.available
+    assert study.disclosures
+
+    client.force_login(viewer)
+    response = client.get(reverse("performance"))
+
+    assert response.status_code == 200
+    parser = _ClosedDetailsTextParser()
+    parser.feed(response.content.decode())
+    visible_text = " ".join(parser.outside_closed_details)
+    closed_details_text = " ".join(parser.inside_closed_details)
+    assert 'class="compact-gate-list study-qualifications"' in response.content.decode()
+    for disclosure in study.disclosures:
+        assert disclosure in visible_text
+        assert disclosure not in closed_details_text
 
 
 def test_live_registered_study_is_owner_bound_and_renders_without_get_time_replay(
@@ -557,18 +732,21 @@ def test_live_registered_study_is_owner_bound_and_renders_without_get_time_repla
     assert response.context["registered_study"].status == "available"
     assert response.context["registered_study"].source_target_date == TARGET
     content = response.content.decode()
-    assert "Registered retrospective evidence" in content
-    assert "Current-universe/current-vintage historical comparisons" in content
-    assert "source cohort dated" in content
-    assert "Zero-log-drift Gaussian baseline" in content
-    assert "Historical-log-drift Gaussian baseline" in content
+    assert "Historical reconstruction comparison" in content
+    assert "Current-universe/current-vintage evidence" in content
+    assert "Studied cohort:" in content
+    assert "Source run" in content
+    assert "Better/worse refers to paired error" in content
+    for partition in study.partitions:
+        for scope in partition.scopes:
+            for row in scope.rows:
+                assert row.baseline_label in content
     assert empty_scope.horizon_label in content
-    assert "No candidate actual observations yet." in content
-    assert "No paired actual observations yet" in content
+    assert "Comparison unavailable." in content
+    assert "No Eligible Observations" in content
     assert "The frozen protocol forbids tuning on the 2025+ final holdout." in content
-    assert "survivorship and current-vintage bias remain visible limits" in content
-    assert "recorded realized" in content
-    assert "Width and inclusion are descriptive" in content
+    assert "survivorship" in content
+    assert "current-vintage limits" in content
     no_paths.assert_not_called()
     no_calculation.assert_not_called()
 

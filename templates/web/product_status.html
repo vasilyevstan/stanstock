@@ -1,43 +1,40 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}Research operations · StanStock{% endblock %}
+{% block title %}Data &amp; updates · StanStock{% endblock %}
 
 {% block content %}
   <section class="hero">
     <div>
-      <p class="eyebrow">Operational state</p>
-      <h1>Research product status</h1>
+      <p class="eyebrow">Recorded data and refreshes</p>
+      <h1>Data &amp; updates</h1>
       <p class="lede">
-        Health, freshness, qualification, verification, admission, and target
-        job state. Forecast values belong on the Research screen, not here.
+        Health, last market date, refresh timing, and availability. Forecast
+        values belong on Opportunities, not here.
       </p>
     </div>
     <div class="overall-status {% if system_ok and product.available %}status-ok{% else %}status-bad{% endif %}">
       <span class="status-dot" aria-hidden="true"></span>
       <span>
-        <small>Active product</small>
-        <strong>{% if system_ok and product.available %}OPERATIONAL{% else %}ATTENTION{% endif %}</strong>
+        <small>Data health</small>
+        <strong>{% if system_ok and product.available %}READY{% else %}ATTENTION{% endif %}</strong>
       </span>
     </div>
   </section>
 
   <section aria-labelledby="qualification-state">
     <div class="section-heading">
-      <div>
-        <p class="eyebrow">Serving gate</p>
-        <h2 id="qualification-state">Verification and freshness</h2>
-      </div>
+      <div><p class="eyebrow">At a glance</p><h2 id="qualification-state">Current data</h2></div>
     </div>
     <div class="status-grid">
       <article class="status-card">
-        <h3>Registered output</h3>
+        <h3>Health</h3>
         <p>{{ product.message }}</p>
         <strong>{{ product.status|display_label }}</strong>
         {% if product.verification_code %}<small>{{ product.verification_code|display_label }}</small>{% endif %}
       </article>
       <article class="status-card">
-        <h3>Expected target</h3>
+        <h3>Last market date</h3>
         {% if product.run %}
           <p>Market date {{ product.run.target_date }}; generated {{ product.run.generated_at }}.</p>
           <strong>{{ product.evidence_grade|display_label }}</strong>
@@ -47,24 +44,12 @@
         {% endif %}
       </article>
       <article class="status-card">
-        <h3>Qualification</h3>
-        <p>{{ product.admitted_count }} admitted listing{{ product.admitted_count|pluralize }}; {{ product.rejected_count }} not admitted.</p>
-        <strong>Captured cohort only</strong>
+        <h3>Analysed</h3>
+        <p>{{ product.cards|length }} analysed / {{ product.rejected_count }} not admitted.</p>
+        <strong>Recorded cohort</strong>
       </article>
       <article class="status-card">
-        <h3>Provider and authorization</h3>
-        <p>{% if product.provider %}{{ product.provider|display_label }}{% else %}No authorized active source{% endif %}</p>
-        <strong>{% if product.available %}Owner-bound display{% else %}Fail closed{% endif %}</strong>
-      </article>
-      {% for component in components %}
-        <article class="status-card">
-          <h3>{{ component.name }}</h3>
-          <p>{{ component.detail }}</p>
-          <strong>{% if component.ok %}Available{% else %}Unavailable{% endif %}</strong>
-        </article>
-      {% endfor %}
-      <article class="status-card">
-        <h3>Local schedule</h3>
+        <h3>Next scheduled refresh</h3>
         <p>
           {% if scheduler.error %}
             {{ scheduler.error }}
@@ -76,51 +61,37 @@
             Manual only.
           {% endif %}
         </p>
-        <strong>{% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches and scheduler.schedule_matches %}Scheduled{% else %}Attention required{% endif %}</strong>
+        <strong>{% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches and scheduler.schedule_matches %}Scheduled{% else %}Needs attention{% endif %}</strong>
       </article>
     </div>
   </section>
 
-  <section aria-labelledby="admission-counts">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Bounded intake</p>
-        <h2 id="admission-counts">Admission states</h2>
-      </div>
+  <details class="panel operational-details">
+    <summary>Technical data, provider, and job details</summary>
+    <div class="detail-grid">
+      <section>
+        <h2>Availability reasons</h2>
+        <div class="compact-list">
+          {% for state, count in admission_counts %}
+            <article><strong>{{ state|display_label }}</strong><span class="badge">{{ count }}</span></article>
+          {% empty %}<p class="empty-state">No verified availability record is available.</p>{% endfor %}
+        </div>
+      </section>
+      <section>
+        <h2>Provider and checks</h2>
+        <p>{% if product.provider %}{{ product.provider|display_label }}{% else %}No authorized active source{% endif %}</p>
+        {% for component in components %}
+          <p><strong>{{ component.name }}</strong> — {% if component.ok %}available{% else %}unavailable{% endif %}: {{ component.detail }}</p>
+        {% endfor %}
+      </section>
     </div>
-    <div class="compact-list">
-      {% for state, count in admission_counts %}
-        <article>
-          <strong>{{ state|display_label }}</strong>
-          <span class="badge">{{ count }}</span>
-        </article>
-      {% empty %}
-        <p class="empty-state">No verified admission record is available.</p>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section aria-labelledby="job-state">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Operations</p>
-        <h2 id="job-state">Research target jobs</h2>
-      </div>
-    </div>
+    <h2>Recent research jobs</h2>
     <div class="compact-list">
       {% for job in recent_jobs %}
-        <article>
-          <div>
-            <strong>{{ job.job_name }}</strong>
-            <small>Target {{ job.target_date }} · attempt {{ job.attempt }}</small>
-          </div>
-          <span class="badge badge-{{ job.status }}">{{ job.get_status_display }}</span>
-        </article>
-      {% empty %}
-        <p class="empty-state">No research-product target job is recorded.</p>
-      {% endfor %}
+        <article><div><strong>{{ job.job_name }}</strong><small>Target {{ job.target_date }} · attempt {{ job.attempt }}</small></div><span class="badge badge-{{ job.status }}">{{ job.get_status_display }}</span></article>
+      {% empty %}<p class="empty-state">No research-product target job is recorded.</p>{% endfor %}
     </div>
-  </section>
+  </details>
 
   <p><a href="{% url 'archive-opportunities' %}">Archived research evidence</a> remains separate.</p>
 {% endblock %}

@@ -115,6 +115,7 @@ from stanstock.research.models import (
     StockAnalysis,
 )
 from stanstock.research.opportunities import assess_opportunity
+from stanstock.research.price_product_config import PRODUCT_VERSION
 from stanstock.research.provenance import (
     analysis_run_data_mode,
     analysis_run_source_providers,
@@ -189,6 +190,8 @@ STOCK_DETAIL_PREDICTIONS_PER_PAGE = 30
 
 def index(request: HttpRequest) -> HttpResponse:
     if request.user.is_authenticated:
+        if settings.RESEARCH_PRODUCT_ENABLED:
+            return redirect("opportunities")
         return redirect("status")
     return redirect("login")
 
@@ -710,6 +713,7 @@ def market_overview_page(request: HttpRequest) -> HttpResponse:
         "web/market.html",
         {
             "market_rows": latest_listings,
+            "market_listing_count": len(market_rows),
             "etf_rows": etf_rows,
             "regions": regions,
             "sectors": sectors,
@@ -1072,13 +1076,17 @@ def portfolios_page(request: HttpRequest) -> HttpResponse:
         }
         card.update(_model_portfolio_metrics(portfolio, valuation))
         cards.append(card)
+    sample_source_run = latest_provider_backed_analysis_run()
     return render(
         request,
         "web/portfolios.html",
         {
             "form": form,
             "sample_form": sample_form,
-            "sample_source_run": latest_provider_backed_analysis_run(),
+            "sample_source_run": sample_source_run,
+            "sample_builder_supported": (
+                sample_source_run is None or sample_source_run.config_version != PRODUCT_VERSION
+            ),
             "portfolio_cards": cards,
             "archived_portfolios": archived,
         },
@@ -3175,7 +3183,7 @@ def _portfolio_detail_context(
                     Security.SecurityType.ADR,
                 ),
             )
-            .select_related("listing__latest_market_data")
+            .select_related("listing__latest_market_data", "run")
             .order_by("-pk")
         )
         for persisted_analysis in analyses:
@@ -3191,6 +3199,10 @@ def _portfolio_detail_context(
                 "analysis": latest_analysis,
                 "price_band": current_price_band,
                 "is_etf": is_etf,
+                "is_active_momentum_method": (
+                    latest_analysis is not None
+                    and latest_analysis.run.config_version == PRODUCT_VERSION
+                ),
                 "opportunity": (
                     assess_opportunity(
                         latest_analysis,

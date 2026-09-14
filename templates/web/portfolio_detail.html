@@ -375,6 +375,10 @@
                 <td>
                   {% if card.is_etf %}
                     <span class="badge">ETF · no stock rating</span>
+                  {% elif card.is_active_momentum_method %}
+                    <span class="badge">6-month momentum method</span>
+                    <small>No overall score — this is the 6-month momentum method.</small>
+                    <small>Action is not repeated here. <a href="{% url 'opportunities' %}?q={{ position.holding.listing.ticker|urlencode }}">Check verified current research</a>.</small>
                   {% elif card.opportunity.eligible %}
                     <span class="opportunity-badge">{{ card.opportunity.label }}</span>
                     <small>{{ card.opportunity.policy_version }}</small>

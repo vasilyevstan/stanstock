@@ -12,7 +12,7 @@
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="shell header-content">
-        <a class="brand" href="{% url 'index' %}">
+        <a class="brand" href="{% url 'index' %}" aria-label="StanStock home">
           <span class="brand-mark" aria-hidden="true">S</span>
           <span>
             <strong>StanStock</strong>
@@ -20,15 +20,24 @@
           </span>
         </a>
         {% if request.user.is_authenticated %}
-          <nav aria-label="Primary">
-            <a href="{% url 'opportunities' %}"{% if request.resolver_match.url_name == "opportunities" %} aria-current="page"{% endif %}>Research</a>
-            <a href="{% url 'market' %}"{% if request.resolver_match.url_name == "market" or request.resolver_match.url_name == "etf-detail" %} aria-current="page"{% endif %}>Market</a>
-            <a href="{% url 'predictions' %}"{% if request.resolver_match.url_name == "predictions" %} aria-current="page"{% endif %}>Predictions</a>
-            <a href="{% url 'performance' %}"{% if request.resolver_match.url_name == "performance" %} aria-current="page"{% endif %}>Performance</a>
-            <a href="{% url 'my-list' %}"{% if request.resolver_match.url_name == "my-list" or request.resolver_match.url_name == "tracked-symbol-delete" %} aria-current="page"{% endif %}>My list</a>
-            <a href="{% url 'portfolios' %}"{% if request.resolver_match.url_name == "portfolios" or request.resolver_match.url_name == "portfolio-detail" %} aria-current="page"{% endif %}>Portfolios</a>
-            <a href="{% url 'simulations' %}"{% if request.resolver_match.url_name == "simulations" %} aria-current="page"{% endif %}>Simulations</a>
-            <a href="{% url 'status' %}"{% if request.resolver_match.url_name == "status" %} aria-current="page"{% endif %}>Status</a>
+          <nav class="primary-nav" aria-label="Primary">
+            <div class="primary-nav-links">
+              <a href="{% url 'opportunities' %}"{% if request.resolver_match.url_name == "opportunities" and request.GET.price_band != "under_10" %} aria-current="page"{% endif %}>Opportunities</a>
+              <a href="{% url 'opportunities' %}?price_band=under_10"{% if request.resolver_match.url_name == "opportunities" and request.GET.price_band == "under_10" %} aria-current="page"{% endif %}>Under $10</a>
+              <a href="{% url 'my-list' %}"{% if request.resolver_match.url_name == "my-list" or request.resolver_match.url_name == "tracked-symbol-delete" %} aria-current="page"{% endif %}>My List</a>
+              <a href="{% url 'portfolios' %}"{% if request.resolver_match.url_name == "portfolios" or request.resolver_match.url_name == "portfolio-detail" %} aria-current="page"{% endif %}>Portfolios</a>
+              <a href="{% url 'performance' %}"{% if request.resolver_match.url_name == "performance" %} aria-current="page"{% endif %}>Performance</a>
+            </div>
+            <details class="more-nav">
+              <summary>More</summary>
+              <div class="more-nav-menu">
+                <a href="{% url 'market' %}"{% if request.resolver_match.url_name == "market" or request.resolver_match.url_name == "etf-detail" %} aria-current="page"{% endif %}>Market</a>
+                <a href="{% url 'predictions' %}"{% if request.resolver_match.url_name == "predictions" %} aria-current="page"{% endif %}>Prediction history</a>
+                <a href="{% url 'simulations' %}"{% if request.resolver_match.url_name == "simulations" %} aria-current="page"{% endif %}>Simulations</a>
+                <a href="{% url 'status' %}"{% if request.resolver_match.url_name == "status" %} aria-current="page"{% endif %}>Data &amp; updates</a>
+                <a href="{% url 'methodology' %}"{% if request.resolver_match.url_name == "methodology" %} aria-current="page"{% endif %}>Methodology</a>
+              </div>
+            </details>
             <form method="post" action="{% url 'logout' %}">
               {% csrf_token %}
               <button class="link-button" type="submit">Sign out</button>
@@ -65,7 +74,7 @@
         </div>
       </div>
     {% endif %}
-    <main id="main-content" class="shell page">
+    <main id="main-content" class="shell page {% block page_class %}{% endblock %}">
       {% if messages %}
         <div class="messages" aria-live="polite">
           {% for message in messages %}

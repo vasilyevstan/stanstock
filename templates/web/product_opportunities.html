@@ -1,25 +1,20 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}Research opportunities · StanStock{% endblock %}
+{% block title %}Opportunities · StanStock{% endblock %}
+{% block page_class %}opportunities-page{% endblock %}
 
 {% block content %}
-  <section class="page-heading">
+  <section class="page-heading opportunities-heading">
     <div>
-      <p class="eyebrow">Verified price research</p>
-      <h1>Research opportunities</h1>
-      <p class="lede">
-        A six-month relative-momentum decision is shown beside four
-        independently labelled conditional price projections. No score,
-        calibrated confidence, or gain odds are estimated.
-      </p>
+      <h1>Opportunities</h1>
+      <p class="lede">Compare recorded momentum and model scenarios.</p>
     </div>
     {% if product.run %}
-      <div class="run-stamp">
-        <small>Market date</small>
-        <strong>{{ product.run.target_date }}</strong>
-        <span>{{ product.evidence_grade|display_label }} · {{ product.provider|display_label }}</span>
-      </div>
+      <p class="run-stamp opportunity-run-stamp">
+        Market date <strong>{{ product.run.target_date }}</strong> ·
+        {{ product.evidence_grade|display_label }} · {{ product.provider|display_label }}
+      </p>
     {% endif %}
   </section>
 
@@ -31,132 +26,114 @@
       <p><a href="{% url 'archive-opportunities' %}">Open clearly labelled archived evidence</a>.</p>
     </div>
   {% else %}
-    <div class="notice">
-      <strong>How to read the ranges.</strong>
-      Lower, Median, and Upper are p20, p50, and p80 terminal outcomes from
-      the fixed filtered historical simulation. The span contains the central
-      60% of model path mass. It is not demonstrated real-world probability,
-      fair value, a stop-loss, or established forecasting skill.
-    </div>
-    <div class="notice">
-      <strong>Signals can disagree.</strong>
-      The research suggestion uses 12–1 stock-versus-SPY momentum and fixed
-      risk/liquidity restrictions. Projection drift uses the trailing
-      three-year mean log return. Neither quantity overrides the other.
-    </div>
-
-    <form class="filter-bar product-filter" method="get">
-      {% for field in filter_form %}
-        <label>
-          <span>{{ field.label }}</span>
-          {{ field }}
-        </label>
-      {% endfor %}
-      <button class="primary-button filter-submit" type="submit">Apply filters</button>
-    </form>
-    {% if filter_form.errors %}
-      <div class="error-box" role="alert">{{ filter_form.errors }}</div>
-    {% endif %}
-
-    {% if promoted_cards %}
-      <section aria-labelledby="current-qualified-title">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Fresh current-price guard passed</p>
-            <h2 id="current-qualified-title">Currently display-qualified BUY research</h2>
-          </div>
-        </div>
-        <p class="muted">
-          Qualification requires the immutable target suggestion plus a fresh,
-          independently bound current USD close of at least $10. It does not
-          mutate the recorded suggestion or place a trade.
+    <section class="opportunity-controls" aria-label="Opportunity filters">
+      <div class="price-band-links" aria-label="Reference price band">
+        {% for link in band_links %}
+          <a class="band-link{% if link.active %} is-active{% endif %}" href="{% url 'opportunities' %}{% if link.query %}?{{ link.query }}{% endif %}"{% if link.active %} aria-current="page"{% endif %}>
+            {{ link.label }} <span>{{ link.count }}</span>
+          </a>
+        {% endfor %}
+        <a class="clear-link" href="{% url 'opportunities' %}">Clear all</a>
+      </div>
+      {% if filter_form.cleaned_data.price_band == "under_10" %}
+        <p class="speculative-note under-ten-allocation-note">
+          <strong>Under $10: speculative watch · 0% new allocation.</strong>
+          It cannot promote a BUY or enter a new sample basket.
         </p>
-        <ul class="inline-symbols">
-          {% for card in promoted_cards %}
-            <li><a href="{% url 'stock-detail' card.analysis.listing_id %}">{{ card.listing.ticker }}</a></li>
-          {% endfor %}
-        </ul>
-      </section>
+      {% endif %}
+      <div class="horizon-links" aria-label="Projection horizon">
+        <span>Horizon</span>
+        {% for link in horizon_links %}
+          <a href="{% url 'opportunities' %}?{{ link.query }}" aria-label="{{ link.label }} projections"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
+        {% endfor %}
+      </div>
+      <form class="product-search" method="get">
+        {{ filter_form.horizon }}
+        {{ filter_form.price_band }}
+        <label class="product-search-field" for="{{ filter_form.q.id_for_label }}">
+          <span>Search stocks</span>
+          {{ filter_form.q }}
+        </label>
+        <button class="primary-button" type="submit">Search</button>
+        <details class="advanced-filters">
+          <summary>Advanced filters{% if advanced_filters_active %} (active){% endif %}</summary>
+          <div class="filter-bar">
+            {% for field in filter_form %}
+              {% if field.name != "q" and field.name != "horizon" and field.name != "price_band" %}
+                <label>
+                  <span>{{ field.label }}</span>
+                  {{ field }}
+                </label>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </details>
+      </form>
+      {% if filter_form.errors %}
+        <div class="error-box" role="alert">
+          <strong>Filters need attention.</strong> {{ filter_form.errors }}
+        </div>
+      {% endif %}
+    </section>
+
+    <section aria-labelledby="opportunity-list-title">
+      <div class="section-heading opportunity-results-heading">
+        <h2 id="opportunity-list-title">{{ selected_horizon_label }} projections</h2>
+        <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
+      </div>
+      <p class="muted opportunity-scenario-note">
+        p20, p50, and p80 are model scenarios—not calibrated probabilities or fair values.
+      </p>
+      <ol class="compact-opportunity-list">
+        {% for entry in overview_cards %}
+          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection %}
+        {% empty %}
+          <li class="empty-state">No verified listings match these filters.</li>
+        {% endfor %}
+      </ol>
+    </section>
+
+    {% if opportunity_page.paginator.num_pages > 1 %}
+      <nav class="pagination" aria-label="Opportunity pages">
+        {% if opportunity_page.has_previous %}
+          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.previous_page_number }}">Previous</a>
+        {% endif %}
+        <span>Page {{ opportunity_page.number }} of {{ opportunity_page.paginator.num_pages }}</span>
+        {% if opportunity_page.has_next %}
+          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.next_page_number }}">Next</a>
+        {% endif %}
+      </nav>
     {% endif %}
 
-    <section aria-labelledby="standard-research-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Captured qualified cohort</p>
-          <h2 id="standard-research-title">$10 and above at the decision date</h2>
-        </div>
-        <span class="badge">{{ standard_cards|length }} listing{{ standard_cards|length|pluralize }}</span>
-      </div>
-      <div class="research-grid">
-        {% for card in standard_cards %}
-          {% include "web/_product_card.html" with card=card %}
+    <details class="panel qualification-details">
+      <summary>Qualification details: {{ product.admitted_count }} available, {{ product.rejected_count }} unavailable</summary>
+      <p>
+        Availability and investment eligibility are separate. A missing history,
+        incompatible dollar-volume basis, or other recorded restriction remains
+        withheld rather than treated as zero.
+      </p>
+      <ul class="compact-gate-list">
+        {% for reason, count in admission_reason_counts %}
+          <li>{{ reason|display_label }}: {{ count }}</li>
         {% empty %}
-          <p class="empty-state">No verified listings in this price section match the filters.</p>
+          <li>No unavailable admissions were recorded.</li>
         {% endfor %}
-      </div>
-    </section>
-
-    <section aria-labelledby="under-ten-title" class="under-ten-section">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Qualified core and saved names</p>
-          <h2 id="under-ten-title">Under $10 speculative research</h2>
-          <p class="muted">
-            This section uses the captured cohort and immutable decision-date
-            close—not a broad cheap-stock discovery list.
-          </p>
-        </div>
-        <strong>0% new allocation</strong>
-      </div>
-      <div class="research-grid">
-        {% for card in under_10_cards %}
-          {% include "web/_product_card.html" with card=card %}
-        {% empty %}
-          <p class="empty-state">No qualified captured listing under $10 matches the filters.</p>
+      </ul>
+      <dl class="advisory-history-list">
+        {% for item in unavailable_admissions %}
+          <div>
+            <dt>{{ item.symbol }}</dt>
+            <dd>
+              {{ item.reason_code|display_label }}
+              {% if item.required_closes != None %}
+                <small>{{ item.available_closes }} of {{ item.required_closes }} closes{% if item.missing_closes %} · missing {{ item.missing_closes }}{% endif %}</small>
+              {% endif %}
+            </dd>
+          </div>
         {% endfor %}
-      </div>
-    </section>
-
-    <section aria-labelledby="admission-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Captured intake</p>
-          <h2 id="admission-title">Admission and history qualification</h2>
-        </div>
-        <span class="badge">{{ product.admitted_count }} admitted · {{ product.rejected_count }} not admitted</span>
-      </div>
-      <div class="responsive-table" tabindex="0" aria-label="Captured research admission states">
-        <table class="compact-table">
-          <thead>
-            <tr>
-              <th scope="col">Symbol</th>
-              <th scope="col">Captured as</th>
-              <th scope="col">State</th>
-              <th scope="col">Reason</th>
-              <th scope="col">History</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for item in product.admissions %}
-              <tr>
-                <th scope="row">{{ item.symbol }}</th>
-                <td>{{ item.captured_role|display_label }}</td>
-                <td>{{ item.status|display_label }}</td>
-                <td>{{ item.reason_code|display_label }}</td>
-                <td>
-                  {% if item.required_closes != None %}
-                    {{ item.available_closes }} of {{ item.required_closes }} closes
-                    {% if item.missing_closes %} · missing {{ item.missing_closes }}{% endif %}
-                  {% else %}
-                    Not measured
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
+      </dl>
+      <p><a href="{% url 'methodology' %}">Read method and evidence limitations</a>.</p>
+    </details>
   {% endif %}
 
   <p class="archive-link"><a href="{% url 'archive-opportunities' %}">Archived score-based research</a> retains its original methods and labels.</p>

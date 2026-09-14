@@ -12,7 +12,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db.models import Count, Q
-from django.http import Http404, HttpRequest, HttpResponse
+from django.http import Http404, HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
 
 from stanstock.core.models import JobRun
@@ -29,6 +29,7 @@ from stanstock.research.price_product_config import (
     MOMENTUM_METHOD_VERSION,
 )
 from stanstock.research.product_reader import (
+    ProductAdmission,
     ProductCard,
     ProductHistoryRead,
     ProductRead,
@@ -36,12 +37,25 @@ from stanstock.research.product_reader import (
     read_research_product,
     read_research_product_history,
 )
-from stanstock.research.product_study_evidence import read_registered_price_product_study
-from stanstock.research.reporting import canonical_reportable_prediction_filter
+from stanstock.research.product_study_evidence import (
+    ProductStudyComparisonRow,
+    ProductStudyPartitionView,
+    ProductStudyScopeView,
+    read_registered_price_product_study,
+)
+from stanstock.research.reporting import (
+    canonical_reportable_prediction_filter,
+    reportable_prediction_filter,
+)
 from stanstock.web import views as legacy_views
-from stanstock.web.forms import ResearchProductFilterForm, TrackedSymbolForm
+from stanstock.web.forms import (
+    PRODUCT_HORIZON_CHOICES,
+    ResearchProductFilterForm,
+    TrackedSymbolForm,
+)
 
 _PERFORMANCE_RUN_BATCH_SIZE = 200
+_OPPORTUNITIES_PAGE_SIZE = 20
 
 
 def _read(request: HttpRequest) -> ProductRead:
@@ -77,23 +91,100 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
     product = _read(request)
     form = ResearchProductFilterForm(request.GET or None)
     cards = list(product.cards)
+    selected_horizon = "6m"
+    active_filter_values: dict[str, object] = {}
     if form.is_valid():
-        cards = _filter_cards(cards, form.cleaned_data)
+        active_filter_values = dict(form.cleaned_data)
+        selected_horizon = str(active_filter_values["horizon"] or "6m")
+        cards = _filter_cards(cards, active_filter_values)
     elif request.GET:
         cards = []
-    under_10 = [card for card in cards if card.target_under_10]
-    standard = [card for card in cards if not card.target_under_10]
-    promoted = [card for card in standard if card.current_promotion_eligible]
+    base_filter_values = {**active_filter_values, "price_band": ""}
+    band_cards = (
+        _filter_cards(list(product.cards), base_filter_values)
+        if active_filter_values
+        else list(product.cards)
+    )
+    page = Paginator(cards, _OPPORTUNITIES_PAGE_SIZE).get_page(request.GET.get("page"))
+    overview_cards = [
+        {
+            "card": card,
+            "projection": next(
+                projection
+                for projection in card.projections
+                if projection.horizon == selected_horizon
+            ),
+        }
+        for card in page.object_list
+    ]
+    admission_reasons = Counter(
+        item.reason_code for item in product.admissions if item.status != "admitted"
+    )
     return render(
         request,
         "web/product_opportunities.html",
         {
             "product": product,
             "filter_form": form,
-            "cards": cards,
-            "standard_cards": standard,
-            "under_10_cards": under_10,
-            "promoted_cards": promoted,
+            "opportunity_page": page,
+            "overview_cards": overview_cards,
+            "selected_horizon": selected_horizon,
+            "selected_horizon_label": dict(PRODUCT_HORIZON_CHOICES)[selected_horizon],
+            "band_links": (
+                {
+                    "label": "All",
+                    "count": len(band_cards),
+                    "active": not active_filter_values.get("price_band"),
+                    "query": _product_querystring(
+                        active_filter_values,
+                        price_band=None,
+                        page=None,
+                    ),
+                },
+                {
+                    "label": "$10 and above",
+                    "count": sum(not card.target_under_10 for card in band_cards),
+                    "active": active_filter_values.get("price_band") == "at_least_10",
+                    "query": _product_querystring(
+                        active_filter_values,
+                        price_band="at_least_10",
+                        page=None,
+                    ),
+                },
+                {
+                    "label": "Under $10",
+                    "count": sum(card.target_under_10 for card in band_cards),
+                    "active": active_filter_values.get("price_band") == "under_10",
+                    "query": _product_querystring(
+                        active_filter_values,
+                        price_band="under_10",
+                        page=None,
+                    ),
+                },
+            ),
+            "horizon_links": tuple(
+                {
+                    "value": value,
+                    "label": label,
+                    "active": selected_horizon == value,
+                    "query": _product_querystring(
+                        active_filter_values,
+                        horizon=value,
+                        page=None,
+                    ),
+                }
+                for value, label in PRODUCT_HORIZON_CHOICES
+            ),
+            "clear_filters_query": "",
+            "pagination_query": _product_querystring(active_filter_values, page=None),
+            "advanced_filters_active": any(
+                active_filter_values.get(field)
+                for field in ("direction", "suggestion", "risk")
+            ),
+            "admission_reason_counts": sorted(admission_reasons.items()),
+            "unavailable_admissions": tuple(
+                item for item in product.admissions if item.status != "admitted"
+            ),
         },
     )
 
@@ -122,6 +213,25 @@ def _filter_cards(cards: list[ProductCard], values: dict[str, object]) -> list[P
             continue
         result.append(card)
     return result
+
+
+def _product_querystring(
+    values: dict[str, object],
+    **updates: str | int | None,
+) -> str:
+    """Build links from validated product filters, not arbitrary GET input."""
+
+    query = QueryDict("", mutable=True)
+    for field in ResearchProductFilterForm.base_fields:
+        value = values.get(field)
+        if value:
+            query[field] = str(value)
+    for field, value in updates.items():
+        if value is None:
+            query.pop(field, None)
+        else:
+            query[field] = str(value)
+    return query.urlencode()
 
 
 @login_required
@@ -184,32 +294,70 @@ def prediction_history_page(request: HttpRequest) -> HttpResponse:
         return legacy_views.prediction_history_page(request)
     history = _read_history(request)
     product = history.current
-    cohort_page = Paginator(history.cohorts, 5).get_page(request.GET.get("page"))
-    page_cards = [card for cohort in cohort_page.object_list for card in cohort.cards]
-    decision_cards = page_cards
-    advisory_rows = [
-        (
-            card,
-            next(
-                prediction
-                for prediction in card.advisory_predictions
-                if prediction.horizon == projection.horizon
-            ),
-            projection,
-        )
-        for card in page_cards
-        for projection in card.projections
+    issuance_cards = [
+        card
+        for cohort in history.cohorts
+        for card in cohort.cards
     ]
+    issuance_page = Paginator(issuance_cards, _OPPORTUNITIES_PAGE_SIZE).get_page(
+        request.GET.get("page")
+    )
+    history_entries = [_history_entry(card) for card in issuance_page.object_list]
     return render(
         request,
         "web/product_history.html",
         {
             "product": product,
             "history": history,
-            "cohort_page": cohort_page,
-            "decision_cards": decision_cards,
-            "advisory_rows": advisory_rows,
+            "issuance_page": issuance_page,
+            # Preserve the verified, per-version card projection for callers
+            # that inspect the request context. The template renders the
+            # compact issuance adapter below.
+            "decision_cards": list(issuance_page.object_list),
+            "history_entries": history_entries,
         },
+    )
+
+
+def _history_entry(card: ProductCard) -> dict[str, object]:
+    advisory_by_horizon = {
+        prediction.horizon: prediction for prediction in card.advisory_predictions
+    }
+    advisory_entries = []
+    for projection in card.projections:
+        prediction = advisory_by_horizon[projection.horizon]
+        non_evaluable = _is_non_evaluable_advisory(prediction)
+        advisory_entries.append(
+            {
+                "prediction": prediction,
+                "projection": projection,
+                "non_evaluable": non_evaluable,
+                "outcome_label": (
+                    "Not evaluable — forecast withheld"
+                    if non_evaluable
+                    else _outcome_label(prediction)
+                ),
+            }
+        )
+    return {
+        "card": card,
+        "decision_outcome_label": _outcome_label(card.decision_prediction),
+        "advisories": advisory_entries,
+    }
+
+
+def _outcome_label(prediction: Prediction) -> str:
+    if hasattr(prediction, "outcome"):
+        return prediction.outcome.get_status_display()
+    return "Outcome pending"
+
+
+def _is_non_evaluable_advisory(prediction: Prediction) -> bool:
+    return (
+        prediction.evidence_role == Prediction.EvidenceRole.ADVISORY
+        and prediction.bear_return is None
+        and prediction.base_return is None
+        and prediction.bull_return is None
     )
 
 
@@ -228,8 +376,12 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     )
     decision_groups: list[dict[str, object]] = []
     advisory_groups: list[dict[str, object]] = []
+    observed_scope: dict[str, dict[str, int]] = {
+        "decision": {},
+        "advisory": {},
+    }
     if history.available:
-        decision_groups, advisory_groups = _observed_performance_groups(history)
+        decision_groups, advisory_groups, observed_scope = _observed_performance_groups(history)
     return render(
         request,
         "web/product_performance.html",
@@ -237,8 +389,10 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             "product": product,
             "history": history,
             "registered_study": registered_study,
+            "comparison_partitions": _comparison_partitions(registered_study.partitions),
             "decision_groups": decision_groups,
             "advisory_groups": advisory_groups,
+            "observed_scope": observed_scope,
             "has_matured": any(
                 group["status"] == PredictionOutcome.Status.MATURED
                 for group in (*decision_groups, *advisory_groups)
@@ -247,16 +401,121 @@ def performance_page(request: HttpRequest) -> HttpResponse:
     )
 
 
+def _comparison_partitions(
+    partitions: tuple[ProductStudyPartitionView, ...],
+) -> tuple[dict[str, object], ...]:
+    """Keep each existing baseline visible once without changing study rows."""
+
+    return tuple(
+        {
+            "partition": partition,
+            "scopes": tuple(
+                {
+                    "scope": scope,
+                    "baseline_summaries": _comparison_scope_summaries(scope),
+                }
+                for scope in partition.scopes
+            ),
+        }
+        for partition in partitions
+    )
+
+
+def _comparison_scope_summaries(
+    scope: ProductStudyScopeView,
+) -> tuple[dict[str, object], ...]:
+    """Project existing rows for concise display; detailed tables retain all rows."""
+
+    by_baseline: dict[str, list[ProductStudyComparisonRow]] = {}
+    for row in scope.rows:
+        by_baseline.setdefault(row.baseline_model, []).append(row)
+
+    summaries = []
+    for rows in by_baseline.values():
+        context_row = next(
+            (row for row in rows if row.metric_name == "median_absolute_error"),
+            rows[0],
+        )
+        assessments = tuple(dict.fromkeys(row.assessment for row in rows))
+        unavailable_reasons = tuple(
+            dict.fromkeys(
+                row.unavailable_reason for row in rows if row.unavailable_reason is not None
+            )
+        )
+        summaries.append(
+            {
+                "baseline_label": context_row.baseline_label,
+                "context_row": context_row,
+                "assessments": assessments,
+                "unavailable_reasons": unavailable_reasons,
+                "has_candidate_worse": "Candidate worse" in assessments,
+            }
+        )
+    return tuple(summaries)
+
+
 def _observed_performance_groups(
     history: ProductHistoryRead,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, dict[str, int]],
+]:
     """Aggregate all verified runs without an unbounded SQL ``IN`` clause."""
 
     decision_counts: Counter[str] = Counter()
     advisory_counts: Counter[tuple[str, str]] = Counter()
+    scope = {
+        "decision": {
+            "not_eligible_for_observed": 0,
+            "eligible_canonical": 0,
+            "outcome_pending": 0,
+            "matured": 0,
+            "unresolved": 0,
+            "corporate_event": 0,
+        },
+        "advisory": {
+            "not_eligible_for_observed": 0,
+            "eligible_canonical": 0,
+            "outcome_pending": 0,
+            "matured": 0,
+            "unresolved": 0,
+            "corporate_event": 0,
+            "non_evaluable": 0,
+        },
+    }
     run_ids = tuple(cohort.run.id for cohort in history.cohorts)
     for offset in range(0, len(run_ids), _PERFORMANCE_RUN_BATCH_SIZE):
         run_batch = run_ids[offset : offset + _PERFORMANCE_RUN_BATCH_SIZE]
+        prediction_base = Prediction.objects.filter(analysis__run_id__in=run_batch)
+        decision_predictions = prediction_base.filter(
+            method_version=MOMENTUM_METHOD_VERSION,
+            evidence_role=Prediction.EvidenceRole.DECISION,
+        )
+        advisory_predictions = prediction_base.filter(
+            method_version=FHS_METHOD_VERSION,
+            evidence_role=Prediction.EvidenceRole.ADVISORY,
+        )
+        non_evaluable_advisory = Q(
+            bear_return__isnull=True,
+            base_return__isnull=True,
+            bull_return__isnull=True,
+        )
+        evaluable_advisory = advisory_predictions.exclude(non_evaluable_advisory)
+        for name, predictions in (
+            ("decision", decision_predictions),
+            ("advisory", evaluable_advisory),
+        ):
+            canonical = predictions.filter(canonical_reportable_prediction_filter())
+            scope[name]["not_eligible_for_observed"] += predictions.exclude(
+                reportable_prediction_filter()
+            ).count()
+            scope[name]["eligible_canonical"] += canonical.count()
+            scope[name]["outcome_pending"] += canonical.filter(outcome__isnull=True).count()
+        scope["advisory"]["non_evaluable"] += advisory_predictions.filter(
+            non_evaluable_advisory
+        ).count()
+
         base = PredictionOutcome.objects.filter(
             canonical_reportable_prediction_filter("prediction__"),
             prediction__analysis__run_id__in=run_batch,
@@ -273,7 +532,12 @@ def _observed_performance_groups(
         for row in decision_query.iterator(chunk_size=25):
             decision_counts[str(row["status"])] += int(row["count"])
         advisory_query = (
-            base.filter(
+            base.exclude(
+                prediction__bear_return__isnull=True,
+                prediction__base_return__isnull=True,
+                prediction__bull_return__isnull=True,
+            )
+            .filter(
                 prediction__method_version=FHS_METHOD_VERSION,
                 prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
             )
@@ -285,6 +549,30 @@ def _observed_performance_groups(
             advisory_counts[(str(row["prediction__horizon"]), str(row["status"]))] += int(
                 row["count"]
             )
+        for name, outcomes in (
+            (
+                "decision",
+                base.filter(
+                    prediction__method_version=MOMENTUM_METHOD_VERSION,
+                    prediction__evidence_role=Prediction.EvidenceRole.DECISION,
+                ),
+            ),
+            (
+                "advisory",
+                base.exclude(
+                    prediction__bear_return__isnull=True,
+                    prediction__base_return__isnull=True,
+                    prediction__bull_return__isnull=True,
+                ).filter(
+                    prediction__method_version=FHS_METHOD_VERSION,
+                    prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
+                ),
+            ),
+        ):
+            for status, count in outcomes.values("status").annotate(
+                count=Count("prediction")
+            ).values_list("status", "count"):
+                scope[name][str(status)] += int(count)
     return (
         [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
         [
@@ -295,6 +583,7 @@ def _observed_performance_groups(
             }
             for (horizon, status), count in sorted(advisory_counts.items())
         ],
+        scope,
     )
 
 
@@ -320,7 +609,10 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
                 if created:
                     messages.success(
                         request,
-                        f"{preference.symbol} added. It will be considered at the next intake.",
+                        (
+                            f"{preference.symbol} added. It will be checked at the next "
+                            "scheduled refresh."
+                        ),
                     )
                 else:
                     messages.info(request, f"{preference.symbol} is already in My list.")
@@ -329,12 +621,12 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
     admission_by_symbol = {item.symbol: item for item in product.admissions}
     card_by_symbol = {card.listing.provider_symbol: card for card in product.cards}
     items = [
-        {
-            "preference": preference,
-            "admission": admission_by_symbol.get(preference.symbol),
-            "card": card_by_symbol.get(preference.symbol),
-            "captured": preference.symbol in admission_by_symbol,
-        }
+        _my_list_item(
+            preference=preference,
+            admission=admission_by_symbol.get(preference.symbol),
+            card=card_by_symbol.get(preference.symbol),
+            product=product,
+        )
         for preference in TrackedSymbol.objects.filter(owner=owner).order_by("symbol", "created_at")
     ]
     return render(
@@ -347,6 +639,37 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
         },
         status=400 if invalid else 200,
     )
+
+
+def _my_list_item(
+    *,
+    preference: TrackedSymbol,
+    admission: ProductAdmission | None,
+    card: ProductCard | None,
+    product: ProductRead,
+) -> dict[str, object]:
+    if not product.available:
+        state = "Source failed" if product.status == "integrity_failed" else "Source unavailable"
+        state_detail = product.message
+    elif admission is None:
+        state = "Pending"
+        state_detail = "Checked at the next scheduled refresh."
+    elif card is not None:
+        state = "Ready"
+        state_detail = "Research is available for this stock."
+    elif admission.missing_closes:
+        state = "More history needed"
+        state_detail = admission.reason_code
+    else:
+        state = "Research unavailable"
+        state_detail = admission.reason_code
+    return {
+        "preference": preference,
+        "admission": admission,
+        "card": card,
+        "state": state,
+        "state_detail": state_detail,
+    }
 
 
 def _has_product_output() -> bool:
@@ -428,6 +751,10 @@ def archive_performance_page(request: HttpRequest) -> HttpResponse:
             "prediction__method_version",
             "prediction__evidence_role",
             "prediction__horizon",
+            "prediction__evidence_grade",
+            "prediction__source_mode",
+            "prediction__price_provider",
+            "prediction__issued_on_time",
             "status",
         )
         .annotate(count=Count("prediction"))
@@ -436,6 +763,10 @@ def archive_performance_page(request: HttpRequest) -> HttpResponse:
             "prediction__method_version",
             "prediction__evidence_role",
             "prediction__horizon",
+            "prediction__evidence_grade",
+            "prediction__source_mode",
+            "prediction__price_provider",
+            "prediction__issued_on_time",
             "status",
         )
     )

@@ -1,0 +1,40 @@
+{% load stanstock %}
+<li>
+  <article class="compact-opportunity">
+    <header>
+      <div>
+        <a href="{% url 'stock-detail' card.analysis.listing_id %}"><h3>{{ card.listing.ticker }}</h3></a>
+        <p>{{ card.listing.security.company.name }}</p>
+      </div>
+      {% if card.target_under_10 %}<span class="badge">Under $10 watch</span>{% endif %}
+    </header>
+    <dl class="compact-opportunity-facts">
+      <div>
+        <dt>Dated close</dt>
+        <dd>{{ card.analysis.current_price|price }} USD <small>{{ card.analysis.run.target_date }}</small></dd>
+      </div>
+      <div>
+        <dt>6m momentum</dt>
+        <dd>{{ card.direction|display_label }}</dd>
+      </div>
+      <div>
+        <dt>Action</dt>
+        <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
+      </div>
+    </dl>
+    {% if projection.available %}
+      <dl class="compact-projection" aria-label="{{ projection.label }} projection">
+        <div><dt>Lower p20</dt><dd>{{ projection.lower_return|percentage }}<small>{{ projection.lower_price|price }} USD</small></dd></div>
+        <div><dt>Median p50</dt><dd>{{ projection.median_return|percentage }}<small>{{ projection.median_price|price }} USD</small></dd></div>
+        <div><dt>Upper p80</dt><dd>{{ projection.upper_return|percentage }}<small>{{ projection.upper_price|price }} USD</small></dd></div>
+      </dl>
+    {% else %}
+      <p class="field-error"><strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}</p>
+    {% endif %}
+    {% if card.target_under_10 %}
+      <p class="speculative-note">Speculative watch only · 0% new allocation.</p>
+    {% elif card.blocking_reasons %}
+      <p class="muted">Restriction: {{ card.blocking_reasons.0|display_label }}</p>
+    {% endif %}
+  </article>
+</li>

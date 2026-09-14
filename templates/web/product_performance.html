@@ -1,234 +1,189 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}Research performance · StanStock{% endblock %}
+{% block title %}Performance · StanStock{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
       <p class="eyebrow">Separated evidence lanes</p>
-      <h1>Research performance</h1>
+      <h1>Performance</h1>
       <p class="lede">
-        Owner-authorized observed outcome cohorts remain separate from registered
-        current-universe/current-vintage retrospective comparisons. Neither
-        section is pooled into one unlabeled “accuracy” number.
+        Live observed outcomes, historical reconstruction, and numerical checks
+        answer different questions. They are never pooled into one skill claim.
       </p>
     </div>
   </section>
 
-  <section class="panel">
-    <p class="eyebrow">Observed product outcome cohorts</p>
-    <h2>Authorized issuance history</h2>
+  <section class="panel" aria-labelledby="observed-track-record">
+    <p class="eyebrow">Live / observed track record</p>
+    <h2 id="observed-track-record">Authorized issuance history</h2>
     {% if not history.available %}
-      <div class="error-box" role="alert">
-        <strong>Observed performance unavailable.</strong> {{ history.message }}
-      </div>
+      <div class="error-box" role="alert"><strong>Observed performance unavailable.</strong> {{ history.message }}</div>
     {% else %}
-      <div class="notice">
+      <p class="notice">
         <strong>Forecasting skill is not established.</strong>
-        The observed decision and advisory ledgers below stay separate from the
-        retrospective historical comparison section. No fixture result,
-        Monte Carlo path count, or pooled old/new percentage is presented as a
-        proven live-skill headline.
-      </div>
-      {% if not has_matured %}
-        <p class="empty-state">
-          No canonical observed product outcome has matured yet. The
-          projections remain conditional model outputs; absence of a matured
-          outcome does not turn them into an “insufficient evidence” range.
-        </p>
-      {% endif %}
-
-      <div class="detail-grid">
-        <section class="panel">
-          <h3>Six-month decision cohort</h3>
-          <p><code>us-relative-momentum-v1</code> · decision evidence only.</p>
-          <ul>
-            {% for group in decision_groups %}
-              <li>{{ group.status|display_label }}: {{ group.count }}</li>
-            {% empty %}
-              <li>No canonical observed outcomes.</li>
-            {% endfor %}
+        Only canonical, observed, on-time, provider-backed predictions can enter
+        this track record. Manual, synthetic, and research-grade rows do not
+        become observed evidence by waiting.
+      </p>
+      <div class="track-record-grid">
+        <section>
+          <h3>Six-month decisions</h3>
+          <dl class="track-record-counts">
+            <div><dt>Not eligible for observed track record</dt><dd>{{ observed_scope.decision.not_eligible_for_observed }}</dd></div>
+            <div><dt>Observed eligible (canonical)</dt><dd>{{ observed_scope.decision.eligible_canonical }}</dd></div>
+            <div><dt>Outcome pending</dt><dd>{{ observed_scope.decision.outcome_pending }}</dd></div>
+            <div><dt>Recorded matured</dt><dd>{{ observed_scope.decision.matured }}</dd></div>
+            <div><dt>Recorded unresolved</dt><dd>{{ observed_scope.decision.unresolved }}</dd></div>
+            <div><dt>Recorded corporate event</dt><dd>{{ observed_scope.decision.corporate_event }}</dd></div>
+          </dl>
+          <p class="muted">A pending outcome still requires maturity and the required recorded data. Unresolved and corporate-event records retain their own state.</p>
+          <ul class="compact-gate-list">
+            {% for group in decision_groups %}<li>{{ group.status|display_label }}: {{ group.count }}</li>{% empty %}<li>No observed decision outcomes are recorded.</li>{% endfor %}
           </ul>
-          <p class="muted">
-            BUY/AVOID evaluation uses stock and SPY returns at the same
-            endpoints. HOLD has no manufactured success value.
-          </p>
         </section>
-        <section class="panel">
-          <h3>FHS advisory cohorts</h3>
-          <p><code>us-price-fhs-v1</code> · no recommendation success metric.</p>
-          <ul>
-            {% for group in advisory_groups %}
-              <li>{{ group.prediction__horizon|display_label }} · {{ group.status|display_label }}: {{ group.count }}</li>
-            {% empty %}
-              <li>No canonical observed advisory outcomes.</li>
-            {% endfor %}
+        <section>
+          <h3>FHS advisory projections</h3>
+          <dl class="track-record-counts">
+            <div><dt>Not evaluable — forecast withheld</dt><dd>{{ observed_scope.advisory.non_evaluable }}</dd></div>
+            <div><dt>Not eligible for observed track record</dt><dd>{{ observed_scope.advisory.not_eligible_for_observed }}</dd></div>
+            <div><dt>Observed eligible (canonical)</dt><dd>{{ observed_scope.advisory.eligible_canonical }}</dd></div>
+            <div><dt>Outcome pending</dt><dd>{{ observed_scope.advisory.outcome_pending }}</dd></div>
+            <div><dt>Recorded matured</dt><dd>{{ observed_scope.advisory.matured }}</dd></div>
+            <div><dt>Recorded unresolved</dt><dd>{{ observed_scope.advisory.unresolved }}</dd></div>
+            <div><dt>Recorded corporate event</dt><dd>{{ observed_scope.advisory.corporate_event }}</dd></div>
+          </dl>
+          <p class="muted">6m, 12m, 3y, and 5y remain separate. An all-null advisory forecast is non-evaluable, not an outcome waiting only for time.</p>
+          <ul class="compact-gate-list">
+            {% for group in advisory_groups %}<li>{{ group.prediction__horizon|display_label }} · {{ group.status|display_label }}: {{ group.count }}</li>{% empty %}<li>No evaluable observed advisory outcomes are recorded.</li>{% endfor %}
           </ul>
-          <p class="muted">
-            6m, 12m, 3y, and 5y remain distinct cohorts. All-null advisory rows
-            are non-evaluable.
-          </p>
         </section>
       </div>
     {% endif %}
   </section>
 
-  <section class="panel">
-    <p class="eyebrow">Registered retrospective evidence</p>
-    <h2>Current-universe/current-vintage historical comparisons</h2>
+  <section class="panel" aria-labelledby="numerical-sensitivity">
+    <p class="eyebrow">Numerical sensitivity</p>
+    <h2 id="numerical-sensitivity">Historical anchor diagnostic</h2>
+    {% if registered_study.convergence_summary %}
+      <p>
+        <strong>Available:</strong> {{ registered_study.convergence_summary.available_quantile_comparison_count }}
+        · <strong>Exceeded:</strong> {{ registered_study.convergence_summary.exceeded_count }}
+        · <strong>Unavailable:</strong> {{ registered_study.convergence_summary.unavailable_count }}.
+        These compare {{ registered_study.convergence_summary.production_paths }} production paths with
+        {{ registered_study.convergence_summary.diagnostic_paths }} diagnostic paths.
+      </p>
+      {% if not registered_study.convergence_summary.has_available_quantile_comparisons %}
+        <p class="field-error"><strong>Comparison unavailable.</strong> Zero available comparisons is not a pass.</p>
+      {% endif %}
+      <p class="muted">Numerical precision checks are not market outcomes, calibration, or a skill claim. Exceedances remain disclosed and do not alter issuance.</p>
+    {% else %}
+      <p class="empty-state">Numerical sensitivity is unavailable because no registered historical comparison is available.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="historical-comparison">
+    <p class="eyebrow">Historical reconstruction comparison</p>
+    <h2 id="historical-comparison">Current-universe/current-vintage evidence</h2>
+    <p class="muted">
+      Better/worse refers to paired error, not profitability or proven live skill;
+      interval width and inclusion are descriptive.
+    </p>
     {% if registered_study.available %}
       <p>
-        <strong>Studied cohort:</strong>
-        {{ registered_study.studied_listing_count }} of
+        <strong>Studied cohort:</strong> {{ registered_study.studied_listing_count }} of
         {{ registered_study.source_run_listing_count }} selected listings from
-        the source cohort dated {{ registered_study.source_target_date }}.
-        Source grade: {{ registered_study.source_snapshot_grade|display_label }}.
+        {{ registered_study.source_target_date }} · {{ registered_study.source_snapshot_grade|display_label }} source grade.
       </p>
-      <p>
-        <strong>Source run captured:</strong> {{ registered_study.source_generated_at }}
-        · <strong>source run:</strong> <code>{{ registered_study.source_run_id }}</code>
-        · <strong>report generated:</strong> {{ registered_study.report_generated_at }}
-        · <strong>protocol:</strong> <code>{{ registered_study.evidence_label }}</code>
+      <p class="muted">
+        Source run {{ registered_study.source_run_id }} was captured {{ registered_study.source_generated_at }};
+        report generated {{ registered_study.report_generated_at }}. This reconstruction has survivorship and
+        current-vintage limits and does not establish live skill.
       </p>
-      <ul>
-        <li>
-          Fixed epoch {{ registered_study.fixed_epoch }}; validation runs from
-          {{ registered_study.validation_start }} through the session before
-          {{ registered_study.validation_end_exclusive }}; final holdout runs
-          from {{ registered_study.holdout_start }} through
-          {{ registered_study.holdout_complete_through }}.
-        </li>
-        <li>The frozen protocol forbids tuning on the 2025+ final holdout.</li>
-        <li>
-          This is a current-universe/current-vintage reconstruction, so
-          survivorship and current-vintage bias remain visible limits.
-        </li>
-        <li>
-          Convergence diagnostics are numerical checks, not extra market
-          evidence, support, or calibration.
-        </li>
-        <li>
-          Historical losses compare conditional forecasts with recorded realized
-          price returns, not simulated outcomes. Better or worse describes paired
-          error, not proven profitability or statistically established live skill.
-        </li>
-        <li>
-          Width and inclusion are descriptive, not standalone quality rankings.
-          The interval score jointly penalizes width and missed outcomes; higher
-          inclusion is not automatically better for a 60% interval.
-        </li>
-      </ul>
-      {% if registered_study.convergence_summary %}
-        <section class="notice" aria-labelledby="historical-anchor-convergence">
-          <h3 id="historical-anchor-convergence">Historical anchor numerical sensitivity</h3>
-          <p>
-            <strong>HISTORICAL ANCHOR numerical sensitivity:</strong>
-            8,192 production paths versus 16,384 diagnostic paths. Across
-            {{ registered_study.convergence_summary.available_quantile_comparison_count }}
-            available quantile comparisons,
-            {{ registered_study.convergence_summary.exceeded_count }} exceeded the frozen
-            <code>max(0.01 return, 0.02 * production interval width)</code> threshold.
-            {{ registered_study.convergence_summary.unavailable_count }} diagnostics could not
-            be assessed; they are not treated as zero failures.
-          </p>
-          {% if not registered_study.convergence_summary.has_available_quantile_comparisons %}
-            <p>
-              <strong>No numerical pass conclusion is available.</strong>
-              Zero available quantile comparisons is not a pass, even when the stored
-              exceeded count is zero.
-            </p>
-          {% endif %}
-          <p class="muted">
-            These are numerical precision checks, not extra market outcomes or calibrated
-            skill. Diagnostic exceedances remain disclosed; they do not tune or alter
-            issuance, and the current forecasts remain available.
-          </p>
-        </section>
+      {% if registered_study.disclosures %}
+        <ul class="compact-gate-list study-qualifications" aria-label="Study qualifications">
+          {% for disclosure in registered_study.disclosures %}<li>{{ disclosure }}</li>{% endfor %}
+        </ul>
       {% endif %}
-      {% for disclosure in registered_study.disclosures %}
-        <p class="muted">{{ disclosure }}</p>
-      {% endfor %}
-
-      {% for partition in registered_study.partitions %}
-        <section class="panel">
-          <h3>{{ partition.label }}</h3>
-          {% for scope in partition.scopes %}
-            <article>
-              <h4>{{ scope.horizon_label }}</h4>
-              <p>
-                FHS support: {{ scope.target_cohort_count }} target cohorts
-                across {{ scope.distinct_listing_count }} listings.
-                {% if scope.insufficient_reason %}
-                  <strong>No candidate actual observations yet.</strong>
-                  {{ scope.insufficient_reason|display_label }}.
-                {% endif %}
-              </p>
-              <div
-                class="responsive-table"
-                tabindex="0"
-                aria-label="{{ partition.label }} {{ scope.horizon_label }} paired retrospective comparisons"
-              >
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">Baseline</th>
-                      <th scope="col">Metric</th>
-                      <th scope="col">Paired observations</th>
-                      <th scope="col">Paired target cohorts</th>
-                      <th scope="col">FHS average</th>
-                      <th scope="col">Baseline average</th>
-                      <th scope="col">Δ FHS − baseline</th>
-                      <th scope="col">Readout</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {% for row in scope.rows %}
-                      <tr>
-                        <th scope="row">{{ row.baseline_label }}</th>
-                        <td>{{ row.metric_label }}</td>
-                        <td>{{ row.paired_observation_count }}</td>
-                        <td>{{ row.paired_target_cohort_count }}</td>
-                        <td>{{ row.candidate_average|percentage:2 }}</td>
-                        <td>{{ row.baseline_average|percentage:2 }}</td>
-                        <td>{{ row.mean_difference_candidate_minus_baseline|percentage:2 }}</td>
-                        <td>
-                          {% if row.unavailable_reason %}
-                            No paired actual observations yet —
-                            {{ row.unavailable_reason|display_label }}
-                          {% else %}
-                            {{ row.assessment }}
-                          {% endif %}
-                        </td>
-                      </tr>
-                    {% endfor %}
-                  </tbody>
-                </table>
-              </div>
-            </article>
+      {% for partition_entry in comparison_partitions %}
+        <section class="comparison-partition">
+          <h3>{{ partition_entry.partition.label }}</h3>
+          {% for scope_entry in partition_entry.scopes %}
+            {% with scope=scope_entry.scope %}
+              <article class="comparison-scope">
+                <h4>{{ scope.horizon_label }}</h4>
+                <p>
+                  {{ scope.target_cohort_count }} target cohort{{ scope.target_cohort_count|pluralize }}
+                  across {{ scope.distinct_listing_count }} listing{{ scope.distinct_listing_count|pluralize }};
+                  {{ scope.unavailable_count }} comparison{{ scope.unavailable_count|pluralize }} unavailable.
+                  {% if scope.insufficient_reason %}<strong>Comparison unavailable.</strong> {{ scope.insufficient_reason|display_label }}.{% endif %}
+                </p>
+                <ul class="comparison-summary" aria-label="{{ scope.horizon_label }} baseline summaries">
+                  {% for summary in scope_entry.baseline_summaries %}
+                    <li class="comparison-baseline-summary">
+                      <strong>{{ summary.baseline_label }}</strong>
+                      {% if summary.context_row.unavailable_reason %}
+                        <span class="field-error">Median-error comparison unavailable — {{ summary.context_row.unavailable_reason|display_label }}</span>
+                      {% else %}
+                        <span>
+                          Median error: FHS {{ summary.context_row.candidate_average|percentage:2 }} /
+                          baseline {{ summary.context_row.baseline_average|percentage:2 }} /
+                          Δ {{ summary.context_row.mean_difference_candidate_minus_baseline|percentage:2 }}.
+                        </span>
+                      {% endif %}
+                      <span>Recorded states: {{ summary.assessments|join:", " }}.</span>
+                      {% if summary.unavailable_reasons %}
+                        <span class="field-error">Unavailable: {{ summary.unavailable_reasons|join:", "|display_label }}.</span>
+                      {% endif %}
+                      {% if summary.has_candidate_worse %}
+                        <strong class="field-error comparison-adverse">Candidate worse is recorded for this baseline.</strong>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+                <details>
+                  <summary>Detailed paired comparisons</summary>
+                  <div class="responsive-table" tabindex="0" aria-label="{{ partition_entry.partition.label }} {{ scope.horizon_label }} paired retrospective comparisons">
+                    <table>
+                      <thead>
+                        <tr><th scope="col">Baseline</th><th scope="col">Metric</th><th scope="col">Paired observations</th><th scope="col">Paired cohorts</th><th scope="col">FHS average</th><th scope="col">Baseline average</th><th scope="col">Δ FHS − baseline</th><th scope="col">Readout</th></tr>
+                      </thead>
+                      <tbody>
+                        {% for row in scope.rows %}
+                          <tr class="comparison-detail-row">
+                            <th scope="row">{{ row.baseline_label }}</th>
+                            <td>{{ row.metric_label }}</td>
+                            <td>{{ row.paired_observation_count }}</td>
+                            <td>{{ row.paired_target_cohort_count }}</td>
+                            <td>{{ row.candidate_average|percentage:2 }}</td>
+                            <td>{{ row.baseline_average|percentage:2 }}</td>
+                            <td>{{ row.mean_difference_candidate_minus_baseline|percentage:2 }}</td>
+                            <td>{% if row.unavailable_reason %}Comparison unavailable — {{ row.unavailable_reason|display_label }}{% else %}{{ row.assessment }}{% endif %}</td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              </article>
+            {% endwith %}
           {% endfor %}
         </section>
       {% endfor %}
-      <p>
-        See <a href="{% url 'methodology' %}">methodology and limitations</a>
-        for the fixed operator assumptions and disclosure boundary.
-      </p>
+      <details>
+        <summary>Historical reconstruction limits and protocol</summary>
+        <ul class="compact-gate-list">
+          <li>Fixed epoch {{ registered_study.fixed_epoch }}; validation {{ registered_study.validation_start }} through {{ registered_study.validation_end_exclusive }}; final holdout through {{ registered_study.holdout_complete_through }}.</li>
+          <li>The frozen protocol forbids tuning on the 2025+ final holdout.</li>
+        </ul>
+      </details>
     {% elif registered_study.status == "absent" %}
-      <p class="empty-state">
-        <strong>Retrospective skill not established.</strong>
-        No registered all-selected historical comparison report is available
-        for this account. Older or partial diagnostics are not substituted.
-      </p>
+      <p class="empty-state"><strong>Historical comparison unavailable.</strong> No registered all-selected report is available for this account; older or partial diagnostics are not substituted.</p>
     {% else %}
-      <div class="error-box" role="alert">
-        <strong>Registered retrospective evidence unavailable.</strong>
-        {{ registered_study.message }}
-      </div>
+      <div class="error-box" role="alert"><strong>Historical reconstruction unavailable.</strong> {{ registered_study.message }}</div>
     {% endif %}
   </section>
 
-  <p>
-    <a href="{% url 'archive-performance' %}">Archived performance reports</a>
-    retain their original methods and thresholds.
-  </p>
+  <p><a href="{% url 'archive-performance' %}">Archived performance reports</a> retain their original methods and thresholds.</p>
 {% endblock %}

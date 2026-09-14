@@ -44,6 +44,8 @@ from stanstock.portfolio.planner import (
     record_external_deposit,
 )
 from stanstock.portfolio.service import (
+    PortfolioValuationError,
+    build_sample_portfolio,
     delete_holding,
     record_portfolio_snapshot,
     upsert_holding,
@@ -54,6 +56,7 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
+from stanstock.research.price_product_config import PRODUCT_VERSION
 from stanstock.web.forms import PortfolioForm
 
 pytestmark = pytest.mark.django_db
@@ -932,6 +935,43 @@ def test_missing_satellite_never_forces_a_purchase(
     assert plan.purchases[0].amount == Decimal("420.000000")
     assert plan.residual_cash == Decimal("180.000000")
     assert "No provider-backed stock analysis" in plan.satellite_reason
+
+
+def test_active_momentum_method_keeps_core_math_but_marks_satellite_and_sample_inapplicable(
+    owner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spy, stocks = _planner_market()
+    analysis = StockAnalysis.objects.get(listing=stocks[0])
+    analysis.run.config_version = PRODUCT_VERSION
+    monkeypatch.setattr(
+        "stanstock.portfolio.planner.latest_provider_backed_analysis_run",
+        lambda: analysis.run,
+    )
+    portfolio = Portfolio.objects.create(
+        owner=owner,
+        name="Momentum method applicability",
+        base_currency="USD",
+        cash_balance=Decimal("600"),
+    )
+    monkeypatch.setattr(
+        "stanstock.portfolio.planner.timezone.localdate",
+        lambda: date(2026, 9, 7),
+    )
+
+    plan = preview_monthly_contribution_plan(portfolio)
+
+    assert plan.issues == ()
+    assert [(purchase.listing, purchase.amount) for purchase in plan.purchases] == [
+        (spy, Decimal("420.000000"))
+    ]
+    assert plan.residual_cash == Decimal("180.000000")
+    assert "active momentum method has no short-horizon satellite lane" in plan.satellite_reason
+    with pytest.raises(
+        PortfolioValuationError,
+        match="legacy scored sample builder is not supported by the active momentum method",
+    ):
+        build_sample_portfolio(owner=owner, source_run=analysis.run)
 
 
 def test_medium_horizon_opportunity_cannot_qualify_short_satellite(

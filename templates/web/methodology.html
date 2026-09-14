@@ -9,8 +9,8 @@
       <h1>Methodology and limitations</h1>
       <p class="lede">
         StanStock uses deterministic rules, versioned weights, immutable data
-        vintages, and out-of-sample evaluation. It does not use an LLM to alter
-        scores or recommendations.
+        vintages, and separately labelled evaluation evidence. It does not use
+        an LLM to alter scores or recommendations.
       </p>
     </div>
   </section>
@@ -49,6 +49,14 @@
         market observations.
       </p>
     </section>
+  {% endif %}
+  {% if stanstock_research_product_enabled %}
+    <details class="panel archived-methodology">
+      <summary>Archived methods — not used by the active product</summary>
+      <p>
+        The retained text below documents historical interfaces and methods.
+        It does not describe the active momentum decision or FHS projections.
+      </p>
   {% endif %}
   <div class="detail-grid">
     <section class="panel">
@@ -100,4 +108,7 @@
       <p>Free sources can be incomplete, delayed, revised, or unavailable. European filing coverage and total-return data may be less complete than US price history.</p>
     </section>
   </div>
+  {% if stanstock_research_product_enabled %}
+    </details>
+  {% endif %}
 {% endblock %}

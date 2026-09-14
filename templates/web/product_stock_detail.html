@@ -24,20 +24,31 @@
       </div>
     </section>
 
-    <dl class="source-strip">
+    <dl class="source-strip source-strip-primary">
       <div><dt>Reference close</dt><dd>{{ card.analysis.current_price|price }} USD</dd></div>
       <div><dt>Market date</dt><dd>{{ card.analysis.run.target_date }}</dd></div>
-      <div><dt>Evidence grade</dt><dd>{{ card.decision_prediction.evidence_grade|display_label }}</dd></div>
       <div><dt>Provider</dt><dd>{{ card.decision_prediction.price_provider|display_label }}</dd></div>
-      <div><dt>Price coverage</dt><dd>{{ card.source_period_start }} – {{ card.source_period_end }}</dd></div>
-      <div><dt>Retrieved</dt><dd>{{ card.source_retrieved_at }}</dd></div>
     </dl>
+    <details class="panel source-provenance-details">
+      <summary>Price coverage and retrieval details</summary>
+      <dl class="source-strip">
+        <div><dt>Evidence grade</dt><dd>{{ card.decision_prediction.evidence_grade|display_label }}</dd></div>
+        <div><dt>Price coverage</dt><dd>{{ card.source_period_start }} – {{ card.source_period_end }}</dd></div>
+        <div><dt>Retrieved</dt><dd>{{ card.source_retrieved_at }}</dd></div>
+      </dl>
+    </details>
 
     {% if card.target_under_10 %}
       <div class="speculative-note">
         <strong>Under $10 · speculative watch · 0% new allocation.</strong>
         A positive momentum direction remains HOLD and cannot be promoted or
         enter a newly constructed sample basket.
+      </div>
+    {% endif %}
+    {% if card.blocking_reasons %}
+      <div class="notice" role="status">
+        <strong>Research restriction.</strong>
+        {{ card.blocking_reasons|join:", "|display_label }}.
       </div>
     {% endif %}
 
@@ -81,8 +92,8 @@
     </section>
 
     <div class="detail-grid product-method-grid">
-      <section class="panel">
-        <h2>Momentum decision</h2>
+      <details class="panel">
+        <summary>Momentum decision details</summary>
         <p>
           The stock and SPY use identical endpoints: T−252 through T−21.
           Positive requires both positive stock skipped-month momentum and
@@ -94,9 +105,9 @@
           <div><dt>SPY log momentum</dt><dd>{{ card.benchmark_log_momentum|floatformat:4 }}</dd></div>
           <div><dt>Relative log momentum</dt><dd>{{ card.relative_log_momentum|floatformat:4 }}</dd></div>
         </dl>
-      </section>
-      <section class="panel">
-        <h2>Risk and suggestion restrictions</h2>
+      </details>
+      <details class="panel">
+        <summary>Risk and action restrictions</summary>
         <dl class="product-detail-list">
           <div><dt>Relative volatility</dt><dd>{{ card.relative_volatility|floatformat:2 }}× SPY · {{ card.relative_volatility_label|display_label }}</dd></div>
           <div><dt>Maximum 252-session drawdown</dt><dd>{{ card.maximum_drawdown|percentage }}</dd></div>
@@ -105,9 +116,9 @@
         {% if card.blocking_reasons %}
           <ul>{% for reason in card.blocking_reasons %}<li>{{ reason|display_label }}</li>{% endfor %}</ul>
         {% endif %}
-      </section>
-      <section class="panel">
-        <h2>Filtered historical simulation</h2>
+      </details>
+      <details class="panel">
+        <summary>Filtered historical simulation method</summary>
         <p>
           The fixed operator uses 756 split-adjusted daily USD price returns
           excluding dividends, a 252-return filter burn-in, 504 centered and
@@ -115,9 +126,9 @@
           and 8,192 deterministic PCG64 paths. Results use linear quantiles
           and ledger rounding recorded at issuance.
         </p>
-      </section>
-      <section class="panel">
-        <h2>Important uncertainty</h2>
+      </details>
+      <details class="panel">
+        <summary>Uncertainty and provenance limits</summary>
         <p>
           Projection drift continues the trailing three-year mean log return.
           The model does not estimate parameter uncertainty or explicitly
@@ -128,7 +139,7 @@
           Momentum and FHS drift can disagree because they answer different
           questions. No range changes the immutable momentum suggestion.
         </p>
-      </section>
+      </details>
     </div>
     <p><a href="{% url 'methodology' %}">Full methodology and published foundations</a></p>
     <p><a href="{% url 'archive-stock-detail' card.analysis.listing_id %}">Archived evidence for this listing</a> keeps its historical interpretation.</p>

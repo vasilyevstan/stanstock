@@ -21,12 +21,6 @@
   <section class="panel">
     <p class="eyebrow">StanStock sample</p>
     <h2>Build a frozen model portfolio</h2>
-    <p>
-      Equal-weight the highest-ranked eligible opportunities from the latest
-      provider-backed analysis and preserve an immutable baseline. The current
-      price-only model tests a short-horizon signal; performance after that
-      horizon is observational rather than validation of the original thesis.
-    </p>
     {% if sample_source_run %}
       <p class="muted">
         Source run {{ sample_source_run.target_date }} ·
@@ -34,20 +28,32 @@
         {{ sample_source_run.config_version }}
       </p>
     {% endif %}
-    <form method="post" class="stack">
-      {% csrf_token %}
-      <input type="hidden" name="action" value="sample">
-      {% if sample_form.non_field_errors %}
-        <div class="error-box" role="alert">{{ sample_form.non_field_errors }}</div>
-      {% endif %}
-      {% for field in sample_form %}
-        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-        {{ field }}
-        {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
-        {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-      {% endfor %}
-      <button class="primary-button" type="submit">Build sample portfolio</button>
-    </form>
+    {% if sample_builder_supported %}
+      <p>
+        Equal-weight the highest-ranked eligible opportunities from the latest
+        provider-backed scored analysis and preserve an immutable baseline.
+      </p>
+      <form method="post" class="stack">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="sample">
+        {% if sample_form.non_field_errors %}
+          <div class="error-box" role="alert">{{ sample_form.non_field_errors }}</div>
+        {% endif %}
+        {% for field in sample_form %}
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
+          {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
+        {% endfor %}
+        <button class="primary-button" type="submit">Build sample portfolio</button>
+      </form>
+    {% else %}
+      <div class="notice">
+        <strong>Sample builder unavailable for the active momentum method.</strong>
+        This legacy scored builder cannot rank a momentum-only cohort, so no
+        current ranked basket is shown.
+      </div>
+    {% endif %}
   </section>
 
   <div class="detail-grid">
