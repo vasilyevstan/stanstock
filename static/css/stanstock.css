@@ -1233,6 +1233,10 @@ summary {
   color: var(--text);
 }
 
+.opportunities-page .opportunities-heading h1 {
+  margin-bottom: 0;
+}
+
 .opportunity-controls {
   gap: 0.55rem;
   margin-bottom: 0.9rem;
