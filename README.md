@@ -186,9 +186,10 @@ ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 
 ## Authenticated pages
 
-- `/opportunities` — the landing page: a paginated stock comparison with
-  price-band filters, median return, and model-estimated probabilities for a
-  selectable 6m, 12m, 3y, or 5y horizon;
+- `/opportunities` — the landing page: BUY-qualified candidates and positive
+  momentum shortlists for Under $10, $10-$50, and $50-$300, followed by a
+  paginated stock comparison including $300+ listings. The full cards retain
+  median returns and model-simulation shares at 6m, 12m, 3y, or 5y;
 - `/opportunities?price_band=under_10` — the directly accessible Under-$10
   research view, still restricted to 0% new allocation;
 - `/stocks/<listing-id>` — method assumptions, source closure, decision, and
@@ -212,6 +213,11 @@ research, or **My List** to manage saved names. Each stock's detail page shows
 all four projection horizons. **More** contains Market, prediction history,
 Simulations, data status, and methodology. Operational status is not the
 research landing page.
+
+Shortlists re-rank each verified cohort; they do not automatically discover
+additional stocks. Empty BUY or Under-$10 shortlists are honest outcomes,
+not a reason to lower evidence gates or promise gains. A selected price band
+opens the focused full list.
 
 Forecast availability, BUY eligibility, and a measured track record are
 different states. Research-grade or synthetic records do not become observed

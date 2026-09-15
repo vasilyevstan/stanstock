@@ -50,6 +50,10 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Viewport acceptance depends on the eligibility state.** A genuine BUY
+  fixture does not prove that a page with empty BUY and Under-$10 shortlists
+  is usable. Render both states and measure the first actual candidate after
+  the empty sections and restrictions; card counts alone miss a text wall.
 - **An authenticated browser is not sign-in acceptance.** Injected sessions
   and HTML bypass the rendered-form CSRF boundary. Exercise real form POSTs,
   safe deep-link recovery, and sign-out; reproduce stale tabs in one shared

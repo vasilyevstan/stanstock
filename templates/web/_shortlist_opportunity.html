@@ -1,0 +1,37 @@
+{% load stanstock %}
+<li>
+  <article class="shortlist-opportunity">
+    <header>
+      <div>
+        <a href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ selected_horizon }}"><h3>{{ card.listing.ticker }}</h3></a>
+        <p>{{ card.listing.security.company.name }}</p>
+      </div>
+      {% if section.is_under_10 %}<span class="badge">Speculative watch</span>{% endif %}
+    </header>
+    <dl class="shortlist-opportunity-facts">
+      <div>
+        <dt>Dated close</dt>
+        <dd>{{ card.analysis.current_price|price }} {{ card.listing.currency }} <small>{{ card.analysis.run.target_date }}</small></dd>
+      </div>
+      <div>
+        <dt>Action</dt>
+        <dd>{% if section.is_under_10 %}Speculative watch{% elif card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Restriction</dt>
+        <dd>
+          {% if section.is_under_10 %}
+            0% new allocation
+          {% elif card.blocking_reasons %}
+            {{ card.blocking_reasons.0|display_label }}
+          {% elif card.allocation_restriction %}
+            {{ card.allocation_restriction|display_label }}
+          {% else %}
+            Research only; not a guarantee.
+          {% endif %}
+        </dd>
+      </div>
+    </dl>
+    <a class="shortlist-detail-link" href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ selected_horizon }}">Open {{ selected_horizon_label }} details</a>
+  </article>
+</li>

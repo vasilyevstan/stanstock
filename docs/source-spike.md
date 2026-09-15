@@ -64,11 +64,36 @@ Saved names are admission requests, not automatic provider requests or
 analysis membership. Existing adequate registered history is reused before
 credentials/quota. Missing candidates are bounded and recorded separately.
 
+### Discovery is a separate capability
+
+Opportunities shortlists re-rank the current verified cohort. They do not
+automatically discover additional tickers, mutate My List, or scan the entire
+stock catalog for prices.
+
+The official [Market Movers endpoint](https://twelvedata.com/docs/llms/market-data/market-movers.md)
+is available on Pro (individual) or Venture (business) and above, not Basic.
+It costs 100 credits per request and returns at most 50 current-trading-day
+gainers or losers. Its documented price filter is a lower bound, not a
+complete price-range or liquidity screener. It does not provide a historical
+target-date parameter; a later "latest" snapshot cannot be substituted for an
+earlier decision.
+
+The stock catalog supplies reference identities, not price or liquidity
+screening. Quotes and time series require named instruments. Other bounded
+discovery designs may be possible, but need separate owner approval,
+source/rights review, target-safe captured intake, and quota/retry evidence.
+No paid upgrade, new intake policy, or acquisition job is activated by the
+shortlist interface.
+
 ### Volume provenance limitation
 
 Twelve Data's reviewed/documented `adjust=splits` behavior establishes the
 price-return basis. The currently documented source does **not** establish
 that reported share volume is adjusted on a compatible split basis.
+
+The official [price-adjustment explanation](https://support.twelvedata.com/en/articles/5179064-are-the-prices-adjusted)
+discusses daily/weekly/monthly price adjustment and unadjusted intraday data,
+but makes no corresponding historical-volume compatibility statement.
 
 StanStock therefore does not set volume compatibility merely because prices
 are split-adjusted. Momentum, drawdown, relative volatility, and FHS
