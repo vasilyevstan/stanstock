@@ -22,7 +22,14 @@
   60% of simulated model mass, not demonstrated 60% real-world coverage.
 - Median is not mean. Lower is not a worst case, stop price, or guaranteed
   floor.
-- Probability and confidence are null, not zero.
+- The original prediction probability/confidence fields remain null, not
+  zero. Separately registered model-estimated probabilities are shares of
+  simulations, not validated real-world odds.
+- Outcome buckets describe terminal cumulative price returns. The nested
+  below-minus-20% event is not an interim drawdown probability. Zero/all
+  simulated outcomes do not imply impossibility/certainty in the market.
+- A later-derived outcome summary has its own availability timestamp and
+  does not inherit an earlier prediction's on-time status.
 - 8,192 production paths and 16,384-path diagnostics describe numerical
   approximation, not additional financial evidence.
 - Missing or invalid calculation components are withheld rather than repaired

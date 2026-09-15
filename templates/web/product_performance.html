@@ -63,6 +63,17 @@
     {% endif %}
   </section>
 
+  <section class="panel" aria-labelledby="frequency-summary-availability">
+    <p class="eyebrow">Separate descriptive evidence</p>
+    <h2 id="frequency-summary-availability">Model-estimated probabilities</h2>
+    {% if product.cards and product.cards.0.projections.0.frequency_status == "available" %}
+      <p>Registered terminal-path shares are available for this issuance.</p>
+    {% else %}
+      <p>Terminal-path shares were not derived for this issuance, or their evidence could not be verified.</p>
+    {% endif %}
+    <p class="muted">Shares of model simulations; not validated real-world odds. They are not calibration, skill, or outcome metrics and do not alter the original run, forecast, or observed-performance state.</p>
+  </section>
+
   <section class="panel" aria-labelledby="numerical-sensitivity">
     <p class="eyebrow">Numerical sensitivity</p>
     <h2 id="numerical-sensitivity">Historical anchor diagnostic</h2>

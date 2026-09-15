@@ -181,6 +181,13 @@ def test_native_profile_ignores_legacy_success_and_replays_exact_registered_outp
     assert Prediction.objects.filter(analysis__run=run).count() == 15
     assert parent.details["verification"]["stock_analysis_count"] == 3
     assert parent.details["verification"]["prediction_count"] == 15
+    frequency_verification = parent.details["frequency_verification"]
+    assert frequency_verification["status"] == "verified"
+    assert frequency_verification["analysis_run_id"] == str(run.id)
+    assert DataAsset.objects.filter(
+        pk=frequency_verification["frequency_asset_id"],
+        kind="research_product_frequency_evidence",
+    ).exists()
     assert DataAsset.objects.filter(kind=PRODUCT_INTAKE_KIND).count() == 1
     assert DataAsset.objects.filter(kind=PRODUCT_MEMBERSHIP_KIND).count() == 1
     assert DataAsset.objects.filter(kind=CALCULATION_ARTIFACT_KIND).count() == 3
@@ -202,6 +209,127 @@ def test_native_profile_ignores_legacy_success_and_replays_exact_registered_outp
     parent.save(update_fields=["details"])
     with pytest.raises(TrackedSymbolValidationError, match="unavailable or invalid"):
         verified_catalog_references_for_symbols(symbols=("NEW",), store=store)
+
+
+@pytest.mark.parametrize("legacy_child", (False, True))
+def test_frequency_child_follows_reassigned_owner_without_reusing_another_issuance(
+    scheduled_environment, settings, django_user_model, legacy_child
+):
+    first_owner, store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    first_parent = _parent(first_owner)
+    first_child = JobRun.objects.get(
+        pk=first_parent.details["frequency_verification"]["child_job_run_id"]
+    )
+    if legacy_child:
+        first_child.job_name = "research_product_frequency_v1"
+        first_child.save(update_fields=["job_name"])
+    second_owner = django_user_model.objects.create_user(username="replacement-owner")
+    settings.OWNER_USERNAME = second_owner.username
+
+    _run_command()
+
+    second_parent = _parent(second_owner)
+    second_child = JobRun.objects.get(
+        pk=second_parent.details["frequency_verification"]["child_job_run_id"]
+    )
+    assert second_child.pk != first_child.pk
+    assert second_child.status == JobRun.Status.SUCCESS
+    assert second_child.job_name == product_job_name(
+        "research_product_frequency_v1", _identity(second_owner)
+    )
+    assert (
+        first_parent.details["frequency_verification"]["frequency_asset_id"]
+        != second_parent.details["frequency_verification"]["frequency_asset_id"]
+    )
+    for owner, parent in ((first_owner, first_parent), (second_owner, second_parent)):
+        settings.OWNER_USERNAME = owner.username
+        replayed = replay_recorded_scheduled_refresh(parent)
+        assert str(replayed.analysis_run.pk) == parent.details["verification"]["analysis_run_id"]
+        assert "skipped" in _run_command()
+        asset = DataAsset.objects.get(
+            pk=parent.details["frequency_verification"]["frequency_asset_id"]
+        )
+        assert asset.metadata["owner_id"] == str(owner.pk)
+    assert DataAsset.objects.filter(kind="research_product_frequency_evidence").count() == 2
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_completed_new_parent_rechecks_frequency_sibling_before_skip_recovery(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tampered child cannot ride the successful-parent skip shortcut."""
+
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "Europe/Tallinn",
+    )
+    owner, _store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    parent = _parent(owner)
+    child = JobRun.objects.get(pk=parent.details["frequency_verification"]["child_job_run_id"])
+    child.details["frequency_asset_sha256"] = "forged"
+    child.save(update_fields=["details"])
+    resolve.reset_mock()
+    fetch.reset_mock()
+
+    with pytest.raises(CommandError, match=r"Scheduled research refresh failed \(ValueError\)"):
+        _run_command()
+
+    # The integrity check is entirely local: no provider resolution or fetch
+    # happens while refusing a corrupted completed parent.
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_new_parent_cannot_be_made_legacy_by_removing_frequency_bindings(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STANSTOCK_SCHEDULE_TIMEZONE", "Europe/Tallinn")
+    monkeypatch.setattr(
+        "stanstock.core.management.commands.scheduled_refresh.detect_iana_timezone",
+        lambda: "Europe/Tallinn",
+    )
+    owner, _store, _path, resolve, fetch = scheduled_environment
+    _run_command()
+    parent = _parent(owner)
+    parent.details.pop("frequency_verification")
+    parent.details.pop("frequencies")
+    parent.save(update_fields=["details"])
+    resolve.reset_mock()
+    fetch.reset_mock()
+
+    with pytest.raises(CommandError, match=r"Scheduled research refresh failed \(ValueError\)"):
+        _run_command()
+
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_legacy_parent_without_frequency_child_skips_frequency_verification(
+    scheduled_environment: tuple[Any, Any, Any, Any, Any],
+) -> None:
+    owner, store, _path, _resolve, _fetch = scheduled_environment
+    parent = JobRun.objects.create(
+        job_name=product_job_name(SCHEDULED_RESEARCH_JOB, _identity(owner)),
+        region="us",
+        target_date=TARGET,
+        attempt=1,
+        status=JobRun.Status.SUCCESS,
+        finished_at=NOW,
+        details={"profile": "research_product_v1", "stages": {}},
+    )
+
+    research_product_refresh._verify_recorded_frequency_stage(
+        parent=parent,
+        target_date=TARGET,
+        owner_id=_identity(owner)["owner_id"],
+        store=store,
+    )
 
 
 def test_manual_daily_product_is_research_only_and_cannot_occupy_scheduled_identity(

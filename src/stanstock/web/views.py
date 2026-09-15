@@ -20,6 +20,7 @@ from django.db import transaction
 from django.db.models import Avg, Count, Q, QuerySet
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
@@ -175,6 +176,7 @@ from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.types import SimulationWorkflowError
 from stanstock.web.demo import DEMO_OPPORTUNITIES
 from stanstock.web.forms import (
+    PRODUCT_HORIZON_CHOICES,
     OpportunityFilterForm,
     PortfolioDepositForm,
     PortfolioForm,
@@ -1003,6 +1005,9 @@ def tracked_symbol_delete(request: HttpRequest, tracked_symbol_id: UUID) -> Http
     symbol = preference.symbol
     preference.delete()
     messages.success(request, f"{symbol} removed from My list.")
+    selected_horizon = request.POST.get("horizon")
+    if selected_horizon in dict(PRODUCT_HORIZON_CHOICES):
+        return redirect(f"{reverse('my-list')}?horizon={selected_horizon}")
     return redirect("my-list")
 
 

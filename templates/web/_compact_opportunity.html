@@ -3,7 +3,7 @@
   <article class="compact-opportunity">
     <header>
       <div>
-        <a href="{% url 'stock-detail' card.analysis.listing_id %}"><h3>{{ card.listing.ticker }}</h3></a>
+        <a href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ projection.horizon }}"><h3>{{ card.listing.ticker }}</h3></a>
         <p>{{ card.listing.security.company.name }}</p>
       </div>
       {% if card.target_under_10 %}<span class="badge">Under $10 watch</span>{% endif %}
@@ -21,13 +21,23 @@
         <dt>Action</dt>
         <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
       </div>
+      <div>
+        <dt>Median return</dt>
+        <dd>{{ projection.median_return|percentage }}</dd>
+      </div>
     </dl>
     {% if projection.available %}
       <dl class="compact-projection" aria-label="{{ projection.label }} projection">
-        <div><dt>Lower p20</dt><dd>{{ projection.lower_return|percentage }}<small>{{ projection.lower_price|price }} USD</small></dd></div>
-        <div><dt>Median p50</dt><dd>{{ projection.median_return|percentage }}<small>{{ projection.median_price|price }} USD</small></dd></div>
-        <div><dt>Upper p80</dt><dd>{{ projection.upper_return|percentage }}<small>{{ projection.upper_price|price }} USD</small></dd></div>
+        {% for share in projection.frequency_shares %}
+          <div class="probability-cell">
+            <dt>{% if share.event == "loss" %}Loss{% elif share.event == "flat_to_20" %}Flat to +20%{% else %}Above +20%{% endif %}</dt>
+            <dd>{{ share.label }}</dd>
+          </div>
+        {% endfor %}
       </dl>
+      {% if projection.frequency_status != "available" %}
+        <p class="field-error"><strong>Model-estimated probabilities unavailable.</strong> {{ projection.frequency_reason|display_label }}</p>
+      {% endif %}
     {% else %}
       <p class="field-error"><strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}</p>
     {% endif %}

@@ -19,6 +19,7 @@
     <h2 id="add-symbol">Add stock</h2>
     <form method="post" class="stack">
       {% csrf_token %}
+      <input type="hidden" name="horizon" value="{{ selected_horizon }}">
       {% for field in form %}
         <label for="{{ field.id_for_label }}">{{ field.label }}</label>
         {{ field }}
@@ -46,6 +47,15 @@
         <h2 id="preference-state">Research state</h2>
       </div>
     </div>
+    <nav class="horizon-links" aria-label="My List projection horizon">
+      <span>Horizon</span>
+      {% for link in horizon_links %}
+        <a href="?{{ link.query }}"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
+      {% endfor %}
+    </nav>
+    {% if horizon_error %}
+      <p class="field-error" role="alert">{{ horizon_error }}</p>
+    {% endif %}
     <div class="responsive-table" tabindex="0" aria-label="My List captured research states">
       <table class="compact-table">
         <thead>
@@ -62,7 +72,7 @@
             <tr>
               <th scope="row">
                 {% if item.card %}
-                  <a href="{% url 'stock-detail' item.card.analysis.listing_id %}">{{ item.preference.symbol }}</a>
+                  <a href="{% url 'stock-detail' item.card.analysis.listing_id %}?horizon={{ selected_horizon }}">{{ item.preference.symbol }}</a>
                 {% else %}
                   {{ item.preference.symbol }}
                 {% endif %}
@@ -72,6 +82,14 @@
                 <strong>{{ item.state }}</strong>
                 <small>{{ item.state_detail|display_label }}</small>
                 {% if item.card %}<small>{{ item.card.direction|display_label }} · {% if item.card.suggestion %}{{ item.card.suggestion|upper }}{% else %}action unavailable{% endif %}</small>{% endif %}
+                {% if item.projection and item.projection.available %}
+                  <small>{{ selected_horizon_label }} median: {{ item.projection.median_return|percentage }}.</small>
+                  {% if item.projection.frequency_status == "available" %}
+                    <small>Model-estimated probabilities: {% for share in item.projection.frequency_shares %}{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20% (0% to +20%){% else %}Above +20% (R &gt; +20%){% endif %} {{ share.label }}{% if not forloop.last %} · {% endif %}{% endfor %}. Shares of model simulations; not validated real-world odds.</small>
+                  {% else %}
+                    <small>Model-estimated probabilities unavailable. {{ item.projection.frequency_reason|display_label }}</small>
+                  {% endif %}
+                {% endif %}
               </td>
               <td>
                 {% if item.admission and item.admission.required_closes != None %}
@@ -84,6 +102,7 @@
               <td>
                 <form method="post" action="{% url 'tracked-symbol-delete' item.preference.id %}" class="inline-form">
                   {% csrf_token %}
+                  <input type="hidden" name="horizon" value="{{ selected_horizon }}">
                   <button class="danger-button" type="submit">Remove</button>
                 </form>
               </td>

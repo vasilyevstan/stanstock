@@ -153,7 +153,24 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       real-world coverage; the median is not the mean or a stop-loss.
 - [ ] Drift continuation, variance assumptions, residual sampling and the
       same-shock zero-drift sensitivity are explicit. Simulated path counts
-      do not increase independent empirical support or unlock probability.
+      do not increase independent empirical support or unlock calibrated
+      probability.
+- [ ] Separately registered model-estimated outcome shares leave original
+      prediction probability/confidence fields unchanged. Count exhaustive
+      terminal-return events from the actual paths, not three quantiles;
+      ending-loss events are not interim drawdown probabilities.
+- [ ] Frequency registration binds complete drift/zero-drift projection
+      payloads, exact source identity, explicit asset schema and all metadata.
+      Native forged-registry tests exercise the actual reader and offline
+      verifier rather than replacing either validator with a mock.
+- [ ] Publication is captured after derivation and lock wait; historical
+      reads cannot see later reports or inherit a source's on-time status.
+      Offline re-derivation preserves original publication/execution metadata.
+- [ ] Genuine source withholding remains explicit and does not break
+      previously successful source jobs. Exact base/head reproduction covers
+      full successful and withheld payloads and a real retained old parent's
+      canonical replay. Added child names cannot excuse changes inside frozen
+      payloads; stripped new-parent bindings fail closed.
 - [ ] Seed identity, complete input/calendar hashes and declared numeric
       precision reproduce the output. Whole-triplet numerical failures
       remain explicit rather than clipped into plausible values.

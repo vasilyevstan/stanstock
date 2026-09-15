@@ -13,10 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: quality
+  checks:
+    name: checks (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, price-product, price-study]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -46,7 +50,28 @@ jobs:
         run: uv run playwright install --with-deps chromium
 
       - name: Run tests
-        run: uv run pytest --cov=stanstock --cov-report=term-missing
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+        run: |
+          case "$TEST_SUITE" in
+            core)
+              selection=(--ignore-glob='tests/test_research_product_*.py'
+                         --ignore-glob='tests/test_research_price_product*.py')
+              ;;
+            price-study)
+              selection=(tests/test_research_product_study_evidence.py)
+              ;;
+            price-product)
+              selection=()
+              for path in tests/test_research_product_*.py tests/test_research_price_product*.py; do
+                if [ "$path" != tests/test_research_product_study_evidence.py ]; then
+                  selection+=("$path")
+                fi
+              done
+              ;;
+            *) exit 1 ;;
+          esac
+          uv run pytest --cov=stanstock --cov-report=term-missing --maxfail=1 "${selection[@]}"
 
       - name: Check migration drift
         run: uv run python manage.py makemigrations --check --dry-run
@@ -60,6 +85,18 @@ jobs:
           DJANGO_ALLOWED_HOSTS: "localhost"
           DATABASE_URL: "postgresql://stanstock:stanstock@localhost:5432/stanstock"
         run: uv run python manage.py check --deploy --settings=stanstock.settings.prod
+
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [checks]
+    if: always()
+    steps:
+      - name: Require every complete test partition
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: test "$CHECKS_RESULT" = success
 
   postgresql:
     name: postgresql
@@ -93,6 +130,11 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen --all-groups
 
+      - name: Prepare static manifest for native rendering regressions
+        env:
+          DJANGO_SECRET_KEY: "ci-only-postgresql-test-secret"
+        run: uv run python manage.py collectstatic --noinput --verbosity 0 --settings=stanstock.settings.dev
+
       - name: Run PostgreSQL integrity regressions
         env:
           POSTGRES_USER: "stanstock"
@@ -117,6 +159,10 @@ jobs:
             tests/test_research_product_schema.py \
             tests/test_research_product_parent_guards.py \
             tests/test_research_product_scheduled.py \
+            tests/test_research_product_frequency_evidence.py \
+            tests/test_research_product_jobs.py::test_postgresql_frequency_registration_has_one_winner_and_retry_reads_its_bytes \
+            tests/test_research_product_reader_web.py::test_native_four_layer_live_job_reader_and_authenticated_pages \
+            tests/test_research_product_reader_web.py::test_status_history_performance_and_my_list_keep_boundaries \
             tests/test_research_product_study_evidence.py::test_registered_study_reader_fails_closed_on_forged_metadata_row \
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \

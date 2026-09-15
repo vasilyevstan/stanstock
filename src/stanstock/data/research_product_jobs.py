@@ -77,6 +77,7 @@ from stanstock.research.price_product_config import (
     default_price_product_config_path,
     load_price_product_config,
 )
+from stanstock.research.product_frequency_evidence import register_product_frequencies
 from stanstock.research.product_pipeline import (
     _require_observed_commit_deadline,
     select_product_price_asset,
@@ -87,6 +88,7 @@ from stanstock.research.service import analyze_snapshot
 RESEARCH_INTAKE_JOB = "research_intake_v1"
 DAILY_RESEARCH_JOB = "daily_research_v1"
 SCHEDULED_RESEARCH_JOB = "scheduled_refresh_research_v1"
+FREQUENCY_RESEARCH_JOB = "research_product_frequency_v1"
 
 
 def execute_daily_research_job(
@@ -98,6 +100,7 @@ def execute_daily_research_job(
     store: AssetStore | None = None,
     core_config_path: Path | None = None,
     enforce_rate_limit: bool = True,
+    derive_frequencies: bool = True,
 ) -> JobRun:
     """Capture, acquire, admit and issue one recoverable bounded research cohort."""
     if not isinstance(issued_on_time, bool):
@@ -119,6 +122,8 @@ def execute_daily_research_job(
             completed = _completed_product_run(intake, store=asset_store)
             if completed is not None:
                 _project_product_market_state(completed, store=asset_store)
+                if derive_frequencies:
+                    register_product_frequencies(run=completed, store=asset_store)
                 return JobExecutionResult(details=_daily_details(intake, completed, recovered=True))
         resolve_us_target_date(decision_time=timezone.now(), explicit_target=target_date)
         if issued_on_time:
@@ -194,6 +199,8 @@ def execute_daily_research_job(
         if completed is None:
             raise ValueError("Research writer did not commit its complete captured output")
         _project_product_market_state(completed, store=asset_store)
+        if derive_frequencies:
+            register_product_frequencies(run=completed, store=asset_store)
         return JobExecutionResult(
             details={
                 **_daily_details(intake, completed, recovered=False),
@@ -599,7 +606,12 @@ def _successful_attempt(job: JobRun) -> JobRun:
 
 def product_job_name(kind: str, identity: dict[str, str]) -> str:
     """Use the existing target uniqueness guard for each explicit owner issuance."""
-    if kind not in {DAILY_RESEARCH_JOB, RESEARCH_INTAKE_JOB, SCHEDULED_RESEARCH_JOB}:
+    if kind not in {
+        DAILY_RESEARCH_JOB,
+        RESEARCH_INTAKE_JOB,
+        SCHEDULED_RESEARCH_JOB,
+        FREQUENCY_RESEARCH_JOB,
+    }:
         raise ValueError("Unknown research product job kind")
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()

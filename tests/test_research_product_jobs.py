@@ -5,13 +5,16 @@ import logging
 import math
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import Mock
 
 import polars as pl
 import pytest
+from django.db import connection, connections
 from django.utils import timezone
 from exchange_calendars import get_calendar
 
@@ -30,6 +33,10 @@ from stanstock.data.research_product import (
 from stanstock.data.research_product_jobs import execute_daily_research_job
 from stanstock.portfolio.models import TrackedSymbol
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
+from stanstock.research.product_frequency_evidence import (
+    FREQUENCY_EVIDENCE_KIND,
+    register_product_frequencies,
+)
 from stanstock.research.product_pipeline import verify_price_product_output
 
 pytestmark = pytest.mark.django_db
@@ -589,7 +596,14 @@ def test_committed_output_recovers_after_lost_job_completion(product_environment
     assert recovered.status == "success"
     assert recovered.details["recovered"] is True
     assert recovered.details["analysis_run_id"] == str(original.id)
-    assert set(DataAsset.objects.values_list("id", flat=True)) == assets
+    # Recovery does not rewrite its frozen product output. It may append the
+    # separate, first-time frequency evidence that was skipped when the
+    # original task failed after committing the source run.
+    recovered_assets = set(DataAsset.objects.values_list("id", flat=True))
+    assert assets < recovered_assets
+    assert recovered_assets - assets == set(
+        DataAsset.objects.filter(kind=FREQUENCY_EVIDENCE_KIND).values_list("id", flat=True)
+    )
     assert set(Prediction.objects.values_list("id", flat=True)) == predictions
     assert not Prediction.objects.filter(issued_on_time=True).exists()
     resolve.assert_not_called()
@@ -721,7 +735,67 @@ def test_distinct_concurrent_issuances_share_the_target_acquisition_lock(tmp_pat
         "predictions": 30,
         "listings": 3,
         "history_requests": 1,
+        "frequency_assets": 1,
+        "different_publication_clocks": True,
+        "winner_bytes_verified": True,
+        "report_files": 1,
     }
+
+
+@pytest.mark.skipif(
+    connection.vendor != "postgresql",
+    reason="PostgreSQL independent-connection frequency-evidence concurrency regression",
+)
+@pytest.mark.django_db(transaction=True)
+def test_postgresql_frequency_registration_has_one_winner_and_retry_reads_its_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    django_user_model,
+) -> None:
+    """Two independent PostgreSQL connections publish exactly one immutable report."""
+
+    environment = make_product_environment(tmp_path, monkeypatch, django_user_model)
+    _owner, store, _path, resolve, fetch = environment
+    # Arrange the immutable source through the established synthetic
+    # acquisition fixture. The actual concurrent evidence writers below must
+    # use only that source and may not resolve a credential or fetch again.
+    resolve.side_effect = None
+    resolve.return_value = "synthetic-test-token"
+    fetch.side_effect = lambda symbol, **_kwargs: _series(symbol)
+    job = _run(environment, derive_frequencies=False)
+    run_id = str(job.details["analysis_run_id"])
+    resolve.reset_mock()
+    fetch.reset_mock()
+    resolve.side_effect = AssertionError("frequency registration must not resolve credentials")
+    fetch.side_effect = AssertionError("frequency registration must not fetch provider data")
+    start = Barrier(2)
+
+    def register_from_independent_connection() -> tuple[str, bytes]:
+        connections.close_all()
+        try:
+            start.wait(timeout=10)
+            run = AnalysisRun.objects.get(pk=run_id)
+            asset = register_product_frequencies(run=run, store=store)
+            return str(asset.id), store.read_bytes(asset.relative_path)
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(register_from_independent_connection)
+        second = executor.submit(register_from_independent_connection)
+        results = (first.result(timeout=60), second.result(timeout=60))
+
+    assert results[0][0] == results[1][0]
+    assert results[0][1] == results[1][1]
+    asset = DataAsset.objects.get(kind=FREQUENCY_EVIDENCE_KIND)
+    assert DataAsset.objects.filter(kind=FREQUENCY_EVIDENCE_KIND).count() == 1
+    assert store.read_bytes(asset.relative_path) == results[0][1]
+    # A bounded sequential retry returns the immutable winner, rather than
+    # attempting to publish another report or resolve provider credentials.
+    retry = register_product_frequencies(run=AnalysisRun.objects.get(pk=run_id), store=store)
+    assert retry.pk == asset.pk
+    resolve.assert_not_called()
+    fetch.assert_not_called()
 
 
 def _series(

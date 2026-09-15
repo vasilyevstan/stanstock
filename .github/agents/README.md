@@ -143,6 +143,13 @@ distinct agent in the chain.
 
 ## Protected research invariants
 
+Separate model-simulation frequency reports do not populate frozen prediction
+probability/confidence fields or establish calibrated odds. Their own actual
+publication time controls as-of visibility. Full source/projection identity,
+including zero-drift and withheld payloads, is required; a quantile match is
+not authentication of counts. New report children are verified separately
+without changing historical canonical parent replay.
+
 Every applicable gate preserves actual generation/retrieval timestamps
 separately from historical `data_cutoff`, rejects late signals from observed
 backtests, converts currencies only through point-in-time FX resolved against

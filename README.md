@@ -28,13 +28,22 @@ The replacement product has two deterministic operators:
 | Operator | Role | Output |
 |---|---|---|
 | `us-relative-momentum-v1` | Six-month decision evidence | Raw direction plus Buy / Hold / Avoid suggestion |
-| `us-price-fhs-v1` | Advisory price research | Lower / Median / Upper projections at 6m, 12m, 3y, and 5y |
+| `us-price-fhs-v1` | Advisory price research | Median and detailed price ranges at 6m, 12m, 3y, and 5y |
 
 The output is exactly one `StockAnalysis` and five immutable predictions for
 each qualified listing: one 6m momentum decision and four FHS advisory rows,
 including a distinct 6m advisory row. The product has no overall score,
-calibrated confidence percentage, probability of gain, or automated portfolio
-instruction.
+calibrated confidence percentage, validated probability of gain, or automated
+portfolio instruction. Its original probability/confidence fields remain null.
+
+**Model-estimated probabilities** summarize the same deterministic FHS paths
+in a separate, immutable, source-bound report. The three outcomes are **Loss**,
+**Flat to +20%**, and **Above +20%**, measured at the selected horizon from the
+dated reference close. These are shares of model simulations, **not validated
+real-world odds**. They do not change the momentum suggestion or allocation.
+Median return remains visible; detailed price ranges and downside sensitivity
+remain available on the stock page. A missing summary does not hide an
+otherwise valid median or price range.
 
 Published research motivates the operators, but StanStock's individual-stock
 rules are not paper replications and have not been proven profitable. See
@@ -74,6 +83,7 @@ fixed core + captured owner-saved names + entitlement
         -> immutable membership and exact stock/SPY source closure
         -> momentum + FHS calculation
         -> one analysis + exact five-row prediction ledger + output proof
+        -> separate offline same-path outcome report, when registered
         -> shared fail-closed reader
         -> Opportunities / detail / My List / status / history / performance
 ```
@@ -83,6 +93,11 @@ or mutates evidence. The reader verifies owner authorization, registered
 manifests, source identity, and physical checksums before rendering. Completed
 target recovery reuses exact captured records before credential resolution or
 new quota use.
+
+Outcome reports have their own actual publication time. A later derivation
+does not rewrite an issuance or become evidence that probabilities were
+published at its original decision time. Old source verification remains
+valid independently of whether a derived report exists.
 
 ## Safe local demo
 
@@ -172,12 +187,14 @@ ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 ## Authenticated pages
 
 - `/opportunities` — the landing page: a paginated stock comparison with
-  price-band filters and a selectable 6m, 12m, 3y, or 5y projection;
+  price-band filters, median return, and model-estimated probabilities for a
+  selectable 6m, 12m, 3y, or 5y horizon;
 - `/opportunities?price_band=under_10` — the directly accessible Under-$10
   research view, still restricted to 0% new allocation;
 - `/stocks/<listing-id>` — method assumptions, source closure, decision, and
   all projection horizons;
-- `/my-list` — captured saved-candidate state and current persisted prices;
+- `/my-list` — saved-candidate readiness and matching horizon summaries for
+  admitted stocks, with add/remove controls;
 - `/status` — operational health, admission, freshness, and verification, not
   a second forecast table;
 - `/predictions` — immutable decision/advisory history;

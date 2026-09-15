@@ -311,7 +311,7 @@ def _protocol_sessions(config: PriceProductConfig) -> tuple[date, ...]:
     )
 
 
-def _load_study_sources(
+def load_price_product_sources(
     *,
     run: AnalysisRun,
     store: AssetStore,
@@ -364,6 +364,23 @@ def _load_study_sources(
             )
         )
     return tuple(loaded)
+
+
+def _load_study_sources(
+    *,
+    run: AnalysisRun,
+    store: AssetStore,
+    config: PriceProductConfig,
+    requested_listing_ids: tuple[UUID, ...],
+) -> tuple[_LoadedStudySource, ...]:
+    """Compatibility delegate for the frozen retrospective study."""
+
+    return load_price_product_sources(
+        run=run,
+        store=store,
+        config=config,
+        requested_listing_ids=requested_listing_ids,
+    )
 
 
 def _load_study_source(

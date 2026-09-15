@@ -21,6 +21,17 @@ Production settings and PostgreSQL migration/concurrency checks run separately
 with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
+CI partitions the complete pytest collection into price-product modules
+(`test_research_product_*.py` and `test_research_price_product*.py`), the
+expensive `test_research_product_study_evidence.py` subset, and the non-product
+complement. Each test belongs to exactly one partition. All retain the
+40-minute execution limit; none drops tests or changes assertions. The
+required `quality` check fails unless all partitions, including their checks,
+succeed. Coverage shown by each partition is partial; `make check` remains
+the complete local run. A failed partition
+stops at its first failure so its traceback is available without waiting for
+the job timeout. PostgreSQL integrity and container checks remain separate.
+
 Responsive browser cases require the Chromium binary matching the locked
 Playwright package. CI installs it with
 `uv run playwright install --with-deps chromium`; for a local environment
@@ -65,7 +76,54 @@ Release validation must cover:
 - no partial output served after failure; and
 - no provider call from ordinary authenticated GET.
 
+## Model-outcome summary coverage
+
+The immutable FHS prediction contract stays unchanged. A separate report must
+derive internally from the same deterministic terminal arrays, rather than
+trust supplied counts or infer probabilities from quantiles.
+
+Cover:
+
+- complete Loss / Flat to +20% / Above +20% partition, boundary ties, and
+  nested terminal loss below -20%;
+- unchanged 8,192-path denominator, including nonfinite/withheld failure;
+- deterministic counts and same-shock zero-drift sensitivity;
+- group rounding, symbolic small/extreme labels, exact counts, unsigned
+  probability shares versus signed returns, and no real-world guarantees;
+- full canonical source/listing/horizon/input/seed/projection identity;
+- same-quantile/different-count forgery detected by offline re-derivation;
+- registration accepting only source identity, not caller-authored statistics;
+- actual publication time, earlier as-of invisibility, future-clock refusal,
+  and no inherited prediction on-time status;
+- idempotent recovery before replay, distinct concurrent publication clocks,
+  one committed report/file with verified final bytes, and cross-process
+  SQLite locking through the durable commit;
+- safe retry after a failed registry insert without overwriting an earlier
+  unpublished blob or inheriting its publication time;
+- owner/issuance/product-bound children across owner reassignment, including
+  source-checked compatibility with earlier fixed-name children;
+- byte-identical frozen success and withheld output in base/head reproduction;
+- unchanged historical parent verification and separate new-child evidence;
+- source-complete but summary-missing/failed states and retained median/range;
+- exact-run history binding rather than substituting current probabilities;
+- no simulation, calculation, write, credential resolution, or fetch on GET;
+- one native synthetic issuance-to-report-to-reader-to-rendered-UI chain;
+- selected horizon across Opportunities, Under $10, stock detail and My List;
+  and
+- the existing mobile complete-card, desktop three-row, readable-navigation,
+  and overflow limits on both local and Linux browser environments.
+
+Numerical path-doubling comparisons describe precision only. They do not
+establish calibration or add independent market observations, and an adverse
+result is recorded rather than tuned away. Numeric calibration metrics are
+outside this change; a future study requires a separately reviewed protocol.
+
 ## Reader and UI coverage
+
+The fixed synthetic demo uses its fixture's end date, not the moving live
+market date, in both current and history readers. Exercise a later read clock
+without regenerating the source; real-provider stale-session rejection must
+remain unchanged.
 
 The native end-to-end contract must persist real synthetic evidence, call the
 production writer, read through the fail-closed product reader, and render

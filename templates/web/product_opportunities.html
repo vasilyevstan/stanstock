@@ -82,7 +82,8 @@
         <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
       </div>
       <p class="muted opportunity-scenario-note">
-        p20, p50, and p80 are model scenarios—not calibrated probabilities or fair values.
+        <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
+        Advisory only.
       </p>
       <ol class="compact-opportunity-list">
         {% for entry in overview_cards %}

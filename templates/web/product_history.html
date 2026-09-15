@@ -23,6 +23,15 @@
       The six-month momentum action has no overall score. Advisory p20–p80
       ranges are model scenarios, not calibrated probabilities.
     </p>
+    <nav class="horizon-links" aria-label="Prediction history projection horizon">
+      <span>Horizon</span>
+      {% for link in horizon_links %}
+        <a href="?{{ link.query }}"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
+      {% endfor %}
+    </nav>
+    {% if horizon_error %}
+      <p class="field-error" role="alert">{{ horizon_error }}</p>
+    {% endif %}
     <section aria-labelledby="issuance-history-title">
       <div class="section-heading">
         <div>
@@ -37,7 +46,7 @@
             <article class="issuance-entry">
               <header>
                 <div>
-                  <a href="{% url 'stock-detail' entry.card.analysis.listing_id %}"><h3>{{ entry.card.listing.ticker }}</h3></a>
+                  <a href="{% url 'stock-detail' entry.card.analysis.listing_id %}?horizon={{ selected_horizon }}"><h3>{{ entry.card.listing.ticker }}</h3></a>
                   <p>{{ entry.card.listing.security.company.name }}</p>
                 </div>
                 <span class="badge">{{ entry.card.decision_prediction.evidence_grade|display_label }} · {{ entry.card.decision_prediction.price_provider|display_label }}</span>
@@ -48,8 +57,23 @@
                 <div><dt>6m action</dt><dd>{% if entry.card.suggestion %}{{ entry.card.suggestion|upper }}{% else %}Unavailable{% endif %}<small>{{ entry.card.direction|display_label }} raw momentum</small></dd></div>
                 <div><dt>Outcome</dt><dd>{{ entry.decision_outcome_label }}</dd></div>
               </dl>
+              <section class="frequency-summary" aria-label="{{ selected_horizon_label }} model-estimated probabilities">
+                <h4>{{ selected_horizon_label }} model-estimated probabilities</h4>
+                {% if entry.selected_advisory.projection.available %}
+                  <p><strong>Median return:</strong> {{ entry.selected_advisory.projection.median_return|percentage }}</p>
+                  {% if entry.selected_advisory.projection.frequency_status == "available" %}
+                    <p><strong>Shares of model simulations; not validated real-world odds.</strong></p>
+                    <ul>{% for share in entry.selected_advisory.projection.frequency_shares %}<li>{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20% (0 ≤ R ≤ +20%){% else %}Above +20% (R &gt; +20%){% endif %}: {{ share.label }}</li>{% endfor %}</ul>
+                    {% if entry.selected_advisory.projection.frequency_derived_at %}<small>Published {{ entry.selected_advisory.projection.frequency_derived_at }}; not itself an on-time probability claim.</small>{% endif %}
+                  {% else %}
+                    <p class="field-error"><strong>Model-estimated probabilities unavailable.</strong> {{ entry.selected_advisory.projection.frequency_reason|display_label }}</p>
+                  {% endif %}
+                {% else %}
+                  <p><strong>Projection withheld.</strong> {{ entry.selected_advisory.projection.insufficiency_reason|display_label }}</p>
+                {% endif %}
+              </section>
               <details>
-                <summary>Four advisory projections</summary>
+                <summary>Four advisory projections: ranges and exact path details</summary>
                 <p class="muted">Advisory values do not alter the action or enter decision hit rates.</p>
                 <dl class="advisory-history-list">
                   {% for advisory in entry.advisories %}
@@ -57,8 +81,14 @@
                       <dt>{{ advisory.projection.label }}</dt>
                       <dd>
                         {% if advisory.projection.available %}
-                          {{ advisory.projection.lower_return|percentage }} / {{ advisory.projection.median_return|percentage }} / {{ advisory.projection.upper_return|percentage }}
-                          <small>Lower / Median / Upper · {{ advisory.outcome_label }}</small>
+                          <strong>Median:</strong> {{ advisory.projection.median_return|percentage }}
+                          <small>Outcome: {{ advisory.outcome_label }}</small>
+                          {% if advisory.projection.frequency_status == "available" %}
+                            <small>Range (p20 / p50 / p80): {{ advisory.projection.lower_return|percentage }} / {{ advisory.projection.median_return|percentage }} / {{ advisory.projection.upper_return|percentage }}.</small>
+                            <small>Exact paths: {% for share in advisory.projection.frequency_shares %}{% if share.event == "loss" %}Loss (R &lt; 0){% elif share.event == "flat_to_20" %}Flat to +20%{% else %}Above +20%{% endif %} {{ share.count }} of 8,192{% if not forloop.last %} · {% endif %}{% endfor %}.</small>
+                          {% else %}
+                            <small>Model-estimated probabilities unavailable: {{ advisory.projection.frequency_reason|display_label }}.</small>
+                          {% endif %}
                         {% else %}
                           <strong>Withheld</strong>
                           <small>{{ advisory.outcome_label }}{% if advisory.projection.insufficiency_reason %} · {{ advisory.projection.insufficiency_reason|display_label }}{% endif %}</small>
@@ -87,9 +117,9 @@
 
     {% if issuance_page.paginator.num_pages > 1 %}
       <nav class="pagination" aria-label="Prediction history pages">
-        {% if issuance_page.has_previous %}<a href="?page={{ issuance_page.previous_page_number }}">Previous</a>{% endif %}
+        {% if issuance_page.has_previous %}<a href="?{{ pagination_query }}&amp;page={{ issuance_page.previous_page_number }}">Previous</a>{% endif %}
         <span>Page {{ issuance_page.number }} of {{ issuance_page.paginator.num_pages }}</span>
-        {% if issuance_page.has_next %}<a href="?page={{ issuance_page.next_page_number }}">Next</a>{% endif %}
+        {% if issuance_page.has_next %}<a href="?{{ pagination_query }}&amp;page={{ issuance_page.next_page_number }}">Next</a>{% endif %}
       </nav>
     {% endif %}
   {% endif %}

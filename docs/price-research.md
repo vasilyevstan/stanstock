@@ -16,8 +16,10 @@ For each qualified listing:
 - four advisory predictions for `us-price-fhs-v1` at `6m`, `12m`, `3y`, and
   `5y`.
 
-Scores, numeric confidence, and positive-return probability are null. Every
-missing calculation has an explicit reason.
+Scores, numeric confidence, and the original positive-return probability
+field are null. Every missing calculation has an explicit reason. A
+separately registered outcome-frequency report does not change these frozen
+prediction rows or their meaning.
 
 ## Required evidence
 
@@ -165,7 +167,80 @@ The deterministic seed derives from method version, effective config hash,
 permanent listing UUID, and target date. Random indices are generated in
 path-major order. Complete inputs and calendar are hashed separately.
 
-## Lower, Median, Upper
+## Model-estimated probabilities
+
+The probability-first presentation uses the same 8,192 deterministic terminal
+paths, not a distribution inferred from three quantiles and not a new fitted
+model. A separate versioned report counts each path once in one of three
+exhaustive outcomes:
+
+| Label | Terminal cumulative price return |
+|---|---|
+| Loss | \(R_H < 0\) |
+| Flat to +20% | \(0 \le R_H \le 0.20\) |
+| Above +20% | \(R_H > 0.20\) |
+
+For event \(A\), its model-estimated share is
+\(\widehat p_A = \#\{j:R_H^{(j)}\in A\}/8192\).
+Classification compares terminal log returns with the fixed log-space
+thresholds \(0\) and \(\log(1+0.20)\). Exact zero and the upper boundary
+belong to the middle outcome. Any nonfinite path withholds that horizon's
+summary; the denominator is never filtered to make an estimate available.
+
+The stock detail also shows the nested event \(R_H < -0.20\), using
+\(\log(1-0.20)\). This means **finishing more than 20% down**, not reaching a
+20% drawdown at any point along the path. It is a subset of Loss, not a fourth
+outcome to add to the three shares. The same events on the existing
+zero-log-drift paths show dependence on the assumed drift, without another
+model or another random sample.
+
+All thresholds concern total price return over the selected horizon, not an
+annual rate; dividends, fees, and taxes are excluded. The absolute +20%
+threshold has a different economic meaning over six months and five years.
+The horizon and dated reference close must remain visible.
+
+### Presentation and nonclaims
+
+The heading is **Model-estimated probabilities**, accompanied by
+**Shares of model simulations; not validated real-world odds.** Probability
+shares have no plus/minus prefix; projected returns retain their signs.
+Median return is not a mean, expected return, or fair value.
+
+Exact integer counts are stored. Whole-percent display uses largest-remainder
+rounding with fixed Loss, Flat, Above tie order. Plain numeric shares total
+100%. A small nonzero share rounded to zero is labelled `<1%`, and a share
+below all paths rounded to 100 is labelled `>99%`; symbolic bounds are not
+presented as an exact arithmetic total. Exact counts remain in details.
+Genuine zero/all-path counts describe only the simulated sample, never an
+impossible/certain market outcome. The complement of Loss includes unchanged
+prices and is not a strictly positive-return probability.
+
+The model's historical-drift assumption, fixed variance dynamics, omitted
+corporate events, and lack of parameter uncertainty also limit these shares.
+More simulated paths can improve numerical precision; they cannot establish
+empirical support, calibration, or profitability. No new numeric calibration
+or skill claim is introduced by the outcome report. A future calibration
+study requires its own frozen, overlap-aware protocol and per-horizon
+evidence, distinct from the existing retrospective quantile comparisons.
+
+### Evidence and availability
+
+Registration derives the entire report internally from the exact run's
+verified immutable sources and records complete input, seed, listing, horizon,
+method, and projection identity. Matching the old quantiles is a necessary
+compatibility check, not proof of the counts: different distributions can
+share the same three quantiles. No registration interface accepts supplied
+probabilities or summary statistics.
+
+The new report is an append-only `DataAsset`, not a new prediction or a
+replacement source vintage. Its own `available_at` limits historical reads.
+A summary derived later is explicitly a later reconstruction; it never
+inherits the prediction's on-time status. Reads verify registered evidence
+without simulation, and an explicit offline verification re-derives the
+counts. Missing or failed summary evidence has a separate state from the
+underlying forecast. An independently valid median/range stays available.
+
+## Detailed Lower, Median, Upper
 
 NumPy's linear quantile convention is used:
 
