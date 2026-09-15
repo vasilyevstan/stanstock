@@ -6,15 +6,15 @@
         <a href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ projection.horizon }}"><h3>{{ card.listing.ticker }}</h3></a>
         <p>{{ card.listing.security.company.name }}</p>
       </div>
-      {% if card.target_under_10 %}<span class="badge">Under $10 watch</span>{% endif %}
+      {% if price_band and not price_band.new_allocation_eligible %}<span class="badge">Under $10 watch</span>{% endif %}
     </header>
     <dl class="compact-opportunity-facts">
       <div>
         <dt>Dated close</dt>
-        <dd>{{ card.analysis.current_price|price }} USD <small>{{ card.analysis.run.target_date }}</small></dd>
+        <dd>{{ card.analysis.current_price|price }} {{ card.listing.currency }} <small>{{ card.analysis.run.target_date }}</small></dd>
       </div>
       <div>
-        <dt>6m momentum</dt>
+        <dt>Relative momentum</dt>
         <dd>{{ card.direction|display_label }}</dd>
       </div>
       <div>
@@ -22,9 +22,15 @@
         <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
       </div>
       <div>
-        <dt>Median return</dt>
+        <dt>{{ projection.label }} median cumulative return</dt>
         <dd>{{ projection.median_return|percentage }}</dd>
       </div>
+      {% if not price_band %}
+        <div>
+          <dt>Reference price band</dt>
+          <dd>Unclassified</dd>
+        </div>
+      {% endif %}
     </dl>
     {% if projection.available %}
       <dl class="compact-projection" aria-label="{{ projection.label }} projection">
@@ -41,7 +47,7 @@
     {% else %}
       <p class="field-error"><strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}</p>
     {% endif %}
-    {% if card.target_under_10 %}
+    {% if price_band and not price_band.new_allocation_eligible %}
       <p class="speculative-note">Speculative watch only · 0% new allocation.</p>
     {% elif card.blocking_reasons %}
       <p class="muted">Restriction: {{ card.blocking_reasons.0|display_label }}</p>
