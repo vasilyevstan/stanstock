@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Action not performed · StanStock{% endblock %}
+
+{% block content %}
+  <section class="login-card error-box" aria-labelledby="csrf-recovery-title">
+    {% if is_login_recovery %}
+      <div>
+        <p class="eyebrow">Action not performed</p>
+        <h1 id="csrf-recovery-title">Refresh your sign-in page</h1>
+        <p class="lede">
+          That sign-in action was not performed. Reload a fresh sign-in page before trying again.
+        </p>
+      </div>
+      <a class="primary-button" href="{{ recovery_url }}">Reload fresh sign-in</a>
+    {% else %}
+      <div>
+        <p class="eyebrow">Action not performed</p>
+        <h1 id="csrf-recovery-title">Return to the home page</h1>
+        <p class="lede">
+          That action was not performed. Return home before choosing what to do next.
+        </p>
+      </div>
+      <a class="primary-button" href="{{ recovery_url }}">Return home</a>
+    {% endif %}
+  </section>
+{% endblock %}

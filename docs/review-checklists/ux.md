@@ -56,3 +56,6 @@ user-facing tables/charts. Reviewer: `stanstock-critic-tester`.
       input, or unexpectedly move an active control.
 - [ ] Error and empty states give a clear, honest message rather than a
       blank or misleading table/chart.
+- [ ] Rejected forms offer an explicit safe GET recovery action, never a
+      repeat POST or a GET to a POST-only action. A stale login form recovers
+      its safe destination through a fresh form on desktop and mobile.

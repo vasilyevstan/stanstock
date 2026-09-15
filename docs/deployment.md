@@ -93,8 +93,40 @@ exact committed revision:
 8. rollback/disable procedures have been rehearsed without deleting immutable
    history.
 
+Also complete the sign-in journey below. A healthy process or an
+already-authenticated browser does not establish that a user can sign in.
+
 The active price product has no SEC prerequisite. Do not block its market
 stage on the separately configured SEC workflow.
+
+### Sign-in and rejected-form acceptance
+
+Bind the running process to the exact deployed revision, then use a signed-out
+browser at the real deployment origin. Follow a protected deep link, submit
+the rendered login form, and confirm that the intended local destination and
+query parameters survive. Exercise the real POST sign-out control as well.
+Pre-created sessions, `force_login`, and injected HTML are not substitutes.
+
+Exercise a stale form using two tabs in one browser context: keep the first
+tab's login form open, sign in and then sign out in the second, and submit
+the first tab's old form. Rejection must remain HTTP 403. The public error
+page must offer a fresh GET sign-in link, preserve a safe local destination,
+and allow a fresh form submission without accepting or replaying the rejected
+POST. Check desktop and narrow-screen navigation and static assets.
+
+Use synthetic credentials for tests and isolated production-style dry runs.
+An installed owner's full-credential journey uses only that owner's existing,
+authorized credentials, entered privately. If those credentials are unavailable,
+record that the installed credential journey was not performed; distinguish
+the synthetic full-flow evidence from installed login-page and 403-recovery
+evidence. Never create a private-installation user or reset a password to make
+acceptance appear complete.
+
+Do not disable CSRF protection or broaden trusted origins to hide a mismatch.
+With the current cookie-based configuration, a restart alone does not change
+the CSRF secret. A stale form is consistent with a successful sign-in in
+another tab, but the actual cause requires evidence; deployment cookie or
+proxy changes must be investigated separately.
 
 ## Scheduling
 
@@ -123,13 +155,15 @@ dirty development checkout.
 With a reachable PostgreSQL URL and non-secret local test values:
 
 ```bash
-docker compose -f compose.production.yaml config
+docker compose -f compose.production.yaml config --quiet
 docker compose -f compose.production.yaml up --build
 ```
 
 Verify migrations, static collection, `/healthz`, authentication, durable
 restart behavior, synthetic product rendering, and backup verification. A dry
 run does not establish live-provider entitlement or release acceptance.
+Do not publish expanded Compose configuration: it can contain interpolated
+credentials.
 
 ## Rollback
 

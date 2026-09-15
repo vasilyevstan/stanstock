@@ -50,6 +50,20 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **An authenticated browser is not sign-in acceptance.** Injected sessions
+  and HTML bypass the rendered-form CSRF boundary. Exercise real form POSTs,
+  safe deep-link recovery, and sign-out; reproduce stale tabs in one shared
+  cookie context. Record unavailable installed owner credentials rather than
+  creating an account or resetting a password to manufacture evidence.
+- **Successful login rotates Django's CSRF cookie; logout does not.** This
+  is verified against Django 5.2. A held form can become stale after another
+  tab signs in. With the current cookie-based configuration, a restart alone
+  does not replace that random secret; do not claim an unproven trigger.
+- **Public failure rendering must not inherit request-aware data access.**
+  Rendering `base.html` with a request invokes the research context processor
+  and may emit authenticated forms. The CSRF recovery view renders without
+  a request, adds no queries, and retains a non-cacheable 403 without reading
+  POST values or replaying the rejected action.
 - **A frozen clock can hide a publication race.** Concurrent reports may
   have the same logical hash but different timestamped bytes. Exercise
   distinct publisher clocks and verify final file checksums, not just row
