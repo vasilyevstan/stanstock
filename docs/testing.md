@@ -42,6 +42,32 @@ browser is absent.
 Documentation-only edits need no build, but these drafts still require a
 separate multi-model clarity/privacy review before publication.
 
+## Sign-in and CSRF recovery
+
+Authentication acceptance must exercise Django's CSRF middleware:
+`Client(enforce_csrf_checks=True)` obtains the actual rendered token before
+posting synthetic credentials. A default test client or a pre-created
+authenticated session cannot prove this boundary.
+
+The real-HTTP browser cases cover fresh sign-in/POST sign-out and stale-tab
+recovery at narrow and desktop widths. Two pages share one browser context:
+one retains an old login form while the other signs in and signs out. Separate
+contexts have independent cookie jars and cannot reproduce this mechanism.
+Neither `force_login` nor `page.set_content` substitutes for these journeys.
+
+Rejected forms must stay HTTP 403, never cache, preserve safe GET-only login
+destinations, and offer only home navigation for other failed actions. Test
+missing/malformed tokens, missing cookies, origin/referer refusals, unsafe
+destinations, unchanged authentication state and rate limits, and no submitted
+credentials, tokens, forms, or technical reason in the response in either
+DEBUG mode. The failure renderer is tested directly for zero queries and no
+context processors; unchanged authentication/provider middleware may still
+perform its existing queries around a complete HTTP request.
+
+Synthetic full-credential evidence and an installed owner's login are separate
+claims. Record unavailable private credentials explicitly rather than
+provisioning an account or resetting a password for a deployment check.
+
 ## Product correctness coverage
 
 Release validation must cover:

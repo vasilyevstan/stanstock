@@ -20,6 +20,13 @@ untrusted input. Reviewer: `stanstock-critic-tester`.
       reviewed reason).
 - [ ] Forms and admin actions validate and sanitize input server-side, not
       only in the template/JS layer.
+- [ ] Sign-in acceptance uses a rendered token with CSRF enforcement and a
+      real browser form POST; injected sessions or HTML are not auth proof.
+- [ ] CSRF failures remain non-cacheable 403 responses with no POST replay,
+      credential/token/reason echo, context-processor invocation, or
+      authentication-state change by the failure renderer. Recovery accepts
+      only a Django-validated GET destination; rejection does not consume
+      the invalid-password attempt budget.
 
 ## Secrets
 
