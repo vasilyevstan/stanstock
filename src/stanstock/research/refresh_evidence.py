@@ -248,7 +248,8 @@ def _canonical_decimal(instance: Any, field: str, value: Decimal) -> Decimal:
     decimal_places = getattr(instance._meta.get_field(field), "decimal_places", None)
     if decimal_places is None:
         return value
-    return value.quantize(Decimal(1).scaleb(-decimal_places))
+    quantized = value.quantize(Decimal(1).scaleb(-decimal_places))
+    return quantized.copy_abs() if quantized.is_zero() else quantized
 
 
 def model_row_values(instance: Any, fields: tuple[str, ...]) -> dict[str, Any]:

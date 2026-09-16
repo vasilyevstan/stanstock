@@ -158,6 +158,8 @@ jobs:
             tests/test_medium_forecast_v2.py::test_postgresql_analyze_snapshot_holds_advisory_parent_locks_to_outer_commit \
             tests/test_research_product_schema.py \
             tests/test_research_product_parent_guards.py \
+            tests/test_research_refresh_evidence.py::test_manifest_decimal_fields_round_trip \
+            tests/test_research_product_pipeline.py::test_signed_zero_projection_issues_and_replays \
             tests/test_research_product_scheduled.py \
             tests/test_research_product_frequency_evidence.py \
             tests/test_research_product_jobs.py::test_postgresql_frequency_registration_has_one_winner_and_retry_reads_its_bytes \

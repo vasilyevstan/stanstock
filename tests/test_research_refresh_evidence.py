@@ -32,6 +32,7 @@ from stanstock.research.refresh_evidence import (
     canonical_row_json,
     dumps_canonical_envelope,
     lookup_manifest,
+    model_row_values,
     parse_manifest_envelope,
     row_digest,
     sorted_entries,
@@ -106,6 +107,254 @@ def test_row_digest_distinguishes_decimal_precision() -> None:
     # Decimal("10.500000") != Decimal("10.5") as *stored strings*, matching
     # exact database precision rather than numeric equality.
     assert row_digest(STOCK_ANALYSIS_MODEL, base) != row_digest(STOCK_ANALYSIS_MODEL, other)
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "value", "expected"),
+    [
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("-0.0000"),
+            Decimal("0.0000"),
+            id="four-place-negative-zero",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("0.0000"),
+            Decimal("0.0000"),
+            id="four-place-positive-zero",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            None,
+            None,
+            id="four-place-null",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("-0.0001"),
+            Decimal("-0.0001"),
+            id="four-place-negative-quantum",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("0.0001"),
+            Decimal("0.0001"),
+            id="four-place-positive-quantum",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("-0.1234"),
+            Decimal("-0.1234"),
+            id="four-place-negative-nonzero",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("0.1234"),
+            Decimal("0.1234"),
+            id="four-place-positive-nonzero",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("-1.0000"),
+            Decimal("-1.0000"),
+            id="four-place-lower-boundary",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("999999.9999"),
+            Decimal("999999.9999"),
+            id="four-place-upper-boundary",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("-0.00004"),
+            Decimal("0.0000"),
+            id="four-place-negative-rounds-zero",
+        ),
+        pytest.param(
+            PREDICTION_MODEL,
+            "bear_return",
+            Decimal("0.00006"),
+            Decimal("0.0001"),
+            id="four-place-nonzero-rounds-quantum",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("-0.000000"),
+            Decimal("0.000000"),
+            id="six-place-negative-zero",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("0.000000"),
+            Decimal("0.000000"),
+            id="six-place-positive-zero",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            None,
+            None,
+            id="six-place-null",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("-0.000001"),
+            Decimal("-0.000001"),
+            id="six-place-negative-quantum",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("0.000001"),
+            Decimal("0.000001"),
+            id="six-place-positive-quantum",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("-0.123456"),
+            Decimal("-0.123456"),
+            id="six-place-negative-nonzero",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("0.123456"),
+            Decimal("0.123456"),
+            id="six-place-positive-nonzero",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("-999999.999999"),
+            Decimal("-999999.999999"),
+            id="six-place-lower-boundary",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("999999.999999"),
+            Decimal("999999.999999"),
+            id="six-place-upper-boundary",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("-0.0000004"),
+            Decimal("0.000000"),
+            id="six-place-negative-rounds-zero",
+        ),
+        pytest.param(
+            STOCK_ANALYSIS_MODEL,
+            "daily_change",
+            Decimal("0.0000006"),
+            Decimal("0.000001"),
+            id="six-place-nonzero-rounds-quantum",
+        ),
+    ],
+)
+def test_manifest_decimal_fields_round_trip(
+    persisted_analysis: StockAnalysis,
+    model: str,
+    field: str,
+    value: Decimal | None,
+    expected: Decimal | None,
+) -> None:
+    """Writer-side manifest values match an explicit backend re-query."""
+    source_prediction = Prediction.objects.get(analysis=persisted_analysis)
+    if model == PREDICTION_MODEL:
+        writer = Prediction.objects.create(
+            analysis=source_prediction.analysis,
+            listing=source_prediction.listing,
+            generated_at=source_prediction.generated_at,
+            target_date=source_prediction.target_date,
+            issued_on_time=source_prediction.issued_on_time,
+            horizon=source_prediction.horizon,
+            evidence_role=source_prediction.evidence_role,
+            evidence_grade=source_prediction.evidence_grade,
+            source_mode=source_prediction.source_mode,
+            price_provider=source_prediction.price_provider,
+            price_subject=source_prediction.price_subject,
+            price_at_prediction=source_prediction.price_at_prediction,
+            bear_return=value,
+            base_return=value,
+            bull_return=value,
+            probability_positive=source_prediction.probability_positive,
+            confidence=source_prediction.confidence,
+            confidence_status=source_prediction.confidence_status,
+            insufficiency_reason=source_prediction.insufficiency_reason,
+            recommendation=source_prediction.recommendation,
+            overall_score=source_prediction.overall_score,
+            component_scores=source_prediction.component_scores,
+            model_version=f"manifest-{field}-{str(value).replace('-', 'n').replace('.', 'p')}",
+            method_version=source_prediction.method_version,
+            config_hash=source_prediction.config_hash,
+            data_cutoff=source_prediction.data_cutoff,
+            source_assets=source_prediction.source_assets,
+            calculation=source_prediction.calculation,
+            code_revision=source_prediction.code_revision,
+        )
+        fields = PREDICTION_FIELDS
+    else:
+        writer = persisted_analysis
+        setattr(writer, field, value)
+        writer.save(update_fields=(field,))
+        fields = STOCK_ANALYSIS_FIELDS
+
+    writer_values = model_row_values(writer, fields)
+    writer_json = canonical_row_json(model, writer_values)
+    writer_digest = row_digest(model, writer_values)
+    decimal_field = writer._meta.get_field(field)
+    assert decimal_field.decimal_places in {4, 6}
+    if expected is None:
+        assert writer_values[field] is None
+    else:
+        quantum = Decimal(1).scaleb(-decimal_field.decimal_places)
+        assert writer_values[field] == expected
+        assert writer_values[field].as_tuple().exponent == quantum.as_tuple().exponent
+        if expected.is_zero():
+            assert not writer_values[field].is_signed()
+        else:
+            zero_values = dict(writer_values)
+            zero_values[field] = Decimal(0).quantize(quantum)
+            assert row_digest(model, zero_values) != writer_digest
+
+    reloaded = type(writer).objects.get(pk=writer.pk)
+    reloaded_values = model_row_values(reloaded, fields)
+    assert reloaded_values == writer_values
+    assert canonical_row_json(model, reloaded_values) == writer_json
+    assert row_digest(model, reloaded_values) == writer_digest
+
+    direct_signed_zero = Decimal("-0.0000" if decimal_field.decimal_places == 4 else "-0.000000")
+    direct_values = dict(writer_values)
+    direct_values[field] = direct_signed_zero
+    direct_payload = json.loads(canonical_row_json(model, direct_values))
+    assert direct_payload["fields"][field] == str(direct_signed_zero)
+    nested_values = dict(writer_values)
+    nested_values["component_scores"] = {
+        "direct_signed_zero": str(direct_signed_zero),
+        "nested_signed_zero": direct_signed_zero,
+    }
+    nested_payload = json.loads(canonical_row_json(model, nested_values))
+    assert nested_payload["fields"]["component_scores"] == {
+        "direct_signed_zero": str(direct_signed_zero),
+        "nested_signed_zero": str(direct_signed_zero),
+    }
 
 
 def test_canonical_row_json_rejects_unknown_model() -> None:
