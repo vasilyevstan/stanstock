@@ -300,6 +300,11 @@ Markdown links/navigation, agent definitions and status names, and the absence
 of private information. Public wiki changes retain independent multi-model
 clarity/privacy review of the exact changed content.
 
+Publication review also covers author/committer metadata, the commits that
+will become reachable, and the explicit destination ref. Preflight an approved
+public Git identity; do not publish unrelated local branches or use all-ref
+pushes. Safe page text alone does not establish safe publication.
+
 Do not rerun application suites, private activation, browser journeys, or
 retrospective studies merely to restate unchanged released behavior. Retain
 the original accepted evidence and explicitly bind its unchanged scope to the

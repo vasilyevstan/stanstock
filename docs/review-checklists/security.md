@@ -34,6 +34,10 @@ untrusted input. Reviewer: `stanstock-critic-tester`.
       appears in code, tests, fixtures, logs, or committed files.
 - [ ] `.env.example` stays a template with placeholder values only; real
       secrets are never added to it.
+- [ ] Public documentation publication checks commit author/committer
+      metadata and newly reachable history as well as page contents. Use an
+      approved public identity and explicit refs; do not publish unrelated
+      private branches.
 - [ ] Provider API keys are read from environment/settings, never
       hard-coded, and never printed in error messages or admin output.
 

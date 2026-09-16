@@ -50,6 +50,11 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Public-safe Markdown can still have private Git metadata.** A new wiki
+  checkout may fall back to an auto-detected author/committer identity.
+  Preflight an approved public identity before committing, then verify the
+  candidate's metadata, ancestry, and explicit destination ref before pushing.
+  Text-only privacy review cannot detect an identity leak in commit history.
 - **A feasible design is not an authorized task.** A possible cloud topology
   is not an accepted hosting choice. Distinguish advice, a requested plan,
   execution authorization, and technical readiness. An unavailable user does
