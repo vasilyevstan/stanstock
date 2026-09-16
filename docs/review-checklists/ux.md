@@ -13,6 +13,9 @@ user-facing tables/charts. Reviewer: `stanstock-critic-tester`.
 - [ ] Actual results appear in the initial viewport rather than below a
       large heading, preamble, or control stack. Row/DOM counts alone do not
       prove usable density; inspect content positions and readable values.
+- [ ] Shortlist acceptance covers both genuinely eligible candidates and
+      realistic empty groups. Measure the first actual candidate after empty
+      sections and restrictions, not the position of a heading or placeholder.
 - [ ] Primary labels remain intact, secondary menus do not open over content
       by default, and form submission preserves the selected view and filters.
 - [ ] Technical detail can be collapsed, but the summary of a restriction,

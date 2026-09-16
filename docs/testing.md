@@ -288,6 +288,30 @@ pending CI/deployment gates, or a dirty runtime approaching refresh. It may
 replace an owner only when that owner is unavailable or failed. Only the
 orchestrator performs git/release/deployment actions.
 
+The [canonical agent guide](../.github/agents/README.md) defines task
+authorization, tier selection, governance ownership, and evidence reuse.
+The public [Agent Team and Workflow page](https://github.com/vasilyevstan/stanstock/wiki/Agent-Team-and-Workflow)
+explains each role's inputs, outputs, permissions, and handoffs.
+
+## Documentation-only changes
+
+Apply review to the changed claims and instructions. Verify source references,
+Markdown links/navigation, agent definitions and status names, and the absence
+of private information. Public wiki changes retain independent multi-model
+clarity/privacy review of the exact changed content.
+
+Publication review also covers author/committer metadata, the commits that
+will become reachable, and the explicit destination ref. Preflight an approved
+public Git identity; do not publish unrelated local branches or use all-ref
+pushes. Safe page text alone does not establish safe publication.
+
+Do not rerun application suites, private activation, browser journeys, or
+retrospective studies merely to restate unchanged released behavior. Retain
+the original accepted evidence and explicitly bind its unchanged scope to the
+new candidate; never claim old results were newly executed. Required final-SHA
+CI still runs, and a changed claim or instruction needs its own review.
+Documentation publication does not require an application restart.
+
 ## Release acceptance
 
 Each release records the following evidence at its exact head. These are

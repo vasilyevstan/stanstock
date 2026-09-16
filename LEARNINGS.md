@@ -50,6 +50,21 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Public-safe Markdown can still have private Git metadata.** A new wiki
+  checkout may fall back to an auto-detected author/committer identity.
+  Preflight an approved public identity before committing, then verify the
+  candidate's metadata, ancestry, and explicit destination ref before pushing.
+  Text-only privacy review cannot detect an identity leak in commit history.
+- **A feasible design is not an authorized task.** A possible cloud topology
+  is not an accepted hosting choice. Distinguish advice, a requested plan,
+  execution authorization, and technical readiness. An unavailable user does
+  not accept a suggested default. See
+  `.github/agents/README.md#task-authorization`.
+- **Deployment metadata does not prove observed-issuance identity.** The
+  current image excludes `.git`, while `clean_git_revision` verifies a real
+  clean checkout. Setting `STANSTOCK_CODE_REVISION` alone cannot bridge that
+  boundary. Document the packaging limitation rather than describe cloud
+  scheduling as implemented or weaken the guard.
 - **Signed-zero persistence is a boundary contract, not new forecast math.**
   SQLite and PostgreSQL can return signed decimal zero as unsigned. Normalize
   only post-quantization zero for model-row hashes; permit only same-scale
@@ -284,8 +299,11 @@ reviews and should not be re-litigated without an explicit new decision.
   are withheld with a reason instead of being approximated.
 - **Backtest signal time and information time are separate.** Research-grade
   reconstructions may be generated later, but their fact availability and
-  price rows are capped at the historical `AnalysisRun.data_cutoff`; an
-  observed-grade backtest rejects a signal not generated on its target date.
+  price rows are capped at the historical `AnalysisRun.data_cutoff`.
+  Observed eligibility is independently proved per prediction version
+  against the next-session-open deadline; a same-calendar-date comparison
+  alone is not that proof. The legacy automatic issuance default remains
+  distinct from an explicitly verified observed request.
 - **Never backfill provenance with a stronger claim than the old code
   proved.** Legacy analyses without an explicit cutoff use `generated_at`;
   assigning their target date would falsely certify historical input
@@ -344,10 +362,11 @@ reviews and should not be re-litigated without an explicit new decision.
   `synthetic_demo`.
 - **Released foundations are not candidate activation approvals.** A guarded
   watchlist must separate reusable data/forecast capabilities from dedicated
-  controls that remain unreleased, keep allocation and forecasts fail-closed
-  until joint review and candidate-specific eligibility pass, and preserve
-  every immutable prediction row with its original role while labeling only
-  the current activation context.
+  controls that remain unreleased. Qualified price-only projections do not
+  unlock fundamental eligibility, BUY promotion, or nonzero new allocation.
+  Those activation controls require their own joint review and
+  candidate-specific evidence. Preserve every immutable prediction row with
+  its original role while labeling only the current activation context.
 - **Large provider catalogs can contain irrelevant malformed rows.** Preserve
   the complete raw response, but normalize only the symbols in the reviewed
   universe and continue to fail closed when any configured symbol is missing,
@@ -376,10 +395,11 @@ reviews and should not be re-litigated without an explicit new decision.
   defaults to the research snapshot's `as_of_date`, rejects later or
   non-session target dates, and relies on `JobRun` to skip a repeated
   successful target.
-- **Outcome maturity is session-based.** The evaluator uses 10/252/756
-  distinct observed sessions, leaves insufficient cases unresolved, and
-  excludes research-grade or late-generated outcomes from live-performance
-  aggregates.
+- **Outcome maturity is session-based and horizon-specific.** Legacy
+  short/medium/long retain 10/252/756 distinct observed sessions; canonical
+  6m/12m/3y/5y use 126/252/756/1260. Insufficient cases remain unresolved,
+  and research-grade or late-generated predictions do not become
+  live-performance evidence. See `research.outcomes.HORIZON_SESSION_COUNTS`.
 - **Simulation identity and inputs are durable.** Trades and holdings persist
   listing UUIDs, and every completed run records immutable price, signal,
   benchmark, and (when converted) FX input assets alongside its result curve.

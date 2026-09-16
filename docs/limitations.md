@@ -147,3 +147,9 @@ There is no promise of continuously free hosting. A durable deployment needs
 private PostgreSQL, asset and backup storage, HTTPS, secret management, and
 enough capacity for the configured universe. The intended topology is one
 private instance; multi-replica coordination needs separate review.
+
+GitHub Actions runners are not an always-on application host, and an Actions
+secret is not a remotely readable runtime vault. The current Git-free image
+alone cannot satisfy the clean-checkout guard for fresh observed issuance.
+Linux scheduling and cloud credential delivery remain unimplemented; see
+[cloud readiness](deployment.md#cloud-readiness-and-credentials).

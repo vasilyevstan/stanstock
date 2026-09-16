@@ -2,6 +2,10 @@
 
 ## Workflow
 
+- Establish task authorization before implementation. Feasibility questions
+  and planning requests permit investigation and proposals, not edits,
+  credential migration, infrastructure purchases, or deployment. Follow
+  [task authorization](.github/agents/README.md#task-authorization).
 - Work on a focused branch and open a pull request into protected `main`.
 - Use specific, outcome-focused commit subjects and pull-request titles; avoid
   vague labels such as "updates", "changes", or "fixes".
@@ -25,8 +29,12 @@
 - Apply the planning contract prospectively; do not relabel released work,
   including the Under-$10 diagnostics or September 9 refresh, as pre-action
   approved.
+- Reuse accepted unchanged-source reviews with an explicit final-candidate
+  binding; do not reuse stale evidence for changed behavior or bypass required
+  exact-SHA CI.
 - Run the smallest relevant checks during development and `make check` before
-  release review.
+  application release review. For documentation-only work, follow the
+  [documentation review scope](docs/testing.md#documentation-only-changes).
 
 ## Architecture
 

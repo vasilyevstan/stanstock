@@ -48,6 +48,10 @@ consumed by another app/module or by an external caller. Reviewer:
 - [ ] A recoverable unavailable-boundary state has an explicit database
       invariant (valid snapshot xor non-empty issue); expected valuation
       failure cannot roll back the holding correction it is meant to record.
+- [ ] Numeric persistence changes exercise the real database round trip and
+      every affected artifact/row verifier, including retained-parent replay.
+      A signed-zero compatibility rule does not loosen nonzero, scale,
+      general JSON, or immutable-artifact comparisons.
 
 ## Cross-app boundaries
 

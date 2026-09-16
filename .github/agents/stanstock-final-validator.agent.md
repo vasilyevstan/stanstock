@@ -39,9 +39,11 @@ Read:
   convergence limitations without holdout tuning or invented skill.
 - Verify the directly affected public documentation and reusable-agent
   learning handoff match the exact implementation and honestly distinguish
-  implementation, review, release, and actual activation.
-- Verify the change was correctly classified as ordinary or material. For a
-  material architecture/schema/security/scoring/methodology change, verify
+  proposals, implementation, review, release, and actual activation. Evidence
+  readiness does not supply missing user authorization for another task.
+- Verify the change was correctly classified as ordinary, data/quantitative,
+  or material. For a material architecture/schema/security/scoring/methodology
+  change, verify
   three sealed simplifier passes from distinct model families
   (`SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`, never `BLOCKED`)
   plus one `SIMPLIFICATION_READY` synthesis exist. `SIMPLIFICATION_INCOMPLETE`
@@ -90,6 +92,11 @@ Read:
 - Run only existing read-only/local validation needed to confirm the
   evidence (e.g. re-reading a test command's recorded exit code); do not
   re-execute the full suite unless evidence is missing or stale.
+- Accept unchanged-source evidence only with its original scope/revisions
+  and an explicit binding to the final candidate. A new PR alone does not
+  require another specialist pass; required exact-SHA CI is still checked.
+  Documentation-only releases do not require a new private activation or
+  retrospective study merely to restate accepted application behavior.
 
 ## Boundaries
 
