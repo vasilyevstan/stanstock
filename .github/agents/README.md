@@ -4,6 +4,13 @@ Six reusable agents provide an independent-review workflow for StanStock
 changes. They complement `CONTRIBUTING.md`; they do not replace human release
 or merge authority.
 
+These are development and review roles, not application runtime services.
+They do not generate production forecasts, fetch provider data at runtime,
+schedule refreshes, or trade. The public
+[Agent Team and Workflow guide](https://github.com/vasilyevstan/stanstock/wiki/Agent-Team-and-Workflow)
+explains their responsibilities and handoffs; this file and the individual
+agent definitions remain normative.
+
 ## Agents
 
 | Agent | Role |
@@ -14,6 +21,25 @@ or merge authority.
 | `stanstock-research-integrity` | Read-only. Reviews provider rights/provenance, as-of/look-ahead correctness, empirical forecast panels, SEC fact semantics, methodology, outcomes, and simulations. |
 | `stanstock-critic-tester` | Read-only. Adversarial diff review plus test execution, using the security/UX/contracts/operations checklists. |
 | `stanstock-final-validator` | Read-only. Milestone/release acceptance across the full chain. |
+
+## Task authorization
+
+Distinguish the user's accepted task from technical readiness. "Can we",
+feasibility questions, and requests for a plan do not authorize implementation,
+credential changes, infrastructure purchases, or deployment. Read-only
+investigation and a requested private plan may proceed; do not launch an
+implementation agent or treat a suggested default as an accepted decision.
+An architect or simplifier result is not a substitute for user authorization.
+
+After execution is authorized, the designated orchestrator owns the Git,
+PR, Actions, and deployment operations included in that scope. Honor existing
+pre-authorization and use the repository's canonical eligible approval path;
+do not invent another personal-approval wait or bypass exact-SHA CI, ownership,
+serialization, locks, or other technical protections. If no applicable
+approval path exists, report that technical blocker rather than claim one.
+
+Specialists approve evidence within their roles. They do not expand task
+scope or acquire Git/deployment authority through an approval status.
 
 ## Tiered chains
 
@@ -50,6 +76,11 @@ stanstock-architect
 **Final validator** also runs standalone at any milestone or release
 boundary to confirm the accumulated chain evidence is complete, even when no
 single change triggered chain 3.
+
+For governance-only changes outside the developer's edit ownership, the
+designated human/orchestrator supplies the implementation handoff. Record
+`N/A: out-of-scope governance ownership` for the bounded developer slot;
+the applicable independent review gates still apply.
 
 ### What makes a change "material"
 
@@ -125,6 +156,11 @@ preserve the exact handoff and fingerprint when doing so. Never claim
 completion, abandon the chain, or poll a background agent repeatedly while
 there is independent work to do.
 
+Keep one owner and one active observer for each wait. Use bounded checkpoints
+to inspect required jobs and eligible gates, and report a concrete blocker
+when progress stops. A CI or provider wait is not permission to expand scope,
+add optional reviews, or create unrelated work.
+
 ## Exact revision evidence
 
 Every handoff and every terminal status (`APPROVE_SLICE`,
@@ -132,6 +168,13 @@ Every handoff and every terminal status (`APPROVE_SLICE`,
 SHA (or explicitly "no commits yet" before the first commit). A stale,
 branch-name-only, or SHA-less claim is not evidence and must be treated as
 incomplete.
+
+An unchanged-source review need not be repeated merely because a new branch,
+PR, or merge commit exists. Retain its original exact revisions and scope,
+prove which reviewed source is unchanged, and explicitly bind that evidence
+to the final candidate. Do not relabel an old result as a newly executed test.
+Changed behavior invalidates the relevant evidence; required exact-SHA CI
+still runs for the final candidate.
 
 ## No self-approval
 

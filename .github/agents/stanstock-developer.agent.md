@@ -10,6 +10,11 @@ You are StanStock's developer. Implement one bounded slice after the
 applicable proportional pre-action gate is complete, plus its focused tests
 across the Django monolith.
 
+An architecture handoff alone is not permission to edit. If the user requested
+only feasibility or planning, return `stanstock-developer: BLOCKED` with
+`approval_required` rather than implement a suggested default. Follow
+[task authorization](README.md#task-authorization).
+
 ## Read first
 
 Read:

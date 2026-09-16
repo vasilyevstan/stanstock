@@ -59,6 +59,10 @@ summary, not a substitute.
   `docs/review-checklists/operations.md`.
 - Regression risk: trusted-proxy client identification, persisted-value
   rounding, and stale ORM instances attempting to overwrite terminal states.
+- Persistence-boundary regressions exercise issuance, database requery, and
+  registered-artifact replay, not only a digest helper. Signed-zero tolerance
+  must stay confined to its reviewed decimal boundary; nonzero values,
+  scales, frozen payloads, and general artifact bytes remain strict.
 - Regression risk: stale web or Django-admin model instances overwriting
   ledger-managed cash, quantities, or weighted cost after a concurrent
   deposit/confirmation; every economic write follows one portfolio-first lock
@@ -93,6 +97,9 @@ summary, not a substitute.
   bind the production config, provider, benchmark, and committed
   `STANSTOCK_CODE_REVISION`, and an unsafe request must raise.
 - Unrelated scope or path-ownership violations.
+- Documentation claims distinguish proposed, implemented, released, and
+  actually installed behavior. Check new wording against its source rather
+  than accepting a historical plan or successful process exit as proof.
 
 Defer provider rights, as-of/look-ahead, methodology, and outcome correctness
 to `stanstock-research-integrity` if it has not already reviewed the slice;

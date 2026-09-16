@@ -15,8 +15,11 @@ The primary authenticated research experience uses:
 2. `us-price-fhs-v1` for advisory 126-, 252-, 756-, and 1260-session
    projections.
 
-No SEC input is required. There is no fitted model, overall score, probability
-of gain, calibrated confidence, fair value, or automatic trade.
+No SEC input is required. There is no fitted model, overall score, calibrated
+real-world gain probability, calibrated confidence, fair value, or automatic
+trade. Separately registered model-estimated probabilities summarize the
+conditional simulation paths; the original prediction probability/confidence
+fields remain null.
 
 Each qualified listing produces one analysis and exactly five immutable
 prediction rows. See [Price research](price-research.md).

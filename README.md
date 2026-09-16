@@ -279,6 +279,8 @@ Current release acceptance is stated only in [Release status](#release-status).
 - [Deployment](docs/deployment.md)
 - [Source capability](docs/source-spike.md)
 - [Testing](docs/testing.md)
+- [Development agents and task authorization](.github/agents/README.md)
+- [Public agent team and workflow guide](https://github.com/vasilyevstan/stanstock/wiki/Agent-Team-and-Workflow)
 - [Known limitations](docs/limitations.md)
 
 ## Financial disclaimer

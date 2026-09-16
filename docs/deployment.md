@@ -37,6 +37,46 @@ deterministic synthetic histories and records research-grade output.
 
 Ephemeral storage is not acceptable for `STANSTOCK_DATA_DIR`.
 
+## Cloud readiness and credentials
+
+The production Compose file is a deployment building block, not a configured
+cloud service. The supported scheduler is the macOS LaunchAgent described
+below; no Linux timer or cloud deployment workflow is supplied.
+
+The current application image excludes `.git`. Fresh observed issuance calls
+`clean_git_revision` against a real clean checkout, so setting
+`STANSTOCK_CODE_REVISION` inside that image is not sufficient. A future cloud
+design must independently bind the job and web deployment to the same reviewed
+revision without weakening that guard. A clean native job checkout alongside
+the web container is one possible design, not an implemented cloud profile.
+
+[GitHub-hosted runners](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners)
+are temporary workflow machines, not persistent application hosting.
+[Standard runners for public repositories are free](https://docs.github.com/en/billing/concepts/product-billing/github-actions),
+but that does not provide a free always-on VM, PostgreSQL service, or private
+asset store. A separate VM or managed host has its own capacity, storage,
+backup, and pricing requirements.
+
+[GitHub Actions secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+are made available to eligible workflows, not exposed as a secret-retrieval
+service for an arbitrary application server. A deployment would still need
+reviewed secure delivery to a private runtime secret source. Do not describe
+the key as accessible "only to me": authorized workflow execution, people able
+to control those workflows, and runtime administrators are part of the trust
+boundary. Keep provider secrets out of PR/test workflows, artifacts, and logs.
+
+GitHub is not required merely to avoid Keychain. The existing unattended
+entrypoint reads an owner-only environment file and forces
+`STANSTOCK_DISABLE_KEYCHAIN=1`; interactive macOS onboarding may still use
+Keychain. Moving secret storage must not disable a working local credential
+or scheduler before an authorized, verified cutover.
+
+A cloud cutover additionally needs an accepted host, persistent and matching
+database/assets, a verified paired backup, one authoritative scheduler,
+HTTPS, provider rights, and actual installation acceptance. Moving an
+existing SQLite installation to the production PostgreSQL profile is a
+separate validated data migration, not a connection-string substitution.
+
 ## Environment
 
 Required production values:

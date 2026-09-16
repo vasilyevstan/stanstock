@@ -26,6 +26,11 @@ Do not add a root plan, per-slice plan file, generated planning artifact, task
 database, or YAML planning schema. The existing YAML block in the agent README
 is transport for agent handoffs, not a planning schema.
 
+A user-requested private assistant-session plan is not a repository planning
+artifact. Keep it out of Git; it neither authorizes implementation nor replaces
+the applicable pre-action handoff and PR evidence. Task authorization is
+defined in [the agent guide](../.github/agents/README.md#task-authorization).
+
 Every filled record names its exact `contract_revision`; ordinary work uses
 `N/A: ordinary change; no planning artifact required`. A data/quant revision
 identifies its short check. A material revision identifies the architect

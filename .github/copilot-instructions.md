@@ -24,6 +24,11 @@ Every task begins by reading, in order:
 
 ## Non-negotiable rules
 
+- A feasibility question or a request for a plan is not permission to
+  implement. Confirm the accepted scope before editing, launching an
+  implementation agent, moving credentials, provisioning infrastructure, or
+  deploying. A suggested default or completed architecture review is not
+  user acceptance; see `agents/README.md#task-authorization`.
 - Preserve unrelated tracked, staged, and untracked work; never discard a
   user's in-progress changes.
 - Keep the architecture lean: a Django modular monolith with PostgreSQL plus
@@ -51,6 +56,9 @@ Every task begins by reading, in order:
   + synthesis -> developer -> research-integrity -> critic-tester ->
   final-validator; the final validator also runs at milestone/release
   boundaries.
+- Reuse accepted evidence for unchanged source and scope rather than repeat
+  specialist reviews because a branch or PR changed. Bind that evidence to
+  the final candidate explicitly; required exact-SHA CI is not waived.
 - The orchestrator owns progress through that chain and must detect stalls
   rather than silently wait. Treat an idle/completed agent with unread output,
   an agent that stops making tool progress, a repeated unresolved finding, a
