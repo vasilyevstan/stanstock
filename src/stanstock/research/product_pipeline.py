@@ -1041,6 +1041,23 @@ def _catalogs_for_membership(
     return tuple(resolve_asset_ref(AssetRef.from_json(ref), cutoff=source_time) for ref in raw_refs)
 
 
+def _recorded_decimal_matches_row(actual: Decimal | None, recorded: object) -> bool:
+    """Match a finite ledger Decimal to its exact recorded artifact text.
+
+    SQLite re-queries a numeric signed zero as unsigned while calculation
+    artifacts preserve their original Decimal text. Only that same-scale zero
+    sign representation may differ; every nonzero value still requires an
+    exact finite text match.
+    """
+    if not isinstance(actual, Decimal) or not actual.is_finite():
+        return False
+    if not isinstance(recorded, str):
+        return False
+    if str(actual) == recorded:
+        return True
+    return actual.is_zero() and str(actual.copy_negate()) == recorded
+
+
 def _require_rows_match_recorded_result(
     *,
     analysis: StockAnalysis,
@@ -1139,9 +1156,9 @@ def _require_rows_match_recorded_result(
             )
         elif isinstance(ledger, Mapping):
             valid = (
-                str(row.bear_return) == str(ledger.get("lower"))
-                and str(row.base_return) == str(ledger.get("median"))
-                and str(row.bull_return) == str(ledger.get("upper"))
+                _recorded_decimal_matches_row(row.bear_return, ledger.get("lower"))
+                and _recorded_decimal_matches_row(row.base_return, ledger.get("median"))
+                and _recorded_decimal_matches_row(row.bull_return, ledger.get("upper"))
                 and row.insufficiency_reason == (reason or "")
             )
         else:
