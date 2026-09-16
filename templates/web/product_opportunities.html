@@ -8,7 +8,6 @@
   <section class="page-heading opportunities-heading">
     <div>
       <h1>Opportunities</h1>
-      <p class="lede">Compare momentum and price scenarios.</p>
     </div>
     {% if product.run %}
       <p class="run-stamp opportunity-run-stamp">
@@ -33,9 +32,9 @@
             {{ link.label }} <span>{{ link.count }}</span>
           </a>
         {% endfor %}
-        <a class="clear-link" href="{% url 'opportunities' %}">Clear all</a>
+        <a class="clear-link" href="{% url 'opportunities' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}">Clear filters</a>
       </div>
-      {% if filter_form.cleaned_data.price_band == "under_10" %}
+      {% if selected_price_band_is_under_10 %}
         <p class="speculative-note under-ten-allocation-note">
           <strong>Under $10: speculative watch · 0% new allocation.</strong>
           It cannot promote a BUY or enter a new sample basket.
@@ -76,9 +75,62 @@
       {% endif %}
     </section>
 
+    <details class="opportunity-ranking-disclosure">
+      <summary><strong>Ranking:</strong> 12–1 relative momentum</summary>
+      <p>
+        <strong>Relative log momentum vs benchmark:</strong> T−252 through T−21 (the prior 12 months, excluding the last month).
+        The 126-session decision horizon is a future horizon, not a measured past window.
+      </p>
+    </details>
+
+    {% if show_shortlists %}
+      <section class="opportunity-shortlists{% if not shortlist_sections.0.cards and not shortlist_sections.1.cards %} opportunity-shortlists-empty-primary{% endif %}" aria-label="Research shortlists">
+        <p class="muted shortlist-coverage">
+          Shortlists re-rank this verified cohort (curated core plus saved names); automatic discovery of additional stocks is not enabled.
+        </p>
+        {% for section in shortlist_sections %}
+          <section class="shortlist-section{% if not section.cards %} shortlist-section-empty{% endif %}{% if section.is_under_10 %} shortlist-section-under-ten{% endif %}" aria-labelledby="shortlist-{{ section.key }}-title">
+            <div class="section-heading shortlist-section-heading">
+              <h2 id="shortlist-{{ section.key }}-title">{{ section.title }}</h2>
+              {% if section.cards %}<span class="badge">{{ section.cards|length }} shown · {{ section.limit }} max</span>{% endif %}
+            </div>
+            {% if section.is_under_10 %}
+              <p class="speculative-note shortlist-under-ten-note">
+                <strong>Speculative watch · 0% new allocation · nominal price ≠ value.</strong>
+              </p>
+            {% endif %}
+            <ol class="shortlist-opportunity-list">
+              {% for card in section.cards %}
+                {% include "web/_shortlist_opportunity.html" with card=card section=section selected_horizon=selected_horizon selected_horizon_label=selected_horizon_label %}
+              {% empty %}
+                <li class="empty-state">
+                  {% if section.reason_counts %}
+                    <details class="shortlist-empty-details">
+                      <summary>
+                        {{ section.empty_message }} {{ section.reason_counts|length }} restriction{{ section.reason_counts|length|pluralize }}.
+                        {% if section.liquidity_unavailable %}Dollar turnover unavailable, not zero.{% endif %}
+                      </summary>
+                      <span class="shortlist-reason-counts">
+                        Recorded restrictions:
+                        {% for reason, count in section.reason_counts %}
+                          {{ reason|display_label }} ({{ count }}){% if not forloop.last %} ·{% endif %}
+                        {% endfor %}
+                      </span>
+                    </details>
+                  {% else %}
+                    {{ section.empty_message }}
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ol>
+          </section>
+        {% endfor %}
+      </section>
+    {% endif %}
+
     <section aria-labelledby="opportunity-list-title">
       <div class="section-heading opportunity-results-heading">
-        <h2 id="opportunity-list-title">{{ selected_horizon_label }} projections</h2>
+        <h2 id="opportunity-list-title">{{ selected_horizon_label }} projections · full comparison</h2>
         <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
       </div>
       <p class="muted opportunity-scenario-note">
@@ -87,7 +139,7 @@
       </p>
       <ol class="compact-opportunity-list">
         {% for entry in overview_cards %}
-          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection %}
+          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band %}
         {% empty %}
           <li class="empty-state">No verified listings match these filters.</li>
         {% endfor %}

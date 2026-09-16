@@ -101,6 +101,36 @@ The current Twelve Data source documents split-adjusted prices but does not
 prove compatible volume adjustment. That missing provenance can keep turnover
 unavailable and BUY blocked even when direction and projections calculate.
 
+## Opportunities shortlists
+
+The first page without a selected price band separates up to three
+BUY-qualified candidates from up to three positive-momentum research
+candidates in each of the Under-$10, $10-$50, and $50-$300 bands. The existing
+paginated comparison follows, including $300+ listings. Price bands use the
+immutable run's reference close and show its market date; nominal price is
+affordability context, not value.
+
+Shortlists order the existing benchmark-relative momentum, then ticker and
+permanent listing ID. They do not rank simulation shares, median projections,
+or the selected forecast horizon. BUY candidates must additionally pass the
+unchanged recommendation and current-source promotion guards. Under $10
+remains a speculative watch with 0% new allocation, not a BUY highlight.
+
+Shortlist cards show the decision and its restrictions without a competing
+simulation headline. The full comparison and detail pages retain the selected
+horizon's advisory scenarios. These are new-purchase research signals, not
+portfolio-specific instructions to sell or retain an existing holding.
+
+Filters apply consistently to shortlists and counts. A selected price band
+or a later results page shows only the focused full list. Empty BUY and
+Under-$10 shortlists are valid outcomes; missing liquidity is never treated
+as zero or ignored to fill a section.
+
+The lists update from each newly verified run within the curated core and
+captured owner-saved cohort. This is daily re-ranking, not automatic discovery
+of additional stocks. Wider intake remains a separate source, rights, and
+provenance decision; see [source capabilities](source-spike.md).
+
 ## Filtered historical simulation
 
 For \(N=756\) daily log returns:

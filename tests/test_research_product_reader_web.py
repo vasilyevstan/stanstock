@@ -5,8 +5,10 @@ import math
 from copy import copy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
+from uuid import UUID
 
 import pytest
 from django.db import DatabaseError, transaction
@@ -14,9 +16,10 @@ from django.urls import reverse
 from django.utils import timezone
 from exchange_calendars import get_calendar
 
+from stanstock.core.models import JobRun
 from stanstock.data.assets import AssetStore
 from stanstock.data.live_us import _persist_catalog
-from stanstock.data.models import DataAsset, UniverseMembership
+from stanstock.data.models import DataAsset, LatestMarketData, UniverseMembership
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import StockCatalog
 from stanstock.data.research_product_demo import execute_demo_product_refresh
@@ -302,6 +305,15 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
         "stanstock.data.providers.twelve_data.fetch_daily_price_series",
         no_provider_fetch,
     )
+    immutable_counts = (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+        StockAnalysis.objects.count(),
+        LatestMarketData.objects.count(),
+        JobRun.objects.count(),
+        TrackedSymbol.objects.count(),
+    )
 
     opportunities = client.get(reverse("opportunities"))
     assert opportunities.status_code == 200
@@ -310,9 +322,15 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     assert "CHEAP" in content
     assert "Under $10 watch" in content
     assert "0% new allocation" in content
-    assert "Median return" in content
+    assert "6 months median cumulative return" in content
+    assert "T−252 through T−21 (the prior 12 months, excluding the last month)" in content
+    assert "The 126-session decision horizon is a future horizon" in content
     assert all(label in content for label in ("Loss", "Flat to +20%", "Above +20%"))
     assert "Shares of model simulations; not validated real-world odds." in content
+    assert (
+        "Shortlists re-rank this verified cohort (curated core plus saved names); "
+        "automatic discovery of additional stocks is not enabled."
+    ) in content
     assert all(label in content for label in ("6 months", "12 months", "3 years", "5 years"))
     assert "/100" not in content
     assert "Heuristic evidence score" not in content
@@ -323,11 +341,9 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     cheap_section = content.split("ZZRP", maxsplit=1)[0]
     assert "CHEAP" in cheap_section
 
-    immutable_counts = (
-        AnalysisRun.objects.count(),
-        Prediction.objects.count(),
-        DataAsset.objects.count(),
-    )
+    shortlist_sections = opportunities.context["shortlist_sections"]
+    assert shortlist_sections[0]["cards"] == []
+
     under_ten = client.get(reverse("opportunities"), {"price_band": "under_10"})
     invalid = client.get(reverse("opportunities"), {"horizon": "tomorrow"})
     assert under_ten.status_code == 200
@@ -339,6 +355,10 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
         AnalysisRun.objects.count(),
         Prediction.objects.count(),
         DataAsset.objects.count(),
+        StockAnalysis.objects.count(),
+        LatestMarketData.objects.count(),
+        JobRun.objects.count(),
+        TrackedSymbol.objects.count(),
     )
     assert verifier.call_count == 3
 
@@ -360,6 +380,15 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
         for label in ("6 months", "12 months", "3 years", "5 years")
     )
     assert verifier.call_count == 4
+    assert immutable_counts == (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+        StockAnalysis.objects.count(),
+        LatestMarketData.objects.count(),
+        JobRun.objects.count(),
+        TrackedSymbol.objects.count(),
+    )
     no_calculation.assert_not_called()
     no_simulation.assert_not_called()
     no_provider_fetch.assert_not_called()
@@ -399,6 +428,21 @@ def test_demo_refresh_uses_same_reader_and_primary_rendering(
     assert "ZZRPLOW" in content
     assert "100 of 757 closes" in content
     assert "missing 657" in content
+    qualified_buy_cards = [
+        card
+        for card in result.cards
+        if (
+            card.suggestion == "buy"
+            and card.current_promotion_eligible
+            and card.relative_log_momentum is not None
+            and card.relative_log_momentum > 0
+            and card.analysis.current_price >= Decimal("10")
+        )
+    ]
+    assert qualified_buy_cards
+    assert {
+        card.analysis.listing_id for card in response.context["shortlist_sections"][0]["cards"]
+    } == {card.analysis.listing_id for card in qualified_buy_cards}
 
 
 def test_unauthenticated_and_wrong_owner_never_receive_private_product(
@@ -431,6 +475,8 @@ def test_absent_product_does_not_substitute_legacy_analysis(
     assert b"Active research unavailable" in response.content
     assert persisted_analysis.listing.ticker.encode() not in response.content
     assert b"Archived score-based research" in response.content
+    assert response.context["show_shortlists"] is False
+    assert response.context["shortlist_sections"] == ()
 
 
 def test_corrupt_physical_source_suppresses_all_active_output(live_product):
@@ -449,7 +495,7 @@ def test_corrupt_physical_source_suppresses_all_active_output(live_product):
     assert result.verification_code
 
 
-def test_stale_target_is_not_substituted_or_promoted(live_product, monkeypatch):
+def test_stale_target_is_not_substituted_or_promoted(live_product, client, monkeypatch):
     owner, store, _run = live_product
     monkeypatch.setattr(
         "stanstock.research.product_reader.timezone.now",
@@ -461,6 +507,14 @@ def test_stale_target_is_not_substituted_or_promoted(live_product, monkeypatch):
     assert result.status == "stale"
     assert result.cards == ()
     assert result.verification_code == "product_target_stale"
+
+    client.force_login(owner)
+    response = client.get(reverse("opportunities"))
+
+    assert response.status_code == 200
+    assert response.context["product"].status == "stale"
+    assert response.context["show_shortlists"] is False
+    assert response.context["shortlist_sections"] == ()
 
 
 def test_stale_active_target_remains_visible_only_as_dated_history(
@@ -720,6 +774,361 @@ def _synthetic_presentation_read(
     assert verified.available
     under_ten = next(card for card in verified.cards if card.target_under_10)
     return replace(verified, cards=(under_ten,) * card_count)
+
+
+def _shortlist_presentation_card(
+    source,
+    *,
+    listing_id: UUID,
+    ticker: str,
+    close: Decimal,
+    relative_momentum: Decimal | None,
+    suggestion: str | None = "hold",
+    current_promotion_eligible: bool = False,
+    target_under_10: bool = False,
+    currency: str = "USD",
+    blocking_reasons: tuple[str, ...] = (),
+):
+    """Build a non-persisted card that can challenge the page adapter."""
+
+    listing = copy(source.listing)
+    listing.id = listing_id
+    listing.ticker = ticker
+    listing.currency = currency
+    analysis = copy(source.analysis)
+    analysis.listing = listing
+    analysis.current_price = close
+    return replace(
+        source,
+        analysis=analysis,
+        direction="positive" if relative_momentum is not None else "unavailable",
+        suggestion=suggestion,
+        relative_log_momentum=relative_momentum,
+        blocking_reasons=blocking_reasons,
+        allocation_restriction="",
+        target_under_10=target_under_10,
+        current_promotion_eligible=current_promotion_eligible,
+    )
+
+
+def _synthetic_price_band_presentation_read(*, owner, store: AssetStore) -> ProductRead:
+    """Exercise display bands with only request-local, synthetic card variants."""
+
+    source = read_research_product(user=owner, store=store).cards[0]
+    cards = (
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000009"),
+            ticker="UNDER",
+            close=Decimal("9.99"),
+            relative_momentum=Decimal("0.90"),
+            suggestion="buy",
+            current_promotion_eligible=True,
+            target_under_10=False,
+            blocking_reasons=("dollar_turnover_unavailable",),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000002"),
+            ticker="TIE",
+            close=Decimal("10"),
+            relative_momentum=Decimal("0.80"),
+            target_under_10=True,
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000001"),
+            ticker="TIE",
+            close=Decimal("49.99"),
+            relative_momentum=Decimal("0.80"),
+            suggestion="hold",
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000003"),
+            ticker="ALPHA",
+            close=Decimal("20"),
+            relative_momentum=Decimal("0.80"),
+            suggestion="hold",
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000004"),
+            ticker="FIFTY",
+            close=Decimal("50"),
+            relative_momentum=Decimal("0.70"),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000005"),
+            ticker="TWO99",
+            close=Decimal("299.99"),
+            relative_momentum=Decimal("0.60"),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000006"),
+            ticker="THREE00",
+            close=Decimal("300"),
+            relative_momentum=Decimal("0.50"),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000007"),
+            ticker="ZERO",
+            close=Decimal("0"),
+            relative_momentum=Decimal("0.40"),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000008"),
+            ticker="EUR",
+            close=Decimal("25"),
+            relative_momentum=Decimal("0.30"),
+            currency="EUR",
+        ),
+    )
+    return replace(read_research_product(user=owner, store=store), cards=cards)
+
+
+def _synthetic_realistic_shortlist_read(*, owner, store: AssetStore) -> ProductRead:
+    """A current cohort with no qualified BUY or positive Under-$10 candidate."""
+
+    source = read_research_product(user=owner, store=store).cards[0]
+    cards = (
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000101"),
+            ticker="WATCH",
+            close=Decimal("9.99"),
+            relative_momentum=None,
+            suggestion="hold",
+            target_under_10=False,
+            blocking_reasons=("dollar_turnover_unavailable",),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000102"),
+            ticker="RESEARCHC",
+            close=Decimal("49.99"),
+            relative_momentum=Decimal("0.80"),
+            suggestion="buy",
+            current_promotion_eligible=False,
+            blocking_reasons=(
+                "dollar_turnover_unavailable",
+                "relative_volatility_above_limit",
+                "drawdown_above_limit",
+            ),
+        ),
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID("00000000-0000-0000-0000-000000000103"),
+            ticker="RESEARCHD",
+            close=Decimal("299.99"),
+            relative_momentum=Decimal("0.70"),
+            suggestion="hold",
+        ),
+    )
+    return replace(read_research_product(user=owner, store=store), cards=cards)
+
+
+def test_opportunity_shortlists_classify_once_and_share_valid_filter_scope(
+    live_product,
+    client,
+    monkeypatch,
+):
+    owner, store, _run = live_product
+    client.force_login(owner)
+    presentation = _synthetic_price_band_presentation_read(owner=owner, store=store)
+
+    def read_presentation(request):
+        request._stanstock_product_read = presentation
+        return presentation
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    classify_price_band = Mock(wraps=product_views.classify_price_band)
+    monkeypatch.setattr(product_views, "classify_price_band", classify_price_band)
+    response = client.get(reverse("opportunities"))
+
+    assert response.status_code == 200
+    assert response.context["show_shortlists"] is True
+    assert response.context["opportunity_page"].paginator.count == 9
+    assert classify_price_band.call_count == len(presentation.cards)
+    assert all(
+        call.kwargs["date_basis"] == "decision_target"
+        and call.kwargs["price_date"] == presentation.cards[0].analysis.run.target_date
+        for call in classify_price_band.call_args_list
+    )
+    assert b'class="bandHiddenInput"' in response.content
+    assert response.content.count(b"Unclassified") == 2
+    assert b"9.99 USD" in response.content
+    assert b"EUR" in response.content
+    assert response.content.count(b'class="shortlist-opportunity"') == 6
+    ranking_definition = (
+        b"T\xe2\x88\x92252 through T\xe2\x88\x9221 (the prior 12 months, excluding the last month)."
+    )
+    assert b"Ranking:</strong> 12\xe2\x80\x931 relative momentum" in response.content
+    assert response.content.count(ranking_definition) == 1
+
+    links = {str(link["label"]): link for link in response.context["band_links"]}
+    assert [link["count"] for link in response.context["band_links"]] == [9, 6, 1, 3, 2, 1]
+    assert links["All"]["active"] is True
+    assert all("price_band=under_10" not in link["query"] for link in (links["All"],))
+
+    sections = {section["key"]: section for section in response.context["shortlist_sections"]}
+    assert sections["buy"]["cards"] == []
+    assert sections["buy"]["reason_counts"] == (("dollar_turnover_unavailable", 1),)
+    assert [card.listing.ticker for card in sections["under_10"]["cards"]] == ["UNDER"]
+    assert [card.listing.ticker for card in sections["10_to_50"]["cards"]] == [
+        "ALPHA",
+        "TIE",
+        "TIE",
+    ]
+    tie_listing_ids = [
+        card.analysis.listing_id
+        for card in sections["10_to_50"]["cards"]
+        if card.listing.ticker == "TIE"
+    ]
+    assert tie_listing_ids == [
+        UUID("00000000-0000-0000-0000-000000000001"),
+        UUID("00000000-0000-0000-0000-000000000002"),
+    ]
+    assert [card.listing.ticker for card in sections["50_to_300"]["cards"]] == ["FIFTY", "TWO99"]
+    assert all(len(section["cards"]) <= 3 for section in response.context["shortlist_sections"])
+    assert "Speculative watch · 0% new allocation".encode() in response.content
+    assert "nominal price ≠ value.".encode() in response.content
+    shortlist_content = response.content.split(
+        b'<section aria-labelledby="opportunity-list-title">',
+        maxsplit=1,
+    )[0]
+    assert b"Under $10 watch" not in shortlist_content
+
+    selected_band = client.get(reverse("opportunities"), {"price_band": "10_to_50"})
+    at_least_ten = client.get(reverse("opportunities"), {"price_band": "at_least_10"})
+    assert selected_band.context["show_shortlists"] is False
+    assert selected_band.context["opportunity_page"].paginator.count == 3
+    assert b'class="shortlist-opportunity"' not in selected_band.content
+    assert selected_band.content.count(ranking_definition) == 1
+    assert at_least_ten.context["show_shortlists"] is False
+    assert at_least_ten.context["opportunity_page"].paginator.count == 6
+
+    selected_ids = {
+        entry["card"].analysis.listing_id for entry in selected_band.context["overview_cards"]
+    }
+    assert selected_ids == {
+        UUID("00000000-0000-0000-0000-000000000001"),
+        UUID("00000000-0000-0000-0000-000000000002"),
+        UUID("00000000-0000-0000-0000-000000000003"),
+    }
+
+    filtered = client.get(
+        reverse("opportunities"),
+        {
+            "q": "TIE",
+            "horizon": "3y",
+            "direction": "positive",
+            "suggestion": "hold",
+            "risk": presentation.cards[0].relative_volatility_label,
+        },
+    )
+    filtered_sections = {
+        section["key"]: section for section in filtered.context["shortlist_sections"]
+    }
+    assert filtered.context["opportunity_page"].paginator.count == 2
+    assert [link["count"] for link in filtered.context["band_links"]] == [2, 2, 0, 2, 0, 0]
+    assert [card.analysis.listing_id for card in filtered_sections["10_to_50"]["cards"]] == [
+        UUID("00000000-0000-0000-0000-000000000001"),
+        UUID("00000000-0000-0000-0000-000000000002"),
+    ]
+    assert all("q=TIE" in link["query"] for link in filtered.context["band_links"])
+    assert all("horizon=3y" in link["query"] for link in filtered.context["band_links"])
+    assert all("suggestion=hold" in link["query"] for link in filtered.context["band_links"])
+
+    no_matches = client.get(reverse("opportunities"), {"q": "MISSING"})
+    assert b"No verified listings match these filters." in no_matches.content
+
+    no_positive_presentation = replace(
+        presentation,
+        cards=tuple(replace(card, relative_log_momentum=None) for card in presentation.cards),
+    )
+    presentation = no_positive_presentation
+    no_positive = client.get(reverse("opportunities"))
+    assert b"No positive benchmark-relative momentum was recorded in this filtered cohort." in (
+        no_positive.content
+    )
+
+    presentation = _synthetic_price_band_presentation_read(owner=owner, store=store)
+    paged_presentation = replace(presentation, cards=presentation.cards * 3)
+    presentation = paged_presentation
+    page_two = client.get(reverse("opportunities"), {"page": "2"})
+    invalid = client.get(reverse("opportunities"), {"price_band": "not-a-band"})
+    assert page_two.context["show_shortlists"] is False
+    assert b'class="shortlist-opportunity"' not in page_two.content
+    assert page_two.content.count(ranking_definition) == 1
+    assert invalid.context["show_shortlists"] is False
+    assert b'class="shortlist-opportunity"' not in invalid.content
+
+    perturbed = replace(
+        _synthetic_price_band_presentation_read(owner=owner, store=store),
+        cards=tuple(
+            replace(
+                card,
+                projections=tuple(
+                    replace(projection, median_return=Decimal("-0.99"))
+                    for projection in card.projections
+                ),
+            )
+            for card in presentation.cards[:9]
+        ),
+    )
+    presentation = perturbed
+    horizon_changed = client.get(reverse("opportunities"), {"horizon": "5y"})
+    horizon_sections = {
+        section["key"]: section for section in horizon_changed.context["shortlist_sections"]
+    }
+    assert [card.analysis.listing_id for card in horizon_sections["10_to_50"]["cards"]] == [
+        UUID("00000000-0000-0000-0000-000000000003"),
+        UUID("00000000-0000-0000-0000-000000000001"),
+        UUID("00000000-0000-0000-0000-000000000002"),
+    ]
+
+
+def test_realistic_empty_shortlists_keep_positive_non_under_ten_cards_in_the_full_list(
+    live_product,
+    client,
+    monkeypatch,
+):
+    owner, store, _run = live_product
+    client.force_login(owner)
+    presentation = _synthetic_realistic_shortlist_read(owner=owner, store=store)
+
+    def read_presentation(request):
+        request._stanstock_product_read = presentation
+        return presentation
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    response = client.get(reverse("opportunities"))
+
+    sections = {section["key"]: section for section in response.context["shortlist_sections"]}
+    assert sections["buy"]["cards"] == []
+    assert sections["under_10"]["cards"] == []
+    assert [card.listing.ticker for card in sections["10_to_50"]["cards"]] == ["RESEARCHC"]
+    assert [card.listing.ticker for card in sections["50_to_300"]["cards"]] == ["RESEARCHD"]
+    assert sections["buy"]["reason_counts"] == (
+        ("dollar_turnover_unavailable", 1),
+        ("drawdown_above_limit", 1),
+        ("relative_volatility_above_limit", 1),
+    )
+    assert b"Dollar Turnover Unavailable (1)" in response.content
+    assert b"Relative Volatility Above Limit (1)" in response.content
+    assert b"Drawdown Above Limit (1)" in response.content
+    assert b"Dollar turnover unavailable, not zero." in response.content
+    assert b"volume is zero" not in response.content
+    full_listing_ids = {
+        entry["card"].analysis.listing_id for entry in response.context["overview_cards"]
+    }
+    assert UUID("00000000-0000-0000-0000-000000000102") in full_listing_ids
+    assert UUID("00000000-0000-0000-0000-000000000103") in full_listing_ids
 
 
 def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
@@ -1035,19 +1444,58 @@ def chromium_browser():
     )
 
 
-@pytest.mark.parametrize("viewport", ((375, 812), (1440, 900)))
+@pytest.mark.parametrize("viewport", ((375, 812), (1280, 900), (1440, 900)))
+@pytest.mark.parametrize("scenario", ("qualified_buy", "realistic_empty"))
 def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
-    live_product,
     client,
     chromium_browser,
+    django_user_model,
+    live_product,
     monkeypatch,
+    settings,
+    tmp_path,
+    scenario: str,
     viewport: tuple[int, int],
 ):
-    """Use the existing browser only for synthetic layout acceptance evidence."""
+    """Use the existing browser for qualified and compact-empty shortlist evidence."""
 
-    owner, store, _run = live_product
-    client.force_login(owner)
-    presentation = _synthetic_presentation_read(owner=owner, store=store)
+    if scenario == "qualified_buy":
+        settings.RESEARCH_PRODUCT_ENABLED = True
+        settings.DEMO_MODE = True
+        settings.DATA_DIR = tmp_path
+        monkeypatch.setattr(timezone, "now", lambda: NOW)
+        store = AssetStore(tmp_path)
+        execute_demo_product_refresh(store=store)
+        viewer = django_user_model.objects.create_user(username="shortlist-layout-viewer")
+        client.force_login(viewer)
+        verified = read_research_product(user=viewer, store=store)
+        first_shortlist_card = next(
+            card
+            for card in verified.cards
+            if (
+                card.suggestion == "buy"
+                and card.current_promotion_eligible
+                and card.relative_log_momentum is not None
+            )
+        )
+        # The page gets the already verified synthetic result below. Switching
+        # the runtime selector back keeps the synthetic-demo banner from
+        # consuming the first-viewport budget that a private current cohort
+        # does not have.
+        settings.DEMO_MODE = False
+        presentation = replace(verified, cards=(first_shortlist_card,) * 105)
+        expected_shortlist_count = 6
+    else:
+        owner, store, _run = live_product
+        client.force_login(owner)
+        realistic = _synthetic_realistic_shortlist_read(owner=owner, store=store)
+        watch_card = realistic.cards[0]
+        presentation = replace(
+            realistic,
+            cards=realistic.cards + (watch_card,) * 102,
+        )
+        first_shortlist_card = realistic.cards[1]
+        expected_shortlist_count = 2
 
     def read_presentation(request):
         request._stanstock_product_read = presentation
@@ -1057,7 +1505,11 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
     response = client.get(reverse("opportunities"))
     searched_response = client.get(
         reverse("opportunities"),
-        {"q": "CHEAP", "horizon": "12m", "price_band": "under_10"},
+        {
+            "q": first_shortlist_card.listing.ticker,
+            "horizon": "12m",
+            "price_band": "at_least_10",
+        },
     )
     market_response = client.get(reverse("market"))
     assert response.status_code == 200
@@ -1073,6 +1525,10 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.set_content(response.content.decode())
                 page.add_style_tag(path=str(css_path))
                 assert page.locator(".compact-opportunity").count() == 20
+                assert page.locator(".shortlist-opportunity").count() == expected_shortlist_count
+                assert page.locator(".shortlist-opportunity").count() <= 12
+                assert page.locator(".shortlist-opportunity.compact-opportunity").count() == 0
+                assert page.locator("*").count() <= 1222
                 assert page.locator(".compact-projection").count() == 20
                 note = page.locator(".opportunity-scenario-note")
                 assert note.is_visible()
@@ -1091,7 +1547,11 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 assert page.evaluate("document.documentElement.scrollWidth") <= page.evaluate(
                     "document.documentElement.clientWidth"
                 )
-                for selector in (".compact-opportunity-facts", ".compact-projection"):
+                for selector in (
+                    ".shortlist-opportunity-facts",
+                    ".compact-opportunity-facts",
+                    ".compact-projection",
+                ):
                     widths = page.locator(selector).evaluate_all(
                         "(elements) => elements.map((element) => "
                         "[element.scrollWidth, element.clientWidth])"
@@ -1144,7 +1604,8 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                     assert search_widths[1] < search_widths[0]
                     assert search_widths[1] <= 120
                 assert (
-                    page.locator("#opportunity-list-title").inner_text() == "6 months projections"
+                    page.locator("#opportunity-list-title").inner_text()
+                    == "6 months projections · full comparison"
                 )
 
                 first_projection = page.locator(".compact-projection").first
@@ -1165,36 +1626,59 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
 
                 under_ten = page.get_by_role("link", name="Under $10").first
                 assert under_ten.bounding_box()["y"] < viewport[1]
-                card_boxes = page.locator(".compact-opportunity").evaluate_all(
+                shortlist_cards = page.locator(".shortlist-opportunity")
+                assert first_shortlist_card.listing.ticker in shortlist_cards.first.inner_text()
+                if scenario == "realistic_empty":
+                    assert (
+                        page.locator(
+                            ".shortlist-section:has(#shortlist-buy-title) .shortlist-opportunity"
+                        ).count()
+                        == 0
+                    )
+                    assert (
+                        page.locator(
+                            ".shortlist-section:has(#shortlist-under_10-title) "
+                            ".shortlist-opportunity"
+                        ).count()
+                        == 0
+                    )
+                    assert "RESEARCHC" in shortlist_cards.first.inner_text()
+                shortlist_boxes = shortlist_cards.evaluate_all(
                     "(elements) => elements.map((element) => {"
                     "const box = element.getBoundingClientRect(); "
                     "return {top: box.top, bottom: box.bottom};"
                     "})"
                 )
-                complete_cards = [
-                    box for box in card_boxes if box["top"] >= 0 and box["bottom"] <= viewport[1]
-                ]
+                shortlist_layout_boxes = page.locator(
+                    ".site-header, .opportunities-heading, .opportunity-controls, "
+                    ".shortlist-coverage, .shortlist-section"
+                ).evaluate_all(
+                    "(elements) => elements.map((element) => {"
+                    "const box = element.getBoundingClientRect(); "
+                    "return {className: element.className, top: box.top, bottom: box.bottom};"
+                    "})"
+                )
+                assert shortlist_boxes[0]["top"] >= 0
+                assert shortlist_boxes[0]["bottom"] <= viewport[1], (
+                    f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
+                )
                 if viewport[0] == 375:
-                    assert card_boxes[0]["top"] >= 0
-                    assert card_boxes[0]["top"] <= 600
-                    assert card_boxes[0]["bottom"] - card_boxes[0]["top"] <= 250
-                    layout_boxes = page.locator(
-                        ".site-header, .opportunities-heading, .opportunity-controls, "
-                        ".opportunity-results-heading, .opportunity-scenario-note"
-                    ).evaluate_all(
-                        "(elements) => elements.map((element) => {"
-                        "const box = element.getBoundingClientRect(); "
-                        "return {className: element.className, top: box.top, bottom: box.bottom};"
-                        "})"
+                    assert shortlist_boxes[0]["top"] <= 650, (
+                        f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
                     )
-                    assert card_boxes[0]["bottom"] <= viewport[1], (
-                        f"first_card={card_boxes[0]}; layout={layout_boxes}"
+                    assert shortlist_boxes[0]["bottom"] - shortlist_boxes[0]["top"] <= 250
+                    assert shortlist_boxes[0]["bottom"] <= viewport[1], (
+                        f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
                     )
                 else:
-                    assert card_boxes[0]["top"] <= 500
-                    assert card_boxes[0]["bottom"] - card_boxes[0]["top"] <= 140
-                    assert len(complete_cards) >= 3
+                    assert shortlist_boxes[0]["top"] <= 600
+                    assert shortlist_boxes[0]["bottom"] - shortlist_boxes[0]["top"] <= 140
 
+                page.locator('.product-search input[type="text"]').focus()
+                assert page.evaluate(
+                    "document.activeElement === document.querySelector("
+                    "'.product-search input[type=\"text\"]')"
+                )
                 page.locator(".advanced-filters summary").focus()
                 page.keyboard.press("Enter")
                 assert page.locator(".advanced-filters").get_attribute("open") == ""
@@ -1205,10 +1689,12 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.set_content(searched_response.content.decode())
                 page.add_style_tag(path=str(css_path))
                 assert (
-                    page.locator("#opportunity-list-title").inner_text() == "12 months projections"
+                    page.locator("#opportunity-list-title").inner_text()
+                    == "12 months projections · full comparison"
                 )
                 assert page.locator('input[name="horizon"]').input_value() == "12m"
-                assert page.locator('input[name="price_band"]').input_value() == "under_10"
+                assert page.locator('input[name="price_band"]').input_value() == "at_least_10"
+                assert page.locator(".shortlist-opportunity").count() == 0
                 assert (
                     page.locator(".compact-opportunity a")
                     .first.get_attribute("href")

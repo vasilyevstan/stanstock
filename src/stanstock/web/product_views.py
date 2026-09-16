@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
@@ -24,7 +25,21 @@ from stanstock.portfolio.watchlist import (
     TrackedSymbolValidationError,
     add_tracked_symbol,
 )
-from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
+from stanstock.research.affordability import (
+    DECISION_TARGET_DATE_BASIS,
+    PRICE_BANDS,
+    UNDER_10_BAND,
+    PriceBandAssessment,
+    PriceBandDefinition,
+    classify_price_band,
+)
+from stanstock.research.models import (
+    AnalysisRun,
+    Prediction,
+    PredictionOutcome,
+    Recommendation,
+    StockAnalysis,
+)
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
     MOMENTUM_METHOD_VERSION,
@@ -58,6 +73,7 @@ from stanstock.web.forms import (
 
 _PERFORMANCE_RUN_BATCH_SIZE = 200
 _OPPORTUNITIES_PAGE_SIZE = 20
+_SHORTLIST_LIMIT = 3
 
 
 def _read(request: HttpRequest) -> ProductRead:
@@ -92,22 +108,34 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
         return legacy_views.opportunities_page(request)
     product = _read(request)
     form = ResearchProductFilterForm(request.GET or None)
-    cards = list(product.cards)
+    all_cards = list(product.cards)
+    classifications = _classify_price_bands(all_cards)
     selected_horizon = "6m"
     active_filter_values: dict[str, object] = {}
-    if form.is_valid():
-        active_filter_values = dict(form.cleaned_data)
-        selected_horizon = str(active_filter_values["horizon"] or "6m")
-        cards = _filter_cards(cards, active_filter_values)
-    elif request.GET:
+    filters_are_usable = not form.is_bound or form.is_valid()
+    if filters_are_usable:
+        if form.is_bound:
+            active_filter_values = dict(form.cleaned_data)
+        selected_horizon = str(active_filter_values.get("horizon") or "6m")
+        scope_filter_values = {**active_filter_values, "price_band": ""}
+        scoped_cards = _filter_cards(
+            all_cards,
+            scope_filter_values,
+            classifications=classifications,
+        )
+        cards = _filter_cards(
+            all_cards,
+            active_filter_values,
+            classifications=classifications,
+        )
+    else:
         cards = []
-    base_filter_values = {**active_filter_values, "price_band": ""}
-    band_cards = (
-        _filter_cards(list(product.cards), base_filter_values)
-        if active_filter_values
-        else list(product.cards)
-    )
+        scoped_cards = []
+    selected_price_band = str(active_filter_values.get("price_band") or "")
     page = Paginator(cards, _OPPORTUNITIES_PAGE_SIZE).get_page(request.GET.get("page"))
+    show_shortlists = (
+        product.available and filters_are_usable and not selected_price_band and page.number == 1
+    )
     overview_cards = [
         {
             "card": card,
@@ -116,6 +144,7 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
                 for projection in card.projections
                 if projection.horizon == selected_horizon
             ),
+            "price_band": classifications[card.analysis.listing_id],
         }
         for card in page.object_list
     ]
@@ -132,37 +161,12 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
             "overview_cards": overview_cards,
             "selected_horizon": selected_horizon,
             "selected_horizon_label": dict(PRODUCT_HORIZON_CHOICES)[selected_horizon],
-            "band_links": (
-                {
-                    "label": "All",
-                    "count": len(band_cards),
-                    "active": not active_filter_values.get("price_band"),
-                    "query": _product_querystring(
-                        active_filter_values,
-                        price_band=None,
-                        page=None,
-                    ),
-                },
-                {
-                    "label": "$10 and above",
-                    "count": sum(not card.target_under_10 for card in band_cards),
-                    "active": active_filter_values.get("price_band") == "at_least_10",
-                    "query": _product_querystring(
-                        active_filter_values,
-                        price_band="at_least_10",
-                        page=None,
-                    ),
-                },
-                {
-                    "label": "Under $10",
-                    "count": sum(card.target_under_10 for card in band_cards),
-                    "active": active_filter_values.get("price_band") == "under_10",
-                    "query": _product_querystring(
-                        active_filter_values,
-                        price_band="under_10",
-                        page=None,
-                    ),
-                },
+            "selected_price_band": selected_price_band,
+            "selected_price_band_is_under_10": selected_price_band == UNDER_10_BAND,
+            "band_links": _band_links(
+                active_filter_values,
+                scoped_cards,
+                classifications=classifications,
             ),
             "horizon_links": tuple(
                 {
@@ -177,10 +181,19 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
                 }
                 for value, label in PRODUCT_HORIZON_CHOICES
             ),
-            "clear_filters_query": "",
+            "clear_filters_query": _product_querystring(
+                {"horizon": selected_horizon},
+                page=None,
+            ),
             "pagination_query": _product_querystring(active_filter_values, page=None),
             "advanced_filters_active": any(
                 active_filter_values.get(field) for field in ("direction", "suggestion", "risk")
+            ),
+            "show_shortlists": show_shortlists,
+            "shortlist_sections": (
+                _shortlist_sections(scoped_cards, classifications=classifications)
+                if show_shortlists
+                else ()
             ),
             "admission_reason_counts": sorted(admission_reasons.items()),
             "unavailable_admissions": tuple(
@@ -190,7 +203,196 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
     )
 
 
-def _filter_cards(cards: list[ProductCard], values: dict[str, object]) -> list[ProductCard]:
+def _classify_price_bands(
+    cards: list[ProductCard],
+) -> dict[UUID, PriceBandAssessment | None]:
+    """Classify each immutable analysis close once for this request."""
+
+    return {
+        card.analysis.listing_id: classify_price_band(
+            close=card.analysis.current_price,
+            price_date=card.analysis.run.target_date,
+            date_basis=DECISION_TARGET_DATE_BASIS,
+            currency=card.listing.currency,
+        )
+        for card in cards
+    }
+
+
+def _band_links(
+    values: dict[str, object],
+    cards: list[ProductCard],
+    *,
+    classifications: dict[UUID, PriceBandAssessment | None],
+) -> tuple[dict[str, object], ...]:
+    selected_price_band = str(values.get("price_band") or "")
+    links: list[dict[str, object]] = [
+        {
+            "label": "All",
+            "count": len(cards),
+            "active": not selected_price_band,
+            "query": _product_querystring(values, price_band=None, page=None),
+        },
+        {
+            "label": f"${_first_non_under_10_band().minimum} and above",
+            "count": sum(
+                assessment is not None and assessment.slug != UNDER_10_BAND
+                for assessment in (classifications[card.analysis.listing_id] for card in cards)
+            ),
+            "active": selected_price_band == "at_least_10",
+            "query": _product_querystring(
+                values,
+                price_band="at_least_10",
+                page=None,
+            ),
+        },
+    ]
+    links.extend(
+        {
+            "label": _short_price_band_label(definition),
+            "count": sum(
+                assessment is not None and assessment.slug == definition.slug
+                for assessment in (classifications[card.analysis.listing_id] for card in cards)
+            ),
+            "active": selected_price_band == definition.slug,
+            "query": _product_querystring(
+                values,
+                price_band=definition.slug,
+                page=None,
+            ),
+        }
+        for definition in PRICE_BANDS
+    )
+    return tuple(links)
+
+
+def _first_non_under_10_band() -> PriceBandDefinition:
+    return next(definition for definition in PRICE_BANDS if definition.slug != UNDER_10_BAND)
+
+
+def _short_price_band_label(definition: PriceBandDefinition) -> str:
+    return definition.label.split(" - ", maxsplit=1)[0]
+
+
+def _shortlist_sections(
+    cards: list[ProductCard],
+    *,
+    classifications: dict[UUID, PriceBandAssessment | None],
+) -> tuple[dict[str, object], ...]:
+    positive_cards = _positive_momentum_cards(cards)
+    buy_cards = [
+        card for card in positive_cards if _is_buy_qualified(card, classifications=classifications)
+    ]
+    buy_empty_message = "No verified listings match these filters."
+    buy_reason_counts: tuple[tuple[str, int], ...] = ()
+    buy_liquidity_unavailable = False
+    if cards:
+        if not positive_cards:
+            buy_empty_message = (
+                "No positive benchmark-relative momentum was recorded in this filtered cohort."
+            )
+        elif not buy_cards:
+            buy_empty_message = "No current BUY."
+            buy_reason_counts = tuple(
+                sorted(
+                    Counter(
+                        reason for card in positive_cards for reason in card.blocking_reasons
+                    ).items()
+                )
+            )
+            buy_liquidity_unavailable = any(
+                reason == "dollar_turnover_unavailable" for reason, _count in buy_reason_counts
+            )
+    sections: list[dict[str, object]] = [
+        {
+            "key": "buy",
+            "title": "BUY-qualified research",
+            "cards": _sort_and_limit_shortlist(buy_cards),
+            "limit": _SHORTLIST_LIMIT,
+            "is_under_10": False,
+            "empty_message": buy_empty_message,
+            "reason_counts": buy_reason_counts,
+            "liquidity_unavailable": buy_liquidity_unavailable,
+        }
+    ]
+    for definition in (definition for definition in PRICE_BANDS if definition.maximum is not None):
+        band_cards = [
+            card
+            for card in positive_cards
+            if (
+                (assessment := classifications[card.analysis.listing_id]) is not None
+                and assessment.slug == definition.slug
+            )
+        ]
+        sections.append(
+            {
+                "key": definition.slug,
+                "title": (
+                    f"{_short_price_band_label(definition)} positive-momentum watch"
+                    if definition.slug == UNDER_10_BAND
+                    else f"{definition.label} positive research"
+                ),
+                "cards": _sort_and_limit_shortlist(band_cards),
+                "limit": _SHORTLIST_LIMIT,
+                "is_under_10": definition.slug == UNDER_10_BAND,
+                "empty_message": (
+                    "No verified listings match these filters."
+                    if not cards
+                    else "No positive momentum is recorded."
+                    if definition.slug == UNDER_10_BAND
+                    else "No positive-momentum research candidates match these filters."
+                ),
+                "reason_counts": (),
+                "liquidity_unavailable": False,
+            }
+        )
+    return tuple(sections)
+
+
+def _positive_momentum_cards(cards: list[ProductCard]) -> list[ProductCard]:
+    positive_cards = []
+    for card in cards:
+        relative_momentum = card.relative_log_momentum
+        if card.direction != "positive" or relative_momentum is None:
+            continue
+        positive_cards.append(card)
+    return positive_cards
+
+
+def _is_buy_qualified(
+    card: ProductCard,
+    *,
+    classifications: dict[UUID, PriceBandAssessment | None],
+) -> bool:
+    assessment = classifications[card.analysis.listing_id]
+    return (
+        card.suggestion == Recommendation.BUY
+        and card.current_promotion_eligible
+        and assessment is not None
+        and assessment.slug != UNDER_10_BAND
+    )
+
+
+def _sort_and_limit_shortlist(cards: list[ProductCard]) -> list[ProductCard]:
+    return sorted(
+        cards,
+        key=_shortlist_sort_key,
+    )[:_SHORTLIST_LIMIT]
+
+
+def _shortlist_sort_key(card: ProductCard) -> tuple[Decimal, str, UUID]:
+    relative_momentum = card.relative_log_momentum
+    if relative_momentum is None:
+        raise ValueError("Shortlist cards require recorded relative momentum")
+    return (-relative_momentum, card.listing.ticker, card.analysis.listing_id)
+
+
+def _filter_cards(
+    cards: list[ProductCard],
+    values: dict[str, object],
+    *,
+    classifications: dict[UUID, PriceBandAssessment | None],
+) -> list[ProductCard]:
     query = str(values.get("q") or "").strip().casefold()
     direction = str(values.get("direction") or "")
     suggestion = str(values.get("suggestion") or "")
@@ -208,12 +410,25 @@ def _filter_cards(cards: list[ProductCard], values: dict[str, object]) -> list[P
             continue
         if risk and card.relative_volatility_label != risk:
             continue
-        if price_band == "under_10" and not card.target_under_10:
-            continue
-        if price_band == "at_least_10" and card.target_under_10:
+        if price_band and not _matches_price_band(
+            classifications[card.analysis.listing_id],
+            requested_band=price_band,
+        ):
             continue
         result.append(card)
     return result
+
+
+def _matches_price_band(
+    assessment: PriceBandAssessment | None,
+    *,
+    requested_band: str,
+) -> bool:
+    if assessment is None:
+        return False
+    if requested_band == "at_least_10":
+        return assessment.slug != UNDER_10_BAND
+    return assessment.slug == requested_band
 
 
 def _product_querystring(

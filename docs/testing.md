@@ -102,6 +102,33 @@ Release validation must cover:
 - no partial output served after failure; and
 - no provider call from ordinary authenticated GET.
 
+## Opportunities structure and selection
+
+Keep classification, filtered counts, and shortlist selection tied to the
+same verified cohort. Cover all USD boundaries and invalid/non-USD aliases
+through the web path, stable momentum/ticker/permanent-ID ordering, null
+inputs, and scenario/horizon perturbations that cannot change membership.
+Selected bands, invalid forms, and later result pages suppress all shortlists.
+
+Exercise both a genuinely pipeline-produced, current-source-qualified
+synthetic BUY and a realistic empty-BUY/empty-positive-Under-$10 state.
+Do not force promotion flags or invent eligible private data to populate a
+section. Extend the persistence-to-producer-to-verified-reader-to-page
+contract test; separate presentation fixtures do not replace it.
+
+Use real Chromium at 375x812, 1280x900, and 1440x900. Controls remain
+keyboard-reachable near the top, with no horizontal overflow. Measure the
+first actual shortlist candidate inside the first viewport, including when
+earlier sections are empty. Bound the DOM and distinguish the at-most-twelve
+shortlist cards from the twenty paged full cards; inserting shortlists
+legitimately moves the old full-list card positions.
+
+Prove that repeated GETs leave domain rows unchanged and do not call the
+provider or rerun a simulation. Preserve frozen producer/config/reader blobs
+and complete successful and withheld payload contracts, not merely equal
+test counts. Session-injected layout evidence remains separate from the real
+form-authentication evidence above.
+
 ## Model-outcome summary coverage
 
 The immutable FHS prediction contract stays unchanged. A separate report must

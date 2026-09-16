@@ -29,7 +29,7 @@ from stanstock.portfolio.watchlist import (
     TrackedSymbolValidationError,
     normalize_tracked_symbol,
 )
-from stanstock.research.affordability import price_band_choices
+from stanstock.research.affordability import PRICE_BANDS, UNDER_10_BAND, price_band_choices
 from stanstock.research.models import Recommendation, RiskClass
 from stanstock.simulation.models import SimulationDefinition
 
@@ -48,6 +48,22 @@ PRODUCT_HORIZON_CHOICES: tuple[tuple[str, str], ...] = (
     ("12m", "12 months"),
     ("3y", "3 years"),
     ("5y", "5 years"),
+)
+
+_NON_UNDER_10_PRICE_BANDS = tuple(
+    definition for definition in PRICE_BANDS if definition.slug != UNDER_10_BAND
+)
+_UNDER_10_PRICE_BAND_LABEL = next(
+    label for slug, label in price_band_choices() if slug == UNDER_10_BAND
+)
+RESEARCH_PRODUCT_PRICE_BAND_CHOICES: tuple[tuple[str, str], ...] = (
+    ("", "All reference prices"),
+    (UNDER_10_BAND, _UNDER_10_PRICE_BAND_LABEL),
+    (
+        "at_least_10",
+        f"${_NON_UNDER_10_PRICE_BANDS[0].minimum} and above",
+    ),
+    *((definition.slug, definition.label) for definition in _NON_UNDER_10_PRICE_BANDS),
 )
 
 
@@ -139,13 +155,9 @@ class ResearchProductFilterForm(forms.Form):
     )
     price_band = forms.ChoiceField(
         required=False,
-        choices=[
-            ("", "All reference prices"),
-            ("under_10", "Under $10"),
-            ("at_least_10", "$10 and above"),
-        ],
+        choices=RESEARCH_PRODUCT_PRICE_BAND_CHOICES,
         label="Decision-date reference price",
-        widget=forms.HiddenInput(),
+        widget=forms.HiddenInput(attrs={"class": "bandHiddenInput"}),
     )
 
 
