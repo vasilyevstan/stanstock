@@ -118,16 +118,60 @@ contract test; separate presentation fixtures do not replace it.
 
 Use real Chromium at 375x812, 1280x900, and 1440x900. Controls remain
 keyboard-reachable near the top, with no horizontal overflow. Measure the
-first actual shortlist candidate inside the first viewport, including when
-earlier sections are empty. Bound the DOM and distinguish the at-most-twelve
-shortlist cards from the twenty paged full cards; inserting shortlists
-legitimately moves the old full-list card positions.
+first actual comparison result inside the first viewport, not a heading or
+placeholder. The existing shortlist groups now follow the primary comparison;
+opening them must expose their unchanged memberships, order and restrictions.
+Bound the DOM and distinguish the at-most-twelve shortlist cards from the
+twenty paged full cards. Empty shortlist groups must not displace the main
+results.
 
 Prove that repeated GETs leave domain rows unchanged and do not call the
 provider or rerun a simulation. Preserve frozen producer/config/reader blobs
 and complete successful and withheld payload contracts, not merely equal
 test counts. Session-injected layout evidence remains separate from the real
 form-authentication evidence above.
+
+## Saved workspace and retired browser creators
+
+Exercise the three primary destinations: Opportunities, Market and Portfolios.
+The native authenticated landing remains Opportunities. Under $10 is an
+on-page price filter, not a global navigation item. Saved stocks belongs under
+Market while retaining the existing owner-scoped `/my-list` intake behavior.
+Research performance must not be presented as personal portfolio returns.
+Retained history and methodology must remain reachable without a feature hub.
+
+Show actual saved portfolios and holdings before forms. Cover populated,
+empty, archived, frozen-sample, missing-price and unavailable states at the
+same browser sizes, with 320px usability, visible focus, readable navigation
+and appropriate text/control contrast. Shared CSS changes also exercise real
+sign-in, rejected-form recovery and retained historical pages.
+
+Portfolio sections are server-selected, not CSS-hidden eager computation.
+Assert that an ordinary Holdings GET does not invoke the allocation preview
+or build a hidden full activity/snapshot series. Explicit eligible Plan GET
+uses the existing preview. Preserve reads needed for displayed valuation,
+contribution performance and corporate-action warnings. Batched snapshot
+counts must match exact row counts, including zero and multiple same-day rows.
+
+Preserve owner isolation, CSRF, deposits and confirmation idempotency, locked
+plan recomputation, stale-plan recovery, archive/restore and bound-form errors
+in the relevant section. Use a synthetic persistence-to-service-to-rendered
+portfolio case alongside focused request tests; do not replace domain
+invariants with mocked success-shaped values.
+
+For authenticated, CSRF-valid requests, simulation creation POST returns 405
+and the retired sample-portfolio action returns an explicit 400. Prove that
+neither invokes its former workflow or writes definitions, runs, portfolios
+or assets. Historical GETs and ordinary manual portfolio creation still work.
+Retain domain/CLI coverage; the simulation and portfolio engines are not
+deleted or reinterpreted.
+
+Use identical synthetic fixtures and exact base/head revisions for affected
+request call counts, query counts, rendered bytes and timing comparisons.
+Distinguish cold and warm observations. Report only measured differences;
+fewer links or removed adapters alone do not establish lower RAM use.
+No live-data benchmark, permanent telemetry or new benchmark framework is
+required.
 
 ## Model-outcome summary coverage
 
@@ -184,7 +228,7 @@ authenticated Opportunities and stock detail.
 
 Exercise the entry-point journey as well as direct routes: authenticated
 sign-in without a `next` destination, authenticated landing, recognizable
-Opportunities navigation, first-screen Under-$10 access,
+three-destination navigation, first-screen Under-$10 price-filter access,
 filter/horizon selection, pagination, and stock detail. Use synthetic
 representative lists for density and responsive measurements; do not repeat
 full retrospective simulations merely to populate a layout fixture. Keep a

@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}My List · StanStock{% endblock %}
+{% block title %}Saved stocks · StanStock{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Private stock list</p>
-      <h1>My List</h1>
+      <h1>Saved stocks</h1>
       <p class="lede">
         Add or remove a stock for the next scheduled refresh. This does not
         fetch data now, place a trade, or rewrite recorded research.
       </p>
     </div>
   </section>
+  {% include "web/_market_navigation.html" with market_section="saved" %}
 
   <section class="panel" aria-labelledby="add-symbol">
     <h2 id="add-symbol">Add stock</h2>
@@ -43,11 +43,10 @@
   <section aria-labelledby="preference-state">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">Saved stocks</p>
         <h2 id="preference-state">Research state</h2>
       </div>
     </div>
-    <nav class="horizon-links" aria-label="My List projection horizon">
+    <nav class="horizon-links" aria-label="Saved stocks projection horizon">
       <span>Horizon</span>
       {% for link in horizon_links %}
         <a href="?{{ link.query }}"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
@@ -56,7 +55,7 @@
     {% if horizon_error %}
       <p class="field-error" role="alert">{{ horizon_error }}</p>
     {% endif %}
-    <div class="responsive-table" tabindex="0" aria-label="My List captured research states">
+    <div class="responsive-table" tabindex="0" aria-label="Saved stocks captured research states">
       <table class="compact-table">
         <thead>
           <tr>
@@ -108,7 +107,7 @@
               </td>
             </tr>
           {% empty %}
-            <tr><td colspan="5">My List is empty.</td></tr>
+            <tr><td colspan="5">No saved stocks yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>

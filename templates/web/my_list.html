@@ -1,13 +1,12 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}My tracked symbols · StanStock{% endblock %}
+{% block title %}Saved stocks · StanStock{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Personal preferences</p>
-      <h1>My tracked symbols</h1>
+      <h1>Saved stocks</h1>
       <p class="lede">
         Keep a private list of supported US stock symbols. Adding or removing a
         symbol changes only this list; it does not fetch data, expand the
@@ -15,6 +14,7 @@
       </p>
     </div>
   </section>
+  {% include "web/_market_navigation.html" with market_section="saved" %}
 
   <section class="panel" aria-labelledby="add-tracked-symbol">
     <p class="eyebrow">Add a symbol</p>

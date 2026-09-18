@@ -6,13 +6,16 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import polars as pl
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from stanstock.data.asof import AsOfData
@@ -39,7 +42,7 @@ from stanstock.data.models import (
 from stanstock.simulation.builders import build_price_panel, run_simulation_workflow
 from stanstock.simulation.engine import AccountingEngine
 from stanstock.simulation.fx import normalize_fx_frame
-from stanstock.simulation.models import SimulationRun
+from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.types import (
     ExecutionPriceBasis,
     FxAttributionStatus,
@@ -1625,22 +1628,48 @@ def test_single_currency_workflow_persists_no_fx_asset(
 
 @pytest.fixture
 def fx_client() -> Client:
-    client = Client()
+    client = Client(enforce_csrf_checks=True)
     user_model = get_user_model()
     user = user_model.objects.create_user(username="fxuser")
     client.force_login(user)
     return client
 
 
+def _assert_retired_simulation_post(client: Client, payload: dict[str, object]) -> None:
+    """A valid CSRF token must reach the 405 gate, never form/workflow validation."""
+    assert client.get(reverse("simulations")).status_code == 200
+    models = (SimulationDefinition, SimulationRun, DataAsset, FxRate)
+    before = [model.objects.count() for model in models]
+    with (
+        patch("stanstock.simulation.builders.run_simulation_workflow") as workflow,
+        CaptureQueriesContext(connection) as queries,
+    ):
+        response = client.post(
+            reverse("simulations"),
+            payload,
+            HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value,
+        )
+    assert response.status_code == 405
+    assert response.headers["Allow"] == "GET, HEAD"
+    assert response.context is None
+    workflow.assert_not_called()
+    assert not [
+        query["sql"]
+        for query in queries
+        if query["sql"].lstrip().split()[0].upper() in {"INSERT", "UPDATE", "DELETE", "REPLACE"}
+    ]
+    assert [model.objects.count() for model in models] == before
+
+
 @pytest.mark.django_db
-def test_web_form_requires_base_currency_for_mixed_selection(
+def test_retired_simulation_post_rejects_mixed_selection_without_base_currency(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
 ) -> None:
     snapshot, listings, _store = mixed_currency_universe
 
-    response = fx_client.post(
-        reverse("simulations"),
+    _assert_retired_simulation_post(
+        fx_client,
         {
             "name": "Mixed web run",
             "mode": "portfolio",
@@ -1655,51 +1684,61 @@ def test_web_form_requires_base_currency_for_mixed_selection(
         },
     )
 
-    assert response.status_code == 400
-    assert "base_currency" in response.context["form"].errors
-    assert b"multi-currency selection" in response.content
-
 
 @pytest.mark.django_db
-def test_web_mixed_currency_run_reports_fx_contribution(
+def test_retired_simulation_creator_keeps_service_fx_history_readable(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
 ) -> None:
     snapshot, listings, store = mixed_currency_universe
 
-    with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr(
-            "stanstock.simulation.builders.AssetStore",
-            lambda *args, **kwargs: store,
-        )
-        patcher.setattr(
-            "stanstock.simulation.service.AssetStore",
-            lambda *args, **kwargs: store,
-        )
-        response = fx_client.post(
-            reverse("simulations"),
-            {
-                "name": "Mixed web run",
-                "mode": "portfolio",
-                "snapshot": str(snapshot.id),
-                "start_date": "2026-02-02",
-                "end_date": "2026-02-04",
-                "starting_capital": "90000.00",
-                "transaction_cost_bps": "0.00",
-                "slippage_bps": "0.00",
-                "base_currency": "USD",
-                "fx_max_carry_days": "7",
-                "selected_listings": [str(listing.id) for listing in listings.values()],
-            },
-        )
-
-    assert response.status_code == 302
-    run = SimulationRun.objects.get()
+    _assert_retired_simulation_post(
+        fx_client,
+        {
+            "name": "Mixed web run",
+            "mode": "portfolio",
+            "snapshot": str(snapshot.id),
+            "start_date": "2026-02-02",
+            "end_date": "2026-02-04",
+            "starting_capital": "90000.00",
+            "transaction_cost_bps": "0.00",
+            "slippage_bps": "0.00",
+            "base_currency": "USD",
+            "fx_max_carry_days": "7",
+            "selected_listings": [str(listing.id) for listing in listings.values()],
+        },
+    )
+    _definition, run, result = run_simulation_workflow(
+        name="Retained mixed-currency history",
+        mode="portfolio",
+        snapshot=snapshot,
+        start_date=date(2026, 2, 2),
+        end_date=date(2026, 2, 4),
+        starting_capital=90_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+        selected_listing_ids=[listing.id for listing in listings.values()],
+        base_currency="USD",
+        fx_max_carry_days=7,
+        provider="synthetic_demo",
+        asset_store=store,
+        decision_time=DECISION_TIME,
+        code_revision="fx-test",
+    )
+    run.refresh_from_db()
+    assert run.status == SimulationRun.Status.COMPLETE
+    assert run.metrics["fx_attribution_status"] == FxAttributionStatus.EXACT.value
+    assert run.metrics["fx_local_currency_cumulative_return"] == pytest.approx(0.0, abs=1e-9)
+    assert run.metrics["fx_contribution_return"] == pytest.approx(2.0 / 3.0 * 0.2, rel=1e-6)
+    assert run.metrics["fx_contribution_return"] == pytest.approx(result.metrics.cumulative_return)
     detail = fx_client.get(reverse("simulation-detail", args=[run.id]))
     assert detail.status_code == 200
     assert b"Converted into USD" in detail.content
     assert b"FX contribution" in detail.content
     assert b"base currency USD" in detail.content
+    assert b"+13.3%" in detail.content
+    assert b"+0.0%" in detail.content
+    assert b"Retained mixed-currency history" in fx_client.get(reverse("simulations")).content
 
 
 @pytest.mark.django_db
@@ -1746,14 +1785,14 @@ def test_simulate_command_converts_and_reports(
 
 
 @pytest.mark.django_db
-def test_web_form_rejects_a_restriction_that_excludes_selected_listings(
+def test_retired_simulation_post_rejects_conflicting_currency_restriction(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
 ) -> None:
     snapshot, listings, _store = mixed_currency_universe
 
-    response = fx_client.post(
-        reverse("simulations"),
+    _assert_retired_simulation_post(
+        fx_client,
         {
             "name": "Conflicting restriction",
             "mode": "portfolio",
@@ -1770,21 +1809,16 @@ def test_web_form_rejects_a_restriction_that_excludes_selected_listings(
         },
     )
 
-    assert response.status_code == 400
-    errors = response.context["form"].errors
-    assert "restrict_native_currency" in errors
-    assert "EURCO (EUR)" in str(errors["restrict_native_currency"])
-
 
 @pytest.mark.django_db
-def test_web_form_rejects_benchmark_currency_without_a_subject(
+def test_retired_simulation_post_rejects_stray_benchmark_currency(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
 ) -> None:
     snapshot, listings, _store = mixed_currency_universe
 
-    response = fx_client.post(
-        reverse("simulations"),
+    _assert_retired_simulation_post(
+        fx_client,
         {
             "name": "Stray benchmark currency",
             "mode": "portfolio",
@@ -1800,20 +1834,16 @@ def test_web_form_rejects_benchmark_currency_without_a_subject(
         },
     )
 
-    assert response.status_code == 400
-    assert "benchmark_currency" in response.context["form"].errors
-    assert SimulationRun.objects.count() == 0
-
 
 @pytest.mark.django_db
-def test_web_form_rejects_a_carry_limit_above_the_reviewed_maximum(
+def test_retired_simulation_post_rejects_excessive_carry_limit(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
 ) -> None:
     snapshot, listings, _store = mixed_currency_universe
 
-    response = fx_client.post(
-        reverse("simulations"),
+    _assert_retired_simulation_post(
+        fx_client,
         {
             "name": "Loose carry",
             "mode": "portfolio",
@@ -1828,9 +1858,6 @@ def test_web_form_rejects_a_carry_limit_above_the_reviewed_maximum(
             "selected_listings": [str(listings["USDCO"].id)],
         },
     )
-
-    assert response.status_code == 400
-    assert "fx_max_carry_days" in response.context["form"].errors
 
 
 @pytest.mark.django_db

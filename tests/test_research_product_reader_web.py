@@ -1173,13 +1173,13 @@ def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
     assert regular.content.count(b"Loss") == 20
     assert b'href="/opportunities?price_band=under_10"' in regular.content
     assert b'aria-current="page">Opportunities</a>' in regular.content
-    assert b"<summary>More</summary>" in regular.content
+    assert b"<summary>More</summary>" not in regular.content
     assert b"Data &amp; updates" in regular.content
     assert b"Under $10 watch" in regular.content
     # 20 of a deliberately synthetic 105-entry cohort is an 80% rendered
     # listing reduction from the former expanded all-entry presentation.
     assert 1 - (20 / len(presentation.cards)) >= 0.60
-    assert b'aria-current="page">Under $10</a>' in under_ten.content
+    assert b'aria-current="page">Opportunities</a>' in under_ten.content
     assert b"12 months projections" in under_ten.content
     assert b"horizon=12m&amp;price_band=under_10&amp;page=2" in under_ten.content
     assert submitted.status_code == 200
@@ -1198,10 +1198,10 @@ def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
     assert b"Filters need attention" in invalid.content
     assert invalid.content.count(b'class="compact-opportunity"') == 0
     assert market.status_code == 200
-    assert b'<details class="more-nav">' in market.content
-    assert b'<details class="more-nav" open>' not in market.content
+    assert b"more-nav" not in market.content
     assert b'href="/market" aria-current="page">Market</a>' in market.content
-    assert b'href="/opportunities?price_band=under_10"' in market.content
+    assert b'href="/opportunities?price_band=under_10"' not in market.content
+    assert b"Saved stocks</a>" in market.content
 
     settings.RESEARCH_PRODUCT_ENABLED = False
     legacy_landing = client.get(reverse("index"))
@@ -1240,7 +1240,7 @@ def test_native_portfolio_momentum_copy_has_no_fabricated_score_or_sample_builde
     assert b"None/100" not in detail.content
     assert b"Check verified current research" in detail.content
     assert portfolios.status_code == 200
-    assert b"Sample builder unavailable for the active momentum method" in portfolios.content
+    assert b"sample builder" not in portfolios.content.lower()
     assert b'name="action" value="sample"' not in portfolios.content
 
 
@@ -1444,7 +1444,7 @@ def chromium_browser():
     )
 
 
-@pytest.mark.parametrize("viewport", ((375, 812), (1280, 900), (1440, 900)))
+@pytest.mark.parametrize("viewport", ((320, 812), (375, 812), (1280, 900), (1440, 900)))
 @pytest.mark.parametrize("scenario", ("qualified_buy", "realistic_empty"))
 def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
     client,
@@ -1626,6 +1626,16 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
 
                 under_ten = page.get_by_role("link", name="Under $10").first
                 assert under_ten.bounding_box()["y"] < viewport[1]
+                comparison = page.locator(".compact-opportunity").first
+                assert presentation.cards[0].listing.ticker in comparison.inner_text()
+                first_box = comparison.bounding_box()
+                assert first_box["y"] >= 0
+                if viewport[0] >= 375:
+                    assert first_box["y"] + first_box["height"] <= viewport[1], first_box
+                assert first_box["height"] <= (290 if viewport[0] <= 375 else 180)
+                assert page.locator(".secondary-shortlists").get_attribute("open") is None
+                # The full comparison, not a re-ranked shortlist, owns the first viewport.
+                page.locator(".secondary-shortlists > summary").click()
                 shortlist_cards = page.locator(".shortlist-opportunity")
                 assert first_shortlist_card.listing.ticker in shortlist_cards.first.inner_text()
                 if scenario == "realistic_empty":
@@ -1643,37 +1653,6 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                         == 0
                     )
                     assert "RESEARCHC" in shortlist_cards.first.inner_text()
-                shortlist_boxes = shortlist_cards.evaluate_all(
-                    "(elements) => elements.map((element) => {"
-                    "const box = element.getBoundingClientRect(); "
-                    "return {top: box.top, bottom: box.bottom};"
-                    "})"
-                )
-                shortlist_layout_boxes = page.locator(
-                    ".site-header, .opportunities-heading, .opportunity-controls, "
-                    ".shortlist-coverage, .shortlist-section"
-                ).evaluate_all(
-                    "(elements) => elements.map((element) => {"
-                    "const box = element.getBoundingClientRect(); "
-                    "return {className: element.className, top: box.top, bottom: box.bottom};"
-                    "})"
-                )
-                assert shortlist_boxes[0]["top"] >= 0
-                assert shortlist_boxes[0]["bottom"] <= viewport[1], (
-                    f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
-                )
-                if viewport[0] == 375:
-                    assert shortlist_boxes[0]["top"] <= 650, (
-                        f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
-                    )
-                    assert shortlist_boxes[0]["bottom"] - shortlist_boxes[0]["top"] <= 250
-                    assert shortlist_boxes[0]["bottom"] <= viewport[1], (
-                        f"first_shortlist={shortlist_boxes[0]}; layout={shortlist_layout_boxes}"
-                    )
-                else:
-                    assert shortlist_boxes[0]["top"] <= 600
-                    assert shortlist_boxes[0]["bottom"] - shortlist_boxes[0]["top"] <= 140
-
                 page.locator('.product-search input[type="text"]').focus()
                 assert page.evaluate(
                     "document.activeElement === document.querySelector("
@@ -1707,7 +1686,12 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
             try:
                 market_page.set_content(market_response.content.decode())
                 market_page.add_style_tag(path=str(css_path))
-                assert market_page.locator(".more-nav").get_attribute("open") is None
+                assert market_page.locator(".more-nav").count() == 0
+                assert market_page.locator(".primary-nav-links a").all_inner_texts() == [
+                    "Opportunities",
+                    "Market",
+                    "Portfolios",
+                ]
             finally:
                 market_page.close()
         finally:

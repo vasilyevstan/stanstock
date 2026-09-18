@@ -840,23 +840,15 @@ def test_invalid_ineligible_analysis_does_not_abort_sample_construction(owner) -
 
 
 @pytest.mark.django_db
-def test_sample_portfolio_web_flow_and_split_warning(client, owner) -> None:
+def test_frozen_sample_history_and_split_warning_survive_browser_retirement(client, owner) -> None:
     _run, listings = _provider_analysis_run(count=2)
     client.force_login(owner)
 
-    response = client.post(
-        reverse("portfolios"),
-        {
-            "action": "sample",
-            "starting_capital": "100000.00",
-            "top_n": "2",
-        },
+    portfolio, _created = build_sample_portfolio(
+        owner=owner, starting_capital=Decimal("100000"), top_n=2
     )
-
-    portfolio = Portfolio.objects.get(owner=owner, source_analysis_run__isnull=False)
-    assert response.status_code == 302
-    assert response.url == reverse("portfolio-detail", args=[portfolio.pk])
-    detail = client.get(response.url)
+    url = reverse("portfolio-detail", args=[portfolio.pk])
+    detail = client.get(url)
     content = detail.content.decode()
     assert "Research-reference portfolio; composition is frozen." in content
     assert "1-10 trading days" in content
@@ -866,12 +858,12 @@ def test_sample_portfolio_web_flow_and_split_warning(client, owner) -> None:
     market.close = Decimal("50")
     market.session_date = date(2026, 9, 5)
     market.save(update_fields=["close", "session_date"])
-    warned = client.get(response.url).content.decode()
+    warned = client.get(url).content.decode()
     assert "Model price return" in warned
     assert "Withheld" in warned
     assert "split-sized price move" in warned
     record_portfolio_snapshot(portfolio)
-    persistently_withheld = client.get(response.url).content.decode()
+    persistently_withheld = client.get(url).content.decode()
     assert "Model return withheld." in persistently_withheld
     assert "historical split warning" in persistently_withheld
 

@@ -28,7 +28,11 @@ from stanstock.research.models import (
     RiskClass,
     StockAnalysis,
 )
-from stanstock.simulation.builders import build_price_panel, build_signals_for_backtest
+from stanstock.simulation.builders import (
+    build_price_panel,
+    build_signals_for_backtest,
+    run_simulation_workflow,
+)
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.types import SimulationWorkflowError
 
@@ -90,11 +94,13 @@ def web_setup_environment(
 
 @pytest.mark.django_db
 def test_simulations_page_get(auth_client: Client) -> None:
-    """GET /simulations renders the page and simulation form."""
+    """GET and HEAD retain historical records, without a creator."""
     resp = auth_client.get(reverse("simulations"))
     assert resp.status_code == 200
-    assert "form" in resp.context
-    assert b"Run simulation" in resp.content
+    assert "form" not in resp.context
+    assert b"Run simulation" not in resp.content
+    assert b"Historical simulations" in resp.content
+    assert auth_client.head(reverse("simulations")).status_code == 200
 
 
 @pytest.mark.django_db
@@ -108,36 +114,26 @@ def test_simulations_page_post_unauthenticated() -> None:
 
 
 @pytest.mark.django_db
-def test_simulations_page_post_portfolio_valid(
+def test_simulation_workflow_records_remain_readable(
     auth_client: Client,
     web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
 ) -> None:
-    """Valid portfolio POST /simulations creates run, persists UUIDs, redirects to detail."""
+    """The retained engine's synthetic records still have a list and detail."""
     snapshot, listing, store = web_setup_environment
 
-    post_data = {
-        "name": "Web Portfolio Test",
-        "mode": "portfolio",
-        "snapshot": str(snapshot.id),
-        "start_date": "2026-01-01",
-        "end_date": "2026-01-02",
-        "starting_capital": "75000.00",
-        "transaction_cost_bps": "10.00",
-        "slippage_bps": "5.00",
-        "selected_listings": str(listing.id),
-    }
-
-    with (
-        patch("stanstock.simulation.builders.AssetStore", return_value=store),
-        patch("stanstock.simulation.service.AssetStore", return_value=store),
-    ):
-        resp = auth_client.post(reverse("simulations"), post_data)
-
-    assert resp.status_code == 302
-    run = SimulationRun.objects.filter(definition__name="Web Portfolio Test").first()
-    assert run is not None
+    _, run, _ = run_simulation_workflow(
+        name="Retained synthetic portfolio",
+        mode="portfolio",
+        snapshot=snapshot,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 2),
+        starting_capital=75000,
+        selected_listing_ids=[listing.pk],
+        asset_store=store,
+    )
     assert run.status == SimulationRun.Status.COMPLETE
-    assert resp.headers.get("Location") == reverse("simulation-detail", kwargs={"run_id": run.id})
+    assert auth_client.get(reverse("simulation-detail", args=[run.pk])).status_code == 200
+    assert b"Retained synthetic portfolio" in auth_client.get(reverse("simulations")).content
 
     # Verify UUID identity
     for h in run.holdings.all():
@@ -151,7 +147,7 @@ def test_simulations_page_post_backtest_no_signals_rejected(
     auth_client: Client,
     web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
 ) -> None:
-    """Backtest POST /simulations without signals returns 400 and shows form error."""
+    """Even invalid old creator requests stop before signal lookup."""
     snapshot, _, store = web_setup_environment
 
     initial_defs = SimulationDefinition.objects.count()
@@ -175,8 +171,8 @@ def test_simulations_page_post_backtest_no_signals_rejected(
     ):
         resp = auth_client.post(reverse("simulations"), post_data)
 
-    assert resp.status_code == 400
-    assert b"No persisted signals found" in resp.content
+    assert resp.status_code == 405
+    assert resp.headers["Allow"] == "GET, HEAD"
 
     # No definition or run created
     assert SimulationDefinition.objects.count() == initial_defs
@@ -188,7 +184,7 @@ def test_simulations_page_post_ineligible_listing_rejected(
     auth_client: Client,
     web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
 ) -> None:
-    """ModelMultipleChoiceField validates listing membership against selected snapshot."""
+    """The retired creator no longer constructs or validates a listing form."""
     snapshot, _, store = web_setup_environment
 
     # Create another listing that is NOT in snapshot membership
@@ -220,8 +216,7 @@ def test_simulations_page_post_ineligible_listing_rejected(
     ):
         resp = auth_client.post(reverse("simulations"), post_data)
 
-    assert resp.status_code == 400
-    assert b"Selected listings must be eligible members" in resp.content
+    assert resp.status_code == 405
 
 
 @pytest.mark.django_db

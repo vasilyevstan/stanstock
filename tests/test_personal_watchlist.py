@@ -1204,7 +1204,7 @@ def test_duplicate_add_is_idempotent_and_reports_existing(client) -> None:
     assert first.status_code == 302
     assert second.status_code == 200
     assert TrackedSymbol.objects.filter(owner=owner, symbol="ONCE").count() == 1
-    assert b"ONCE is already in My list." in second.content
+    assert b"ONCE is already in Saved stocks." in second.content
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1641,7 +1641,8 @@ def test_my_list_markup_is_semantic_responsive_and_marks_navigation_active(clien
     content = response.content.decode()
 
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in content
-    assert '<a href="/my-list" aria-current="page">My List</a>' in content
+    assert '<a href="/my-list" aria-current="page">Saved stocks</a>' in content
+    assert '<a href="/market" aria-current="page">Market</a>' in content
     assert '<div class="table-scroll" tabindex="0" aria-label="My tracked symbols">' in content
     assert '<th scope="col">Symbol</th>' in content
     assert "<table" in content

@@ -2,15 +2,12 @@
 {% load stanstock %}
 
 {% block title %}{{ portfolio.name }} · StanStock{% endblock %}
+{% block page_class %}portfolio-detail-page{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">
-        {% if portfolio.is_model_portfolio %}Frozen StanStock sample{% else %}Tracked portfolio{% endif %}
-      </p>
       <h1>{{ portfolio.name }}</h1>
-      <p class="lede">{{ portfolio.description|default:"Private portfolio tracking." }}</p>
     </div>
     <div class="run-stamp">
       <small>Valuation date</small>
@@ -19,27 +16,33 @@
     </div>
   </section>
 
+  <nav class="section-nav" aria-label="Portfolio sections">
+    {% for item in sections %}
+      <a href="?section={{ item }}"{% if section == item %} aria-current="page"{% endif %}>{{ item|capfirst }}</a>
+    {% endfor %}
+  </nav>
+
   {% if portfolio.archived_at %}
-    <div class="notice" role="status">
-      This portfolio is archived. Its immutable snapshots remain available.
-      <form method="post" class="inline-form">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="restore">
-        <button class="secondary-button" type="submit">Restore portfolio</button>
-      </form>
+    <div class="{% if section == 'settings' %}notice{% else %}archived-state{% endif %}" role="status">
+      <strong>Archived; history preserved.</strong>
+      {% if section == "settings" %}
+        <form method="post" class="inline-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="restore">
+          <button class="secondary-button" type="submit">Restore portfolio</button>
+        </form>
+      {% else %}
+        <a href="?section=settings" aria-label="Restore in portfolio Settings">Restore</a>.
+      {% endif %}
     </div>
   {% endif %}
 
   {% if portfolio.is_model_portfolio %}
     <div class="notice" role="status">
       <strong>Research-reference portfolio; composition is frozen.</strong>
-      Built from the provider-backed {{ portfolio.source_analysis_run.target_date }}
-      analysis using {{ portfolio.construction_policy|display_label }}.
-      The signal was {{ portfolio.construction_metadata.signal_label }}
-      and covered {{ portfolio.construction_metadata.signal_horizon|display_label }};
-      returns beyond that horizon are observational and do not validate the original
-      signal. Entry values are immutable analysis reference closes, not executable
-      fills. Results are split-adjusted price returns and exclude dividends.
+      Reference closes, not executable fills. Returns beyond
+      {{ portfolio.construction_metadata.signal_horizon|display_label }} are
+      observational; dividends excluded.
     </div>
     {% if model_return_withheld_reason %}
       <div class="error-box notice" role="alert">
@@ -73,18 +76,11 @@
           Unavailable
         {% endif %}
       </strong>
-      <span>Cash plus valued holdings</span>
+      {% if section != "holdings" %}<span>Securities {% if valuation.securities_value is not None %}{{ valuation.securities_value|floatformat:2 }}{% else %}unavailable{% endif %}</span>{% endif %}
     </article>
     <article>
-      <small>Securities value</small>
-      <strong>
-        {% if valuation.securities_value is not None %}
-          {{ valuation.securities_value|floatformat:2 }} {{ portfolio.base_currency }}
-        {% else %}
-          Unavailable
-        {% endif %}
-      </strong>
-      <span>Latest persisted closes</span>
+      <small>Current cash</small>
+      <strong>{{ portfolio.cash_balance|floatformat:2 }} {{ portfolio.base_currency }}</strong>
     </article>
     <article>
       <small>
@@ -99,13 +95,6 @@
           Unavailable
         {% endif %}
       </strong>
-      <span>
-        {% if portfolio.is_model_portfolio %}
-          Immutable research reference
-        {% else %}
-          Market value minus entered cost basis
-        {% endif %}
-      </span>
     </article>
     <article>
       <small>
@@ -122,22 +111,15 @@
           {{ valuation.return_pct|percentage }}
         {% endif %}
       </strong>
-      <span>
-        {% if portfolio.is_model_portfolio %}
-          Total value vs starting capital; dividends excluded
-        {% else %}
-          Cash excluded; dividends excluded unless stated
-        {% endif %}
-      </span>
     </article>
-    {% if portfolio.is_model_portfolio %}
+    {% if portfolio.is_model_portfolio and section == "activity" %}
       <article>
         <small>Positive positions</small>
         <strong>{{ positive_position_count }} / {{ valuation.positions|length }}</strong>
         <span>Current reference-price gain above zero</span>
       </article>
     {% endif %}
-    {% if contribution_performance.active %}
+    {% if section == "activity" and contribution_performance.active %}
       <article>
         <small>External contributions</small>
         <strong>{{ contribution_performance.total_contributions|floatformat:2 }} {{ portfolio.base_currency }}</strong>
@@ -178,10 +160,21 @@
     {% endif %}
   </section>
 
-  {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}
-    <div class="detail-grid">
+  {% if contribution_performance.active and contribution_performance.withheld_reason and section != "activity" %}
+    <p class="notice"><strong>Contribution-adjusted return withheld.</strong> {{ contribution_performance.withheld_reason }}</p>
+  {% endif %}
+
+  {% if section == "holdings" %}
+    {% include "web/_portfolio_holdings.html" %}
+    <p class="muted valuation-basis">
+      Securities value: {% if valuation.securities_value is not None %}{{ valuation.securities_value|floatformat:2 }} {{ portfolio.base_currency }}{% else %}unavailable{% endif %}.
+      {% if portfolio.is_model_portfolio %}Model return compares total value with starting capital.{% else %}Unrealized gain is market value minus entered cost basis; unrealized return excludes cash.{% endif %}
+      Dividends excluded. Contribution-adjusted simple returns are separate in <a href="?section=activity">Activity</a>.
+    </p>
+  {% endif %}
+
+  {% if section == "activity" and not portfolio.archived_at and not portfolio.is_model_portfolio %}
       <section class="panel">
-        <p class="eyebrow">External cash flow</p>
         <h2>Record a deposit</h2>
         <p>
           The default is your {{ portfolio.monthly_contribution|floatformat:2 }}
@@ -191,23 +184,21 @@
         <form method="post" class="stack">
           {% csrf_token %}
           <input type="hidden" name="action" value="deposit">
-          {% if deposit_form.non_field_errors %}
-            <div class="error-box" role="alert">{{ deposit_form.non_field_errors }}</div>
-          {% endif %}
-          {% for hidden in deposit_form.hidden_fields %}{{ hidden }}{% endfor %}
-          {% for field in deposit_form.visible_fields %}
-            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-            {{ field }}
-            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-          {% endfor %}
+          {% include "web/_form_fields.html" with form=deposit_form %}
           <button class="primary-button" type="submit">Record deposit</button>
         </form>
       </section>
+  {% endif %}
 
+  {% if section == "plan" %}
       <section class="panel">
-        <p class="eyebrow">Side-effect-free preview</p>
         <h2>Monthly allocation plan</h2>
-        {% if contribution_plan.issues %}
+        {% if plan_confirmation_error %}
+          <div class="error-box" role="alert">{{ plan_confirmation_error }}</div>
+        {% endif %}
+        {% if not contribution_plan %}
+          <p class="notice">Planning is unavailable for archived or frozen model portfolios.</p>
+        {% elif contribution_plan.issues %}
           <div class="error-box" role="alert">
             {{ contribution_plan.issues|join:" " }}
           </div>
@@ -250,9 +241,7 @@
             <form method="post" class="stack">
               {% csrf_token %}
               <input type="hidden" name="action" value="execute_plan">
-              {% if plan_confirmation_error %}
-                <div class="error-box" role="alert">{{ plan_confirmation_error }}</div>
-              {% elif plan_confirmation_form.non_field_errors %}
+              {% if plan_confirmation_form.non_field_errors %}
                 <div class="error-box" role="alert">{{ plan_confirmation_form.non_field_errors }}</div>
               {% endif %}
               {% for hidden in plan_confirmation_form.hidden_fields %}{{ hidden }}{% endfor %}
@@ -262,161 +251,36 @@
           {% endif %}
         {% endif %}
       </section>
-    </div>
+  {% endif %}
 
-    <div class="detail-grid">
+  {% if section == "holdings" and not portfolio.archived_at and not portfolio.is_model_portfolio %}
       <section class="panel">
-        <p class="eyebrow">Composition</p>
         <h2>Add or update a holding</h2>
         <form method="post" class="stack">
           {% csrf_token %}
           <input type="hidden" name="action" value="holding">
-          {% if holding_form.non_field_errors %}
-            <div class="error-box" role="alert">{{ holding_form.non_field_errors }}</div>
-          {% endif %}
-          {% for field in holding_form %}
-            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-            {{ field }}
-            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-          {% endfor %}
+          {% include "web/_form_fields.html" with form=holding_form %}
           <button class="primary-button" type="submit">Save holding</button>
         </form>
       </section>
+  {% endif %}
 
+  {% if section == "settings" and not portfolio.archived_at and not portfolio.is_model_portfolio %}
       <section class="panel">
-        <p class="eyebrow">Settings</p>
         <h2>Portfolio details</h2>
         <form method="post" class="stack">
           {% csrf_token %}
           <input type="hidden" name="action" value="update">
-          {% if portfolio_form.non_field_errors %}
-            <div class="error-box" role="alert">{{ portfolio_form.non_field_errors }}</div>
-          {% endif %}
-          {% for field in portfolio_form %}
-            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-            {{ field }}
-            {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
-            {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-          {% endfor %}
+          {% include "web/_form_fields.html" with form=portfolio_form %}
           <button class="primary-button" type="submit">Update portfolio</button>
         </form>
       </section>
-    </div>
   {% endif %}
 
-  <section>
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Current positions</p>
-        <h2>Holdings</h2>
-      </div>
-      {% if not portfolio.archived_at %}
-        <form method="post" class="inline-form">
-          {% csrf_token %}
-          <input type="hidden" name="action" value="snapshot">
-          <button class="secondary-button" type="submit">Record snapshot</button>
-        </form>
-      {% endif %}
-    </div>
-    <div class="table-scroll" tabindex="0" aria-label="Portfolio holdings">
-      <table class="compact-table">
-        <thead>
-          <tr>
-            <th scope="col">Security</th>
-            <th scope="col">Quantity</th>
-            <th scope="col">Average cost</th>
-            <th scope="col">Latest price</th>
-            <th scope="col">Market value</th>
-            <th scope="col">Unrealized</th>
-            <th scope="col">Research</th>
-            {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}<th scope="col">Action</th>{% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for card in position_cards %}
-            {% with position=card.position %}
-              <tr{% if card.opportunity.eligible %} class="opportunity-row"{% endif %}>
-                <td>
-                  {% if card.is_etf %}
-                    <a href="{% url 'etf-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
-                  {% else %}
-                    <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
-                  {% endif %}
-                  <small>{{ position.holding.listing.security.company.name }}</small>
-                  {% if card.is_etf %}<small>Exchange-traded fund · core benchmark role</small>{% endif %}
-                  {% if card.price_band %}
-                    <small>{{ card.price_band.label }} · {{ card.price_band.price_date }}</small>
-                  {% endif %}
-                </td>
-                <td>{{ position.holding.quantity|floatformat:8 }}</td>
-                <td>{{ position.holding.average_cost|floatformat:2 }} {{ portfolio.base_currency }}</td>
-                <td>
-                  {% if position.market_data %}
-                    {{ position.market_data.close|floatformat:2 }}
-                    <small>{{ position.market_data.session_date }}</small>
-                  {% else %}
-                    Unavailable
-                  {% endif %}
-                </td>
-                <td>
-                  {% if position.market_value is not None %}
-                    {{ position.market_value|floatformat:2 }} {{ portfolio.base_currency }}
-                  {% else %}
-                    Unavailable
-                  {% endif %}
-                </td>
-                <td>
-                  {% if position.unrealized_gain is not None %}
-                    {{ position.unrealized_gain|floatformat:2 }} {{ portfolio.base_currency }}
-                  {% else %}
-                    Unavailable
-                  {% endif %}
-                </td>
-                <td>
-                  {% if card.is_etf %}
-                    <span class="badge">ETF · no stock rating</span>
-                  {% elif card.is_active_momentum_method %}
-                    <span class="badge">6-month momentum method</span>
-                    <small>No overall score — this is the 6-month momentum method.</small>
-                    <small>Action is not repeated here. <a href="{% url 'opportunities' %}?q={{ position.holding.listing.ticker|urlencode }}">Check verified current research</a>.</small>
-                  {% elif card.opportunity.eligible %}
-                    <span class="opportunity-badge">{{ card.opportunity.label }}</span>
-                    <small>{{ card.opportunity.policy_version }}</small>
-                  {% elif card.analysis %}
-                    {{ card.analysis.get_recommendation_display }}
-                    <small>{{ card.analysis.overall_score }}/100</small>
-                  {% else %}
-                    No analysis
-                  {% endif %}
-                  {% if card.price_band and not card.price_band.new_allocation_eligible %}
-                    <span class="badge">Speculative watchlist</span>
-                    <small>Existing holding remains tracked; new allocation is 0%.</small>
-                  {% endif %}
-                </td>
-                {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}
-                  <td>
-                    <form method="post" action="{% url 'portfolio-holding-delete' portfolio.id position.holding.id %}">
-                      {% csrf_token %}
-                      <button class="danger-button" type="submit">Remove</button>
-                    </form>
-                  </td>
-                {% endif %}
-              </tr>
-            {% endwith %}
-          {% empty %}
-            <tr>
-              <td colspan="8">No holdings have been added.</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
-
+  {% if section == "activity" %}
   {% if contribution_performance.active %}
     <div class="detail-grid">
       <section class="panel">
-        <p class="eyebrow">Immutable cash flows</p>
         <h2>Recent deposits</h2>
         <div class="compact-list">
           {% for deposit in deposits %}
@@ -457,7 +321,6 @@
         {% endif %}
       </section>
       <section class="panel">
-        <p class="eyebrow">Confirmed records</p>
         <h2>Planner purchases</h2>
         <div class="compact-list">
           {% for execution in plan_executions %}
@@ -490,9 +353,15 @@
   <section>
     <div class="section-heading">
       <div>
-        <p class="eyebrow">Dated evidence</p>
         <h2>Value history</h2>
       </div>
+      {% if not portfolio.archived_at %}
+        <form method="post" class="inline-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="snapshot">
+          <button class="secondary-button" type="submit">Record snapshot</button>
+        </form>
+      {% endif %}
     </div>
     <div class="notice">
       {% if portfolio.is_model_portfolio %}
@@ -548,8 +417,9 @@
       </table>
     </div>
   </section>
+  {% endif %}
 
-  {% if not portfolio.archived_at %}
+  {% if section == "settings" and not portfolio.archived_at %}
     <section class="danger-zone">
       <h2>Archive portfolio</h2>
       <p>Archiving stops edits and scheduled snapshots while preserving all history.</p>
@@ -559,5 +429,23 @@
         <button class="danger-button" type="submit">Archive portfolio</button>
       </form>
     </section>
+  {% endif %}
+
+  {% if portfolio.is_model_portfolio or portfolio.description %}
+    <details class="panel portfolio-notes">
+      <summary>{% if portfolio.is_model_portfolio %}Frozen construction and provenance{% else %}Portfolio notes{% endif %}</summary>
+      {% if portfolio.description %}<p>{{ portfolio.description }}</p>{% endif %}
+      {% if portfolio.is_model_portfolio %}
+        <p>
+          Built from the provider-backed {{ portfolio.source_analysis_run.target_date }}
+          analysis using {{ portfolio.construction_policy|display_label }}.
+          The signal was {{ portfolio.construction_metadata.signal_label }}
+          and covered {{ portfolio.construction_metadata.signal_horizon|display_label }};
+          returns beyond that horizon are observational and do not validate the original
+          signal. Entry values are immutable analysis reference closes, not executable
+          fills. Results are split-adjusted price returns and exclude dividends.
+        </p>
+      {% endif %}
+    </details>
   {% endif %}
 {% endblock %}

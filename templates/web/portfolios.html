@@ -6,96 +6,14 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Personal tracking</p>
-      <h1>Your portfolios</h1>
-      <p class="lede">
-        Keep several private portfolios and preserve dated valuation snapshots.
-        Manual returns use the average costs you enter. Frozen StanStock sample
-        portfolios measure provider-backed selections from their recorded
-        reference prices. Both exclude dividends unless the source explicitly
-        includes them.
-      </p>
+      <h1>Portfolios</h1>
+      <p class="lede">Your holdings and cash, valued from stored closes. Not a brokerage account.</p>
     </div>
+    <a class="secondary-button button-link" href="?new=1#new-portfolio">New portfolio</a>
   </section>
-
-  <section class="panel">
-    <p class="eyebrow">StanStock sample</p>
-    <h2>Build a frozen model portfolio</h2>
-    {% if sample_source_run %}
-      <p class="muted">
-        Source run {{ sample_source_run.target_date }} ·
-        {{ sample_source_run.universe_snapshot.get_grade_display }} evidence ·
-        {{ sample_source_run.config_version }}
-      </p>
-    {% endif %}
-    {% if sample_builder_supported %}
-      <p>
-        Equal-weight the highest-ranked eligible opportunities from the latest
-        provider-backed scored analysis and preserve an immutable baseline.
-      </p>
-      <form method="post" class="stack">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="sample">
-        {% if sample_form.non_field_errors %}
-          <div class="error-box" role="alert">{{ sample_form.non_field_errors }}</div>
-        {% endif %}
-        {% for field in sample_form %}
-          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-          {{ field }}
-          {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
-          {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-        {% endfor %}
-        <button class="primary-button" type="submit">Build sample portfolio</button>
-      </form>
-    {% else %}
-      <div class="notice">
-        <strong>Sample builder unavailable for the active momentum method.</strong>
-        This legacy scored builder cannot rank a momentum-only cohort, so no
-        current ranked basket is shown.
-      </div>
-    {% endif %}
-  </section>
-
-  <div class="detail-grid">
-    <section class="panel">
-      <p class="eyebrow">New portfolio</p>
-      <h2>Create a portfolio</h2>
-      <form method="post" class="stack">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="manual">
-        {% if form.non_field_errors %}
-          <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
-        {% endif %}
-        {% for field in form %}
-          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-          {{ field }}
-          {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
-          {% if field.errors %}<div class="field-error">{{ field.errors }}</div>{% endif %}
-        {% endfor %}
-        <button class="primary-button" type="submit">Create portfolio</button>
-      </form>
-    </section>
-
-    <section class="panel">
-      <p class="eyebrow">How tracking works</p>
-      <h2>Evidence, not brokerage accounting</h2>
-      <p>
-        StanStock values current holdings from the latest persisted market rows.
-        The value history includes deposits, withdrawals, and holding edits; it
-        is not a time-weighted return series. Split-adjusted price returns exclude
-        dividends.
-      </p>
-    </section>
-  </div>
 
   <section>
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Active</p>
-        <h2>Tracked portfolios</h2>
-      </div>
-    </div>
-    <div class="portfolio-grid">
+    <div class="portfolio-records" aria-label="Tracked portfolios">
       {% for card in portfolio_cards %}
         <article class="portfolio-card">
           <div>
@@ -103,7 +21,7 @@
             {% if card.portfolio.is_model_portfolio %}
               <span class="opportunity-badge">Frozen StanStock sample</span>
             {% endif %}
-            <p>{{ card.portfolio.description|default:"No description." }}</p>
+            {% if card.portfolio.description %}<p>{{ card.portfolio.description }}</p>{% endif %}
           </div>
           <dl class="key-values">
             <div>
@@ -153,7 +71,7 @@
               <p class="field-error">{{ card.model_return_withheld_reason }}</p>
             {% endif %}
           {% endif %}
-          <a class="primary-button button-link" href="{% url 'portfolio-detail' card.portfolio.id %}">Open portfolio</a>
+          <a class="secondary-button button-link" href="{% url 'portfolio-detail' card.portfolio.id %}">Open portfolio</a>
         </article>
       {% empty %}
         <p class="empty-state">Create your first portfolio to begin tracking it.</p>
@@ -161,11 +79,23 @@
     </div>
   </section>
 
+  {% if show_create_form %}
+    <section class="panel portfolio-form" id="new-portfolio">
+      <h2>New portfolio</h2>
+      <form method="post" class="stack">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="manual">
+        {% include "web/_form_fields.html" with form=form %}
+        <button class="primary-button" type="submit">Create portfolio</button>
+      </form>
+    </section>
+  {% endif %}
+  <p class="muted">Unrealized returns use entered average costs. Frozen model returns use recorded starting capital. Both exclude dividends. History is not a time-weighted return series.</p>
+
   {% if archived_portfolios %}
     <section>
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Preserved history</p>
           <h2>Archived portfolios</h2>
         </div>
       </div>
