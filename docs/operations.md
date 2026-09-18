@@ -94,6 +94,109 @@ scoring configuration, and `code_revision()` (including its
 every target. No provider, target, configuration, benchmark, or
 `STANSTOCK_CODE_REVISION` flag can make it observed.
 
+## Isolated local runtime
+
+Keep a live native web process and its refresh LaunchAgent in a dedicated,
+clean checkout rather than the checkout used for development. A full clone
+also separates Git administration. Pin both processes to an exact reviewed
+revision and give that clone its own environment installed from the existing
+lockfile; copying a virtualenv can retain imports from another checkout.
+Do not automatically pull development changes into a running installation.
+
+This separates one source of refresh failures: unrelated development edits
+or diagnostics tripping the clean-Git guard. It does not prevent provider
+outages, machine sleep, process failure, or missing data. Runtime-generated
+diagnostics can still dirty the new checkout. Keep development/agent work,
+logs and diagnostic artifacts outside runtime source. Existing scheduler
+logs already use a private location outside the checkout.
+
+### Preserve permanent state before changing roots
+
+The local development profile has checkout-relative defaults. Resolve and
+compare the existing web and scheduler configuration before opening a
+candidate database or constructing an asset store:
+
+- For SQLite, set `STANSTOCK_SQLITE_PATH` to the existing absolute database
+  path. Do not also set `DATABASE_URL`. Preserve an existing PostgreSQL
+  profile as PostgreSQL; changing backends is a separate migration.
+- Explicitly bind `STANSTOCK_DATA_DIR` and `STANSTOCK_BACKUP_DIR` to their
+  existing absolute locations. Do not copy, relocate or bootstrap data as
+  part of source isolation.
+- Preserve the settings module, product/configuration, owner/display
+  authorization and provider policy. A new empty database is not a valid
+  fallback.
+- Reuse the approved owner-only private environment through the existing
+  strict loader. Do not shell-source it, duplicate secrets into scripts, or
+  relax ownership and permission checks. The local installer expects
+  `.env` in its selected project root; a file reference must resolve to the
+  approved private file and pass the existing validation.
+
+Inspect effective paths before checks with side effects: constructing an
+`AssetStore` may create its directory, and opening a SQLite connection may
+initialize WAL. Canonical SQLite process-lock identity also follows the
+resolved database location. Different paths can therefore break both data
+parity and cross-process serialization.
+
+### Separate launching from release evidence
+
+A private release-verification script is not a durable application launcher.
+Assertions that a ledger exactly matches an old release snapshot can become
+false after legitimate refreshes. Preserve that snapshot as historical
+evidence; do not rewrite it or make future server startup depend on it.
+
+An installation-specific native launcher is not a packaged StanStock command.
+It should use the existing strict private-environment loader, verify its own
+checkout/interpreter/import origin and approved clean revision, and bind
+`STANSTOCK_CODE_REVISION` to that revision. For the existing local development
+profile, preserve its Django `runserver`, loopback bind, settings and
+no-auto-reload behavior. Keep unattended Keychain fallback disabled.
+Do not substitute WSGI production defaults, Gunicorn, a new supervisor or a
+database backend merely to change source location. Collect static assets
+through the existing command as a controlled preparation step when needed.
+
+### Controlled cutover and rollback
+
+Prepare the candidate and a usable fallback launch command before stopping
+the working server. Confirm a checksummed paired database/assets backup and
+restore-readiness evidence; copying an open SQLite file without its WAL is
+not an adequate backup. Use the existing backup workflow.
+
+Prevent new manual/scheduled starts and drain active work under the existing
+canonical locks against the same permanent database. Job status rows alone
+do not prove quiescence. The installer replaces the loaded LaunchAgent; it
+does not drain an active refresh. Do not unload a busy agent.
+
+Use the existing `launchd_refresh install --project-root` interface only
+after that fence is established. Preserve one LaunchAgent label, its
+validated schedule/timezone and its existing job identities. Restart the
+web process with the prepared same-profile launch command. Do not force a
+provider refresh, recapture intake, run migrations or reissue predictions
+to demonstrate the cutover.
+
+Verify the actual native process and loaded scheduler execution chain, not
+just a proposed plist or a separate shell import. Compare owner-authorized
+reader output and registered evidence against the pre-cutover baseline at
+the same cohort/cutoff. Existing withholding may be preserved; new
+candidate-induced missing, withheld or failed output is a regression.
+HTTP 200 alone is insufficient. Distinguish a genuine market-clock
+transition from a source-location regression.
+
+Historical cohorts retain their own issuance revisions; those need not
+equal the new runtime revision. Fresh observed issuance retains all clean
+revision, cutoff and deadline checks. Completed recovery remains ahead of
+fresh-work guards.
+
+On failure, fence and drain again, then restore the prepared prior
+code/interpreter/web command and scheduler definition against the same
+current permanent data. Do not restore an older database just to reverse a
+source-location change, delete immutable evidence, or discard partial-job
+recovery. Repeat the bounded acceptance comparison.
+
+These are one-time, repeatable-on-demand deployment checks, not a monitoring
+service. Source isolation does not install alerts, heartbeats, recurring
+checks or automatic repair; failures may remain unnoticed until the
+existing application, status page or private logs are inspected.
+
 ## Scheduled profile
 
 The supported macOS LaunchAgent runs at **03:30 local time,

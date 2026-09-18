@@ -189,6 +189,11 @@ downgrade or backdate a missing observed issuance.
 Do not run a resident scheduler inside the web container. A separate clean
 runtime checkout may share the configured database and asset directory with a
 dirty development checkout.
+For the native local profile, follow the
+[isolated-runtime cutover and rollback procedure](operations.md#isolated-local-runtime).
+It preserves the existing server, permanent data and scheduler without a cloud
+migration or new monitoring service. Release-verification snapshots are
+historical evidence, not permanent server-startup prerequisites.
 
 ## Production-style dry run
 
