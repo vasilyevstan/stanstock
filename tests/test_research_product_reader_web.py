@@ -2132,6 +2132,35 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.locator(".secondary-shortlists > summary").click()
                 shortlist_cards = page.locator(".shortlist-opportunity")
                 assert first_shortlist_card.listing.ticker in shortlist_cards.first.inner_text()
+
+                def assert_desktop_shortlist_order():
+                    if viewport[0] < 1280:
+                        return
+                    for wider_font in (False, True):
+                        style = (
+                            page.add_style_tag(
+                                content=':root { font-family: Verdana, "DejaVu Sans", sans-serif; }'
+                            )
+                            if wider_font
+                            else None
+                        )
+                        try:
+                            positions = shortlist_cards.evaluate_all(
+                                """elements => elements.map(e => [
+                                    'header', '.shortlist-opportunity-facts',
+                                    '.shortlist-detail-link'
+                                ].map(selector =>
+                                    e.querySelector(selector).getBoundingClientRect().x
+                                ))"""
+                            )
+                            assert all(
+                                identity < facts < link for identity, facts, link in positions
+                            ), positions
+                        finally:
+                            if style is not None:
+                                style.evaluate("(element) => element.remove()")
+
+                assert_desktop_shortlist_order()
                 if scenario == "realistic_empty":
                     assert (
                         page.locator(
@@ -2180,6 +2209,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.keyboard.press("Enter")
                 assert duplicate_panel.get_attribute("open") == ""
                 assert primary_panel.get_attribute("open") == ""
+                assert_desktop_shortlist_order()
                 assert duplicate_summary.evaluate(
                     "e => e.matches(':focus-visible') && "
                     "parseFloat(getComputedStyle(e).outlineWidth) >= 3"
