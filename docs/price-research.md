@@ -397,3 +397,67 @@ breadth, or a gain probability.
 
 These works motivate ideas, not StanStock's exact coefficients, thresholds,
 single-stock suggestions, horizons, or profitability.
+
+## Synthetic candidate-policy research
+
+`price-candidates-synthetic-v1` is a separate, unwired correctness study in
+`research/price_candidate_policy.py` and `price_candidate_policy_study.py`.
+It does not change the active momentum decision, FHS projections, Opportunities
+shortlists, portfolios or scheduled refresh. It publishes no investment list.
+
+The study assesses three fixed price-pattern hypotheses independently:
+
+| Hypothesis | Fixed research conditions |
+|---|---|
+| Continuation | Positive absolute and benchmark-relative 12-1 momentum, plus positive absolute and relative 21-session returns |
+| Positive-trend pullback | Positive absolute and relative 12-1 momentum; a selected 10%-30% decline followed by at least 5% recovery |
+| Deep reversal | Negative absolute and relative 12-1 momentum; a selected decline of at least 30% followed by at least 10% recovery |
+
+The decline episode uses a 126-session lookback, excludes the latest five closes,
+and selects the deepest ordered peak-to-trough pair, with latest-trough and
+earliest-peak tie rules. Recovery arms require a trough 5-21 sessions old,
+positive absolute and relative five-session returns, and three strictly
+rising final closes. Recent relative return is a wealth ratio,
+`(stock_end / stock_start) / (benchmark_end / benchmark_start) - 1`, not
+percentage-point outperformance or log momentum.
+
+Matched entry patterns still require the independent stock, source, USD,
+compatible-turnover, volatility, drawdown and $10 gates. The frozen momentum
+recommendation is a labelled control, not a veto: the synthetic deep-reversal
+case can qualify for research while its unchanged native control says AVOID.
+Missing compatible volume withholds entry; it is not zero turnover.
+
+Independent deterioration review requires negative absolute and relative
+21-session returns, a close strictly below the preceding 20 closes, and
+current drawdown of at least 10%. It does not assume ownership or prior entry.
+Entry affordability restrictions do not conceal deterioration in an
+Under-$10 synthetic case; this does not authorize investment or live selling.
+Current drawdown, maximum annual drawdown and selected episode depth remain
+distinct quantities.
+
+Six fixed synthetic cases use 757 aligned XNYS closes ending 2026-09-11.
+They establish constructible examples and implementation behavior, not market
+support. Six separate hypothetical payoff rows illustrate cash-minus-hold,
+benchmark-minus-hold, avoided loss and foregone upside at 126 and 252 sessions.
+Their zero cash return, zero differential costs and 5% benchmark return are
+illustrative assumptions, not forecasts or achieved trades. They are not
+outcomes of the pattern cases and are not averaged into a success statistic.
+
+The policy and driver perform no application/private file access, ORM access,
+provider/network calls, subprocess execution, clock reads or environment reads.
+Bounded deterministic calendar construction may cause the calendar dependency
+to read installed timezone resources on its first invocation. This exception
+permits neither arbitrary filesystem access nor application, private or
+provider-data reads.
+
+Serialization returns bytes with complete input/configuration hashes and
+caller-supplied, independently bound source/dependency identity. Synthetic
+identity checks establish fixture consistency, not authority to relabel real
+market data. Unrepresentable arithmetic fails explicitly; native insufficiency
+and genuine missingness retain their separate meanings.
+
+There is no pooled ranking, top-five selection or evidence of predictive
+skill. The thresholds are fixed hypotheses, not validated defaults.
+Compatible live-volume provenance, adequate independent confirmation and a
+complete real-outcome protocol remain prerequisites for separately authorized
+real-data research and any eventual investment-list activation.
