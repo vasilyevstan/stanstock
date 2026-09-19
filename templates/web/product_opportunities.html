@@ -86,7 +86,7 @@
       </p>
       <ol class="compact-opportunity-list">
         {% for entry in overview_cards %}
-          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band %}
+          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band explanation=entry.explanation %}
         {% empty %}
           <li class="empty-state">No verified listings match these filters.</li>
         {% endfor %}
@@ -132,8 +132,8 @@
               </p>
             {% endif %}
             <ol class="shortlist-opportunity-list">
-              {% for card in section.cards %}
-                {% include "web/_shortlist_opportunity.html" with card=card section=section selected_horizon=selected_horizon selected_horizon_label=selected_horizon_label %}
+              {% for entry in section.entries %}
+                {% include "web/_shortlist_opportunity.html" with card=entry.card projection=entry.projection explanation=entry.explanation section=section selected_horizon=selected_horizon selected_horizon_label=selected_horizon_label %}
               {% empty %}
                 <li class="empty-state">
                   {% if section.reason_counts %}

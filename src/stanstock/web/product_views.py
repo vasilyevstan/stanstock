@@ -70,6 +70,7 @@ from stanstock.web.forms import (
     ResearchProductFilterForm,
     TrackedSymbolForm,
 )
+from stanstock.web.templatetags.stanstock import percentage
 
 _PERFORMANCE_RUN_BATCH_SIZE = 200
 _OPPORTUNITIES_PAGE_SIZE = 20
@@ -137,17 +138,27 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
         product.available and filters_are_usable and not selected_price_band and page.number == 1
     )
     overview_cards = [
-        {
-            "card": card,
-            "projection": next(
-                projection
-                for projection in card.projections
-                if projection.horizon == selected_horizon
-            ),
-            "price_band": classifications[card.analysis.listing_id],
-        }
+        _opportunity_entry(
+            card,
+            horizon=selected_horizon,
+            price_band=classifications[card.analysis.listing_id],
+        )
         for card in page.object_list
     ]
+    shortlist_sections = (
+        _shortlist_sections(scoped_cards, classifications=classifications)
+        if show_shortlists
+        else ()
+    )
+    for section in shortlist_sections:
+        section["entries"] = [
+            _opportunity_entry(
+                card,
+                horizon=selected_horizon,
+                price_band=classifications[card.analysis.listing_id],
+            )
+            for card in cast(list[ProductCard], section["cards"])
+        ]
     admission_reasons = Counter(
         item.reason_code for item in product.admissions if item.status != "admitted"
     )
@@ -190,17 +201,56 @@ def opportunities_page(request: HttpRequest) -> HttpResponse:
                 active_filter_values.get(field) for field in ("direction", "suggestion", "risk")
             ),
             "show_shortlists": show_shortlists,
-            "shortlist_sections": (
-                _shortlist_sections(scoped_cards, classifications=classifications)
-                if show_shortlists
-                else ()
-            ),
+            "shortlist_sections": shortlist_sections,
             "admission_reason_counts": sorted(admission_reasons.items()),
             "unavailable_admissions": tuple(
                 item for item in product.admissions if item.status != "admitted"
             ),
         },
     )
+
+
+def _opportunity_entry(
+    card: ProductCard, *, horizon: str, price_band: PriceBandAssessment | None
+) -> dict[str, object]:
+    """Format only an already verified, displayed occurrence; no data access.
+
+    Compare the same one-decimal percentages the page renders, including
+    signed zero. These are wording flags, never a signal or policy input.
+    """
+    projection = next(item for item in card.projections if item.horizon == horizon)
+    median = percentage(projection.median_return)
+    sensitivity = percentage(projection.zero_drift_median_return)
+    direction = "unavailable"
+    comparison = "unavailable"
+    if projection.available and median != "Unavailable":
+        displayed_median = Decimal(median.removesuffix("%"))
+        direction = (
+            "positive" if displayed_median > 0 else "negative" if displayed_median < 0 else "zero"
+        )
+        if sensitivity != "Unavailable":
+            displayed_sensitivity = Decimal(sensitivity.removesuffix("%"))
+            comparison = (
+                "higher"
+                if displayed_median > displayed_sensitivity
+                else "lower"
+                if displayed_median < displayed_sensitivity
+                else "equal"
+            )
+    return {
+        "card": card,
+        "projection": projection,
+        "price_band": price_band,
+        "explanation": {
+            "median_direction": direction,
+            "sensitivity_comparison": comparison,
+            "mean_daily_log_return": percentage(card.mean_log_return, 6),
+            "momentum_disagrees": (
+                (direction == "positive" and card.direction == "negative")
+                or (direction == "negative" and card.direction == "positive")
+            ),
+        },
+    }
 
 
 def _classify_price_bands(
