@@ -12,6 +12,12 @@ for the score-led research experience.
 [PR #53](https://github.com/vasilyevstan/stanstock/pull/53) records exact
 revision, independent review, CI, operational acceptance, and release evidence.
 
+The [focused workspace release](https://github.com/vasilyevstan/stanstock/pull/62)
+provides Opportunities, Market and saved Portfolios. The separately released
+[drift study](docs/price-research.md#synthetic-drift-and-parameter-uncertainty-research)
+and [candidate-policy study](docs/price-research.md#synthetic-candidate-policy-research)
+are synthetic-only research, not replacement forecasts or live buy/sell lists.
+
 Implementation, release, and local activation are separate facts. Checking out
 code or enabling the product setting does not enable a provider, register a
 retrospective study, or prove forecasting skill. A private installation must
