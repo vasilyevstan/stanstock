@@ -131,6 +131,23 @@ and complete successful and withheld payload contracts, not merely equal
 test counts. Session-injected layout evidence remains separate from the real
 form-authentication evidence above.
 
+Inline forecast explanations extend that same four-layer contract. Bind the
+daily-log drift and selected projection/sensitivity to the verified persisted
+calculation, not a second source read. Cover every horizon and both active
+card variants, opposite drift/median and momentum/forecast signs, rounded and
+signed zero, withheld projections, missing drift/sensitivity, distinct missing
+frequency states, and visible Under-$10/liquidity restrictions. Missing
+evidence must not become a zero or a company-specific causal story.
+
+Assert zero incremental queries, asset reads or verification from explanation
+construction. Native disclosure toggles make no request or calculation.
+Exercise default-closed, keyboard and pointer interaction, independent
+duplicate-card panels, selected-horizon links and reset after navigation.
+Preserve first-result visibility and wider-font overflow checks when closed,
+and readable unclipped evidence when open. Bound the added disclosure DOM
+separately from the existing non-disclosure budget; do not remove density
+assertions to accommodate hidden content.
+
 ## Saved workspace and retired browser creators
 
 Exercise the three primary destinations: Opportunities, Market and Portfolios.

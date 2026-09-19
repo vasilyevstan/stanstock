@@ -231,6 +231,13 @@ contextual research links; Methodology and Data & updates are footer utilities.
 Research performance is not personal portfolio performance. Each stock's
 detail page retains all four projection horizons and their limitations.
 
+Every Opportunities comparison and shortlist card has a collapsed **Why this
+forecast?** disclosure. It explains the selected horizon using recorded
+historical drift and its same-shock zero-log-drift sensitivity, separately
+from the six-month action. Supporting evidence and the full-detail link stay
+on the same page; opening a disclosure uses no AI, provider request, or new
+simulation. It does not explain company news or fundamental value.
+
 The interface uses flat dark surfaces and compact financial rows rather than
 decorative dashboard panels. Saved records appear before creation and settings
 forms. Current values, missing-data warnings and the distinction between
