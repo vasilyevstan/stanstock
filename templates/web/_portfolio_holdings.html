@@ -1,0 +1,81 @@
+{% load stanstock %}
+<section aria-labelledby="holdings-title">
+  <div class="section-heading">
+    <h2 id="holdings-title">Holdings</h2>
+  </div>
+  <div class="table-scroll holdings-table" tabindex="0" aria-label="Portfolio holdings">
+    <table class="compact-table">
+      <thead>
+        <tr>
+          <th scope="col">Security</th>
+          <th scope="col">Quantity</th>
+          <th scope="col">Average cost</th>
+          <th scope="col">Latest price</th>
+          <th scope="col">Market value</th>
+          <th scope="col">Unrealized gain</th>
+          {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}<th scope="col">Action</th>{% endif %}
+          <th scope="col">Research</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for card in position_cards %}
+          {% with position=card.position %}
+            <tr class="holding-record{% if card.opportunity.eligible %} opportunity-row{% endif %}">
+              <th scope="row" class="holding-identity">
+                {% if card.is_etf %}
+                  <a href="{% url 'etf-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                {% else %}
+                  <a href="{% url 'stock-detail' position.holding.listing_id %}"><strong>{{ position.holding.listing.ticker }}</strong></a>
+                {% endif %}
+                <small>{{ position.holding.listing.security.company.name }}</small>
+                {% if card.is_etf %}<small>Exchange-traded fund · core benchmark role</small>{% endif %}
+              </th>
+              <td data-label="Quantity">{{ position.holding.quantity|floatformat:8 }}</td>
+              <td data-label="Average cost">{{ position.holding.average_cost|price }} {{ portfolio.base_currency }}</td>
+              <td data-label="Latest price">
+                {% if position.market_data %}
+                  {{ position.market_data.close|price }} {{ position.holding.listing.currency }}
+                  <small>{{ position.market_data.session_date }}</small>
+                {% else %}Unavailable{% endif %}
+              </td>
+              <td data-label="Market value">
+                {% if position.market_value is not None %}{{ position.market_value|floatformat:2 }} {{ portfolio.base_currency }}{% else %}Unavailable{% endif %}
+              </td>
+              <td data-label="Unrealized gain">
+                {% if position.unrealized_gain is not None %}{{ position.unrealized_gain|floatformat:2 }} {{ portfolio.base_currency }}{% else %}Unavailable{% endif %}
+              </td>
+              {% if not portfolio.archived_at and not portfolio.is_model_portfolio %}
+                <td data-label="Action" class="holding-action">
+                  <form method="post" action="{% url 'portfolio-holding-delete' portfolio.id position.holding.id %}">
+                    {% csrf_token %}
+                    <button class="danger-button" type="submit">Remove</button>
+                  </form>
+                </td>
+              {% endif %}
+              <td data-label="Research" class="holding-research">
+                {% if card.is_etf %}
+                  <span class="badge">ETF · no stock rating</span>
+                {% elif card.is_active_momentum_method %}
+                  <small>No overall score — this is the 6-month momentum method.</small>
+                  <small>Action is not repeated here. <a href="{% url 'opportunities' %}?q={{ position.holding.listing.ticker|urlencode }}">Check verified current research</a>.</small>
+                {% elif card.opportunity.eligible %}
+                  <span class="opportunity-badge">{{ card.opportunity.label }}</span>
+                  <small>{{ card.opportunity.policy_version }}</small>
+                {% elif card.analysis %}
+                  {{ card.analysis.get_recommendation_display }}
+                  <small>{{ card.analysis.overall_score }}/100</small>
+                {% else %}No analysis{% endif %}
+                {% if card.price_band and not card.price_band.new_allocation_eligible %}
+                  <span class="badge">Speculative watchlist</span>
+                  <small>Existing holding remains tracked; new allocation is 0%.</small>
+                {% endif %}
+              </td>
+            </tr>
+          {% endwith %}
+        {% empty %}
+          <tr><td colspan="8">No holdings have been added.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

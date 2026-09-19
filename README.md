@@ -85,7 +85,7 @@ fixed core + captured owner-saved names + entitlement
         -> one analysis + exact five-row prediction ledger + output proof
         -> separate offline same-path outcome report, when registered
         -> shared fail-closed reader
-        -> Opportunities / detail / My List / status / history / performance
+        -> Opportunities / detail / Saved stocks / status / history / performance
 ```
 
 Authenticated browsing never calls a provider, runs FHS, registers a study,
@@ -186,33 +186,58 @@ ran. Synthetic examples, downloaded prices, and Monte Carlo path counts do not.
 
 ## Authenticated pages
 
-- `/opportunities` — the landing page: BUY-qualified candidates and positive
-  momentum shortlists for Under $10, $10-$50, and $50-$300, followed by a
-  paginated stock comparison including $300+ listings. The full cards retain
-  median returns and model-simulation shares at 6m, 12m, 3y, or 5y;
+- `/opportunities` — the landing page: a paginated stock comparison with
+  median returns and model-simulation shares at 6m, 12m, 3y, or 5y. Existing
+  BUY-qualified and price-band shortlists are secondary views below the main
+  results, with unchanged selection rules;
 - `/opportunities?price_band=under_10` — the directly accessible Under-$10
   research view, still restricted to 0% new allocation;
 - `/stocks/<listing-id>` — method assumptions, source closure, decision, and
   all projection horizons;
-- `/my-list` — saved-candidate readiness and matching horizon summaries for
-  admitted stocks, with add/remove controls;
+- `/market` — benchmark, breadth, sector and latest-price observations for
+  the stored research cohort, not a whole-market or live-quote service;
+- `/my-list` — **Saved stocks**, reached through Market: saved-candidate
+  readiness and matching horizon summaries, with existing add/remove controls.
+  Saving a name affects a subsequent scheduled refresh, not an immediate
+  provider request or a portfolio holding;
 - `/status` — operational health, admission, freshness, and verification, not
   a second forecast table;
 - `/predictions` — immutable decision/advisory history;
 - `/performance` — separate observed outcome cohorts and registered
   retrospective comparisons;
 - archive routes — frozen prior methods and their original definitions;
-- `/portfolios` and `/simulations` — unchanged local research-accounting
-  surfaces that do not consume the new signal as a trading instruction.
+- `/portfolios` — saved named portfolios first, with ordinary portfolio
+  creation and retained frozen samples;
+- `/portfolios/<portfolio-id>` — Holdings, Activity, Plan and Settings.
+  Optional activity history and allocation previews are prepared only when
+  requested. Confirmation still independently checks the current plan under
+  the existing bookkeeping guards; no brokerage order is sent;
+- `/simulations` and `/simulations/<run-id>` — historical simulation readers,
+  reached through Methodology. New browser simulation execution is retired.
 
 All data-bearing pages require authentication. `/healthz` exposes only coarse
 readiness.
 
-Start with **Opportunities** to compare stocks, **Under $10** for speculative
-research, or **My List** to manage saved names. Each stock's detail page shows
-all four projection horizons. **More** contains Market, prediction history,
-Simulations, data status, and methodology. Operational status is not the
-research landing page.
+The primary navigation is **Opportunities**, **Market** and **Portfolios**.
+Under $10 remains a visible price filter on Opportunities, not a separate
+top-level destination. Research performance and prediction history are
+contextual research links; Methodology and Data & updates are footer utilities.
+Research performance is not personal portfolio performance. Each stock's
+detail page retains all four projection horizons and their limitations.
+
+The interface uses flat dark surfaces and compact financial rows rather than
+decorative dashboard panels. Saved records appear before creation and settings
+forms. Current values, missing-data warnings and the distinction between
+unrealized P/L, contribution-adjusted simple returns and frozen-model returns
+remain explicit.
+
+New generated sample portfolios are also retired from the browser. An
+authenticated, CSRF-valid simulation creation POST returns 405, and a retired
+sample-creation action returns an explicit 400 without invoking its builder.
+Existing records, historical URLs and the `simulate` and
+`build_sample_portfolio` management commands remain available. This removes
+browser execution adapters, not financial history, forecast engines or the
+underlying research capabilities.
 
 Shortlists re-rank each verified cohort; they do not automatically discover
 additional stocks. Empty BUY or Under-$10 shortlists are honest outcomes,

@@ -1,0 +1,4 @@
+<nav class="section-nav" aria-label="Market sections">
+  <a href="{% url 'market' %}"{% if market_section == "market" %} aria-current="page"{% endif %}>Stored prices</a>
+  <a href="{% url 'my-list' %}"{% if market_section == "saved" %} aria-current="page"{% endif %}>Saved stocks</a>
+</nav>

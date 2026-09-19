@@ -32,7 +32,6 @@
             {{ link.label }} <span>{{ link.count }}</span>
           </a>
         {% endfor %}
-        <a class="clear-link" href="{% url 'opportunities' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}">Clear filters</a>
       </div>
       {% if selected_price_band_is_under_10 %}
         <p class="speculative-note under-ten-allocation-note">
@@ -45,6 +44,7 @@
         {% for link in horizon_links %}
           <a href="{% url 'opportunities' %}?{{ link.query }}" aria-label="{{ link.label }} projections"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
         {% endfor %}
+        <a class="clear-link" href="{% url 'opportunities' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}">Clear filters</a>
       </div>
       <form class="product-search" method="get">
         {{ filter_form.horizon }}
@@ -75,6 +75,36 @@
       {% endif %}
     </section>
 
+    <section aria-labelledby="opportunity-list-title">
+      <div class="section-heading opportunity-results-heading">
+        <h2 id="opportunity-list-title">{{ selected_horizon_label }} projections · full comparison</h2>
+        <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
+      </div>
+      <p class="muted opportunity-scenario-note">
+        <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
+        Advisory only. Action uses the separate 6-month momentum decision.
+      </p>
+      <ol class="compact-opportunity-list">
+        {% for entry in overview_cards %}
+          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band %}
+        {% empty %}
+          <li class="empty-state">No verified listings match these filters.</li>
+        {% endfor %}
+      </ol>
+    </section>
+
+    {% if opportunity_page.paginator.num_pages > 1 %}
+      <nav class="pagination" aria-label="Opportunity pages">
+        {% if opportunity_page.has_previous %}
+          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.previous_page_number }}">Previous</a>
+        {% endif %}
+        <span>Page {{ opportunity_page.number }} of {{ opportunity_page.paginator.num_pages }}</span>
+        {% if opportunity_page.has_next %}
+          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.next_page_number }}">Next</a>
+        {% endif %}
+      </nav>
+    {% endif %}
+
     <details class="opportunity-ranking-disclosure">
       <summary><strong>Ranking:</strong> 12–1 relative momentum</summary>
       <p>
@@ -84,6 +114,8 @@
     </details>
 
     {% if show_shortlists %}
+      <details class="secondary-shortlists">
+        <summary>Research shortlists</summary>
       <section class="opportunity-shortlists{% if not shortlist_sections.0.cards and not shortlist_sections.1.cards %} opportunity-shortlists-empty-primary{% endif %}" aria-label="Research shortlists">
         <p class="muted shortlist-coverage">
           Shortlists re-rank this verified cohort (curated core plus saved names); automatic discovery of additional stocks is not enabled.
@@ -126,36 +158,7 @@
           </section>
         {% endfor %}
       </section>
-    {% endif %}
-
-    <section aria-labelledby="opportunity-list-title">
-      <div class="section-heading opportunity-results-heading">
-        <h2 id="opportunity-list-title">{{ selected_horizon_label }} projections · full comparison</h2>
-        <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
-      </div>
-      <p class="muted opportunity-scenario-note">
-        <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
-        Advisory only.
-      </p>
-      <ol class="compact-opportunity-list">
-        {% for entry in overview_cards %}
-          {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band %}
-        {% empty %}
-          <li class="empty-state">No verified listings match these filters.</li>
-        {% endfor %}
-      </ol>
-    </section>
-
-    {% if opportunity_page.paginator.num_pages > 1 %}
-      <nav class="pagination" aria-label="Opportunity pages">
-        {% if opportunity_page.has_previous %}
-          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.previous_page_number }}">Previous</a>
-        {% endif %}
-        <span>Page {{ opportunity_page.number }} of {{ opportunity_page.paginator.num_pages }}</span>
-        {% if opportunity_page.has_next %}
-          <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ opportunity_page.next_page_number }}">Next</a>
-        {% endif %}
-      </nav>
+      </details>
     {% endif %}
 
     <details class="panel qualification-details">
@@ -189,5 +192,6 @@
     </details>
   {% endif %}
 
+  {% include "web/_research_navigation.html" %}
   <p class="archive-link"><a href="{% url 'archive-opportunities' %}">Archived score-based research</a> retains its original methods and labels.</p>
 {% endblock %}

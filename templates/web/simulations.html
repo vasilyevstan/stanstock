@@ -5,8 +5,7 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">One accounting engine</p>
-      <h1>Backtests and portfolios</h1>
+      <h1>Historical simulations</h1>
       <p class="lede">
         Research backtests, observed-universe tests, and portfolio simulations
         remain visibly distinct and share the same transaction-cost accounting.
@@ -14,27 +13,7 @@
     </div>
   </section>
 
-  <section class="panel">
-    <p class="eyebrow">Execute workflow</p>
-    <h2>Run simulation</h2>
-    <form method="post" class="stack">
-      {% csrf_token %}
-      {% if form.non_field_errors %}
-        <div class="error-box" role="alert">{{ form.non_field_errors }}</div>
-      {% endif %}
-      {% for field in form %}
-        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-        {{ field }}
-        {% if field.help_text %}
-          <small class="muted">{{ field.help_text }}</small>
-        {% endif %}
-        {% if field.errors %}
-          <div class="field-error">{{ field.errors }}</div>
-        {% endif %}
-      {% endfor %}
-      <button class="primary-button" type="submit">Run simulation</button>
-    </form>
-  </section>
+  <p class="muted">Historical records only. Browser creation is retired; retained command-line workflows are unchanged.</p>
 
   <form class="filter-bar compact-filter" method="get">
     <label>

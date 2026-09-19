@@ -1214,7 +1214,7 @@ def test_opportunities_display_every_price_band_including_empty_bands(
         in content
     )
     assert "Only listings with a stored analysis in the selected research universe" in content
-    assert "My List</a> tracks symbols locally" in content
+    assert "Saved stocks</a> tracks symbols locally" in content
     assert "browsing or adding symbols there does not refresh prices" in content
     assert "expand the research universe" in content
     assert "<code>refresh_my_list_prices</code>" in content
@@ -1225,7 +1225,7 @@ def test_opportunities_display_every_price_band_including_empty_bands(
     assert filtered_response.status_code == 200
     assert "No analyzed listings in this band match the active filters." in filtered_content
     assert f'href="{reverse("opportunities")}">Clear filters</a>' in filtered_content
-    assert f'href="{reverse("my-list")}">My List</a>' in filtered_content
+    assert f'href="{reverse("my-list")}">Saved stocks</a>' in filtered_content
     assert persisted_analysis.listing.ticker not in filtered_content
 
 

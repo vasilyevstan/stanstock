@@ -86,6 +86,10 @@ def price(value: object) -> str:
         return "Unavailable"
 
     digits = 2 if abs(number) >= 1 else 4
+    if 0 < abs(number) < Decimal("0.0001"):
+        # Preserve a nonzero tiny quote at the precision supported by the
+        # stored price/projection fields rather than displaying a false zero.
+        digits = min(8, max(4, -number.adjusted() + 1))
     rendered = f"{number:,.{digits}f}"
     if digits > 2:
         whole, fraction = rendered.split(".", maxsplit=1)

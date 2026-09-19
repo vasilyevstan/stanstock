@@ -1,21 +1,38 @@
 {% extends "base.html" %}
 {% load stanstock %}
 
-{% block title %}Market overview · StanStock{% endblock %}
+{% block title %}Market · StanStock{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">Persisted observations</p>
-      <h1>Market overview</h1>
+      <h1>Market</h1>
       <p class="lede">
-        Breadth and sector summaries use only the latest stored snapshots. They
-        do not imply live coverage when the provider gate is disabled.
+        Stored cohort only, not the broad market or live quotes.
       </p>
     </div>
     <span class="badge {% if data_mode == "provider" %}badge-success{% elif data_mode == "synthetic" %}badge-failed{% endif %}">
       {{ data_mode_label }}
     </span>
+  </section>
+  {% include "web/_market_navigation.html" with market_section="market" %}
+
+  <section class="panel">
+    <h2>Latest listings</h2>
+    <p class="muted">Showing {{ market_rows|length }} of {{ market_listing_count }} persisted market prices.</p>
+    <dl class="key-values market-listings">
+      {% for item in market_rows %}
+        <div>
+          <dt><a href="{% url 'stock-detail' item.row.listing_id %}">{{ item.row.listing.ticker }}</a> · {{ item.row.listing.region|display_label }}</dt>
+          <dd>
+            {{ item.row.close|price }} {{ item.row.listing.currency }} · {{ item.change|percentage }}
+            <small>{{ item.row.session_date }} · {{ item.row.source_asset.provider|display_label }}</small>
+          </dd>
+        </div>
+      {% empty %}
+        <div><dt>State</dt><dd>No persisted market prices.</dd></div>
+      {% endfor %}
+    </dl>
   </section>
 
   <section class="metric-grid" aria-label="Regional market breadth">
@@ -36,7 +53,6 @@
     <section>
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Investable benchmark</p>
           <h2>ETF core</h2>
         </div>
       </div>
@@ -57,7 +73,6 @@
 
   <div class="detail-grid">
     <section class="panel">
-      <p class="eyebrow">Cross-section</p>
       <h2>Sector movement</h2>
       <dl class="key-values">
         {% for sector in sectors %}
@@ -67,25 +82,6 @@
           </div>
         {% empty %}
           <div><dt>Coverage</dt><dd>No market snapshots</dd></div>
-        {% endfor %}
-      </dl>
-    </section>
-    <section class="panel">
-      <p class="eyebrow">Coverage</p>
-      <h2>Latest listings</h2>
-      <p class="muted">Showing {{ market_rows|length }} of {{ market_listing_count }} persisted market prices.</p>
-      <dl class="key-values">
-        {% for item in market_rows %}
-          <div>
-            <dt>{{ item.row.listing.ticker }} · {{ item.row.listing.region|display_label }}</dt>
-            <dd>
-              {{ item.row.close|price }} {{ item.row.listing.currency }}
-              <small>{{ item.change|percentage }}</small>
-              <small>{{ item.row.source_asset.provider|display_label }}</small>
-            </dd>
-          </div>
-        {% empty %}
-          <div><dt>State</dt><dd>No persisted market prices.</dd></div>
         {% endfor %}
       </dl>
     </section>

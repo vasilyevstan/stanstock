@@ -857,7 +857,7 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
                         ),
                     )
                 else:
-                    messages.info(request, f"{preference.symbol} is already in My list.")
+                    messages.info(request, f"{preference.symbol} is already in Saved stocks.")
                 return redirect(f"{reverse('my-list')}?horizon={selected_horizon}")
     product = _read(request)
     admission_by_symbol = {item.symbol: item for item in product.admissions}

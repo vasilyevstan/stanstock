@@ -1348,7 +1348,7 @@ def test_portfolio_web_flow_records_deposit_and_confirmed_plan(
     assert created.status_code == 302
     assert portfolio.deposits.count() == 1
 
-    detail = client.get(reverse("portfolio-detail", args=[portfolio.pk]))
+    detail = client.get(reverse("portfolio-detail", args=[portfolio.pk]), {"section": "plan"})
     assert detail.status_code == 200
     assert b"Monthly allocation plan" in detail.content
     assert b"420.00" in detail.content
@@ -1366,7 +1366,9 @@ def test_portfolio_web_flow_records_deposit_and_confirmed_plan(
     assert executed.status_code == 302
     assert PortfolioPlanExecution.objects.filter(portfolio=portfolio).count() == 1
     assert PortfolioPurchase.objects.filter(execution__portfolio=portfolio).count() == 2
-    completed = client.get(reverse("portfolio-detail", args=[portfolio.pk]))
+    completed = client.get(
+        reverse("portfolio-detail", args=[portfolio.pk]), {"section": "activity"}
+    )
     assert b"Planner purchases" in completed.content
     assert b"Contribution-adjusted return" in completed.content
 

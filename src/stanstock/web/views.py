@@ -22,7 +22,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_safe
 
 from stanstock.core.launchd import SCHEDULE_TIME_LABEL, launch_agent_status
 from stanstock.core.models import JobRun
@@ -32,7 +32,6 @@ from stanstock.data.etfs import (
     INVESTABLE_US_ETF_SYMBOL,
     build_etf_overview,
 )
-from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import (
     CompanyClassificationObservation,
     DataAsset,
@@ -64,7 +63,6 @@ from stanstock.portfolio.planner import (
 from stanstock.portfolio.service import (
     PortfolioValuation,
     PortfolioValuationError,
-    build_sample_portfolio,
     calculate_portfolio_valuation,
     delete_holding,
     portfolio_snapshot_series,
@@ -121,7 +119,6 @@ from stanstock.research.provenance import (
     analysis_run_data_mode,
     analysis_run_source_providers,
     data_mode_label,
-    latest_provider_backed_analysis_run,
     latest_serving_analysis_run,
 )
 from stanstock.research.reporting import (
@@ -171,9 +168,7 @@ from stanstock.research.under10 import (
     under10_inactive_gates,
     under10_policy_hash,
 )
-from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
-from stanstock.simulation.types import SimulationWorkflowError
 from stanstock.web.demo import DEMO_OPPORTUNITIES
 from stanstock.web.forms import (
     PRODUCT_HORIZON_CHOICES,
@@ -182,12 +177,11 @@ from stanstock.web.forms import (
     PortfolioForm,
     PortfolioHoldingForm,
     PortfolioPlanConfirmationForm,
-    SamplePortfolioForm,
-    SimulationForm,
     TrackedSymbolForm,
 )
 
 STOCK_DETAIL_PREDICTIONS_PER_PAGE = 30
+PORTFOLIO_SECTIONS = ("holdings", "activity", "plan", "settings")
 
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -861,41 +855,8 @@ def performance_page(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@require_safe
 def simulations_page(request: HttpRequest) -> HttpResponse:
-    form: SimulationForm | None = None
-    if request.method == "POST":
-        form = SimulationForm(request.POST)
-        if form.is_valid():
-            data = form.cleaned_data
-            try:
-                _, run, _ = run_simulation_workflow(
-                    name=data["name"],
-                    mode=data["mode"],
-                    snapshot=data["snapshot"],
-                    start_date=data["start_date"],
-                    end_date=data["end_date"],
-                    starting_capital=float(data["starting_capital"]),
-                    transaction_cost_bps=float(data["transaction_cost_bps"]),
-                    slippage_bps=float(data["slippage_bps"]),
-                    top_n=data.get("top_n"),
-                    selected_listing_ids=data.get("parsed_listing_ids"),
-                    benchmark_subject=data.get("benchmark_subject") or None,
-                    benchmark_currency=data.get("benchmark_currency") or None,
-                    base_currency=data.get("base_currency") or None,
-                    restrict_native_currency=data.get("restrict_native_currency") or None,
-                    fx_max_carry_days=(
-                        DEFAULT_MAX_CARRY_DAYS
-                        if data.get("fx_max_carry_days") is None
-                        else int(data["fx_max_carry_days"])
-                    ),
-                )
-                return redirect("simulation-detail", run_id=run.id)
-            except (SimulationWorkflowError, ValueError) as exc:
-                form.add_error(None, str(exc))
-
-    if form is None:
-        form = SimulationForm()
-
     mode = request.GET.get("mode", "")
     runs = SimulationRun.objects.select_related("definition", "universe_snapshot").order_by(
         "-started_at"
@@ -903,22 +864,15 @@ def simulations_page(request: HttpRequest) -> HttpResponse:
     if mode in SimulationDefinition.Mode.values:
         runs = runs.filter(definition__mode=mode)
 
-    status_code = (
-        HTTPStatus.BAD_REQUEST
-        if request.method == "POST" and not form.is_valid()
-        else HTTPStatus.OK
-    )
     return render(
         request,
         "web/simulations.html",
         {
-            "form": form,
             "runs": runs[:50],
             "result_count": runs.count(),
             "modes": SimulationDefinition.Mode.choices,
             "selected_mode": mode,
         },
-        status=status_code,
     )
 
 
@@ -968,9 +922,9 @@ def my_list_page(request: HttpRequest) -> HttpResponse:
                 invalid_form = True
             else:
                 if created:
-                    messages.success(request, f"{preference.symbol} added to My list.")
+                    messages.success(request, f"{preference.symbol} added to Saved stocks.")
                 else:
-                    messages.info(request, f"{preference.symbol} is already in My list.")
+                    messages.info(request, f"{preference.symbol} is already in Saved stocks.")
                 return redirect("my-list")
 
     return render(
@@ -1004,7 +958,7 @@ def tracked_symbol_delete(request: HttpRequest, tracked_symbol_id: UUID) -> Http
     )
     symbol = preference.symbol
     preference.delete()
-    messages.success(request, f"{symbol} removed from My list.")
+    messages.success(request, f"{symbol} removed from Saved stocks.")
     selected_horizon = request.POST.get("horizon")
     if selected_horizon in dict(PRODUCT_HORIZON_CHOICES):
         return redirect(f"{reverse('my-list')}?horizon={selected_horizon}")
@@ -1014,38 +968,18 @@ def tracked_symbol_delete(request: HttpRequest, tracked_symbol_id: UUID) -> Http
 @login_required
 def portfolios_page(request: HttpRequest) -> HttpResponse:
     owner = cast(User, request.user)
-    form = PortfolioForm(owner=owner)
-    sample_form = SamplePortfolioForm()
+    if request.method == "POST" and request.POST.get("action") == "sample":
+        return HttpResponse(
+            "Browser sample portfolio creation is retired. Existing frozen portfolios "
+            "and their history remain available.",
+            status=HTTPStatus.BAD_REQUEST,
+            content_type="text/plain",
+        )
+    form = None
     invalid_form = False
     if request.method == "POST":
         action = request.POST.get("action", "manual")
-        if action == "sample":
-            sample_form = SamplePortfolioForm(request.POST)
-            invalid_form = not sample_form.is_valid()
-            if not invalid_form:
-                try:
-                    portfolio, created = build_sample_portfolio(
-                        owner=owner,
-                        starting_capital=sample_form.cleaned_data["starting_capital"],
-                        top_n=sample_form.cleaned_data["top_n"],
-                    )
-                except PortfolioValuationError as exc:
-                    sample_form.add_error(None, str(exc))
-                    invalid_form = True
-                else:
-                    if created:
-                        messages.success(
-                            request,
-                            "StanStock sample portfolio created from provider-backed "
-                            "opportunities.",
-                        )
-                    else:
-                        messages.info(
-                            request,
-                            "The sample portfolio for the latest source run already exists.",
-                        )
-                    return redirect("portfolio-detail", portfolio_id=portfolio.id)
-        elif action == "manual":
+        if action == "manual":
             form = PortfolioForm(request.POST, owner=owner)
             invalid_form = not form.is_valid()
             if not invalid_form:
@@ -1069,7 +1003,11 @@ def portfolios_page(request: HttpRequest) -> HttpResponse:
             messages.error(request, "Unknown portfolio action.")
             return redirect("portfolios")
 
-    active = list(Portfolio.objects.filter(owner=owner, archived_at__isnull=True).order_by("name"))
+    active = list(
+        Portfolio.objects.filter(owner=owner, archived_at__isnull=True)
+        .annotate(snapshot_count=Count("snapshots"))
+        .order_by("name")
+    )
     archived = Portfolio.objects.filter(owner=owner, archived_at__isnull=False).order_by("name")
     cards: list[dict[str, Any]] = []
     for portfolio in active:
@@ -1077,21 +1015,19 @@ def portfolios_page(request: HttpRequest) -> HttpResponse:
         card: dict[str, Any] = {
             "portfolio": portfolio,
             "valuation": valuation,
-            "snapshot_count": portfolio.snapshots.count(),
+            "snapshot_count": portfolio.snapshot_count,
         }
         card.update(_model_portfolio_metrics(portfolio, valuation))
         cards.append(card)
-    sample_source_run = latest_provider_backed_analysis_run()
+    show_create_form = invalid_form or request.GET.get("new") == "1" or not active
+    if show_create_form and form is None:
+        form = PortfolioForm(owner=owner)
     return render(
         request,
         "web/portfolios.html",
         {
             "form": form,
-            "sample_form": sample_form,
-            "sample_source_run": sample_source_run,
-            "sample_builder_supported": (
-                sample_source_run is None or sample_source_run.config_version != PRODUCT_VERSION
-            ),
+            "show_create_form": show_create_form,
             "portfolio_cards": cards,
             "archived_portfolios": archived,
         },
@@ -1103,10 +1039,41 @@ def portfolios_page(request: HttpRequest) -> HttpResponse:
 def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpResponse:
     owner = cast(User, request.user)
     portfolio = get_object_or_404(Portfolio, pk=portfolio_id, owner=owner)
-    portfolio_form = PortfolioForm(instance=portfolio, owner=owner)
-    holding_form = PortfolioHoldingForm(portfolio=portfolio)
-    deposit_form = PortfolioDepositForm(portfolio=portfolio)
-    plan_confirmation_form = PortfolioPlanConfirmationForm()
+    section = request.GET.get("section", "holdings")
+    if section not in PORTFOLIO_SECTIONS:
+        return HttpResponse(
+            "Unknown portfolio section. Choose holdings, activity, plan, or settings.",
+            status=HTTPStatus.BAD_REQUEST,
+            content_type="text/plain",
+        )
+    if request.method == "POST":
+        action = request.POST.get("action", "")
+        # A direct POST does not depend on a prior section GET. Errors return
+        # to the form that owns the action, not an unrelated selected section.
+        section = {
+            "update": "settings",
+            "holding": "holdings",
+            "deposit": "activity",
+            "execute_plan": "plan",
+            "snapshot": "activity",
+            "archive": "settings",
+            "restore": "settings",
+        }.get(action, section)
+    editable = portfolio.archived_at is None and not portfolio.is_model_portfolio
+    portfolio_form = (
+        PortfolioForm(instance=portfolio, owner=owner)
+        if editable and section == "settings"
+        else None
+    )
+    holding_form = (
+        PortfolioHoldingForm(portfolio=portfolio) if editable and section == "holdings" else None
+    )
+    deposit_form = (
+        PortfolioDepositForm(portfolio=portfolio) if editable and section == "activity" else None
+    )
+    plan_confirmation_form = (
+        PortfolioPlanConfirmationForm() if editable and section == "plan" else None
+    )
     plan_confirmation_error = ""
     invalid_form = False
 
@@ -1214,9 +1181,6 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
                 except PortfolioPlanningError as exc:
                     plan_confirmation_error = str(exc)
                     portfolio.refresh_from_db()
-                    portfolio_form = PortfolioForm(instance=portfolio, owner=owner)
-                    holding_form = PortfolioHoldingForm(portfolio=portfolio)
-                    deposit_form = PortfolioDepositForm(portfolio=portfolio)
                     plan_confirmation_form = PortfolioPlanConfirmationForm()
                 else:
                     portfolio.refresh_from_db()
@@ -1261,6 +1225,7 @@ def portfolio_detail_page(request: HttpRequest, portfolio_id: UUID) -> HttpRespo
         "web/portfolio_detail.html",
         _portfolio_detail_context(
             portfolio=portfolio,
+            section=section,
             portfolio_form=portfolio_form,
             holding_form=holding_form,
             deposit_form=deposit_form,
@@ -3168,16 +3133,18 @@ def _apply_decimal_minimum(
 def _portfolio_detail_context(
     *,
     portfolio: Portfolio,
-    portfolio_form: PortfolioForm,
-    holding_form: PortfolioHoldingForm,
-    deposit_form: PortfolioDepositForm,
-    plan_confirmation_form: PortfolioPlanConfirmationForm,
+    section: str,
+    portfolio_form: PortfolioForm | None,
+    holding_form: PortfolioHoldingForm | None,
+    deposit_form: PortfolioDepositForm | None,
+    plan_confirmation_form: PortfolioPlanConfirmationForm | None,
     plan_confirmation_error: str,
 ) -> dict[str, Any]:
     valuation = calculate_portfolio_valuation(portfolio)
-    listing_ids = [position.holding.listing_id for position in valuation.positions]
+    positions = valuation.positions if section == "holdings" else ()
+    listing_ids = [position.holding.listing_id for position in positions]
     latest_by_listing: dict[UUID, StockAnalysis] = {}
-    latest_run = _latest_analysis_run()
+    latest_run = _latest_analysis_run() if positions else None
     if latest_run is not None:
         analyses = (
             StockAnalysis.objects.filter(
@@ -3194,7 +3161,7 @@ def _portfolio_detail_context(
         for persisted_analysis in analyses:
             latest_by_listing[persisted_analysis.listing_id] = persisted_analysis
     position_cards = []
-    for position in valuation.positions:
+    for position in positions:
         latest_analysis = latest_by_listing.get(position.holding.listing_id)
         is_etf = position.holding.listing.security.security_type == Security.SecurityType.ETF
         current_price_band = None if is_etf else latest_price_band(position.holding.listing)
@@ -3218,20 +3185,24 @@ def _portfolio_detail_context(
                 ),
             }
         )
-    snapshots = portfolio_snapshot_series(portfolio)
+    snapshots = portfolio_snapshot_series(portfolio) if section == "activity" else []
     contribution_plan = (
         preview_monthly_contribution_plan(portfolio)
-        if portfolio.archived_at is None and not portfolio.is_model_portfolio
+        if section == "plan" and portfolio.archived_at is None and not portfolio.is_model_portfolio
         else None
     )
     if contribution_plan is not None and (
-        not plan_confirmation_form.is_bound or plan_confirmation_error
+        plan_confirmation_form is None
+        or not plan_confirmation_form.is_bound
+        or plan_confirmation_error
     ):
         plan_confirmation_form = PortfolioPlanConfirmationForm(
             plan_hash=contribution_plan.plan_hash,
         )
     context = {
         "portfolio": portfolio,
+        "section": section,
+        "sections": PORTFOLIO_SECTIONS,
         "portfolio_form": portfolio_form,
         "holding_form": holding_form,
         "deposit_form": deposit_form,
@@ -3247,17 +3218,19 @@ def _portfolio_detail_context(
             portfolio,
             valuation=valuation,
         ),
-        "deposits": portfolio.deposits.select_related("boundary_snapshot").order_by(
-            "-occurred_at",
-            "-recorded_at",
-        )[:12],
-        "performance_baselines": portfolio.performance_baselines.select_related(
-            "snapshot"
-        ).order_by("-recorded_at", "-id")[:12],
-        "plan_executions": portfolio.plan_executions.prefetch_related(
-            "purchases__listing",
-        ).order_by("-executed_at", "-recorded_at")[:12],
     }
+    if section == "activity":
+        context.update(
+            deposits=portfolio.deposits.select_related("boundary_snapshot").order_by(
+                "-occurred_at", "-recorded_at"
+            )[:12],
+            performance_baselines=portfolio.performance_baselines.select_related(
+                "snapshot"
+            ).order_by("-recorded_at", "-id")[:12],
+            plan_executions=portfolio.plan_executions.prefetch_related(
+                "purchases__listing"
+            ).order_by("-executed_at", "-recorded_at")[:12],
+        )
     context.update(_model_portfolio_metrics(portfolio, valuation))
     return context
 
