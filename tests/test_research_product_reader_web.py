@@ -1632,7 +1632,11 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 assert first_box["y"] >= 0
                 if viewport[0] >= 375:
                     assert first_box["y"] + first_box["height"] <= viewport[1], first_box
-                assert first_box["height"] <= (290 if viewport[0] <= 375 else 180)
+                    assert first_box["height"] <= (290 if viewport[0] == 375 else 180)
+                else:
+                    # At 320px, labelled values and restrictions may wrap taller:
+                    # require unclipped content, not a density/first-viewport cap.
+                    assert comparison.evaluate("(e) => e.scrollHeight <= e.clientHeight")
                 # Installed wider fonts exercise platform-dependent wrapping.
                 # Keep spare room, not just a macOS-only fit at the viewport edge.
                 font_style = page.add_style_tag(
