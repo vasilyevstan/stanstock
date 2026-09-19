@@ -1580,7 +1580,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                     "top: element.getBoundingClientRect().top"
                     "}))"
                 )
-                compact_horizons = page.locator(".horizon-links a")
+                compact_horizons = page.locator(".horizon-links a[aria-label]")
                 assert compact_horizons.all_inner_texts() == ["6m", "12m", "3y", "5y"]
                 assert compact_horizons.evaluate_all(
                     "(elements) => elements.map((element) => element.getAttribute('aria-label'))"
@@ -1633,6 +1633,28 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 if viewport[0] >= 375:
                     assert first_box["y"] + first_box["height"] <= viewport[1], first_box
                 assert first_box["height"] <= (290 if viewport[0] <= 375 else 180)
+                # Installed wider fonts exercise platform-dependent wrapping.
+                # Keep spare room, not just a macOS-only fit at the viewport edge.
+                font_style = page.add_style_tag(
+                    content=':root { font-family: Verdana, "DejaVu Sans", sans-serif; }'
+                )
+                try:
+                    wider_box = comparison.bounding_box()
+                    assert wider_box["y"] >= 0
+                    if viewport[0] >= 375:
+                        assert wider_box["y"] + wider_box["height"] <= viewport[1] - 32, wider_box
+                    assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
+                    assert comparison.locator(
+                        ".compact-opportunity-facts, .compact-projection"
+                    ).evaluate_all(
+                        "(elements) => elements.every(e => e.scrollWidth <= e.clientWidth)"
+                    )
+                    assert page.locator(".band-link, .horizon-links a, .clear-link").evaluate_all(
+                        "(elements) => elements.every(e => e.getBoundingClientRect().height >= 32"
+                        " && e.scrollWidth <= e.clientWidth)"
+                    )
+                finally:
+                    font_style.evaluate("(element) => element.remove()")
                 assert page.locator(".secondary-shortlists").get_attribute("open") is None
                 # The full comparison, not a re-ranked shortlist, owns the first viewport.
                 page.locator(".secondary-shortlists > summary").click()
@@ -1673,6 +1695,11 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 )
                 assert page.locator('input[name="horizon"]').input_value() == "12m"
                 assert page.locator('input[name="price_band"]').input_value() == "at_least_10"
+                clear_filters = page.get_by_role("link", name="Clear filters", exact=True)
+                assert clear_filters.is_visible()
+                assert clear_filters.get_attribute("href") == (
+                    f"{reverse('opportunities')}?horizon=12m"
+                )
                 assert page.locator(".shortlist-opportunity").count() == 0
                 assert (
                     page.locator(".compact-opportunity a")

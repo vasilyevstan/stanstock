@@ -2037,6 +2037,10 @@ summary {
     margin-bottom: 0.3rem;
   }
 
+  .opportunities-page .opportunity-results-heading {
+    margin-top: 0.5rem;
+  }
+
   .opportunities-page .price-band-links,
   .opportunities-page .horizon-links {
     gap: 0.25rem;

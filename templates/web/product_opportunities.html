@@ -32,7 +32,6 @@
             {{ link.label }} <span>{{ link.count }}</span>
           </a>
         {% endfor %}
-        <a class="clear-link" href="{% url 'opportunities' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}">Clear filters</a>
       </div>
       {% if selected_price_band_is_under_10 %}
         <p class="speculative-note under-ten-allocation-note">
@@ -45,6 +44,7 @@
         {% for link in horizon_links %}
           <a href="{% url 'opportunities' %}?{{ link.query }}" aria-label="{{ link.label }} projections"{% if link.active %} aria-current="page"{% endif %}>{{ link.value }}</a>
         {% endfor %}
+        <a class="clear-link" href="{% url 'opportunities' %}{% if clear_filters_query %}?{{ clear_filters_query }}{% endif %}">Clear filters</a>
       </div>
       <form class="product-search" method="get">
         {{ filter_form.horizon }}
