@@ -204,6 +204,27 @@ methodology, outcomes, or simulations. Reviewer: `stanstock-research-integrity`.
       exact target records/assets, not fixture success or a narrowed sample.
       The default serving and scheduled paths use the reviewed product.
 
+## Synthetic research and adoption
+
+- [ ] Synthetic cases establish arithmetic, constructibility and explicit
+      failure behavior, not stock-selection skill, calibrated probabilities
+      or an empirically optimal threshold. Disconnected hypothetical payoffs
+      are not outcomes of the pattern cases or an aggregate success rate.
+- [ ] Sensitivity comparisons preserve their declared controls and assumptions.
+      Shrinkage can moderate pessimism as well as optimism; parameter/regime
+      uncertainty is not calibrated merely because it is represented.
+- [ ] Reuse the exposure inventory. New names, overlapping anchors or more
+      paths do not create independent untouched confirmation. Any later real
+      evaluation needs its separately authorized, prespecified protocol and
+      complete original denominator, including unresolved terminal outcomes.
+- [ ] A separate hypothesis does not inherit an old recommendation as an
+      accidental veto. Retain independently justified entry gates and frozen
+      control outputs; absence of entry or missing liquidity is not affirmative
+      sell evidence. Entry/exit conflicts remain explicit.
+- [ ] Artifact bytes retain actual execution identity when later commits have
+      identical source. Pure synthetic studies do not publish live lists,
+      register provider evidence or enter existing performance denominators.
+
 ## SEC fact normalization and long forecasts
 
 - [ ] Official symbol/exchange/CIK mapping, submissions history (including

@@ -294,6 +294,35 @@ The manual daily and generic analyze commands must remain research-only.
 - source/replay/report/registration provenance remains separate; and
 - synthetic study results never treated as skill.
 
+## Pure synthetic studies
+
+The drift-sensitivity and candidate-policy studies are unwired research code,
+not live recommendations. Use their existing focused test modules:
+`test_research_price_product_drift_study.py` and
+`test_research_price_candidate_policy.py`. Synthetic scores and payoff examples
+do not establish market accuracy or select a winning model.
+
+I/O acceptance must cover a genuinely cold first invocation in a fresh
+interpreter. Import the declared modules and load the public base config
+before the guard, but do not construct the calendar or timezone first.
+The candidate study's calendar dependency may read the independently
+identified installed `America/New_York` resource. Its test-only guard checks
+the exact resource and read-only access, rejects environment-altered search
+paths, aliases/traversal and application/private sentinels, and blocks
+network, subprocess, ORM/provider and FHS operations. This is not an
+arbitrary filesystem exception or a reusable production I/O framework.
+Compare the complete first and repeated serialized outputs, not just counts.
+
+Exercise numeric-domain boundaries as well as ordinary threshold ties:
+quotient underflow, native risk-accumulation overflow and unrepresentable
+fixed-decimal serialization. Preserve narrowly specified rejection and native
+controlled insufficiency; never clip, skip a case or weaken the native helper
+to obtain an apparently valid report.
+
+Record actual execution/source/dependency identities before caller-owned
+persistence. Later identical-source binding may reuse that evidence but must
+retain the original bytes and execution revision, not claim a new run.
+
 ## Immutable and point-in-time coverage
 
 - future prices/facts excluded from historical decisions;

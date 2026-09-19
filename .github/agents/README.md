@@ -121,6 +121,12 @@ lives, and how drift is handled. Ordinary work has no planning artifact.
 Never put secrets, `.env` values, provider credentials, private financial
 data, or session/workspace paths in a handoff.
 
+Do not assume a recipient can read peer conversations or resolve the sender's
+private aliases. Supply the complete matching-revision contract inline or
+through verified accessible, non-sensitive content. A retrieval-only failure
+does not count as a completed review. Report timings, test counts, preservation
+and model-family identity only from actual command or runtime evidence.
+
 ## Correction-in-same-context rule
 
 A finding returns to the agent conversation that owns the affected gate (the
@@ -175,6 +181,10 @@ prove which reviewed source is unchanged, and explicitly bind that evidence
 to the final candidate. Do not relabel an old result as a newly executed test.
 Changed behavior invalidates the relevant evidence; required exact-SHA CI
 still runs for the final candidate.
+
+The same rule applies to research artifacts: preserve their actual execution
+revision and original bytes. A later identical-tree merge is a source-binding
+receipt, not a rerun or permission to rewrite execution provenance.
 
 ## No self-approval
 

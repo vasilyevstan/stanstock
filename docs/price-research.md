@@ -398,6 +398,28 @@ breadth, or a gain probability.
 These works motivate ideas, not StanStock's exact coefficients, thresholds,
 single-stock suggestions, horizons, or profitability.
 
+## Synthetic drift and parameter-uncertainty research
+
+The separate `research/price_product_drift_study.py` module compares unchanged
+historical-drift and same-shock zero-log-drift FHS controls with two synthetic
+sensitivities: plug-in half-drift, and half-drift with one persistent drift
+draw per path shared across horizons. Its fixed assumptions are `m = mu / 2`
+and `u2 = v / (2 * 756)`, using the same historical variance estimate.
+They are not an optimal shrinkage rule, calibrated posterior or
+dependence-robust uncertainty estimate.
+
+Half-drift moderates negative as well as positive trends. The added uncertainty
+illustrates a chosen assumption, not proven forecast improvement. Hypothetical
+score examples are not market outcomes, independent confirmation or a model
+selection result. Equal cumulative deterministic drift at one horizon is
+terminal-equivalent under the same shocks, not a claim about interim drawdowns.
+No fading or regime model is implemented in this slice.
+
+This module performs no source loading or persistence and does not alter
+`us-price-fhs-v1`, its existing zero-drift display or production predictions.
+Real-data adaptation, prospective issuance, evaluation and any adoption require
+their own accepted evidence and authorization.
+
 ## Synthetic candidate-policy research
 
 `price-candidates-synthetic-v1` is a separate, unwired correctness study in
