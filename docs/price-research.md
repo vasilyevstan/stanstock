@@ -443,7 +443,13 @@ Their zero cash return, zero differential costs and 5% benchmark return are
 illustrative assumptions, not forecasts or achieved trades. They are not
 outcomes of the pattern cases and are not averaged into a success statistic.
 
-The pure interfaces perform no provider, database, file or environment access.
+The policy and driver perform no application/private file access, ORM access,
+provider/network calls, subprocess execution, clock reads or environment reads.
+Bounded deterministic calendar construction may cause the calendar dependency
+to read installed timezone resources on its first invocation. This exception
+permits neither arbitrary filesystem access nor application, private or
+provider-data reads.
+
 Serialization returns bytes with complete input/configuration hashes and
 caller-supplied, independently bound source/dependency identity. Synthetic
 identity checks establish fixture consistency, not authority to relabel real

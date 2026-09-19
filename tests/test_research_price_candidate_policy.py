@@ -12,7 +12,11 @@ import math
 import os
 import subprocess
 import sys
+import sysconfig
 import time
+import zoneinfo
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, fields, is_dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, getcontext, localcontext
@@ -22,6 +26,7 @@ from uuid import UUID
 
 import numpy as np
 import pytest
+from django.db.backends.base.base import BaseDatabaseWrapper
 from exchange_calendars import get_calendar  # type: ignore[import-untyped]
 
 import stanstock.research.price_candidate_policy as policy
@@ -1370,6 +1375,233 @@ def test_no_forbidden_work_in_assessment_driver_or_serializer(
         )
     assert actual == result and json.loads(encoded)["claim_status"] == "synthetic_correctness_only"
     # No django_db marker: ORM access is also forbidden by pytest-django.
+
+
+class _ForbiddenEnvironment(Mapping[str, str]):
+    def __getitem__(self, key: str) -> str:
+        _refuse()
+
+    def __iter__(self) -> Iterator[str]:
+        _refuse()
+
+    def __len__(self) -> int:
+        _refuse()
+
+
+def _installed_timezone_resource() -> Path:
+    # Installation metadata, not PYTHONTZPATH or a timezone/calendar construction.
+    search_path = sysconfig.get_config_var("TZPATH")
+    assert isinstance(search_path, str), "Installed timezone search path required"
+    roots = tuple(part for part in search_path.split(os.pathsep) if part)
+    assert zoneinfo.TZPATH == roots, "Timezone search path differs from installation"
+    for root in roots:
+        resource = Path(root) / "America" / "New_York"
+        if resource.is_file():
+            assert resource.resolve(strict=True).is_relative_to(Path(root).resolve(strict=True))
+            return resource
+    raise AssertionError("Installed America/New_York resource required")
+
+
+@contextmanager
+def _cold_study_io_guard() -> Iterator[list[str]]:
+    """Fresh-process test/acceptance guard; yields logical dependency reads only."""
+    resource = _installed_timezone_resource()
+    resolved = resource.resolve(strict=True)
+    identity = resolved.stat()
+    allowed_paths = {resource, resolved}
+    reads: list[str] = []
+    active = True
+
+    def audit(event: str, arguments: tuple[object, ...]) -> None:
+        if not active:
+            return
+        if event == "open":
+            filename, mode, flags = arguments
+            if not isinstance(filename, (str, bytes)) or not isinstance(flags, int):
+                _refuse()
+            path = Path(os.fsdecode(filename))
+            if (
+                mode not in ("r", None)
+                or flags & ~getattr(os, "O_CLOEXEC", 0)
+                or ".." in path.parts
+                or path not in allowed_paths
+                or path.resolve(strict=True) != resolved
+            ):
+                _refuse()
+            current = resolved.stat()
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                _refuse()
+            reads.append("America/New_York")
+        elif event.startswith(("socket.", "subprocess.", "sqlite3.")) or event in (
+            "os.system",
+            "os.exec",
+            "os.posix_spawn",
+            "os.fork",
+            "os.forkpty",
+            "os.listdir",
+            "os.scandir",
+            "os.mkdir",
+            "os.remove",
+            "os.rmdir",
+            "os.rename",
+            "os.link",
+            "os.symlink",
+            "os.truncate",
+        ):
+            _refuse()
+        elif event == "import" and str(arguments[0]).startswith(("django", "stanstock.data")):
+            _refuse()
+
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.startswith(("django", "stanstock.data")):
+            _refuse()
+        return original_import(name, *args, **kwargs)
+
+    assert not any(name.startswith("stanstock.data") for name in sys.modules)
+    sys.addaudithook(audit)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            for owner, name in (
+                (os, "getenv"),
+                (os, "getenvb"),
+                (os, "putenv"),
+                (os, "unsetenv"),
+                (time, "time"),
+                (time, "time_ns"),
+                (BaseDatabaseWrapper, "ensure_connection"),
+                (BaseDatabaseWrapper, "cursor"),
+                (native, "calculate_price_product"),
+                (native, "project_fhs"),
+                (native, "simulate_fhs_terminal_logs"),
+            ):
+                patch.setattr(owner, name, _refuse)
+            patch.setattr(os, "environ", _ForbiddenEnvironment())
+            patch.setattr(os, "environb", _ForbiddenEnvironment())
+            patch.setattr(builtins, "__import__", guarded_import)
+            yield reads
+    finally:
+        # Audit hooks cannot be removed; this hook becomes inert before caller-owned I/O.
+        active = False
+
+
+def test_cold_first_invocation_allows_only_installed_timezone_reads(tmp_path: Path) -> None:
+    sentinel = tmp_path / "synthetic-private-sentinel"
+    sentinel.write_bytes(b"synthetic sentinel, not private data")
+    alias = tmp_path / "timezone-alias"
+    alias.symlink_to(_installed_timezone_resource())
+    script = """
+import builtins, hashlib, io, json, os, socket, subprocess, sys
+from dataclasses import asdict
+from pathlib import Path
+from django.db.backends.base.base import BaseDatabaseWrapper
+from test_research_price_candidate_policy import (
+    BASE_CONFIG_SHA, CASE_IDS, CONFIG_SHA, _canonical, _cold_study_io_guard,
+    _execution, _installed_timezone_resource, _series_hash, driver, native, pytest, zoneinfo,
+    test_canonical_complete_shape_hash_honesty_and_execution_binding,
+    test_independent_driver_recipes_calendar_identities_and_full_hashes,
+    test_payoffs_are_six_disconnected_ordered_hypothetical_rows,
+)
+from stanstock.research.price_product_config import load_price_product_config
+config = load_price_product_config()
+identity = _execution()
+sentinel, alias = map(Path, sys.argv[1:])
+with _cold_study_io_guard() as timezone_reads:
+    assert timezone_reads == []
+    first = driver.run_synthetic_candidate_study(base_config=config)
+    encoded = driver.serialize_synthetic_candidate_study(first, execution_identity=identity)
+    cold_reads = tuple(timezone_reads)
+    assert cold_reads and set(cold_reads) == {"America/New_York"}
+    second = driver.run_synthetic_candidate_study(base_config=config)
+    repeated = driver.serialize_synthetic_candidate_study(second, execution_identity=identity)
+    assert tuple(timezone_reads) == cold_reads
+    assert encoded == repeated
+    assert hashlib.sha256(encoded).digest() == hashlib.sha256(repeated).digest()
+    document = json.loads(encoded)
+    assert _canonical(document) == encoded
+    assert document["execution_identity"] == asdict(identity)
+    report_hash = document.pop("report_sha256")
+    assert report_hash == hashlib.sha256(_canonical(document)).hexdigest()
+    assert document["config_sha256"] == CONFIG_SHA
+    assert document["base_config_hash"] == BASE_CONFIG_SHA
+    assert tuple(c["case_id"] for c in document["cases"]) == CASE_IDS
+    assert len(document["exit_payoff_examples"]) == 6
+    candidates = driver._synthetic_candidates()
+    test_independent_driver_recipes_calendar_identities_and_full_hashes(candidates)
+    test_canonical_complete_shape_hash_honesty_and_execution_binding(first)
+    test_payoffs_are_six_disconnected_ordered_hypothetical_rows(first)
+    for candidate, assessment in zip(candidates, first.cases, strict=True):
+        product = candidate.product_input
+        assert len(product.calendar_sessions) == 757
+        assert product.stock.identity.sha256 == _series_hash(product.stock)
+        assert product.benchmark.identity.sha256 == _series_hash(product.benchmark)
+        expected_input = {
+            "domain": "candidate-synthetic-input@1",
+            "complete_input_hash": native.complete_input_hash(product),
+            "case_id": candidate.case_id,
+            "security_type": candidate.security_type,
+            "region": candidate.region,
+            "policy_version": "price-candidates-synthetic-v1",
+            "config_sha256": CONFIG_SHA,
+        }
+        assert assessment.input_hash == hashlib.sha256(_canonical(expected_input)).hexdigest()
+    timezone = _installed_timezone_resource()
+    blocked_paths = (
+        sentinel, alias, Path("synthetic-application-sentinel"),
+        sentinel.parent / "arbitrary-file", timezone.parent / "other-timezone",
+        timezone.parent / ".." / "America" / "New_York",
+    )
+    for path in blocked_paths:
+        for opener in (builtins.open, io.open, Path.open):
+            with pytest.raises(AssertionError, match="Forbidden work reached"):
+                opener(path, "rb")
+        with pytest.raises(AssertionError, match="Forbidden work reached"):
+            os.open(path, os.O_RDONLY)
+    for mode in ("w", "wb", "a", "r+", "w+", "x"):
+        for opener in (builtins.open, io.open, Path.open):
+            with pytest.raises(AssertionError, match="Forbidden work reached"):
+                opener(sentinel, mode)
+    # Trusted timezone writes are checked at the audit boundary, never attempted.
+    for flags in (os.O_WRONLY, os.O_RDWR, os.O_CREAT, os.O_APPEND, os.O_TRUNC):
+        with pytest.raises(AssertionError, match="Forbidden work reached"):
+            sys.audit("open", str(timezone), None, flags)
+    forbidden = (
+        lambda: socket.socket(),
+        lambda: subprocess.run([sys.executable, "-c", "pass"], check=True),
+        lambda: os.getenv("STANSTOCK_SYNTHETIC_SENTINEL"),
+        lambda: os.environ.get("STANSTOCK_SYNTHETIC_SENTINEL"),
+        lambda: BaseDatabaseWrapper.ensure_connection(None),
+        lambda: builtins.__import__("stanstock.data.providers"),
+        lambda: native.calculate_price_product(None, config=config),
+        lambda: native.project_fhs(None),
+        lambda: native.simulate_fhs_terminal_logs(None),
+    )
+    for operation in forbidden:
+        with pytest.raises(AssertionError, match="Forbidden work reached"):
+            operation()
+    with pytest.MonkeyPatch.context() as path_patch:
+        path_patch.setattr(zoneinfo, "TZPATH", (str(sentinel.parent), *zoneinfo.TZPATH))
+        with pytest.raises(AssertionError, match="Timezone search path differs from installation"):
+            _installed_timezone_resource()
+    assert tuple(timezone_reads) == cold_reads
+print(json.dumps({"timezone_reads": timezone_reads, "complete_bytes_identical": True}))
+"""
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(sentinel), str(alias)],
+        cwd=root,
+        env={"PYTHONPATH": os.pathsep.join((str(root / "src"), str(root / "tests")))},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, "Cold study purity probe failed"
+    evidence = json.loads(completed.stdout)
+    assert evidence["complete_bytes_identical"] is True
+    assert evidence["timezone_reads"] and set(evidence["timezone_reads"]) == {"America/New_York"}
+    assert sentinel.read_bytes() == b"synthetic sentinel, not private data"
 
 
 def test_fresh_import_and_invocation_preserve_full_native_success_and_withholding() -> None:
