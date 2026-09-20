@@ -103,12 +103,12 @@ unavailable and BUY blocked even when direction and projections calculate.
 
 ## Opportunities shortlists
 
-The first page without a selected price band separates up to three
-BUY-qualified candidates from up to three positive-momentum research
-candidates in each of the Under-$10, $10-$50, and $50-$300 bands. The existing
-paginated comparison follows, including $300+ listings. Price bands use the
-immutable run's reference close and show its market date; nominal price is
-affordability context, not value.
+The paginated full comparison appears first, including $300+ listings. On
+the first page without a selected price band, secondary shortlists separate
+up to three BUY-qualified candidates from up to three positive-momentum
+research candidates in each of the Under-$10, $10-$50, and $50-$300 bands.
+Price bands use the immutable run's reference close and show its market
+date; nominal price is affordability context, not value.
 
 Shortlists order the existing benchmark-relative momentum, then ticker and
 permanent listing ID. They do not rank simulation shares, median projections,
@@ -306,6 +306,35 @@ is not a third fitted model.
 Momentum and FHS median may disagree because they answer different questions.
 The UI must show that disagreement rather than vote or blend.
 
+### Inline forecast explanations
+
+The **Why this forecast?** disclosure on each active Opportunities comparison
+and shortlist card describes the selected horizon using the same verified
+run and listing as the displayed result. Independent native disclosures start
+collapsed and reset on page/filter/horizon navigation. Opening one performs
+no request, source lookup, model calculation, or AI inference.
+
+The explanation shows the recorded mean **daily log return** over 756 returns
+(approximately three trading years), the selected cumulative price-return
+range, and the median from the stored same-shock zero-log-drift sensitivity.
+Historical drift shifts the simulated distribution, but is not itself the
+simulated median. Either drift sign can coexist with the opposite median sign.
+Zero log drift does not imply a flat price or zero expected arithmetic return.
+Rounded-zero results do not imply an absence of risk.
+
+The action explanation remains separate: stock and benchmark skipped-month
+momentum use T-252 through T-21, while six months is the decision's future
+horizon. Recorded risk and eligibility blockers explain restrictions without
+recalculating the action. Missing compatible volume evidence is not evidence
+of low trading activity.
+
+Unavailable evidence remains explicit; a missing simulation-frequency report
+does not remove an independently valid price projection. Existing restrictions
+and the simulation-share disclaimer remain visible without expansion.
+The explanation describes conditional price-history assumptions, not company
+news, earnings, fundamental value, validated real-world odds, or a promise
+of a particular return. Price projections exclude dividends.
+
 ## Retrospective protocol
 
 The study is frozen before real holdout inspection:
@@ -397,6 +426,28 @@ breadth, or a gain probability.
 
 These works motivate ideas, not StanStock's exact coefficients, thresholds,
 single-stock suggestions, horizons, or profitability.
+
+## Synthetic drift and parameter-uncertainty research
+
+The separate `research/price_product_drift_study.py` module compares unchanged
+historical-drift and same-shock zero-log-drift FHS controls with two synthetic
+sensitivities: plug-in half-drift, and half-drift with one persistent drift
+draw per path shared across horizons. Its fixed assumptions are `m = mu / 2`
+and `u2 = v / (2 * 756)`, using the same historical variance estimate.
+They are not an optimal shrinkage rule, calibrated posterior or
+dependence-robust uncertainty estimate.
+
+Half-drift moderates negative as well as positive trends. The added uncertainty
+illustrates a chosen assumption, not proven forecast improvement. Hypothetical
+score examples are not market outcomes, independent confirmation or a model
+selection result. Equal cumulative deterministic drift at one horizon is
+terminal-equivalent under the same shocks, not a claim about interim drawdowns.
+No fading or regime model is implemented in this slice.
+
+This module performs no source loading or persistence and does not alter
+`us-price-fhs-v1`, its existing zero-drift display or production predictions.
+Real-data adaptation, prospective issuance, evaluation and any adoption require
+their own accepted evidence and authorization.
 
 ## Synthetic candidate-policy research
 

@@ -8,6 +8,7 @@
       </div>
       {% if price_band and not price_band.new_allocation_eligible %}<span class="badge">Under $10 watch</span>{% endif %}
     </header>
+    {% include "web/_opportunity_explanation.html" %}
     <dl class="compact-opportunity-facts">
       <div>
         <dt>Dated close</dt>

@@ -50,6 +50,48 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Warm caches can hide forbidden I/O.** The synthetic candidate study's
+  first calendar construction reads installed timezone data; its warmed test
+  missed that dependency. Exercise the first invocation in a fresh process,
+  narrowly identify permitted installed resources, reject application/private
+  reads and writes, and compare complete cold/warm bytes. Never prewarm the
+  calendar merely to make the guard pass. See `docs/testing.md#pure-synthetic-studies`.
+- **Finite inputs do not guarantee representable arithmetic.** Positive
+  finite prices can underflow a native quotient; turnover accumulation can
+  overflow; fixed-decimal output can exceed its precision. The synthetic
+  candidate policy translates only its three reviewed failure boundaries.
+  Preserve native controlled insufficiency and reason wording rather than
+  clipping, skipping cases, or catching every exception.
+- **A comparison policy is not automatically an eligibility gate.** Requiring
+  the old momentum BUY would exclude the negative-trend population of the
+  separate synthetic deep-reversal hypothesis. Keep the frozen recommendation
+  as a labelled control and retain independently justified source, liquidity
+  and risk gates. A new research result does not overwrite the old decision
+  or authorize a live investment list.
+- **Sensitivity is not model selection.** The drift study's half-drift
+  assumption moderates negative as well as positive drift; added parameter
+  uncertainty depends on an uncalibrated law. A more cautious-looking result
+  is not evidence of greater accuracy. Synthetic payoff/score examples and
+  model-review agreement do not provide independent market confirmation;
+  new tickers or overlapping cutoffs do not make exposed outcomes untouched.
+- **A healthy server can still serve stale research.** Development dirtiness
+  can block scheduled issuance without stopping HTTP. A dedicated clean
+  runtime clone reduces that coupling, not provider or host failure. Preserve
+  permanent data paths, actual process/profile identity, fencing and same-data
+  rollback; never weaken the clean-revision guard. See
+  `docs/operations.md#isolated-local-runtime`.
+- **Lighter presentation requires behavioral proof.** Hidden tabs still cost
+  work if their contexts are built eagerly; removing a link does not retire
+  its POST handler. The saved workspace checks on-demand planning and rejects
+  retired creators before writes while preserving historical records and CLI
+  engines. Measure actual results with Linux/wider-font rendering as well as
+  local layouts; fewer menus do not establish RAM savings.
+- **Review evidence must be both accessible and measured.** A peer agent may
+  lack conversation-reading tools or a private path alias. Supply the complete
+  matching contract or verified accessible content without exposing private
+  paths; retrieval-only failures are not completed reviews. Timing, counts,
+  preservation and model identity require actual command/runtime evidence,
+  not a reviewer's assertion.
 - **Public-safe Markdown can still have private Git metadata.** A new wiki
   checkout may fall back to an auto-detected author/committer identity.
   Preflight an approved public identity before committing, then verify the
@@ -152,7 +194,10 @@ reviews and should not be re-litigated without an explicit new decision.
   retrospective report. Capture derived-report publication after expensive
   calculation and lock wait, in the winning registration section. Semantic
   re-verification preserves that original publication/execution metadata
-  rather than comparing it to a later application's revision.
+  rather than comparing it to a later application's revision. A tree-identical
+  squash merge can bind accepted synthetic evidence to released source; it
+  does not change the artifact's actual execution revision or constitute a
+  newly executed study.
 - **Display authorization is current, not captured forever.** Owner-bound
   readers revalidate the active account and current provider license even
   when source intake was authorized. License reassignment must not make an

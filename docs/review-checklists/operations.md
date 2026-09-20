@@ -81,6 +81,11 @@ Reviewer: `stanstock-critic-tester`.
 
 ## Deployment safety
 
+- [ ] Isolated-runtime promotions follow
+      [the existing cutover procedure](../operations.md#isolated-local-runtime):
+      verify actual process/profile and permanent-data identity, fence and drain
+      work, and preserve same-data rollback. Candidate-induced withholding
+      where the baseline was available is a regression, not a successful check.
 - [ ] `compose.yaml` / `Dockerfile` changes keep the app runnable locally via
       `docker compose up --build` with no undocumented new required
       environment variable.

@@ -245,6 +245,12 @@ record; the summary below is not a substitute for reading it.
   fact/accession lineage, peer set, and formula inputs needed to reproduce the
   result. Thresholds must be explicit policy assumptions rather than tuned
   against the final evaluation period.
+- **Synthetic research and adoption**: apply the checklist's separate
+  synthetic-study boundary. Constructible cases, hypothetical payoffs, drift
+  sensitivity and reviewer agreement prove neither skill nor calibration.
+  Keep independent confirmation, complete outcome support and activation
+  authorization separate; an old recommendation used as a control must not
+  silently veto a genuinely different research hypothesis.
 - **Outcomes/simulations**: `PredictionOutcome` and `SimulationRun`/
   `SimulationTrade`/`SimulationHolding` figures are computed only from
   data available as of the relevant date; backtests cannot see future

@@ -12,6 +12,12 @@ for the score-led research experience.
 [PR #53](https://github.com/vasilyevstan/stanstock/pull/53) records exact
 revision, independent review, CI, operational acceptance, and release evidence.
 
+The [focused workspace release](https://github.com/vasilyevstan/stanstock/pull/62)
+provides Opportunities, Market and saved Portfolios. The separately released
+[drift study](docs/price-research.md#synthetic-drift-and-parameter-uncertainty-research)
+and [candidate-policy study](docs/price-research.md#synthetic-candidate-policy-research)
+are synthetic-only research, not replacement forecasts or live buy/sell lists.
+
 Implementation, release, and local activation are separate facts. Checking out
 code or enabling the product setting does not enable a provider, register a
 retrospective study, or prove forecasting skill. A private installation must
@@ -224,6 +230,13 @@ top-level destination. Research performance and prediction history are
 contextual research links; Methodology and Data & updates are footer utilities.
 Research performance is not personal portfolio performance. Each stock's
 detail page retains all four projection horizons and their limitations.
+
+Every Opportunities comparison and shortlist card has a collapsed **Why this
+forecast?** disclosure. It explains the selected horizon using recorded
+historical drift and its same-shock zero-log-drift sensitivity, separately
+from the six-month action. Supporting evidence and the full-detail link stay
+on the same page; opening a disclosure uses no AI, provider request, or new
+simulation. It does not explain company news or fundamental value.
 
 The interface uses flat dark surfaces and compact financial rows rather than
 decorative dashboard panels. Saved records appear before creation and settings

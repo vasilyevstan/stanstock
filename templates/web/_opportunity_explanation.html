@@ -1,0 +1,60 @@
+{% load stanstock %}
+<details class="opportunity-explanation">
+  <summary>Why this forecast?</summary>
+  <div class="opportunity-explanation-body">
+    <p>
+      {% if projection.available %}
+        The {{ projection.label }} median cumulative price return is <strong>{{ projection.median_return|percentage }}</strong>:
+        {% if explanation.median_direction == "negative" %}a decline{% elif explanation.median_direction == "positive" %}a gain{% else %}zero at the displayed precision{% endif %}
+        from the reference close of {{ card.analysis.current_price|price }} {{ card.listing.currency }} on {{ card.analysis.run.target_date }}.
+        The median is not the mean, a fair value, or a price target.
+      {% else %}
+        <strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}.
+        No other horizon is substituted; the separate recorded action remains below.
+      {% endif %}
+    </p>
+    <p>
+      The model carries forward the historical average daily price trend, measured as a mean log return over 756 trading-session returns, and combines it with volatility-adjusted historical shocks.
+      This uses 757 closes (about 3 trading years), ending {{ card.analysis.run.target_date }}.
+      The same-shock zero-drift sensitivity removes historical drift; it does not imply flat prices, zero expected arithmetic return, fair value, or safety.
+    </p>
+    <ul class="opportunity-explanation-evidence">
+      {% if projection.available %}
+        <li>Lower (p20) / median (p50) / upper (p80) cumulative price returns:
+          <strong>{{ projection.lower_return|percentage }} / {{ projection.median_return|percentage }} / {{ projection.upper_return|percentage }}</strong>.
+          Prices: {{ projection.lower_price|price }} / {{ projection.median_price|price }} / {{ projection.upper_price|price }} {{ card.listing.currency }}.
+        </li>
+      {% endif %}
+      <li>Historical mean daily log return: <strong>{{ explanation.mean_daily_log_return }}</strong>{% if card.mean_log_return != None %} per trading session (daily log units, not a cumulative price return){% endif %}.</li>
+      <li>Same-shock zero-drift {{ projection.label }} median cumulative price return:
+        <strong>{{ projection.zero_drift_median_return|percentage }}</strong>.
+        {% if explanation.sensitivity_comparison == "equal" %}
+          The two medians are equal at displayed precision.
+        {% elif explanation.sensitivity_comparison == "higher" %}
+          The historical-drift median is higher at displayed precision.
+        {% elif explanation.sensitivity_comparison == "lower" %}
+          The historical-drift median is lower at displayed precision.
+        {% endif %}
+        Mean log drift is not the median price return.
+      </li>
+    </ul>
+    <p>
+      <strong>Separate 6-month action:</strong> {% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %};
+      recorded relative-momentum direction: {{ card.direction|display_label }}.
+      Stock price return: {{ card.stock_price_return|percentage }};
+      benchmark-relative log momentum: {{ card.relative_log_momentum|percentage }} (log units).
+      Both measure T−252 through T−21, excluding the last month; 126 sessions is the future decision horizon, not the lookback.
+      Projections never determine the action.
+      {% if explanation.momentum_disagrees %}The median and momentum point in different directions; their measures and windows differ.{% endif %}
+      {% if card.blocking_reasons %}Recorded restrictions: {% for reason in card.blocking_reasons %}{{ reason|display_label }}{% if not forloop.last %}; {% endif %}{% endfor %}.{% endif %}
+      {% if card.average_dollar_turnover_20d == None %}Missing compatible turnover means no valid liquidity evidence, not low or zero trading activity.{% endif %}
+      {% if card.allocation_restriction %}{{ card.allocation_restriction|display_label }}.{% endif %}
+      {% if card.target_under_10 %}Under $10: speculative watch only · 0% new allocation.{% endif %}
+    </p>
+    <small>
+      Conditional historical price model; no validated real-world odds. Excludes dividends; price projections are advisory.
+      Frequencies describe terminal simulated events, not interim drawdowns. Unavailable frequencies do not erase independently valid ranges.
+      <a href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ projection.horizon }}">Full {{ projection.label }} evidence</a>.
+    </small>
+  </div>
+</details>

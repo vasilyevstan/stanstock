@@ -140,6 +140,7 @@ class ProductCard:
     maximum_drawdown: Decimal | None
     average_dollar_turnover_20d: Decimal | None
     risk_insufficiency_reasons: tuple[str, ...]
+    mean_log_return: Decimal | None
     projections: tuple[ProductProjection, ...]
     target_under_10: bool
     captured_role: str
@@ -748,6 +749,9 @@ def _card(
     risk = _mapping(calculation.get("risk"))
     recommendation = _mapping(calculation.get("recommendation"))
     forecast = _mapping(calculation.get("forecast"))
+    mean_log_return = _optional_decimal(forecast.get("mean_log_return"))
+    if mean_log_return is not None and not mean_log_return.is_finite():
+        raise ValueError("Product mean log return must be finite")
     projections_raw = forecast.get("projections")
     if not isinstance(projections_raw, list):
         raise ValueError("Product forecast projections are missing")
@@ -829,6 +833,7 @@ def _card(
         maximum_drawdown=_optional_decimal(risk.get("maximum_drawdown")),
         average_dollar_turnover_20d=_optional_decimal(risk.get("average_dollar_turnover_20d")),
         risk_insufficiency_reasons=_string_tuple(risk.get("insufficiency_reasons")),
+        mean_log_return=mean_log_return,
         projections=projections,
         target_under_10=target_under_10,
         captured_role=captured_role,
