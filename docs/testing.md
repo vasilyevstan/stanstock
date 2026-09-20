@@ -131,6 +131,23 @@ and complete successful and withheld payload contracts, not merely equal
 test counts. Session-injected layout evidence remains separate from the real
 form-authentication evidence above.
 
+Inline forecast explanations extend that same four-layer contract. Bind the
+daily-log drift and selected projection/sensitivity to the verified persisted
+calculation, not a second source read. Cover every horizon and both active
+card variants, opposite drift/median and momentum/forecast signs, rounded and
+signed zero, withheld projections, missing drift/sensitivity, distinct missing
+frequency states, and visible Under-$10/liquidity restrictions. Missing
+evidence must not become a zero or a company-specific causal story.
+
+Assert zero incremental queries, asset reads or verification from explanation
+construction. Native disclosure toggles make no request or calculation.
+Exercise default-closed, keyboard and pointer interaction, independent
+duplicate-card panels, selected-horizon links and reset after navigation.
+Preserve first-result visibility and wider-font overflow checks when closed,
+and readable unclipped evidence when open. Bound the added disclosure DOM
+separately from the existing non-disclosure budget; do not remove density
+assertions to accommodate hidden content.
+
 ## Saved workspace and retired browser creators
 
 Exercise the three primary destinations: Opportunities, Market and Portfolios.
@@ -293,6 +310,35 @@ The manual daily and generic analyze commands must remain research-only.
 - no caller-authored metrics and no GET replay;
 - source/replay/report/registration provenance remains separate; and
 - synthetic study results never treated as skill.
+
+## Pure synthetic studies
+
+The drift-sensitivity and candidate-policy studies are unwired research code,
+not live recommendations. Use their existing focused test modules:
+`test_research_price_product_drift_study.py` and
+`test_research_price_candidate_policy.py`. Synthetic scores and payoff examples
+do not establish market accuracy or select a winning model.
+
+I/O acceptance must cover a genuinely cold first invocation in a fresh
+interpreter. Import the declared modules and load the public base config
+before the guard, but do not construct the calendar or timezone first.
+The candidate study's calendar dependency may read the independently
+identified installed `America/New_York` resource. Its test-only guard checks
+the exact resource and read-only access, rejects environment-altered search
+paths, aliases/traversal and application/private sentinels, and blocks
+network, subprocess, ORM/provider and FHS operations. This is not an
+arbitrary filesystem exception or a reusable production I/O framework.
+Compare the complete first and repeated serialized outputs, not just counts.
+
+Exercise numeric-domain boundaries as well as ordinary threshold ties:
+quotient underflow, native risk-accumulation overflow and unrepresentable
+fixed-decimal serialization. Preserve narrowly specified rejection and native
+controlled insufficiency; never clip, skip a case or weaken the native helper
+to obtain an apparently valid report.
+
+Record actual execution/source/dependency identities before caller-owned
+persistence. Later identical-source binding may reuse that evidence but must
+retain the original bytes and execution revision, not claim a new run.
 
 ## Immutable and point-in-time coverage
 

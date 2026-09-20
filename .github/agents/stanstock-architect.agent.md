@@ -40,6 +40,9 @@ Never rely on stale conversation state or a branch name as current truth.
 - Map affected apps, models, migrations, provider boundaries, `AsOfData`
   usage, templates, and tests.
 - Separate product decisions from implementation choices.
+- For numerical contracts, distinguish admitted finite inputs from
+  representable intermediate arithmetic and serialized output. Specify narrow
+  rejection boundaries without changing frozen native insufficiency behavior.
 - Separate mathematical calculability from measured predictive skill and
   investment eligibility. Define the complete source-to-screen path and,
   when activation is requested, a fixed-denominator operational usefulness

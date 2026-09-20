@@ -33,6 +33,9 @@ user-facing tables/charts. Reviewer: `stanstock-critic-tester`.
       screen readers can associate values with column/row labels.
 - [ ] Sort, filter, and pagination controls are keyboard-reachable with
       visible focus states.
+- [ ] Shared layout changes cover local and Linux/wider-font rendering,
+      narrow wrapping and actual visible values. Fewer cards, menus or hidden
+      sections alone prove neither usable density nor reduced computation.
 
 ## Responsive and accessible charts
 

@@ -1379,6 +1379,8 @@ summary {
 }
 
 .shortlist-opportunity header {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
 }
 
@@ -1428,7 +1430,7 @@ summary {
   display: grid;
   grid-template-columns: minmax(10rem, 0.95fr) minmax(18rem, 1.2fr) minmax(21rem, 1.45fr);
   align-items: center;
-  gap: 0.8rem;
+  gap: 0.25rem 0.8rem;
   padding: 0.6rem 0.8rem;
 }
 
@@ -1486,6 +1488,44 @@ summary {
   padding: 0.3rem 0.5rem;
   font-size: 0.76rem;
   line-height: 1.3;
+}
+
+.opportunities-page .opportunity-explanation {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.opportunity-explanation > summary {
+  min-height: 32px;
+  width: fit-content;
+  padding-block: 0.35rem;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.opportunity-explanation-body {
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.opportunity-explanation-body p,
+.opportunity-explanation-evidence {
+  margin: 0 0 0.65rem;
+}
+
+.opportunity-explanation-evidence {
+  padding-left: 1.25rem;
+}
+
+.opportunities-page .shortlist-opportunity-facts,
+.opportunities-page .shortlist-detail-link,
+.opportunities-page .compact-opportunity-facts,
+.opportunities-page .compact-projection {
+  grid-row: 1;
 }
 
 .source-provenance-details {
@@ -1794,6 +1834,11 @@ summary {
     grid-column: 1;
   }
 
+  .opportunities-page .compact-opportunity-facts,
+  .opportunities-page .compact-projection {
+    grid-row: auto;
+  }
+
   .portfolio-records .portfolio-card {
     grid-template-columns: 1fr;
     gap: 0.6rem;
@@ -2080,8 +2125,13 @@ summary {
 
   .compact-opportunity {
     grid-template-columns: 1fr;
-    gap: 0.45rem;
-    padding: 0.6rem;
+    gap: 0.1rem;
+    padding: 0.4rem 0.6rem;
+  }
+
+  .opportunities-page .compact-opportunity header p {
+    font-size: 0.82rem;
+    line-height: 1.3;
   }
 
   .compact-opportunity-facts {
@@ -2125,6 +2175,11 @@ summary {
     padding: 0.3rem 0;
   }
 
+  .opportunities-page .shortlist-opportunity-facts,
+  .opportunities-page .shortlist-detail-link {
+    grid-row: auto;
+  }
+
   .shortlist-opportunity-facts {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -2159,7 +2214,7 @@ summary {
 
   .compact-opportunity-facts div,
   .compact-projection div {
-    padding: 0.2rem 0.35rem;
+    padding: 0.1rem 0.35rem;
   }
 
   .compact-opportunity-facts dt,

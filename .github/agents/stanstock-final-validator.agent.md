@@ -97,6 +97,9 @@ Read:
   require another specialist pass; required exact-SHA CI is still checked.
   Documentation-only releases do not require a new private activation or
   retrospective study merely to restate accepted application behavior.
+- Preserve a study artifact's original execution revision and bytes when
+  binding it to identical released source. Terminal source/CI acceptance is
+  not another study execution or permission to activate research-only output.
 
 ## Boundaries
 

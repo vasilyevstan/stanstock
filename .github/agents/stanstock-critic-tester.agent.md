@@ -120,6 +120,10 @@ request that review rather than re-deriving it.
 4. Record exact command, exit code, and concise result.
 5. Classify a real assertion failure separately from a missing controlled
    prerequisite (e.g. absent optional dependency, unset local env var).
+6. For pure-study I/O claims, exercise the first invocation in a fresh process,
+   not only a warmed fixture. Verify narrowly permitted installed resources,
+   negative application/private-I/O cases and complete cold/warm output
+   equality as described in `docs/testing.md#pure-synthetic-studies`.
 
 ## Boundaries
 
