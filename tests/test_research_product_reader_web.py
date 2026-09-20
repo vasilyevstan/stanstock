@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from copy import copy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from html import unescape
 from pathlib import Path
 from unittest.mock import Mock
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 import pytest
+from django.apps import apps
 from django.db import DatabaseError, transaction
 from django.urls import reverse
 from django.utils import timezone
@@ -19,14 +23,19 @@ from exchange_calendars import get_calendar
 from stanstock.core.models import JobRun
 from stanstock.data.assets import AssetStore
 from stanstock.data.live_us import _persist_catalog
-from stanstock.data.models import DataAsset, LatestMarketData, UniverseMembership
+from stanstock.data.models import DataAsset, LatestMarketData, ProviderRecord, UniverseMembership
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import StockCatalog
 from stanstock.data.research_product_demo import execute_demo_product_refresh
 from stanstock.portfolio.models import Portfolio, PortfolioHolding, TrackedSymbol
+from stanstock.research import product_reader
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.outcomes import evaluate_prediction
 from stanstock.research.price_product_config import MOMENTUM_METHOD_VERSION
+from stanstock.research.product_frequency_evidence import (
+    FREQUENCY_EVIDENCE_KIND,
+    ProductFrequencyRead,
+)
 from stanstock.research.product_pipeline import (
     verify_price_product_output as real_product_verifier,
 )
@@ -38,6 +47,7 @@ from stanstock.research.product_reader import (
     read_research_product_history,
 )
 from stanstock.web import product_views
+from stanstock.web.templatetags.stanstock import percentage, price
 from test_research_product_jobs import (
     NOW,
     TARGET,
@@ -271,6 +281,13 @@ def test_real_reader_verifies_once_and_projects_complete_recorded_result(live_pr
         for card in result.cards
     )
     assert all(projection.available for card in result.cards for projection in card.projections)
+    for card in result.cards:
+        persisted = Prediction.objects.get(pk=card.decision_prediction.pk)
+        assert isinstance(card.mean_log_return, Decimal)
+        assert card.mean_log_return.is_finite()
+        assert card.mean_log_return == Decimal(
+            str(persisted.calculation["forecast"]["mean_log_return"])
+        )
     assert all(
         card.analysis.overall_score is None
         and card.analysis.confidence is None
@@ -278,6 +295,330 @@ def test_real_reader_verifies_once_and_projects_complete_recorded_result(live_pr
         for card in result.cards
     )
     verifier.assert_called_once_with(run=run, store=store, replay=False)
+
+
+def _explanation_texts(response):
+    bodies = re.findall(
+        r'<details class="opportunity-explanation">(.*?)</details>',
+        response.content.decode(),
+        flags=re.S,
+    )
+    return [" ".join(unescape(re.sub("<[^>]+>", " ", body)).split()) for body in bodies]
+
+
+def test_card_drift_parser_is_nullable_typed_and_finite(live_product):
+    owner, store, _run = live_product
+    card = read_research_product(user=owner, store=store).cards[0]
+    decision = copy(card.decision_prediction)
+    forecast = decision.calculation["forecast"]
+
+    def parse_drift(changes):
+        # Only a detached Python copy is changed; persisted predictions stay immutable.
+        decision.calculation = {
+            **card.decision_prediction.calculation,
+            "forecast": {key: value for key, value in forecast.items() if key != "mean_log_return"}
+            | changes,
+        }
+        return product_reader._card(
+            analysis=card.analysis,
+            rows=[decision, *card.advisory_predictions],
+            captured_role=card.captured_role,
+            store=store,
+            frequency_read=ProductFrequencyRead(status="absent", message=""),
+        ).mean_log_return
+
+    assert parse_drift({}) is None
+    assert parse_drift({"mean_log_return": None}) is None
+    for value in ("0", "-0.0000", "0.0000001234", "-0.0000001234"):
+        assert parse_drift({"mean_log_return": value}) == Decimal(value)
+    for value in ("NaN", "Infinity", "-Infinity", True, []):
+        with pytest.raises(ValueError):
+            parse_drift({"mean_log_return": value})
+    assert (
+        Prediction.objects.get(pk=decision.pk).calculation == card.decision_prediction.calculation
+    )
+
+
+def _domain_snapshot(store):
+    return (
+        {
+            model._meta.label: model.objects.count()
+            for model in apps.get_models()
+            if model._meta.app_label not in {"auth", "contenttypes", "sessions", "admin"}
+        },
+        list(Prediction.objects.order_by("pk").values()),
+        list(DataAsset.objects.order_by("pk").values()),
+        {
+            asset.relative_path: store.read_bytes(asset.relative_path)
+            for asset in DataAsset.objects.all()
+        },
+    )
+
+
+@pytest.mark.parametrize("cohort", ("live", "demo"))
+def test_native_opportunity_explanations_bind_all_horizons_without_get_work(
+    live_product, client, monkeypatch, django_assert_num_queries, settings, cohort
+):
+    """Persistence -> producer -> real verifier/reader -> both rendered variants."""
+    owner, store, run = live_product
+    if cohort == "demo":
+        settings.DEMO_MODE = True
+        execute_demo_product_refresh(store=store)
+        run = read_research_product(user=owner, store=store).run
+    client.force_login(owner)
+    before = _domain_snapshot(store)
+    forbidden = Mock(side_effect=AssertionError("GET must only read registered output"))
+    for target in (
+        "stanstock.research.product_pipeline.calculate_price_product",
+        "stanstock.research.price_product.simulate_fhs_terminal_logs",
+        "stanstock.research.product_frequency_evidence.simulate_fhs_terminal_logs",
+        "stanstock.research.product_frequency_evidence.register_product_frequencies",
+        "stanstock.data.research_product_jobs.register_product_frequencies",
+        "stanstock.data.providers.twelve_data.fetch_daily_price_series",
+        "stanstock.data.providers.twelve_data.fetch_stock_catalog",
+        "stanstock.data.providers.twelve_data.resolve_api_key",
+    ):
+        monkeypatch.setattr(target, forbidden)
+    verifier = Mock(wraps=real_product_verifier)
+    monkeypatch.setattr("stanstock.research.product_reader.verify_price_product_output", verifier)
+    helper = Mock(wraps=product_views._opportunity_entry)
+    monkeypatch.setattr(product_views, "_opportunity_entry", helper)
+    ordering = None
+    for horizon in ("6m", "12m", "3y", "5y"):
+        helper.reset_mock()
+        response = client.get(reverse("opportunities"), {"horizon": horizon})
+        repeated = client.get(reverse("opportunities"), {"horizon": horizon})
+        assert response.status_code == repeated.status_code == 200
+        assert _explanation_texts(response) == _explanation_texts(repeated)
+
+        def normalize_csrf(body):
+            return re.sub(rb'name="csrfmiddlewaretoken" value="[^"]+"', b"csrf-token", body)
+
+        assert normalize_csrf(response.content) == normalize_csrf(repeated.content)
+        entries = response.context["overview_cards"] + [
+            entry
+            for section in response.context["shortlist_sections"]
+            for entry in section["entries"]
+        ]
+        assert len(entries) == helper.call_count // 2 <= 32
+        ids = [entry["card"].analysis.listing_id for entry in entries]
+        if ordering is None:
+            ordering = ids
+        assert ids == ordering
+        if cohort == "demo":
+            assert response.context["shortlist_sections"][0]["cards"]
+            assert any(section["entries"] for section in response.context["shortlist_sections"])
+        else:
+            assert response.context["shortlist_sections"][0]["cards"] == []
+        for entry, text in zip(entries, _explanation_texts(response), strict=True):
+            card, projection = entry["card"], entry["projection"]
+            assert projection.horizon == horizon
+            assert (
+                f"The {projection.label} median cumulative price return is "
+                f"{percentage(projection.median_return)}"
+            ) in text
+            assert f"reference close of {price(card.analysis.current_price)} USD" in text
+            assert (
+                f"Historical mean daily log return: {percentage(card.mean_log_return, 6)}"
+            ) in text
+            assert (
+                f"Same-shock zero-drift {projection.label} median cumulative price return: "
+                f"{percentage(projection.zero_drift_median_return)}"
+            ) in text
+            assert "756 trading-session returns" in text
+            assert "757 closes (about 3 trading years)" in text
+            assert "T−252 through T−21" in text
+            assert "benchmark-relative log momentum:" in text
+            assert "126 sessions is the future decision horizon" in text
+            assert "no validated real-world odds" in text
+            assert "not interim drawdowns" in text
+            if cohort == "live":
+                assert (
+                    "Missing compatible turnover means no valid liquidity evidence, "
+                    "not low or zero trading activity."
+                ) in text
+            detail_url = reverse("stock-detail", args=[card.analysis.listing_id])
+            assert f"{detail_url}?horizon={horizon}".encode() in response.content
+        assert any(
+            "Under $10: speculative watch only · 0% new allocation." in text
+            for text in _explanation_texts(response)
+        )
+        # All ORM relations have been populated by the native reader; the helper
+        # adds no queries, asset reads, verifier calls, or formatting side effects.
+        with monkeypatch.context() as context, django_assert_num_queries(0):
+            context.setattr(AssetStore, "read_bytes", forbidden)
+            context.setattr(AssetStore, "read_frame", forbidden)
+            context.setattr(
+                "stanstock.research.product_reader.verify_price_product_output", forbidden
+            )
+            for entry in entries:
+                assert (
+                    helper(entry["card"], horizon=horizon, price_band=entry["price_band"]) == entry
+                )
+    assert verifier.call_count == 8
+    assert all(
+        call.kwargs["run"] == run and call.kwargs["replay"] is False
+        for call in verifier.call_args_list
+    )
+    forbidden.assert_not_called()
+    assert _domain_snapshot(store) == before
+
+
+@pytest.mark.parametrize(
+    ("median", "sensitivity", "drift", "direction", "comparison", "phrase"),
+    (
+        ("-0.125", "-0.10", "0.0000001234", "negative", "lower", "a decline"),
+        ("0.125", "0.10", "-0.0000001234", "positive", "higher", "a gain"),
+        ("0", "-0.0000", "0", "zero", "equal", "zero at the displayed precision"),
+        ("-0.0000", "0", "-0.00000000001", "zero", "equal", "zero at the displayed precision"),
+        ("0.00049", "0.00040", "0.00000000001", "zero", "equal", "zero at the displayed precision"),
+        (
+            "-0.00049",
+            "0.00040",
+            "0.00000000001",
+            "zero",
+            "equal",
+            "zero at the displayed precision",
+        ),
+        ("0.00051", "0", "0.00001", "positive", "higher", "a gain"),
+        ("-0.00051", "0", "-0.00001", "negative", "lower", "a decline"),
+        ("0.1", None, None, "positive", "unavailable", "a gain"),
+        ("0.1", "0", None, "positive", "higher", "a gain"),
+        ("0.1", None, "0.0000001234", "positive", "unavailable", "a gain"),
+    ),
+)
+def test_opportunity_explanation_precision_and_missing_presentation_evidence(
+    live_product, client, monkeypatch, median, sensitivity, drift, direction, comparison, phrase
+):
+    """DTO-only edge cases complement, never replace, native issuance contracts."""
+    owner, store, _run = live_product
+    client.force_login(owner)
+    product = read_research_product(user=owner, store=store)
+    source = product.cards[0]
+    projections = tuple(
+        replace(
+            projection,
+            median_return=Decimal(median),
+            zero_drift_median_return=None if sensitivity is None else Decimal(sensitivity),
+        )
+        for projection in source.projections
+    )
+    card = replace(
+        source,
+        projections=projections,
+        mean_log_return=None if drift is None else Decimal(drift),
+        direction="negative" if direction == "positive" else "positive",
+        suggestion="avoid" if direction == "positive" else "hold",
+    )
+
+    def read_presentation(request):
+        request._stanstock_product_read = replace(product, cards=(card,))
+        return request._stanstock_product_read
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    for horizon in ("6m", "12m", "3y", "5y"):
+        response = client.get(reverse("opportunities"), {"horizon": horizon})
+        flags = response.context["overview_cards"][0]["explanation"]
+        assert flags["median_direction"] == direction
+        assert flags["sensitivity_comparison"] == comparison
+        text = _explanation_texts(response)[0]
+        assert phrase in text
+        assert (f"Historical mean daily log return: {percentage(card.mean_log_return, 6)}") in text
+        assert f"Separate 6-month action: {card.suggestion.upper()}" in text
+        if direction != "zero":
+            assert "median and momentum point in different directions" in text
+        else:
+            assert "a decline" not in text and "a gain" not in text
+        if comparison == "equal":
+            assert "two medians are equal at displayed precision" in text
+        elif comparison == "unavailable":
+            label = response.context["overview_cards"][0]["projection"].label
+            assert f"zero-drift {label} median cumulative price return: Unavailable" in text
+        else:
+            assert f"historical-drift median is {comparison} at displayed precision" in text
+        assert "Mean log drift is not the median price return." in text
+
+
+@pytest.mark.parametrize("frequency_state", ("absent", "integrity_failed"))
+def test_native_explanations_keep_valid_ranges_when_frequencies_unavailable(
+    settings, tmp_path, django_user_model, client, monkeypatch, frequency_state
+):
+    settings.RESEARCH_PRODUCT_ENABLED = True
+    settings.DEMO_MODE = True
+    settings.DATA_DIR = tmp_path
+    store = AssetStore(tmp_path)
+    with monkeypatch.context() as context:
+        if frequency_state == "absent":
+            context.setattr(
+                "stanstock.data.research_product_demo.register_product_frequencies",
+                lambda **kwargs: None,
+            )
+        execute_demo_product_refresh(store=store)
+    if frequency_state == "integrity_failed":
+        asset = DataAsset.objects.get(kind=FREQUENCY_EVIDENCE_KIND)
+        store.resolve(asset.relative_path).write_bytes(b"synthetic corrupt report")
+    owner = django_user_model.objects.create_user(username="range-viewer")
+    client.force_login(owner)
+    response = client.get(reverse("opportunities"), {"horizon": "5y"})
+    assert response.context["product"].available
+    assert b"Model-estimated probabilities unavailable." in response.content
+    for entry in response.context["overview_cards"]:
+        assert entry["projection"].available
+        assert entry["projection"].frequency_status == frequency_state
+    assert all(
+        "The 5 years median cumulative price return" in text
+        for text in _explanation_texts(response)
+    )
+
+
+def test_native_withheld_explanation_retains_independent_action(
+    tmp_path, monkeypatch, django_user_model, settings, client
+):
+    from stanstock.data.research_product_jobs import execute_daily_research_job
+
+    settings.RESEARCH_PRODUCT_ENABLED = True
+    settings.DEMO_MODE = False
+    owner, store, path, _resolve, _fetch = make_product_environment(
+        tmp_path, monkeypatch, django_user_model
+    )
+    settings.DATA_DIR = store.root
+    series = _series("CHEAP")
+    payload = json.loads(series.raw_bytes)
+    for row in payload["values"]:
+        for field in ("open", "high", "low", "close"):
+            row[field] = "5"
+    flat_series = twelve_data.parse_daily_price_series(
+        json.dumps(payload).encode(),
+        symbol="CHEAP",
+        retrieved_at=NOW,
+        source_url=series.source_url,
+        end_date=TARGET,
+    )
+    _persist_price_series(store=store, series=flat_series, listing=None)
+    job = execute_daily_research_job(
+        target_date=TARGET,
+        owner=owner,
+        store=store,
+        core_config_path=path,
+        enforce_rate_limit=False,
+    )
+    assert job.status == "success"
+    client.force_login(owner)
+    for horizon in ("6m", "12m", "3y", "5y"):
+        response = client.get(reverse("opportunities"), {"q": "CHEAP", "horizon": horizon})
+        entry = response.context["overview_cards"][0]
+        card, projection = entry["card"], entry["projection"]
+        assert card.mean_log_return is None
+        assert not projection.available
+        assert projection.insufficiency_reason == "filter_variance_degenerate"
+        assert card.suggestion is not None
+        text = _explanation_texts(response)[0]
+        assert f"{projection.label} projection withheld. Filter Variance Degenerate" in text
+        assert "Historical mean daily log return: Unavailable" in text
+        assert f"zero-drift {projection.label} median cumulative price return: Unavailable" in text
+        assert f"Separate 6-month action: {card.suggestion.upper()}" in text
+        assert "No other horizon is substituted" in text
+        assert "Speculative watch only · 0% new allocation." in response.content.decode()
 
 
 def test_native_four_layer_live_job_reader_and_authenticated_pages(
@@ -460,6 +801,15 @@ def test_unauthenticated_and_wrong_owner_never_receive_private_product(
     assert owner.username.encode() not in response.content
     assert b"CHEAP" not in response.content
     assert b"No verified active research-product cohort" in response.content
+    assert b'class="opportunity-explanation"' not in response.content
+    record = ProviderRecord.objects.get(provider="twelve_data")
+    record.metadata["internal_display_rights_confirmed"] = False
+    record.save(update_fields=["metadata"])
+    client.force_login(owner)
+    unauthorized = client.get(reverse("opportunities"))
+    assert unauthorized.context["product"].status == "unauthorized"
+    assert b'class="opportunity-explanation"' not in unauthorized.content
+    assert b"CHEAP" not in unauthorized.content
 
 
 def test_absent_product_does_not_substitute_legacy_analysis(
@@ -479,7 +829,7 @@ def test_absent_product_does_not_substitute_legacy_analysis(
     assert response.context["shortlist_sections"] == ()
 
 
-def test_corrupt_physical_source_suppresses_all_active_output(live_product):
+def test_corrupt_physical_source_suppresses_all_active_output(live_product, client):
     owner, store, _run = live_product
     source = DataAsset.objects.get(
         provider="twelve_data",
@@ -493,6 +843,10 @@ def test_corrupt_physical_source_suppresses_all_active_output(live_product):
     assert result.status == "integrity_failed"
     assert result.cards == ()
     assert result.verification_code
+    client.force_login(owner)
+    response = client.get(reverse("opportunities"))
+    assert b'class="opportunity-explanation"' not in response.content
+    assert b"Active research unavailable." in response.content
 
 
 def test_stale_target_is_not_substituted_or_promoted(live_product, client, monkeypatch):
@@ -515,6 +869,7 @@ def test_stale_target_is_not_substituted_or_promoted(live_product, client, monke
     assert response.context["product"].status == "stale"
     assert response.context["show_shortlists"] is False
     assert response.context["shortlist_sections"] == ()
+    assert b'class="opportunity-explanation"' not in response.content
 
 
 def test_stale_active_target_remains_visible_only_as_dated_history(
@@ -1093,6 +1448,45 @@ def test_opportunity_shortlists_classify_once_and_share_valid_filter_scope(
     ]
 
 
+def test_explanation_work_is_bounded_to_page_and_displayed_shortlists(
+    live_product, client, monkeypatch
+):
+    owner, store, _run = live_product
+    client.force_login(owner)
+    product = read_research_product(user=owner, store=store)
+    source = product.cards[0]
+    cards = tuple(
+        _shortlist_presentation_card(
+            source,
+            listing_id=UUID(int=index + 1),
+            ticker=f"BOUND{index}",
+            close=Decimal(close),
+            relative_momentum=Decimal("0.2"),
+            suggestion="hold" if close == "5" else "buy",
+            current_promotion_eligible=close != "5",
+            target_under_10=close == "5",
+        )
+        for index, close in enumerate(("5", "20", "100") * 3)
+    )
+
+    def read_presentation(request):
+        request._stanstock_product_read = replace(product, cards=cards * 12)
+        return request._stanstock_product_read
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    helper = Mock(wraps=product_views._opportunity_entry)
+    monkeypatch.setattr(product_views, "_opportunity_entry", helper)
+    for query, expected in (({}, 32), ({"page": "2"}, 20), ({"horizon": "bad"}, 0)):
+        helper.reset_mock()
+        response = client.get(reverse("opportunities"), query)
+        assert helper.call_count == expected
+        assert len(_explanation_texts(response)) == expected
+        if expected == 32:
+            assert all(
+                len(section["cards"]) == 3 for section in response.context["shortlist_sections"]
+            )
+
+
 def test_realistic_empty_shortlists_keep_positive_non_under_ten_cards_in_the_full_list(
     live_product,
     client,
@@ -1438,10 +1832,9 @@ def test_history_marks_a_synthetic_all_null_advisory_as_not_evaluable(
 def chromium_browser():
     """Return the Playwright API without starting a driver during collection."""
 
-    return pytest.importorskip(
-        "playwright.sync_api",
-        reason="Playwright is not installed",
-    )
+    from playwright import sync_api
+
+    return sync_api
 
 
 @pytest.mark.parametrize("viewport", ((320, 812), (375, 812), (1280, 900), (1440, 900)))
@@ -1512,23 +1905,71 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
         },
     )
     market_response = client.get(reverse("market"))
+    navigation_responses = [
+        response,
+        searched_response,
+        market_response,
+        client.get(reverse("opportunities"), {"horizon": "5y"}),
+        client.get(reverse("opportunities"), {"horizon": "5y", "page": "2"}),
+        client.get(reverse("opportunities"), {"horizon": "5y", "price_band": "at_least_10"}),
+    ]
     assert response.status_code == 200
     assert searched_response.status_code == 200
     assert market_response.status_code == 200
 
     css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "stanstock.css"
+    css = css_path.read_text()
+
+    def navigation_key(url):
+        parsed = urlsplit(url)
+        return parsed.path, tuple(sorted((k, v) for k, v in parse_qsl(parsed.query) if v))
+
+    rendered_routes = {
+        navigation_key(item.wsgi_request.get_full_path()): item.content
+        for item in navigation_responses
+    }
+    requests = []
+
+    def serve_rendered_route(route):
+        """Navigate real rendered GET responses entirely inside the synthetic browser."""
+        requests.append(route.request.url)
+        if urlsplit(route.request.url).path == "/static/css/stanstock.css":
+            route.fulfill(status=200, content_type="text/css", body=css)
+        else:
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=rendered_routes[navigation_key(route.request.url)],
+            )
+
     with chromium_browser.sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+            page = browser.new_page(
+                viewport={"width": viewport[0], "height": viewport[1]}, has_touch=True
+            )
             try:
-                page.set_content(response.content.decode())
-                page.add_style_tag(path=str(css_path))
+                page.route("**/*", serve_rendered_route)
+                page.goto(f"http://stanstock.test{reverse('opportunities')}")
                 assert page.locator(".compact-opportunity").count() == 20
                 assert page.locator(".shortlist-opportunity").count() == expected_shortlist_count
                 assert page.locator(".shortlist-opportunity").count() <= 12
                 assert page.locator(".shortlist-opportunity.compact-opportunity").count() == 0
-                assert page.locator("*").count() <= 1222
+                panels = page.locator(".opportunity-explanation")
+                assert panels.count() == 20 + expected_shortlist_count <= 32
+                non_disclosure_nodes = page.locator(
+                    "*:not(.opportunity-explanation):not(.opportunity-explanation *)"
+                ).count()
+                assert non_disclosure_nodes <= 1222
+                added_nodes = panels.evaluate_all(
+                    "(elements) => elements.map(e => 1 + e.querySelectorAll('*').length)"
+                )
+                assert max(added_nodes) <= 40
+                assert page.locator("*").count() <= 1222 + 40 * panels.count()
+                assert page.locator(".opportunity-explanation[open]").count() == 0
+                assert panels.locator("summary").all_text_contents() == (
+                    ["Why this forecast?"] * panels.count()
+                )
                 assert page.locator(".compact-projection").count() == 20
                 note = page.locator(".opportunity-scenario-note")
                 assert note.is_visible()
@@ -1630,6 +2071,20 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 assert presentation.cards[0].listing.ticker in comparison.inner_text()
                 first_box = comparison.bounding_box()
                 assert first_box["y"] >= 0
+                assert first_box["y"] < viewport[1]
+                # Measure the intentional summary cost without discarding the
+                # original collapsed-row budgets or wider-font spare margin.
+                impact = comparison.evaluate(
+                    """e => {
+                        const panel = e.querySelector('.opportunity-explanation');
+                        const before = e.getBoundingClientRect().height;
+                        panel.style.display = 'none';
+                        const without = e.getBoundingClientRect().height;
+                        panel.style.removeProperty('display');
+                        return before - without;
+                    }"""
+                )
+                assert 0 <= impact <= 45
                 if viewport[0] >= 375:
                     assert first_box["y"] + first_box["height"] <= viewport[1], first_box
                     assert first_box["height"] <= (290 if viewport[0] == 375 else 180)
@@ -1645,6 +2100,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 try:
                     wider_box = comparison.bounding_box()
                     assert wider_box["y"] >= 0
+                    assert wider_box["y"] < viewport[1]
                     if viewport[0] >= 375:
                         assert wider_box["y"] + wider_box["height"] <= viewport[1] - 32, wider_box
                     assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
@@ -1659,11 +2115,52 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                     )
                 finally:
                     font_style.evaluate("(element) => element.remove()")
+                print(
+                    "layout-evidence",
+                    scenario,
+                    viewport,
+                    f"occurrences={panels.count()}",
+                    f"non_disclosure_nodes={non_disclosure_nodes}",
+                    f"max_added_nodes={max(added_nodes)}",
+                    f"summary_height_impact={impact:.2f}",
+                    f"collapsed_height={first_box['height']:.2f}",
+                    f"first_result_top={first_box['y']:.2f}",
+                    f"wider_font_bottom={wider_box['y'] + wider_box['height']:.2f}",
+                )
                 assert page.locator(".secondary-shortlists").get_attribute("open") is None
                 # The full comparison, not a re-ranked shortlist, owns the first viewport.
                 page.locator(".secondary-shortlists > summary").click()
                 shortlist_cards = page.locator(".shortlist-opportunity")
                 assert first_shortlist_card.listing.ticker in shortlist_cards.first.inner_text()
+
+                def assert_desktop_shortlist_order():
+                    if viewport[0] < 1280:
+                        return
+                    for wider_font in (False, True):
+                        style = (
+                            page.add_style_tag(
+                                content=':root { font-family: Verdana, "DejaVu Sans", sans-serif; }'
+                            )
+                            if wider_font
+                            else None
+                        )
+                        try:
+                            positions = shortlist_cards.evaluate_all(
+                                """elements => elements.map(e => [
+                                    'header', '.shortlist-opportunity-facts',
+                                    '.shortlist-detail-link'
+                                ].map(selector =>
+                                    e.querySelector(selector).getBoundingClientRect().x
+                                ))"""
+                            )
+                            assert all(
+                                identity < facts < link for identity, facts, link in positions
+                            ), positions
+                        finally:
+                            if style is not None:
+                                style.evaluate("(element) => element.remove()")
+
+                assert_desktop_shortlist_order()
                 if scenario == "realistic_empty":
                     assert (
                         page.locator(
@@ -1679,6 +2176,68 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                         == 0
                     )
                     assert "RESEARCHC" in shortlist_cards.first.inner_text()
+                # Native details work independently, including duplicate
+                # listing occurrences in the comparison and a shortlist.
+                matching_comparison = (
+                    page.locator(".compact-opportunity")
+                    .filter(
+                        has=page.get_by_role("heading", name=first_shortlist_card.listing.ticker)
+                    )
+                    .first
+                )
+                primary_panel = matching_comparison.locator(".opportunity-explanation")
+                duplicate_panel = shortlist_cards.first.locator(".opportunity-explanation")
+                primary_summary = primary_panel.locator("summary")
+                requests_before_open = list(requests)
+                warning = comparison.locator(":scope > .speculative-note, :scope > .muted")
+                warning_text = warning.all_inner_texts()
+                primary_summary.click()
+                assert primary_panel.get_attribute("open") == ""
+                assert primary_summary.evaluate("e => getComputedStyle(e).display") == "list-item"
+                primary_summary.tap()
+                assert primary_panel.get_attribute("open") is None
+                primary_summary.tap()
+                assert primary_panel.get_attribute("open") == ""
+                assert duplicate_panel.get_attribute("open") is None
+                body_box = primary_panel.locator(".opportunity-explanation-body").bounding_box()
+                assert body_box["width"] >= matching_comparison.bounding_box()["width"] - 30
+                assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
+                assert warning.all_inner_texts() == warning_text
+                assert all(warning.nth(i).is_visible() for i in range(warning.count()))
+                duplicate_summary = duplicate_panel.locator("summary")
+                duplicate_summary.focus()
+                page.keyboard.press("Enter")
+                assert duplicate_panel.get_attribute("open") == ""
+                assert primary_panel.get_attribute("open") == ""
+                assert_desktop_shortlist_order()
+                assert duplicate_summary.evaluate(
+                    "e => e.matches(':focus-visible') && "
+                    "parseFloat(getComputedStyle(e).outlineWidth) >= 3"
+                )
+                open_font_style = page.add_style_tag(
+                    content=':root { font-family: Verdana, "DejaVu Sans", sans-serif; }'
+                )
+                try:
+                    assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
+                    assert page.locator(".opportunity-explanation-body").evaluate_all(
+                        "(elements) => elements.every(e => e.scrollWidth <= e.clientWidth)"
+                    )
+                finally:
+                    open_font_style.evaluate("(element) => element.remove()")
+                page.keyboard.press("Space")
+                assert duplicate_panel.get_attribute("open") is None
+                assert primary_panel.get_attribute("open") == ""
+                other_panel = page.locator(".compact-opportunity").last.locator(
+                    ".opportunity-explanation"
+                )
+                other_panel.locator("summary").click()
+                assert other_panel.get_attribute("open") == ""
+                assert primary_panel.get_attribute("open") == ""
+                assert primary_panel.locator("a").get_attribute("href") == (
+                    f"{reverse('stock-detail', args=[first_shortlist_card.analysis.listing_id])}"
+                    "?horizon=6m"
+                )
+                assert requests == requests_before_open
                 page.locator('.product-search input[type="text"]').focus()
                 assert page.evaluate(
                     "document.activeElement === document.querySelector("
@@ -1688,11 +2247,27 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.keyboard.press("Enter")
                 assert page.locator(".advanced-filters").get_attribute("open") == ""
 
+                # Real document navigation, not an accordion reset script:
+                # changing horizon, page, filters and returning from Market all
+                # start closed, while selected-horizon UUID links survive.
+                for selector in (
+                    '.horizon-links a[aria-label="5 years projections"]',
+                    '.pagination a:has-text("Next")',
+                    '.band-link:has-text("$10 and above")',
+                    '.primary-nav-links a:has-text("Market")',
+                    '.primary-nav-links a:has-text("Opportunities")',
+                ):
+                    page.locator(selector).click()
+                    assert page.locator(".opportunity-explanation[open]").count() == 0
+                    if page.locator(".opportunity-explanation").count():
+                        page.locator(".opportunity-explanation > summary").first.click()
+                        assert page.locator(".opportunity-explanation[open]").count() == 1
+
                 # This uses the real GET submission adapter and registered
                 # frequencies, then checks the rendered selected-horizon
                 # result in Chromium rather than only a context DTO.
-                page.set_content(searched_response.content.decode())
-                page.add_style_tag(path=str(css_path))
+                page.goto(f"http://stanstock.test{searched_response.wsgi_request.get_full_path()}")
+                assert page.locator(".opportunity-explanation[open]").count() == 0
                 assert (
                     page.locator("#opportunity-list-title").inner_text()
                     == "12 months projections · full comparison"
