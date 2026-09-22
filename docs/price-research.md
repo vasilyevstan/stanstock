@@ -449,6 +449,42 @@ This module performs no source loading or persistence and does not alter
 Real-data adaptation, prospective issuance, evaluation and any adoption require
 their own accepted evidence and authorization.
 
+## Unscored shadow-drift preparation
+
+The separate `research/price_product_shadow_drift.py` module prepares three
+in-memory research arms: unchanged historical-drift FHS, unchanged same-shock
+zero-log-drift FHS, and a fixed half-drift candidate. The candidate adds
+`H * (mu / 2)` to the native zero-drift terminal log returns, where `mu` is
+the recorded historical mean daily log return and `H` is the horizon in
+sessions. It does not refit the filter, resample shocks or add parameter
+uncertainty. Halving drift moderates negative as well as positive trends;
+this is an assumption to investigate, not a demonstrated improvement.
+
+`shadow-fhs-drift-v1` emits six unscored projections: three arms at 6m and
+12m. It retains the native 8,192 paths and all four simulation horizons
+internally, because shortening the maximum horizon would change the random
+stream. Historical and zero-drift controls are copied from the native result
+and checked against complete regenerated projections. Native withholding is
+preserved; the candidate cannot rescue an unavailable native horizon.
+
+Results and canonical serialized bytes carry `research_only_unscored`,
+`caller_supplied_unverified` and `not_frozen` labels. Their complete hashes
+identify supplied inputs and assumptions; they do not authenticate source
+assets, ownership, calendar provenance or observed issuance. The pure API
+loads no data or configuration, reads no clock, and performs no I/O or
+persistence. It has no command, UI, scheduled-job or production consumer.
+The existing synthetic drift study and registered retrospective protocol
+remain unchanged.
+
+The intended future primary objective is 6m central-60% interval score, with
+mean absolute error of the median forecast as a guardrail; 12m is a secondary
+diagnostic.
+Neither metric is calculated by this preparation module, and 3y/5y evaluation
+is outside its scope. Empirical execution requires its own frozen protocol
+and authorization. Already-inspected historical partitions cannot become
+fresh confirmation for a candidate chosen afterward. Synthetic preservation
+and numerical checks do not establish accuracy, calibration or adoption.
+
 ## Synthetic candidate-policy research
 
 `price-candidates-synthetic-v1` is a separate, unwired correctness study in
