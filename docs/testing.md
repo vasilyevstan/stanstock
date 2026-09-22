@@ -340,6 +340,25 @@ Record actual execution/source/dependency identities before caller-owned
 persistence. Later identical-source binding may reuse that evidence but must
 retain the original bytes and execution revision, not claim a new run.
 
+The unscored shadow-drift adapter has its own focused module,
+`test_research_price_product_shadow_drift.py`. Require complete native
+historical/zero-drift control equality, independent full-array checks, the
+four-horizon/8,192-path random-stream shape, fixed half-drift operation order,
+genuine withholding, candidate-local numerical failures, immutable outputs
+and strict finite canonical serialization. Its cold first invocation receives
+an already constructed calendar; it has no calendar-resource exception.
+Provider-mode metadata in a synthetic fixture is not a live-provider test.
+
+Bind differential preservation to the exact implementation base and compare
+complete successful and withheld native, synthetic-study and retrospective
+payloads, with identities and clocks fixed before execution. The older frozen
+probability probe rejects frequency-bound retained parents: use bounded
+test-local current-base recovery without editing the old harness or stripping
+frequency bindings. Missing base objects or incomplete comparisons fail the
+required proof rather than becoming successful skips. Keep the new module
+unwired from production consumers; no empirical or adoption claim follows
+from these checks.
+
 ## Immutable and point-in-time coverage
 
 - future prices/facts excluded from historical decisions;
