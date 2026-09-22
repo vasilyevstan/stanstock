@@ -477,7 +477,8 @@ The existing synthetic drift study and registered retrospective protocol
 remain unchanged.
 
 The intended future primary objective is 6m central-60% interval score, with
-median absolute error as a guardrail; 12m is a secondary diagnostic.
+mean absolute error of the median forecast as a guardrail; 12m is a secondary
+diagnostic.
 Neither metric is calculated by this preparation module, and 3y/5y evaluation
 is outside its scope. Empirical execution requires its own frozen protocol
 and authorization. Already-inspected historical partitions cannot become
