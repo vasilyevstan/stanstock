@@ -222,6 +222,15 @@ class Command(BaseCommand):
                 f"analyses={result.analysis_count} predictions={result.prediction_count}"
             )
         )
+        for label, study_result in (
+            ("capture", result.shadow_capture),
+            ("evaluation", result.shadow_evaluation),
+        ):
+            self.stdout.write(
+                f"shadow_study {label}="
+                f"{'disabled' if study_result is None else study_result.state} "
+                f"reason={'' if study_result is None else study_result.reason_code or ''}"
+            )
 
 
 def _run_stage(

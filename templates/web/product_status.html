@@ -73,6 +73,38 @@
         </p>
         <strong>{% if scheduler.installed and scheduler.loaded and scheduler.timezone_matches and scheduler.schedule_matches %}Scheduled{% else %}Needs attention{% endif %}</strong>
       </article>
+      <article class="status-card">
+        <h3>Prospective three-arm study</h3>
+        {% if shadow_study %}
+          <strong>{{ shadow_study.status|display_label }} · {{ shadow_study.phase|display_label }}</strong>
+          {% if shadow_study.status == "available" and shadow_study.reason_code and shadow_study.reason_code != "shadow_evidence_challenged" %}
+            <p><strong>Research failure</strong> · Core research remains independent.</p>
+          {% endif %}
+          {% if shadow_study.reason_code %}<p>{{ shadow_study.reason_code|display_label }}</p>{% endif %}
+          {% if shadow_study.status == "available" %}
+            <p>Timely captures: {{ shadow_study.capture_counts.timely }}.
+              Missed: {{ shadow_study.capture_counts.missed }}.
+              Failed captures: {{ shadow_study.capture_counts.failed }}.
+              Late: {{ shadow_study.capture_counts.late }}.
+              Missing population: {{ shadow_study.capture_counts.missing_population }}.</p>
+            {% for summary in shadow_study.summaries %}
+              <p>{{ summary.horizon }}: {{ summary.intended_anchors }} intended anchors;
+                {{ summary.paired }} common-support cases;
+                {{ summary.challenged }} challenged.
+                {% if summary.arm_means == None %}All-anchor result unavailable.{% endif %}
+              </p>
+            {% endfor %}
+            {% if shadow_study.case_counts.accepted_with_challenge %}
+              <p><strong>Challenged evidence: original accepted contributions remain frozen;
+                later revisions do not replace them.</strong></p>
+            {% endif %}
+          {% endif %}
+        {% else %}
+          <strong>DISABLED</strong>
+          <p>Automatic study collection and evaluation are off.</p>
+        {% endif %}
+        <small>Descriptive research only. No winner, calibrated odds, or adoption decision.</small>
+      </article>
     </div>
   </section>
 

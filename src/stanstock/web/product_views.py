@@ -533,6 +533,28 @@ def status_page(request: HttpRequest) -> HttpResponse:
         if not _has_product_output():
             return legacy_views.status_page(request)
     product = _read(request)
+    shadow_study = None
+    if settings.SHADOW_STUDY_ENABLED:
+        from django.utils import timezone
+
+        from stanstock.core.verification_types import RefreshVerificationError
+        from stanstock.data.assets import open_asset_store
+        from stanstock.research.shadow_study import ShadowStudyRead, read_shadow_study
+
+        as_of = timezone.now()
+        try:
+            shadow_study = read_shadow_study(
+                owner=request.user,
+                as_of=as_of,
+                store=open_asset_store(),
+            )
+        except RefreshVerificationError:
+            shadow_study = ShadowStudyRead(
+                "integrity_failed",
+                "inactive",
+                as_of,
+                reason_code="shadow_asset_invalid",
+            )
     components = system_status()
     admission_counts = Counter(item.status for item in product.admissions)
     jobs = JobRun.objects.filter(
@@ -551,6 +573,7 @@ def status_page(request: HttpRequest) -> HttpResponse:
             "providers": ProviderRecord.objects.order_by("provider"),
             "recent_jobs": jobs,
             "scheduler": legacy_views._scheduler_status(),
+            "shadow_study": shadow_study,
         },
     )
 

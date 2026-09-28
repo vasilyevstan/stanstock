@@ -472,9 +472,10 @@ Results and canonical serialized bytes carry `research_only_unscored`,
 identify supplied inputs and assumptions; they do not authenticate source
 assets, ownership, calendar provenance or observed issuance. The pure API
 loads no data or configuration, reads no clock, and performs no I/O or
-persistence. It has no command, UI, scheduled-job or production consumer.
-The existing synthetic drift study and registered retrospective protocol
-remain unchanged.
+persistence. It has no direct command or UI. The separately verified,
+default-off prospective study wrapper described below is its only authorized
+application consumer. The existing synthetic drift study and registered
+retrospective protocol remain unchanged.
 
 The intended future primary objective is 6m central-60% interval score, with
 mean absolute error of the median forecast as a guardrail; 12m is a secondary
@@ -484,6 +485,91 @@ is outside its scope. Empirical execution requires its own frozen protocol
 and authorization. Already-inspected historical partitions cannot become
 fresh confirmation for a candidate chosen afterward. Synthetic preservation
 and numerical checks do not establish accuracy, calibration or adoption.
+
+## Prospective three-arm evidence collection
+
+`prospective-three-arm-fhs-v1` is a separate, default-off study of historical,
+zero and fixed-half log drift. It collects future forecasts and evaluates
+them descriptively; it does not certify superiority or select a production
+model. `STANSTOCK_SHADOW_STUDY_ENABLED` enables automatic study work alongside
+the existing refresh only after explicit operator activation. It adds no
+provider requests and changes no production prediction, recommendation,
+ranking, probability or confidence field.
+
+The fixed protocol is committed before actual activation time `T0`. Its
+epoch `S0` is the first XNYS session whose scheduled close is strictly after
+`T0`, irrespective of data availability or capture success. Six-month
+primary anchors have session indices `0, 126, 252, ...`; twelve-month
+diagnostic anchors use `0, 252, 504, ...`. Daily captures form an archive,
+not extra independent primary observations. Missing anchors never move the
+grid or get replaced by off-grid captures. The old retrospective epoch,
+partitions and completion boundary are not modified.
+
+Each target retains its original scheduled intake, complete membership
+dispositions, permanent listing identities, source assets, original native
+prediction IDs and all six unscored adapter projections. Missing intake
+means an unknown population, not zero candidates. Later membership changes
+or reissues cannot replace that cohort. The adapter's original unscored,
+unverified-provenance and not-frozen labels remain unchanged; the distinct
+study wrapper supplies the authenticated protocol and source evidence.
+
+Prospective qualification uses the shadow artifact's own durable
+publication and independently verified successful job completion before
+the next market open. Starting calculation before the deadline or copying
+the native prediction's on-time flag is insufficient. Late captures and
+crashes without a timely completion witness remain explicit; retries cannot
+backdate them.
+
+Evaluation binds original predictions, the native 126th/252nd usable
+observed-session endpoint and exact cutoff-safe price vintages. Missing
+sessions can extend actual intervals, so anchor spacing alone does not
+prove non-overlap. An incompatible target-price basis is quarantined, not
+treated as a verified corporate action. No later quote or convenient
+reissue substitutes for missing evidence.
+
+The primary comparison is half minus historical FHS in six-month
+central-60% interval score, always accompanied by half minus zero FHS.
+Mean absolute error of the median is a required companion, not a pass/fail
+guardrail with an unstated tolerance. Twelve-month results remain separate
+diagnostics. Losses use native ledger precision and decimal cumulative
+return units: `0.01` corresponds to one percentage point.
+
+All arms share one evaluable population within each anchor. Average within
+anchors, then give anchors equal weight. Preserve intended, withheld,
+missing, unresolved and challenged counts. If any intended anchor has no
+common support, the all-intended-anchor aggregate is unavailable; per-anchor
+results remain explicit. There is no available-anchor-only substitute.
+
+Protocol, activation, closure, captures and evaluations are separate
+immutable assets. The first accepted evaluation remains the frozen
+numerical contribution. A later compatible vintage appends a visible
+challenge when its verified return changes; an unchanged return is a verified
+no-op. Incompatible or unverifiable later evidence also appends a challenge
+rather than replacing scores.
+Corrupted original evidence instead fails verification and withholds the
+affected summary. Historical reads cannot see later assessments.
+
+Collection stops administratively, not when results become favorable.
+Disabling automation pauses work; permanent closure stops new enrollment
+without erasing history or resetting the epoch. Formal inference or adoption
+would require a separate design committed before fresh outcomes are
+examined. This study introduces no minimum-sample claim, p-value,
+inferential confidence interval, coefficient search or adoption threshold.
+Existing convergence warnings remain; more simulated paths do not create
+independent market evidence.
+
+Gneiting and Raftery's proper-scoring treatment motivates interval and
+quantile losses, not finite-sample calibration:
+<https://doi.org/10.1198/016214506000001437>. Merton's expected-return
+estimation analysis motivates caution about drift estimates, not a proven
+one-half coefficient: <https://doi.org/10.1016/0304-405X(80)90007-0>.
+Barber et al. (2023), *Conformal prediction beyond exchangeability*, supplies
+coverage bounds with explicit distributional-discrepancy terms; it does not
+establish calibrated StanStock returns or justify a calibration retrofit:
+<https://arxiv.org/abs/2202.13415v5>.
+
+See [prospective study operations](operations.md#prospective-shadow-study)
+for activation, failure isolation and recovery.
 
 ## Synthetic candidate-policy research
 

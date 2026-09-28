@@ -89,6 +89,7 @@ from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND, l
 
 if TYPE_CHECKING:
     from stanstock.core.refresh_verification import ReplayedScheduledRefresh
+    from stanstock.research.shadow_study import ShadowJobResult
 
 PROFILE = "research_product_v1"
 ISSUANCE_KEY = "scheduled"
@@ -112,6 +113,8 @@ class ScheduledResearchExecution:
     target_date: date
     analysis_count: int
     prediction_count: int
+    shadow_capture: ShadowJobResult | None = None
+    shadow_evaluation: ShadowJobResult | None = None
 
 
 def scheduled_identity(owner: object) -> dict[str, str]:
@@ -174,6 +177,8 @@ def execute_scheduled_research_refresh(
     config_path = core_config_path or default_us_universe_config_path()
 
     replayed_prior: list[Any] = []
+    shadow_capture: list[ShadowJobResult | None] = []
+    shadow_evaluation: list[ShadowJobResult | None] = []
 
     def before_attempt() -> None:
         prior = JobRun.objects.filter(
@@ -232,69 +237,81 @@ def execute_scheduled_research_refresh(
         details["code_revision"] = revision
         _persist_parent_details(parent, details)
 
-        market = _run_stage(
-            parent=parent,
-            details=details,
-            stage_name=MARKET_STAGE,
-            job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
-            region=REGION,
-            target_date=target_date,
-            task=lambda: execute_daily_research_job(
+        try:
+            market = _run_stage(
+                parent=parent,
+                details=details,
+                stage_name=MARKET_STAGE,
+                job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
+                region=REGION,
                 target_date=target_date,
-                owner=owner,
-                issuance_key=ISSUANCE_KEY,
-                issued_on_time=True,
-                store=asset_store,
-                core_config_path=config_path,
-                enforce_rate_limit=enforce_rate_limit,
-                derive_frequencies=False,
-            ),
-        )
-        if market is None or market.status not in {
-            JobRun.Status.SUCCESS,
-            JobRun.Status.SKIPPED,
-        }:
-            raise ValueError("Scheduled research market stage produced no complete output")
+                task=lambda: execute_daily_research_job(
+                    target_date=target_date,
+                    owner=owner,
+                    issuance_key=ISSUANCE_KEY,
+                    issued_on_time=True,
+                    store=asset_store,
+                    core_config_path=config_path,
+                    enforce_rate_limit=enforce_rate_limit,
+                    derive_frequencies=False,
+                ),
+            )
+            if market is None or market.status not in {
+                JobRun.Status.SUCCESS,
+                JobRun.Status.SKIPPED,
+            }:
+                raise ValueError("Scheduled research market stage produced no complete output")
+        except EXPECTED_STAGE_ERRORS:
+            shadow_capture.append(_attach_shadow_capture(owner, target_date, asset_store))
+            raise
 
         downstream_failures: list[str] = []
-        frequency = _run_frequency_stage(
-            parent=parent,
-            details=details,
-            target_date=target_date,
-            owner_id=identity["owner_id"],
-            store=asset_store,
-        )
-        if frequency.status not in SATISFIED_DOWNSTREAM_STATUSES:
-            downstream_failures.append(FREQUENCY_STAGE)
-        evaluation = _run_stage(
-            parent=parent,
-            details=details,
-            stage_name=EVALUATION_STAGE,
-            job_name=EVALUATION_JOB_NAME,
-            region=REGION,
-            target_date=target_date,
-            task=lambda: execute_prediction_evaluation_job(
-                provider=TWELVE_DATA_PROVIDER,
-                evaluation_date=target_date,
-                evaluation_time=timezone.now(),
-                benchmark_subject="SPY",
-            ),
-            failures=downstream_failures,
-        )
-        portfolio = _run_stage(
-            parent=parent,
-            details=details,
-            stage_name=PORTFOLIO_STAGE,
-            job_name=PORTFOLIO_JOB_NAME,
-            region="",
-            target_date=target_date,
-            task=lambda: execute_portfolio_snapshot_job(
-                target_date=target_date,
-                require_session_date=True,
-                require_all=True,
-            ),
-            failures=downstream_failures,
-        )
+        try:
+            shadow_capture.append(_attach_shadow_capture(owner, target_date, asset_store))
+        finally:
+            # Even an unexpected optional capture defect cannot prevent the
+            # existing mandatory downstream attempts. It still propagates.
+            try:
+                frequency = _run_frequency_stage(
+                    parent=parent,
+                    details=details,
+                    target_date=target_date,
+                    owner_id=identity["owner_id"],
+                    store=asset_store,
+                )
+                if frequency.status not in SATISFIED_DOWNSTREAM_STATUSES:
+                    downstream_failures.append(FREQUENCY_STAGE)
+                evaluation = _run_stage(
+                    parent=parent,
+                    details=details,
+                    stage_name=EVALUATION_STAGE,
+                    job_name=EVALUATION_JOB_NAME,
+                    region=REGION,
+                    target_date=target_date,
+                    task=lambda: execute_prediction_evaluation_job(
+                        provider=TWELVE_DATA_PROVIDER,
+                        evaluation_date=target_date,
+                        evaluation_time=timezone.now(),
+                        benchmark_subject="SPY",
+                    ),
+                    failures=downstream_failures,
+                )
+                portfolio = _run_stage(
+                    parent=parent,
+                    details=details,
+                    stage_name=PORTFOLIO_STAGE,
+                    job_name=PORTFOLIO_JOB_NAME,
+                    region="",
+                    target_date=target_date,
+                    task=lambda: execute_portfolio_snapshot_job(
+                        target_date=target_date,
+                        require_session_date=True,
+                        require_all=True,
+                    ),
+                    failures=downstream_failures,
+                )
+            finally:
+                shadow_evaluation.append(_attach_shadow_evaluation(owner, target_date, asset_store))
         for stage_name, child in (
             (EVALUATION_STAGE, evaluation),
             (PORTFOLIO_STAGE, portfolio),
@@ -342,6 +359,10 @@ def execute_scheduled_research_refresh(
         if len(replayed_prior) != 1:
             raise ValueError("Scheduled research skip has no independently replayed parent")
         verification = replayed_prior[0].verification
+        try:
+            shadow_capture.append(_attach_shadow_capture(owner, target_date, asset_store))
+        finally:
+            shadow_evaluation.append(_attach_shadow_evaluation(owner, target_date, asset_store))
     else:
         verification = parent.details.get("verification", {})
     return ScheduledResearchExecution(
@@ -349,7 +370,49 @@ def execute_scheduled_research_refresh(
         target_date=target_date,
         analysis_count=_summary_count(verification, "stock_analysis_count"),
         prediction_count=_summary_count(verification, "prediction_count"),
+        shadow_capture=shadow_capture[0],
+        shadow_evaluation=shadow_evaluation[0],
     )
+
+
+def _attach_shadow_capture(
+    owner: object,
+    target_date: date,
+    store: AssetStore,
+) -> ShadowJobResult | None:
+    if not settings.SHADOW_STUDY_ENABLED:
+        return None
+    from stanstock.research.shadow_jobs import execute_shadow_capture_job
+    from stanstock.research.shadow_study import SAFE_CODES, ShadowJobResult, ShadowStudyError
+
+    try:
+        return execute_shadow_capture_job(owner=owner, target_date=target_date, store=store)
+    except RefreshVerificationError as exc:
+        return ShadowJobResult(
+            exc.child if isinstance(exc, ShadowStudyError) else None,
+            "failed",
+            exc.reason_code if exc.reason_code in SAFE_CODES else "shadow_asset_invalid",
+        )
+
+
+def _attach_shadow_evaluation(
+    owner: object,
+    target_date: date,
+    store: AssetStore,
+) -> ShadowJobResult | None:
+    if not settings.SHADOW_STUDY_ENABLED:
+        return None
+    from stanstock.research.shadow_jobs import execute_shadow_evaluation_job
+    from stanstock.research.shadow_study import SAFE_CODES, ShadowJobResult, ShadowStudyError
+
+    try:
+        return execute_shadow_evaluation_job(owner=owner, evaluation_date=target_date, store=store)
+    except RefreshVerificationError as exc:
+        return ShadowJobResult(
+            exc.child if isinstance(exc, ShadowStudyError) else None,
+            "failed",
+            exc.reason_code if exc.reason_code in SAFE_CODES else "shadow_asset_invalid",
+        )
 
 
 def verify_scheduled_research_refresh(
