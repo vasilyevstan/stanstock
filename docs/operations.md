@@ -338,6 +338,97 @@ preferences, portfolios, holdings, and the existing schedule. A missing or
 failed report must show a precise summary state without hiding an
 independently valid median/range.
 
+## Prospective shadow study
+
+The optional three-arm FHS study uses existing jobs and immutable assets.
+It adds no service, scheduler, provider request or production prediction.
+`STANSTOCK_SHADOW_STUDY_ENABLED=false` is the default: no automatic study
+reads, writes, jobs or calculations occur. The existing status page reports
+that it is disabled.
+
+Enabling the flag is not activation. With the flag on but no registered
+activation, the command/status reports the missing activation explicitly;
+it never creates a historical start boundary automatically.
+
+### Explicit activation and closure
+
+Activate only after the reviewed source is installed, the existing runtime
+and scheduler use the same committed revision and permanent state, and
+current owner/provider authorization is valid. Use the existing private
+environment through the normal operator Django shell, never credentials in
+command arguments:
+
+```python
+from stanstock.core.research_product_refresh import resolve_scheduled_owner
+from stanstock.data.assets import AssetStore
+from stanstock.research.shadow_study import activate_shadow_study
+
+activate_shadow_study(owner=resolve_scheduled_owner(), store=AssetStore())
+```
+
+The operator service registers/reuses the fixed protocol, records actual
+activation after protocol commit, and fixes the first future-close epoch.
+Callers cannot supply an earlier activation time or a chosen successful
+target. A retry recovers the original activation rather than resetting it.
+Activation itself must have a verified completion before an enrolled target
+closes. If it crosses the epoch close, that anchor is missed and the phase
+is retained.
+
+To stop new enrollment permanently, use the matching owner's explicit
+service:
+
+```python
+from stanstock.research.shadow_study import close_shadow_study
+
+close_shadow_study(owner=resolve_scheduled_owner(), store=AssetStore())
+```
+
+Closure is append-only and uses the actual operator time. It does not
+delete evidence, reopen the study or reset the epoch. Setting the flag off
+instead is an operational pause. Evaluation of already enrolled cases can
+continue on the existing cadence with automation enabled after closure.
+
+### Isolation, recovery and visible state
+
+Capture runs after verified committed native market output; study
+evaluation follows ordinary prediction evaluation. Both are independent
+research children, outside the mandatory parent stage map. Known study
+failures are recorded with safe reason codes while required core work
+continues. Unexpected defects remain loud after mandatory downstream
+attempts. A healthy core result must not hide research failure: the command
+and the existing `/status` page report study state separately.
+
+Completed-parent recovery invokes the same research entry points without
+rewriting the old parent's successful payload. Recovery verifies exact
+owner, protocol, activation, original source and artifact identities before
+derivation; matching evidence is reused without provider access. Ambiguous
+or conflicting evidence fails explicitly.
+
+The capture's effective availability is conservatively bounded by both
+asset availability and its exact successful child's post-registration
+completion. A skipped job refers to the original success, not a new
+publication time. A crash after artifact commit but before completion
+cannot be repaired by inventing a timely witness. Late/missed capture,
+missing population, withholding and unavailable outcomes stay visible.
+
+Evaluation preserves original prediction IDs, observed-session endpoints
+and exact recorded source vintages. Identical assessments are verified
+no-ops; changed evidence may append an assessment or challenge, never
+overwrite the first accepted result. Missing provider history remains a
+limitation, not permission for an extra study-specific fetch.
+
+For activation acceptance, verify the actual future target's complete
+population, checksummed registered artifacts, independent pre-open
+completion and zero-fetch recovery. A process exit or successful job alone
+is insufficient. Measure the bounded synthetic workload before rollout;
+do not shorten the native simulation or omit slow listings to meet a
+deadline.
+
+Source-only installation with the flag off is not study activation. Later
+activation follows the existing fenced, same-data runtime procedure.
+Rollback preserves all appended evidence and permanent state; do not
+restore an older database to erase the study.
+
 ## Serving checks
 
 Use authenticated pages and local commands together:

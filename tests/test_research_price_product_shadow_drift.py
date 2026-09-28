@@ -884,11 +884,25 @@ def test_pure_import_closure_no_production_consumers_and_bounded_worktree():
         for node in ast.walk(tree)
     )
     for path in (ROOT / "src").rglob("*.py"):
-        if path.resolve() != Path(shadow.__file__).resolve():
+        if path.resolve() not in {
+            Path(shadow.__file__).resolve(),
+            ROOT / "src/stanstock/research/shadow_jobs.py",
+        }:
             assert "price_product_shadow_drift" not in path.read_text()
     allowed = {
         "src/stanstock/research/price_product_shadow_drift.py",
         "tests/test_research_price_product_shadow_drift.py",
+        "src/stanstock/research/shadow_study.py",
+        "src/stanstock/research/shadow_jobs.py",
+        "src/stanstock/core/research_product_refresh.py",
+        "src/stanstock/core/management/commands/scheduled_refresh.py",
+        "src/stanstock/data/research_product_jobs.py",
+        "src/stanstock/settings/base.py",
+        "src/stanstock/web/product_views.py",
+        "templates/web/product_status.html",
+        "tests/test_research_shadow_study.py",
+        "tests/test_research_shadow_jobs.py",
+        ".env.example",
     }
     # Documentation is concurrently owned by the orchestrator, not this slice.
     diff = (

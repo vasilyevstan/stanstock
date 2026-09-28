@@ -355,9 +355,52 @@ payloads, with identities and clocks fixed before execution. The older frozen
 probability probe rejects frequency-bound retained parents: use bounded
 test-local current-base recovery without editing the old harness or stripping
 frequency bindings. Missing base objects or incomplete comparisons fail the
-required proof rather than becoming successful skips. Keep the new module
-unwired from production consumers; no empirical or adoption claim follows
-from these checks.
+required proof rather than becoming successful skips. Permit only the
+separately reviewed prospective study wrapper as an application consumer;
+retain pure adapter import and I/O restrictions. No empirical or adoption
+claim follows from these checks.
+
+### Prospective study integration
+
+The separate `test_research_shadow_study.py` and
+`test_research_shadow_jobs.py` cover the default-off prospective wrapper,
+not a change to the frozen adapter. All fixtures remain synthetic and use
+existing repository tools.
+
+Require a persistence-to-screen contract spanning registered
+protocol/activation, complete source membership, capture calculation,
+durable registration, independent completion witness, fail-closed reading
+and rendered study status. A set of isolated helper tests is insufficient.
+
+Exercise strict schemas and identity pins; wrong owner/provider/run/ref;
+missing and aliased population members; full native/adapter byte
+preservation; default-off zero study I/O; missing activation; and the
+separate status of successful core work and failed research.
+
+Publication cases include lock/commit/deadline crossings, a crash after
+artifact commit but before job completion, skipped-versus-original success
+witnesses, exact concurrent-winner recovery and no backdated qualification.
+Calendar cases include equality with the epoch close, early closes,
+holidays, DST and an unavailable first anchor that must not move the grid.
+
+Evaluation cases include original prediction IDs, actual observed-session
+maturity, missing/extended intervals, source availability cutoffs, revised
+target-price bases, first acceptance and each append-only challenge state.
+Earlier as-of reads cannot see later challenges, and corrupt frozen
+evidence must withhold rather than substitute a convenient vintage.
+
+Hand-computed losses and unequal cohort sizes prove common three-arm
+support and equal-anchor weighting. An empty intended anchor makes the
+all-intended-anchor aggregate unavailable; off-grid daily captures cannot
+replace it. Include no duplicate unchanged pending assessments and no
+silent challenge-score replacement.
+
+Provider-call counters must show zero extra acquisition on fresh, failed
+and recovered study paths. Measure the bounded synthetic workload with all
+8,192 paths and the complete four-horizon RNG shape. Preserve the exact
+base/head differential for native successful and withheld payloads and old
+parent replay; update only the adapter test's obsolete consumer/worktree
+allowlist for the authorized wrapper.
 
 ## Immutable and point-in-time coverage
 

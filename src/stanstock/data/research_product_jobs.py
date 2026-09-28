@@ -89,6 +89,10 @@ RESEARCH_INTAKE_JOB = "research_intake_v1"
 DAILY_RESEARCH_JOB = "daily_research_v1"
 SCHEDULED_RESEARCH_JOB = "scheduled_refresh_research_v1"
 FREQUENCY_RESEARCH_JOB = "research_product_frequency_v1"
+SHADOW_ACTIVATE_JOB = "shadow_study_activate_v1"
+SHADOW_CLOSE_JOB = "shadow_study_close_v1"
+SHADOW_CAPTURE_JOB = "shadow_study_capture_v1"
+SHADOW_EVALUATE_JOB = "shadow_study_evaluate_v1"
 
 
 def execute_daily_research_job(
@@ -611,6 +615,10 @@ def product_job_name(kind: str, identity: dict[str, str]) -> str:
         RESEARCH_INTAKE_JOB,
         SCHEDULED_RESEARCH_JOB,
         FREQUENCY_RESEARCH_JOB,
+        SHADOW_ACTIVATE_JOB,
+        SHADOW_CLOSE_JOB,
+        SHADOW_CAPTURE_JOB,
+        SHADOW_EVALUATE_JOB,
     }:
         raise ValueError("Unknown research product job kind")
     digest = hashlib.sha256(
