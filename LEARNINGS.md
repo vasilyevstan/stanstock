@@ -50,6 +50,10 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Branch scope is not a permanent behavioral contract.** A shadow-adapter
+  test compared every later change with its implementation base and blocked
+  unrelated dependency updates. Keep changed-file allowlists in review
+  evidence; permanent tests enforce imports, consumers and frozen behavior.
 - **Warm caches can hide forbidden I/O.** The synthetic candidate study's
   first calendar construction reads installed timezone data; its warmed test
   missed that dependency. Exercise the first invocation in a fresh process,
