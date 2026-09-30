@@ -360,6 +360,11 @@ separately reviewed prospective study wrapper as an application consumer;
 retain pure adapter import and I/O restrictions. No empirical or adoption
 claim follows from these checks.
 
+Feature-specific changed-file and untracked-file allowlists are one-time
+review evidence, not permanent repository-wide tests. Keep lasting adapter
+checks scoped to its imports, authorized consumers and frozen behavior so
+unrelated tooling or documentation changes do not fail its contract.
+
 ### Prospective study integration
 
 The separate `test_research_shadow_study.py` and

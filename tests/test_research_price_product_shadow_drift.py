@@ -856,7 +856,7 @@ def test_interleaved_concurrent_independent_calls_no_global_state(product_input,
     assert np.array_equal(before[1], after[1])
 
 
-def test_pure_import_closure_no_production_consumers_and_bounded_worktree():
+def test_pure_import_closure_and_only_authorized_consumers():
     tree = ast.parse(inspect.getsource(shadow))
     modules = {
         node.module if isinstance(node, ast.ImportFrom) else alias.name
@@ -889,32 +889,20 @@ def test_pure_import_closure_no_production_consumers_and_bounded_worktree():
             ROOT / "src/stanstock/research/shadow_jobs.py",
         }:
             assert "price_product_shadow_drift" not in path.read_text()
-    allowed = {
-        "src/stanstock/research/price_product_shadow_drift.py",
-        "tests/test_research_price_product_shadow_drift.py",
-        "src/stanstock/research/shadow_study.py",
-        "src/stanstock/research/shadow_jobs.py",
-        "src/stanstock/core/research_product_refresh.py",
-        "src/stanstock/core/management/commands/scheduled_refresh.py",
-        "src/stanstock/data/research_product_jobs.py",
-        "src/stanstock/settings/base.py",
-        "src/stanstock/web/product_views.py",
-        "templates/web/product_status.html",
-        "tests/test_research_shadow_study.py",
-        "tests/test_research_shadow_jobs.py",
-        ".env.example",
-    }
-    # Documentation is concurrently owned by the orchestrator, not this slice.
-    diff = (
-        frozen._git("diff", "--name-only", BASE_SHA, "--", ".", ":(exclude)docs")
-        .stdout.decode()
-        .splitlines()
-    )
-    assert set(diff) <= allowed
-    untracked = (
-        frozen._git("ls-files", "--others", "--exclude-standard").stdout.decode().splitlines()
-    )
-    assert set(untracked) <= allowed
+
+
+def test_pure_import_guard_does_not_inspect_git_state(monkeypatch):
+    monkeypatch.setattr(frozen, "_git", _refuse)
+    test_pure_import_closure_and_only_authorized_consumers()
+
+
+def test_pure_import_guard_rejects_unauthorized_consumer(tmp_path, monkeypatch):
+    consumer = tmp_path / "src/stanstock/web/shadow_jobs.py"
+    consumer.parent.mkdir(parents=True)
+    consumer.write_text("from stanstock.research import price_product_shadow_drift\n")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="price_product_shadow_drift"):
+        test_pure_import_closure_and_only_authorized_consumers()
 
 
 def _retained_current_base_recovery(*, store):
