@@ -133,7 +133,9 @@ running `uv run pytest tests/test_research_product_reader_web.py -q -s`
 to compare the same fixtures against base templates/CSS in memory; the
 compactness change requires at least a 40% median-height reduction.
 Retain per-row label associations, visible restrictions, and mobile local
-labels when desktop headings are shared.
+labels when desktop headings are shared. Assert the human-readable horizon
+inside every row's own definition term across all four horizons; a page-wide
+text match can be satisfied by a shared heading or explanation instead.
 
 Prove that repeated GETs leave domain rows unchanged and do not call the
 provider or rerun a simulation. Preserve frozen producer/config/reader blobs

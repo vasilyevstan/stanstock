@@ -1886,6 +1886,54 @@ def _comparison_density(page):
     )
 
 
+def test_compact_rows_use_human_readable_horizon_terms(client, chromium_browser, live_product):
+    """Every local semantic term must be complete, not just the shared heading."""
+    owner, _store, _run = live_product
+    client.force_login(owner)
+    responses = [
+        (label, client.get(reverse("opportunities"), {"horizon": horizon}))
+        for horizon, label in (
+            ("6m", "6 months"),
+            ("12m", "12 months"),
+            ("3y", "3 years"),
+            ("5y", "5 years"),
+        )
+    ]
+    css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "stanstock.css"
+    with chromium_browser.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())
+            for label, response in responses:
+                assert response.status_code == 200
+                page.set_content(response.content.decode())
+                page.add_style_tag(path=str(css_path))
+                facts = page.locator(".compact-opportunity .compact-opportunity-facts")
+                assert facts.count() == len(response.context["overview_cards"]) >= 2
+                for width in (320, 375, 1280, 1440):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    for row_facts in facts.all():
+                        terms = row_facts.locator(":scope > div > dt")
+                        assert terms.all_text_contents() == [
+                            "Dated close",
+                            "Relative momentum",
+                            "Action",
+                            f"{label} median cumulative price return",
+                        ]
+                        if width < 1280:
+                            assert terms.evaluate_all(
+                                """elements => elements.every(e =>
+                                    getComputedStyle(e).position === 'static' &&
+                                    e.getBoundingClientRect().height > 0 &&
+                                    e.scrollWidth <= e.clientWidth &&
+                                    e.scrollHeight <= e.clientHeight
+                                )"""
+                            )
+        finally:
+            browser.close()
+
+
 @pytest.mark.parametrize("viewport", ((320, 812), (375, 812), (1280, 900), (1440, 900)))
 @pytest.mark.parametrize("scenario", ("qualified_buy", "realistic_empty"))
 def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(

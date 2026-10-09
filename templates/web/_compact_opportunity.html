@@ -21,7 +21,7 @@
         <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
       </div>
       <div>
-        <dt>{{ projection.horizon }} median cumulative price return</dt>
+        <dt>{{ projection.label }} median cumulative price return</dt>
         <dd>{{ projection.median_return|percentage }}</dd>
       </div>
     </dl>
