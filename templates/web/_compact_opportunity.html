@@ -6,13 +6,11 @@
         <a href="{% url 'stock-detail' card.analysis.listing_id %}?horizon={{ projection.horizon }}"><h3>{{ card.listing.ticker }}</h3></a>
         <p>{{ card.listing.security.company.name }}</p>
       </div>
-      {% if price_band and not price_band.new_allocation_eligible %}<span class="badge">Under $10 watch</span>{% endif %}
     </header>
-    {% include "web/_opportunity_explanation.html" %}
     <dl class="compact-opportunity-facts">
-      <div>
+      <div class="compact-dated-close">
         <dt>Dated close</dt>
-        <dd>{{ card.analysis.current_price|price }} {{ card.listing.currency }} <small>{{ card.analysis.run.target_date }}</small></dd>
+        <dd>{{ card.analysis.current_price|price }} {{ card.listing.currency }} <time datetime="{{ card.analysis.run.target_date|date:'Y-m-d' }}">{{ card.analysis.run.target_date }}</time></dd>
       </div>
       <div>
         <dt>Relative momentum</dt>
@@ -23,15 +21,9 @@
         <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
       </div>
       <div>
-        <dt>{{ projection.label }} median cumulative return</dt>
+        <dt>{{ projection.label }} median cumulative price return</dt>
         <dd>{{ projection.median_return|percentage }}</dd>
       </div>
-      {% if not price_band %}
-        <div>
-          <dt>Reference price band</dt>
-          <dd>Unclassified</dd>
-        </div>
-      {% endif %}
     </dl>
     {% if projection.available %}
       <dl class="compact-projection" aria-label="{{ projection.label }} projection">
@@ -42,16 +34,21 @@
           </div>
         {% endfor %}
       </dl>
-      {% if projection.frequency_status != "available" %}
+    {% endif %}
+    <div class="compact-opportunity-secondary">
+      {% include "web/_opportunity_explanation.html" %}
+      {% if price_band and not price_band.new_allocation_eligible %}
+        <span class="badge">Under $10 watch</span>
+        <p class="speculative-note">Speculative watch only · 0% new allocation.</p>
+      {% elif card.blocking_reasons %}
+        <p class="muted">Restriction: {{ card.blocking_reasons.0|display_label }}</p>
+      {% endif %}
+      {% if not price_band %}<p class="muted">Reference price band: Unclassified</p>{% endif %}
+      {% if not projection.available %}
+        <p class="field-error"><strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}</p>
+      {% elif projection.frequency_status != "available" %}
         <p class="field-error"><strong>Model-estimated probabilities unavailable.</strong> {{ projection.frequency_reason|display_label }}</p>
       {% endif %}
-    {% else %}
-      <p class="field-error"><strong>{{ projection.label }} projection withheld.</strong> {{ projection.insufficiency_reason|display_label }}</p>
-    {% endif %}
-    {% if price_band and not price_band.new_allocation_eligible %}
-      <p class="speculative-note">Speculative watch only · 0% new allocation.</p>
-    {% elif card.blocking_reasons %}
-      <p class="muted">Restriction: {{ card.blocking_reasons.0|display_label }}</p>
-    {% endif %}
+    </div>
   </article>
 </li>

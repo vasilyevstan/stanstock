@@ -50,6 +50,11 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Shared headings can mask row-label regressions.** A page-wide text check
+  passed because an `aria-hidden` heading contained the expected horizon,
+  while mobile and screen-reader labels used raw codes. Assert each row's
+  human-readable label alongside its value across all supported horizons;
+  heading or explanation text is not evidence for that row's semantic term.
 - **Branch scope is not a permanent behavioral contract.** A shadow-adapter
   test compared every later change with its implementation base and blocked
   unrelated dependency updates. Keep changed-file allowlists in review

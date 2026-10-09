@@ -84,6 +84,19 @@
         <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
         Advisory only. Action uses the separate 6-month momentum decision.
       </p>
+      {# Each row retains its own semantic labels; these are visual alignment guides. #}
+      {% if overview_cards %}
+        <div class="compact-opportunity-headings" aria-hidden="true">
+          <span>Stock / company</span>
+          <span>Dated close</span>
+          <span>Relative momentum</span>
+          <span>Action</span>
+          <span>{{ selected_horizon_label }} median cumulative price return</span>
+          <span>Loss</span>
+          <span>Flat to +20%</span>
+          <span>Above +20%</span>
+        </div>
+      {% endif %}
       <ol class="compact-opportunity-list">
         {% for entry in overview_cards %}
           {% include "web/_compact_opportunity.html" with card=entry.card projection=entry.projection price_band=entry.price_band explanation=entry.explanation %}

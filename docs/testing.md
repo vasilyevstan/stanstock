@@ -125,6 +125,18 @@ Bound the DOM and distinguish the at-most-twelve shortlist cards from the
 twenty paged full cards. Empty shortlist groups must not displace the main
 results.
 
+At 1280x900 and 1440x900, representative collapsed comparison rows must be
+at most 90px high, with at least six complete rows per 600px list region and
+primary values at least 14px. Longer content and enlarged text may grow
+without clipping. Set `STANSTOCK_UI_BASE_REF` to an exact commit SHA when
+running `uv run pytest tests/test_research_product_reader_web.py -q -s`
+to compare the same fixtures against base templates/CSS in memory; the
+compactness change requires at least a 40% median-height reduction.
+Retain per-row label associations, visible restrictions, and mobile local
+labels when desktop headings are shared. Assert the human-readable horizon
+inside every row's own definition term across all four horizons; a page-wide
+text match can be satisfied by a shared heading or explanation instead.
+
 Prove that repeated GETs leave domain rows unchanged and do not call the
 provider or rerun a simulation. Preserve frozen producer/config/reader blobs
 and complete successful and withheld payload contracts, not merely equal
