@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import subprocess
 from copy import copy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html import unescape
 from pathlib import Path
+from statistics import median
 from unittest.mock import Mock
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -16,6 +19,7 @@ from uuid import UUID
 import pytest
 from django.apps import apps
 from django.db import DatabaseError, transaction
+from django.template import Context, Engine, engines
 from django.urls import reverse
 from django.utils import timezone
 from exchange_calendars import get_calendar
@@ -47,7 +51,7 @@ from stanstock.research.product_reader import (
     read_research_product_history,
 )
 from stanstock.web import product_views
-from stanstock.web.templatetags.stanstock import percentage, price
+from stanstock.web.templatetags.stanstock import display_label, percentage, price
 from test_research_product_jobs import (
     NOW,
     TARGET,
@@ -663,7 +667,7 @@ def test_native_four_layer_live_job_reader_and_authenticated_pages(
     assert "CHEAP" in content
     assert "Under $10 watch" in content
     assert "0% new allocation" in content
-    assert "6 months median cumulative return" in content
+    assert "6 months median cumulative price return" in content
     assert "T−252 through T−21 (the prior 12 months, excluding the last month)" in content
     assert "The 126-session decision horizon is a future horizon" in content
     assert all(label in content for label in ("Loss", "Flat to +20%", "Above +20%"))
@@ -1564,7 +1568,8 @@ def test_root_navigation_filters_and_pagination_use_a_compact_synthetic_adapter(
     assert regular.status_code == 200
     assert regular.content.count(b'class="compact-opportunity"') == 20
     assert regular.context["opportunity_page"].paginator.count == 105
-    assert regular.content.count(b"Loss") == 20
+    assert regular.content.count(b"<dt>Loss</dt>") == 20
+    assert regular.content.count(b"<span>Loss</span>") == 1
     assert b'href="/opportunities?price_band=under_10"' in regular.content
     assert b'aria-current="page">Opportunities</a>' in regular.content
     assert b"<summary>More</summary>" not in regular.content
@@ -1837,6 +1842,50 @@ def chromium_browser():
     return sync_api
 
 
+@pytest.fixture(scope="module")
+def opportunity_layout_base():
+    """Optional exact-revision comparison; no checkout, worktree, or scope allowlist.
+
+    Normal runs enforce absolute density. Review runs can additionally set
+    STANSTOCK_UI_BASE_REF to render the same response context using that
+    revision's complete template tree and CSS, entirely in memory.
+    """
+    revision = os.environ.get("STANSTOCK_UI_BASE_REF")
+    if revision is None:
+        return None
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), "Use an exact baseline commit SHA"
+    root = Path(__file__).resolve().parents[1]
+
+    def git(*args):
+        return subprocess.check_output(["git", "--no-pager", *args], cwd=root, text=True)
+
+    paths = git("ls-tree", "-r", "--name-only", revision, "templates").splitlines()
+    templates = {
+        path.removeprefix("templates/"): git("show", f"{revision}:{path}") for path in paths
+    }
+    engine = Engine(
+        loaders=[("django.template.loaders.locmem.Loader", templates)],
+        libraries=engines["django"].engine.libraries,
+    )
+    return revision, engine, git("show", f"{revision}:static/css/stanstock.css")
+
+
+def _comparison_density(page):
+    """Actual complete rows in the first 600px of the list, not DOM counts."""
+    return page.locator(".compact-opportunity").evaluate_all(
+        """rows => {
+            const start = rows[0].closest('ol').getBoundingClientRect().top;
+            const boxes = rows.map(row => row.getBoundingClientRect());
+            return {
+                heights: boxes.map(box => box.height),
+                complete_in_600: boxes.filter(box =>
+                    box.top >= start && box.bottom <= start + 600
+                ).length
+            };
+        }"""
+    )
+
+
 @pytest.mark.parametrize("viewport", ((320, 812), (375, 812), (1280, 900), (1440, 900)))
 @pytest.mark.parametrize("scenario", ("qualified_buy", "realistic_empty"))
 def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
@@ -1847,6 +1896,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
     monkeypatch,
     settings,
     tmp_path,
+    opportunity_layout_base,
     scenario: str,
     viewport: tuple[int, int],
 ):
@@ -1952,6 +2002,106 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 page.route("**/*", serve_rendered_route)
                 page.goto(f"http://stanstock.test{reverse('opportunities')}")
                 assert page.locator(".compact-opportunity").count() == 20
+                comparison_rows = page.locator(".compact-opportunity")
+                # The visual shared headings do not replace per-occurrence dt/dd semantics.
+                assert comparison_rows.locator("dl > div").evaluate_all(
+                    """cells => cells.every(cell =>
+                        cell.querySelectorAll(':scope > dt').length === 1 &&
+                        cell.querySelectorAll(':scope > dd').length === 1
+                    )"""
+                )
+                assert comparison_rows.locator("dd, header p, header h3").evaluate_all(
+                    "elements => elements.every(e => "
+                    "parseFloat(getComputedStyle(e).fontSize) >= 14)"
+                )
+                if viewport[0] >= 1280:
+                    headings = page.locator(".compact-opportunity-headings > span")
+                    assert headings.count() == 8
+                    columns = comparison_rows.first.locator("header, dl > div")
+                    assert columns.count() == 8
+                    heading_x = [headings.nth(i).bounding_box()["x"] for i in range(8)]
+                    value_x = [columns.nth(i).bounding_box()["x"] for i in range(8)]
+                    assert all(
+                        abs(heading - value) <= 1
+                        for heading, value in zip(heading_x, value_x, strict=True)
+                    )
+                else:
+                    assert not page.locator(".compact-opportunity-headings").is_visible()
+                    assert comparison_rows.locator("dt").evaluate_all(
+                        "elements => elements.every(e => getComputedStyle(e).position === 'static')"
+                    )
+                density = _comparison_density(page)
+                if viewport[0] >= 1280:
+                    assert max(density["heights"]) <= 90, density
+                    assert density["complete_in_600"] >= 6, density
+                    if opportunity_layout_base is not None:
+                        revision, base_engine, base_css = opportunity_layout_base
+                        context = response.context
+                        if isinstance(context, list):
+                            context = context[0]
+                        base_template = base_engine.get_template("web/product_opportunities.html")
+                        base_html = base_template.render(Context(context.flatten()))
+                        baseline_page = browser.new_page(
+                            viewport={"width": viewport[0], "height": viewport[1]}
+                        )
+                        try:
+                            baseline_page.route("**/*", lambda route: route.abort())
+                            baseline_page.set_content(base_html)
+                            baseline_page.add_style_tag(content=base_css)
+                            baseline = _comparison_density(baseline_page)
+                            base_rows = baseline_page.locator(".compact-opportunity")
+
+                            def normalize(values):
+                                return [" ".join(v.split()) for v in values]
+
+                            # Same fixture, complete values and links: denser, not less honest.
+                            for i in range(comparison_rows.count()):
+                                current_row = comparison_rows.nth(i)
+                                base_row = base_rows.nth(i)
+                                assert normalize(current_row.locator("dd").all_text_contents()) == (
+                                    normalize(base_row.locator("dd").all_text_contents())
+                                )
+                                for selector in ("header h3", "header p"):
+                                    assert current_row.locator(selector).inner_text() == (
+                                        base_row.locator(selector).inner_text()
+                                    )
+                                assert current_row.locator("a").evaluate_all(
+                                    "links => links.map(a => a.getAttribute('href'))"
+                                ) == base_row.locator("a").evaluate_all(
+                                    "links => links.map(a => a.getAttribute('href'))"
+                                )
+                                current_body = current_row.locator(
+                                    ".opportunity-explanation-body"
+                                ).text_content()
+                                base_body = base_row.locator(
+                                    ".opportunity-explanation-body"
+                                ).text_content()
+                                assert current_body == base_body
+                                assert current_row.locator(".badge").all_inner_texts() == (
+                                    base_row.locator(".badge").all_inner_texts()
+                                )
+                                current_warnings = current_row.locator(
+                                    ".compact-opportunity-secondary > p"
+                                ).all_inner_texts()
+                                base_warnings = base_row.locator(
+                                    ":scope > .speculative-note, :scope > .muted"
+                                ).all_inner_texts()
+                                assert current_warnings == base_warnings
+                            reduction = 1 - median(density["heights"]) / median(baseline["heights"])
+                            assert reduction >= 0.40, (baseline, density)
+                            print(
+                                "density-comparison",
+                                f"base={revision}",
+                                scenario,
+                                viewport,
+                                f"base_median={median(baseline['heights']):.2f}",
+                                f"candidate_median={median(density['heights']):.2f}",
+                                f"reduction={reduction:.1%}",
+                                f"complete_in_600={density['complete_in_600']}",
+                            )
+                        finally:
+                            baseline_page.close()
+                page.screenshot(path=tmp_path / "compact-opportunities.png", full_page=False)
                 assert page.locator(".shortlist-opportunity").count() == expected_shortlist_count
                 assert page.locator(".shortlist-opportunity").count() <= 12
                 assert page.locator(".shortlist-opportunity.compact-opportunity").count() == 0
@@ -2072,8 +2222,7 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 first_box = comparison.bounding_box()
                 assert first_box["y"] >= 0
                 assert first_box["y"] < viewport[1]
-                # Measure the intentional summary cost without discarding the
-                # original collapsed-row budgets or wider-font spare margin.
+                # Closed disclosure shares the secondary line with visible restrictions.
                 impact = comparison.evaluate(
                     """e => {
                         const panel = e.querySelector('.opportunity-explanation');
@@ -2087,7 +2236,8 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 assert 0 <= impact <= 45
                 if viewport[0] >= 375:
                     assert first_box["y"] + first_box["height"] <= viewport[1], first_box
-                    assert first_box["height"] <= (290 if viewport[0] == 375 else 180)
+                    if viewport[0] == 375:
+                        assert first_box["height"] <= 290
                 else:
                     # At 320px, labelled values and restrictions may wrap taller:
                     # require unclipped content, not a density/first-viewport cap.
@@ -2189,8 +2339,13 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 duplicate_panel = shortlist_cards.first.locator(".opportunity-explanation")
                 primary_summary = primary_panel.locator("summary")
                 requests_before_open = list(requests)
-                warning = comparison.locator(":scope > .speculative-note, :scope > .muted")
+                warning = comparison.locator(".compact-opportunity-secondary > p")
                 warning_text = warning.all_inner_texts()
+                if viewport[0] >= 1280 and warning.count():
+                    summary_box = comparison.locator(
+                        ".opportunity-explanation summary"
+                    ).bounding_box()
+                    assert abs(summary_box["y"] - warning.first.bounding_box()["y"]) < 16
                 primary_summary.click()
                 assert primary_panel.get_attribute("open") == ""
                 assert primary_summary.evaluate("e => getComputedStyle(e).display") == "list-item"
@@ -2300,5 +2455,229 @@ def test_synthetic_compact_opportunities_are_visible_and_do_not_overflow(
                 ]
             finally:
                 market_page.close()
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize(
+    "viewport", ((320, 812), (375, 812), (1024, 900), (1280, 900), (1440, 900), (1920, 1080))
+)
+def test_compact_comparison_preserves_adverse_and_long_content(
+    client, chromium_browser, live_product, monkeypatch, tmp_path, viewport, opportunity_layout_base
+):
+    """DTO edge cases exercise wrapping, not new calculations or persisted evidence."""
+    owner, store, _run = live_product
+    client.force_login(owner)
+    verified = read_research_product(user=owner, store=store)
+    source = verified.cards[0]
+    long_name = (
+        "Synthetic International Research, Manufacturing & Communications "
+        "Company With A Deliberately Long Unabbreviated Name"
+    )
+    long_reason = (
+        "Required corporate event and compatible liquidity evidence remain unavailable. " * 4
+    ).strip()
+    cards = []
+    for index, ticker in enumerate(("LONG", "MISSING", "WITHHELD", "WATCH", "UNCLASSIFIED"), 1):
+        card = _shortlist_presentation_card(
+            source,
+            listing_id=UUID(int=index),
+            ticker=ticker,
+            close=Decimal("9.99") if ticker == "WATCH" else Decimal("1234.56"),
+            relative_momentum=Decimal("0.15"),
+            blocking_reasons=(
+                (long_reason,) if ticker == "LONG" else ("dollar_turnover_unavailable",)
+            ),
+            target_under_10=ticker == "WATCH",
+            currency="EUR" if ticker == "UNCLASSIFIED" else "USD",
+        )
+        if ticker == "LONG":
+            security = copy(card.listing.security)
+            company = copy(security.company)
+            company.name = long_name
+            security.company = company
+            card.listing.security = security
+            card = replace(
+                card,
+                projections=tuple(
+                    replace(projection, median_return=Decimal("-0.375"))
+                    for projection in card.projections
+                ),
+            )
+        elif ticker in ("MISSING", "WITHHELD"):
+            projections = []
+            for projection in card.projections:
+                projection = replace(
+                    projection,
+                    frequencies=None,
+                    frequency_shares=(),
+                    frequency_status="absent",
+                    frequency_reason="frequency_evidence_absent",
+                )
+                if ticker == "WITHHELD":
+                    projection = replace(
+                        projection,
+                        lower_return=None,
+                        median_return=None,
+                        upper_return=None,
+                        lower_price=None,
+                        median_price=None,
+                        upper_price=None,
+                        insufficiency_reason="filter_variance_degenerate",
+                    )
+                projections.append(projection)
+            card = replace(card, projections=tuple(projections))
+        cards.append(card)
+
+    def read_presentation(request):
+        request._stanstock_product_read = replace(verified, cards=tuple(cards))
+        return request._stanstock_product_read
+
+    monkeypatch.setattr(product_views, "_read", read_presentation)
+    response = client.get(reverse("opportunities"), {"horizon": "5y"})
+    assert response.status_code == 200
+    css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "stanstock.css"
+    with chromium_browser.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+            page.route("**/*", lambda route: route.abort())
+            page.set_content(response.content.decode())
+            page.add_style_tag(path=str(css_path))
+            rows = page.locator(".compact-opportunity")
+
+            def row(ticker):
+                return rows.filter(has=page.get_by_role("heading", name=ticker, exact=True))
+
+            assert row("LONG").locator("header p").inner_text() == long_name
+            assert "-37.5%" in row("LONG").locator(".compact-opportunity-facts").inner_text()
+            restriction = row("LONG").locator(".compact-opportunity-secondary > p")
+            assert display_label(long_reason) in restriction.inner_text()
+            for ticker, message in (
+                ("MISSING", "Model-estimated probabilities unavailable. Frequency Evidence Absent"),
+                ("WITHHELD", "5 years projection withheld. Filter Variance Degenerate"),
+            ):
+                error = row(ticker).locator(".field-error")
+                assert error.is_visible()
+                assert error.inner_text() == message
+                assert row(ticker).locator(".probability-cell").count() == 0
+                facts = row(ticker).locator(".compact-opportunity-facts").inner_text()
+                assert "Positive" in facts and "HOLD" in facts
+                median_value = (
+                    row(ticker).locator(".compact-opportunity-facts dd").last.inner_text()
+                )
+                assert median_value == (
+                    "Unavailable"
+                    if ticker == "WITHHELD"
+                    else percentage(cards[1].projections[-1].median_return)
+                )
+            assert row("WATCH").locator(".badge").inner_text() == "Under $10 watch"
+            assert row("WATCH").locator(".speculative-note").is_visible()
+            assert "0% new allocation" in row("WATCH").locator(".speculative-note").inner_text()
+            assert "Reference price band: Unclassified" in row("UNCLASSIFIED").inner_text()
+            unclassified_close = row("UNCLASSIFIED").locator(".compact-dated-close")
+            assert "1,234.56 EUR" in unclassified_close.inner_text()
+            assert rows.locator("time").all_text_contents() == ["Sept. 11, 2026"] * 5
+            assert rows.locator("time").evaluate_all(
+                "elements => elements.every(e => e.dateTime === '2026-09-11')"
+            )
+            assert rows.locator("header a").evaluate_all(
+                "links => links.every(a => a.getAttribute('href').endsWith('?horizon=5y'))"
+            )
+            assert rows.locator(".opportunity-explanation[open]").count() == 0
+            normal_heights = _comparison_density(page)["heights"]
+            if opportunity_layout_base is not None and viewport[0] <= 375:
+                # Record, rather than fix or hide, the shared navigation's
+                # pre-existing overflow at a globally enlarged root font.
+                revision, base_engine, base_css = opportunity_layout_base
+                context = response.context
+                if isinstance(context, list):
+                    context = context[0]
+                base_html = base_engine.get_template("web/product_opportunities.html").render(
+                    Context(context.flatten())
+                )
+                baseline_page = browser.new_page(
+                    viewport={"width": viewport[0], "height": viewport[1]}
+                )
+                root_font = (
+                    ":root { font-size: 20px; font-family: Verdana, 'DejaVu Sans', sans-serif; }"
+                )
+                try:
+                    baseline_page.route("**/*", lambda route: route.abort())
+                    baseline_page.set_content(base_html)
+                    baseline_page.add_style_tag(content=base_css + root_font)
+                    candidate_style = page.add_style_tag(content=root_font)
+                    try:
+                        base_width = baseline_page.evaluate("document.documentElement.scrollWidth")
+                        candidate_width = page.evaluate("document.documentElement.scrollWidth")
+                        assert candidate_width <= base_width
+                        print(
+                            "shared-navigation-20px-root",
+                            f"base={revision}",
+                            viewport,
+                            f"base_width={base_width}",
+                            f"candidate_width={candidate_width}",
+                        )
+                    finally:
+                        candidate_style.evaluate("e => e.remove()")
+                finally:
+                    baseline_page.close()
+            # Enlarge every comparison label/value, not the out-of-scope site
+            # navigation. Rows may grow; no clipping to satisfy density budgets.
+            for font_size in (16, 20):
+                style = page.add_style_tag(
+                    content=":root { font-family: Verdana, 'DejaVu Sans', sans-serif; } "
+                    ".opportunities-page .compact-opportunity, "
+                    ".opportunities-page .compact-opportunity :is(h3, dt, dd) "
+                    f"{{ font-size: {font_size}px; }}"
+                )
+                try:
+                    assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
+                    assert rows.locator(
+                        "header p, dd, .compact-opportunity-secondary > p, summary"
+                    ).evaluate_all(
+                        """elements => elements.every(e => {
+                            const css = getComputedStyle(e);
+                            return e.scrollWidth <= e.clientWidth + 1 &&
+                                e.scrollHeight <= e.clientHeight + 1 &&
+                                css.overflowX !== 'hidden' && css.overflowY !== 'hidden' &&
+                                css.textOverflow !== 'ellipsis' && css.webkitLineClamp === 'none';
+                        })"""
+                    )
+                    assert rows.locator("dd").evaluate_all(
+                        "elements => elements.every(e => "
+                        "parseFloat(getComputedStyle(e).fontSize) >= 14)"
+                    )
+                    if font_size == 20:
+                        assert all(
+                            enlarged > normal
+                            for enlarged, normal in zip(
+                                _comparison_density(page)["heights"], normal_heights, strict=True
+                            )
+                        )
+                    panel = row("LONG").locator(".opportunity-explanation")
+                    summary = panel.locator("summary")
+                    summary.focus()
+                    page.keyboard.press("Enter")
+                    assert panel.get_attribute("open") == ""
+                    assert summary.evaluate(
+                        "e => e.matches(':focus-visible') && "
+                        "parseFloat(getComputedStyle(e).outlineWidth) >= 3 && "
+                        "e.getBoundingClientRect().height >= 32"
+                    )
+                    assert display_label(long_reason) in panel.inner_text()
+                    assert "median and momentum point in different directions" in panel.inner_text()
+                    body = panel.locator(".opportunity-explanation-body")
+                    assert body.evaluate("e => e.scrollWidth <= e.clientWidth")
+                    assert page.evaluate("document.documentElement.scrollWidth") <= viewport[0]
+                    assert row("LONG").locator(".compact-opportunity-secondary > p").is_visible()
+                    page.keyboard.press("Space")
+                    assert panel.get_attribute("open") is None
+                    rows.first.scroll_into_view_if_needed()
+                    page.screenshot(
+                        path=tmp_path / f"compact-adverse-{font_size}.png", full_page=False
+                    )
+                finally:
+                    style.evaluate("e => e.remove()")
         finally:
             browser.close()
