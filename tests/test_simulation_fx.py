@@ -1689,8 +1689,10 @@ def test_retired_simulation_post_rejects_mixed_selection_without_base_currency(
 def test_retired_simulation_creator_keeps_service_fx_history_readable(
     fx_client: Client,
     mixed_currency_universe: tuple[UniverseSnapshot, dict[str, Listing], AssetStore],
+    settings,
 ) -> None:
     snapshot, listings, store = mixed_currency_universe
+    settings.DATA_DIR = store.root
 
     _assert_retired_simulation_post(
         fx_client,
@@ -1733,6 +1735,7 @@ def test_retired_simulation_creator_keeps_service_fx_history_readable(
     assert run.metrics["fx_contribution_return"] == pytest.approx(result.metrics.cumulative_return)
     detail = fx_client.get(reverse("simulation-detail", args=[run.id]))
     assert detail.status_code == 200
+    assert detail.context["metrics_verified"] is True
     assert b"Converted into USD" in detail.content
     assert b"FX contribution" in detail.content
     assert b"base currency USD" in detail.content

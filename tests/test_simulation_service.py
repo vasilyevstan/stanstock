@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from collections.abc import Generator
 from datetime import date
@@ -32,6 +34,8 @@ from stanstock.simulation.service import (
     persist_simulation_run,
 )
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    ACCOUNTING_VERSION_PARAMETER,
     MissingPriceError,
     RebalanceFrequency,
     SimulationConfig,
@@ -53,6 +57,7 @@ def test_setup_models() -> tuple[SimulationDefinition, UniverseSnapshot, Listing
     company1 = Company.objects.create(name="Apple Inc", country="US")
     sec1 = Security.objects.create(company=company1, name="AAPL Common")
     listing1 = Listing.objects.create(
+        id="00000000-0000-4000-8000-000000000001",
         security=sec1,
         ticker="AAPL",
         exchange_mic="XNAS",
@@ -63,6 +68,7 @@ def test_setup_models() -> tuple[SimulationDefinition, UniverseSnapshot, Listing
     company2 = Company.objects.create(name="Microsoft Corp", country="US")
     sec2 = Security.objects.create(company=company2, name="MSFT Common")
     listing2 = Listing.objects.create(
+        id="00000000-0000-4000-8000-000000000002",
         security=sec2,
         ticker="MSFT",
         exchange_mic="XNAS",
@@ -245,6 +251,23 @@ def test_execute_and_persist_failure_records_failed_status(
     failed_run = failed_runs.first()
     assert failed_run is not None
     assert "Missing price" in failed_run.error
+    # Full stable failed-run surface (generated identity/clock are not calculation
+    # payload). Literal captured at unchanged 5aa301d before behavior edits.
+    failure_bytes = json.dumps(
+        {
+            "status": failed_run.status,
+            "input_hash": failed_run.input_hash,
+            "result_asset_key": failed_run.result_asset_key,
+            "metrics": failed_run.metrics,
+            "error": failed_run.error,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    assert hashlib.sha256(failure_bytes).hexdigest() == (
+        "9f327e66faf5e44b2a45db06fc4bb9a9f58ff25ccdfa6ed83011c6464ce59f78"
+    )
 
 
 def test_example_yaml_configs_parse_valid() -> None:
@@ -478,3 +501,100 @@ def test_run_persists_and_identifies_all_input_assets(
     assert loaded.input_assets["signals"].equals(signals)
     assert "benchmark" in loaded.input_assets
     assert loaded.input_assets["benchmark"].equals(benchmark)
+
+
+@pytest.mark.django_db
+def test_v2_registration_binds_snapshot_execution_and_coverage(
+    sim_asset_store, test_setup_models, monkeypatch
+) -> None:
+    definition, snapshot, listing, _other = test_setup_models
+    definition.config = {
+        "selected_symbols": [str(listing.id)],
+        "mode": "backtest",
+        "custom_parameters": {ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    }
+    definition.save()
+    monkeypatch.setattr("stanstock.simulation.service._get_git_revision", lambda: "b" * 40)
+    dates = [date(2026, 1, 5), date(2026, 1, 6)]
+    prices = pl.DataFrame(
+        {"date": dates, "listing_id": [str(listing.id)] * 2, "close": [64.0, 80.0]}
+    )
+    run, result = execute_and_persist_simulation(
+        definition=definition,
+        universe_snapshot=snapshot,
+        prices=prices,
+        asset_store=sim_asset_store,
+        code_revision="a" * 40,
+    )
+    contract = run.metrics["calculation_contract"]
+    assert contract["version"] == ACCOUNTING_VERSION
+    assert contract["definition_id"] == str(definition.id)
+    assert contract["universe_snapshot_id"] == str(snapshot.id)
+    assert contract["execution_revision"] == "b" * 40
+    assert contract["code_revision"] == run.code_revision == "a" * 40
+    assert contract["effective_config"] == result.config.to_dict()
+    registration = DataAsset.objects.get(kind="simulation_result", subject=str(run.id))
+    assert registration.metadata["calculation_contract"] == contract
+    loaded = load_simulation_run(run.id, asset_store=sim_asset_store)
+    assert loaded.calculation_version == ACCOUNTING_VERSION
+    assert loaded.comparison_coverage == contract["comparison_coverage"]
+    # Mutable definitions cannot relabel the execution snapshot.
+    definition.config = {"top_n": 99}
+    definition.save()
+    assert load_simulation_run(run.id, asset_store=sim_asset_store).calculation_version == (
+        ACCOUNTING_VERSION
+    )
+    run.metrics["calculation_contract"]["execution_revision"] = "c" * 40
+    run.save(update_fields=["metrics"])
+    with pytest.raises(ValueError, match="immutable registration"):
+        load_simulation_run(run.id, asset_store=sim_asset_store)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "fault",
+    ("metric_nonfinite", "trade_nonfinite", "capacity", "unknown", "unavailable_revision"),
+)
+def test_new_v2_write_guards_run_before_asset_or_row_publication(
+    sim_asset_store,
+    test_setup_models,
+    monkeypatch,
+    fault,
+):
+    definition, snapshot, listing, _other = test_setup_models
+    config = SimulationConfig(
+        selected_symbols=[str(listing.id)],
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    )
+    prices = pl.DataFrame(
+        {
+            "date": [date(2026, 1, 5)],
+            "listing_id": [str(listing.id)],
+            "close": [64.0],
+        }
+    )
+    result = AccountingEngine(config).run(prices=prices)
+    if fault == "metric_nonfinite":
+        result.metrics.cumulative_return = float("nan")
+    elif fault == "trade_nonfinite":
+        result.trades = result.trades.with_columns(pl.lit(float("inf")).alias("costs"))
+    elif fault == "capacity":
+        result.holdings = result.holdings.with_columns(pl.lit(1e30).alias("quantity"))
+    elif fault == "unknown":
+        result.config.custom_parameters[ACCOUNTING_VERSION_PARAMETER] = "unknown"
+    else:
+        monkeypatch.setattr(
+            "stanstock.simulation.service._get_git_revision",
+            lambda: "git-head-untracked",
+        )
+    writes = []
+    monkeypatch.setattr(sim_asset_store, "write_frame", lambda *_a, **_k: writes.append(True))
+    with pytest.raises(ValueError):
+        persist_simulation_run(
+            definition=definition,
+            universe_snapshot=snapshot,
+            result=result,
+            asset_store=sim_asset_store,
+        )
+    assert writes == []
+    assert SimulationRun.objects.count() == DataAsset.objects.count() == 0

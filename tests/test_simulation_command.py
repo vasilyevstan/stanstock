@@ -104,6 +104,8 @@ def test_simulate_command_portfolio_run(
     assert run.status == SimulationRun.Status.COMPLETE
     assert run.holdings.count() == 2
     assert run.trades.count() == 1
+    assert run.metrics["calculation_contract"]["version"] == "simulation-accounting-v2"
+    assert "simulation-accounting-v2" in output
 
     # Verify UUID identity on holdings and trades
     for h in run.holdings.all():

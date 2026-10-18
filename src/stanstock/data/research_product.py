@@ -22,7 +22,7 @@ import polars as pl
 from django.contrib.auth import get_user_model
 from django.db import transaction
 
-from stanstock.data.asof import AsOfData
+from stanstock.data.asof import AsOfData, PriceFrameRead
 from stanstock.data.assets import AssetStore, asset_ref_for, read_checksummed_bytes, register_asset
 from stanstock.data.live_us import load_us_universe_config
 from stanstock.data.management.config_loader import (
@@ -49,6 +49,7 @@ PRODUCT_INTAKE_CONTRACT = "research-product-intake@1"
 PRODUCT_MEMBERSHIP_KIND = "research_product_membership"
 PRODUCT_MEMBERSHIP_CONTRACT = "research-product-membership@1"
 MAX_SAVED_NAMES = 20
+type _ProductCatalogReference = StockReference
 
 
 def load_product_universe_policy() -> dict[str, Any]:
@@ -555,12 +556,24 @@ def verify_product_price_content(
     target_date: date,
     store: AssetStore,
 ) -> None:
-    """Bind normalized values to their exact raw response, not metadata alone."""
-    frame = (
-        AsOfData(cutoff, store)
-        .price_frame_for_asset_with_diagnostics(asset=asset, through_date=target_date)
-        .frame
+    _verify_product_price_content(
+        asset=asset, raw=raw, cutoff=cutoff, target_date=target_date, store=store
     )
+
+
+def _verify_product_price_content(
+    *,
+    asset: DataAsset,
+    raw: DataAsset,
+    cutoff: datetime,
+    target_date: date,
+    store: AssetStore,
+) -> PriceFrameRead:
+    """Bind normalized values to their exact raw response, not metadata alone."""
+    read = AsOfData(cutoff, store).price_frame_for_asset_with_diagnostics(
+        asset=asset, through_date=target_date
+    )
+    frame = read.frame
     if asset.provider == "synthetic_demo":
         payload = json.loads(read_checksummed_bytes(store, raw))
         if (
@@ -596,7 +609,7 @@ def verify_product_price_content(
             or frame.select("date", "close", "volume").rows() != expected
         ):
             raise ValueError("Synthetic normalized prices diverge from their raw source")
-        return
+        return read
     parsed = twelve_data.parse_daily_price_series(
         read_checksummed_bytes(store, raw),
         symbol=asset.subject,
@@ -625,6 +638,7 @@ def verify_product_price_content(
         != [(bar.trade_date, float(bar.close), bar.volume) for bar in parsed.bars]
     ):
         raise ValueError("Normalized prices diverge from their registered raw response")
+    return read
 
 
 def product_catalog_references(
@@ -676,6 +690,22 @@ def verify_product_listing_catalog(
         cutoff=cutoff,
         store=store,
     )
+    _verify_product_listing_catalog(
+        listing=listing,
+        stock_asset=stock_asset,
+        benchmark_asset=benchmark_asset,
+        references=references,
+    )
+
+
+def _verify_product_listing_catalog(
+    *,
+    listing: Listing,
+    stock_asset: DataAsset,
+    benchmark_asset: DataAsset,
+    references: tuple[StockReference, ...],
+) -> None:
+    """Existing identity checks, given invocation-local checksummed catalog rows."""
     if len(references) != 1:
         raise ValueError("Product stock does not have one exact official catalog identity")
     reference = references[0]

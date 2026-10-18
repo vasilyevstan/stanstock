@@ -10,10 +10,11 @@ from stanstock.data.fx import DEFAULT_MAX_CARRY_DAYS
 from stanstock.data.models import UniverseSnapshot
 from stanstock.simulation.builders import run_simulation_workflow
 from stanstock.simulation.models import SimulationDefinition
+from stanstock.simulation.types import ACCOUNTING_VERSION
 
 
 class Command(BaseCommand):
-    help = "Run and persist a backtest or portfolio simulation."
+    help = f"Run and persist a backtest or portfolio simulation using {ACCOUNTING_VERSION}."
 
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument("--name", default="Simulation", help="Name for the simulation")
@@ -186,6 +187,7 @@ class Command(BaseCommand):
             f"definition {definition.id} ({definition.mode}). "
             f"Cumulative return: {metrics.cumulative_return:.4%}, "
             f"trades: {metrics.total_trades}."
+            f" Calculation: {ACCOUNTING_VERSION}."
         )
         if metrics.fx_conversion_applied:
             native = ", ".join(metrics.fx_native_currencies or ())

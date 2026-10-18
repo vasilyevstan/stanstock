@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
+from uuid import uuid4
 
 import polars as pl
 import pytest
@@ -11,6 +12,7 @@ from django.db import DataError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 
 from stanstock.data.models import Company, Listing, Region, Security, UniverseSnapshot
+from stanstock.research import reporting
 from stanstock.research.models import (
     Prediction,
     PredictionOutcome,
@@ -663,6 +665,77 @@ def _case_prediction(
         data_cutoff=run.data_cutoff,
         code_revision=_VALID_REVISION,
     )
+
+
+@pytest.mark.django_db
+def test_product_scalar_projection_batches_once_and_keeps_canonical_before_status(
+    persisted_analysis,
+    monkeypatch,
+):
+    earlier = _case_prediction(persisted_analysis, 0, method_version="projection-batch-v1")
+    PredictionOutcome.objects.create(
+        prediction=earlier,
+        status="unresolved",
+        evaluation_date=earlier.target_date,
+        evaluated_at=earlier.generated_at,
+        resolution="Synthetic unresolved canonical observation",
+    )
+    values = {
+        field.attname: getattr(earlier, field.attname)
+        for field in Prediction._meta.concrete_fields
+        if not field.primary_key
+    }
+    values.update(
+        model_version="same-observation-later-execution",
+        generated_at=earlier.generated_at + timedelta(seconds=1),
+        code_revision="b" * 40,
+    )
+    later = Prediction.objects.create(**values)
+    _case_outcome(
+        later,
+        actual_return=Decimal(".1"),
+        direction_correct=True,
+        interval_covered=True,
+        signed_error=Decimal(".1"),
+    )
+    null_values = {
+        **values,
+        "model_version": "withheld-other-observation",
+        "analysis": _case_analysis(persisted_analysis, 1),
+        "listing": Listing.objects.get(ticker="RPT-1"),
+        "bear_return": None,
+        "base_return": None,
+        "bull_return": None,
+    }
+    null_values.pop("analysis_id")
+    null_values.pop("listing_id")
+    null = Prediction.objects.create(**null_values)
+    run_ids = (persisted_analysis.run_id, uuid4())
+    monkeypatch.setattr(reporting, "PRODUCT_RUN_BATCH_SIZE", 1)
+    with CaptureQueriesContext(connection) as captured:
+        rows = list(
+            reporting.iter_product_prediction_projection(
+                run_ids,
+                extra_fields=("generated_at", "code_revision"),
+            )
+        )
+    assert len(captured) == 2
+    selected = {row["id"]: row for row in rows}
+    assert selected[earlier.id]["canonical"] is True
+    assert selected[earlier.id]["outcome__status"] == "unresolved"
+    assert selected[later.id]["canonical"] is False
+    assert selected[later.id]["outcome__status"] == "matured"
+    assert selected[null.id]["outcome__status"] is None
+    assert selected[null.id]["base_return"] is None
+    with CaptureQueriesContext(connection) as captured:
+        decision, advisory, scope = reporting.product_performance_groups(run_ids)
+    assert len(captured) == 2  # no status count/recount query
+    assert not any("COUNT(" in entry["sql"].upper() for entry in captured)
+    assert decision == []
+    assert advisory == []  # non-product identities are not silently included
+    assert scope["advisory"]["non_evaluable"] == 0
+    assert scope["advisory"]["matured"] == 0
+    assert scope["advisory"]["unresolved"] == 0
 
 
 def _case_outcome(

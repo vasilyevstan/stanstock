@@ -8,13 +8,16 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import (
     Company,
+    DataAsset,
     Listing,
     Region,
     Security,
@@ -33,8 +36,16 @@ from stanstock.simulation.builders import (
     build_signals_for_backtest,
     run_simulation_workflow,
 )
+from stanstock.simulation.engine import AccountingEngine
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
-from stanstock.simulation.types import SimulationWorkflowError
+from stanstock.simulation.service import load_simulation_run, persist_simulation_run
+from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    ACCOUNTING_VERSION_PARAMETER,
+    SimulationConfig,
+    SimulationResult,
+    SimulationWorkflowError,
+)
 
 
 @pytest.fixture
@@ -92,6 +103,45 @@ def web_setup_environment(
     return snapshot, listing, store
 
 
+@pytest.fixture
+def persist_web_simulation(web_setup_environment, settings):
+    snapshot, listing, store = web_setup_environment
+    settings.DATA_DIR = store.root
+
+    def persist(version: str | None = ACCOUNTING_VERSION) -> tuple[SimulationRun, SimulationResult]:
+        config = SimulationConfig(
+            selected_symbols=[listing.ticker],
+            custom_parameters={} if version is None else {ACCOUNTING_VERSION_PARAMETER: version},
+        )
+        days = [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)]
+        prices = pl.DataFrame(
+            {
+                "date": days,
+                "close": [100.0, 110.0, 121.0],
+                "listing_id": [str(listing.id)] * 3,
+                "symbol": [listing.ticker] * 3,
+            }
+        )
+        benchmark = prices.select("date", "close")
+        result = AccountingEngine(config).run(
+            prices=prices, benchmark_prices=benchmark, calendar=days
+        )
+        definition = SimulationDefinition.objects.create(
+            name="Version disclosure", mode=config.mode.value, config=config.to_dict()
+        )
+        run = persist_simulation_run(
+            definition=definition,
+            universe_snapshot=snapshot,
+            result=result,
+            input_prices=prices,
+            input_benchmark=benchmark,
+            asset_store=store,
+        )
+        return SimulationRun.objects.get(pk=run.pk), result
+
+    return persist
+
+
 @pytest.mark.django_db
 def test_simulations_page_get(auth_client: Client) -> None:
     """GET and HEAD retain historical records, without a creator."""
@@ -117,9 +167,11 @@ def test_simulations_page_post_unauthenticated() -> None:
 def test_simulation_workflow_records_remain_readable(
     auth_client: Client,
     web_setup_environment: tuple[UniverseSnapshot, Listing, AssetStore],
+    settings,
 ) -> None:
     """The retained engine's synthetic records still have a list and detail."""
     snapshot, listing, store = web_setup_environment
+    settings.DATA_DIR = store.root
 
     _, run, _ = run_simulation_workflow(
         name="Retained synthetic portfolio",
@@ -132,7 +184,9 @@ def test_simulation_workflow_records_remain_readable(
         asset_store=store,
     )
     assert run.status == SimulationRun.Status.COMPLETE
-    assert auth_client.get(reverse("simulation-detail", args=[run.pk])).status_code == 200
+    detail = auth_client.get(reverse("simulation-detail", args=[run.pk]))
+    assert detail.status_code == 200
+    assert detail.context["metrics_verified"] is True
     assert b"Retained synthetic portfolio" in auth_client.get(reverse("simulations")).content
 
     # Verify UUID identity
@@ -140,6 +194,160 @@ def test_simulation_workflow_records_remain_readable(
         assert h.listing_id == listing.id
     for t in run.trades.all():
         assert t.listing_id == listing.id
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("version", (None, ACCOUNTING_VERSION))
+def test_simulation_detail_discloses_only_validated_calculation_version(
+    auth_client,
+    persist_web_simulation,
+    version,
+):
+    run, result = persist_web_simulation(version)
+    definition = run.definition
+    response = auth_client.get(reverse("simulation-detail", args=[run.id]))
+    assert response.status_code == 200
+    assert response.context["metrics_verified"] is True
+    if version is None:
+        assert b"Legacy calculation" in response.content
+        assert b"initial trading costs may be omitted" in response.content
+        definition.config["custom_parameters"] = {ACCOUNTING_VERSION_PARAMETER: "unknown"}
+        definition.save(update_fields=["config"])
+        unknown = auth_client.get(reverse("simulation-detail", args=[run.id]))
+        assert unknown.context["metrics_verified"] is False
+        assert b"Legacy calculation" not in unknown.content
+    else:
+        assert ACCOUNTING_VERSION.encode() in response.content
+        assert b"2 matched benchmark intervals" in response.content
+        assert b"Drawdown includes inception capital" in response.content
+        assert response.context["calculation"]["coverage"] == result.metrics.comparison_coverage
+        assert not {"calculation_contract", "comparison_coverage"} & {
+            name for name, _value in response.context["metrics"]
+        }
+        run.metrics["calculation_contract"]["effective_config"]["custom_parameters"][
+            ACCOUNTING_VERSION_PARAMETER
+        ] = "unknown"
+        run.save(update_fields=["metrics"])
+        unknown = auth_client.get(reverse("simulation-detail", args=[run.id]))
+        assert unknown.context["metrics_verified"] is False
+        assert b"Legacy calculation" not in unknown.content
+        run.metrics["calculation_contract"]["effective_config"]["custom_parameters"][
+            ACCOUNTING_VERSION_PARAMETER
+        ] = ACCOUNTING_VERSION
+        run.metrics["comparison_coverage"]["matched_intervals"] = 99
+        run.save(update_fields=["metrics"])
+        response = auth_client.get(reverse("simulation-detail", args=[run.id]))
+        assert response.context["metrics_verified"] is False
+        assert response.context["metrics"] == []
+        assert b"Calculation provenance could not be verified" in response.content
+        assert b"Legacy calculation" not in response.content
+        # Removing a v2 marker in mutable surfaces cannot create trusted legacy.
+        run.metrics.pop("calculation_contract")
+        run.metrics.pop("comparison_coverage")
+        run.save(update_fields=["metrics"])
+        definition.config["custom_parameters"] = {}
+        definition.save(update_fields=["config"])
+        response = auth_client.get(reverse("simulation-detail", args=[run.id]))
+        assert response.context["metrics_verified"] is False
+        assert b"Legacy calculation" not in response.content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "definition",
+        "snapshot",
+        "simulation_result",
+        "simulation_input_prices",
+        "simulation_input_benchmark",
+        "missing_simulation_result",
+        "missing_simulation_input_prices",
+        "missing_simulation_input_benchmark",
+    ),
+)
+def test_simulation_detail_withholds_invalid_v2_evidence_between_requests(
+    auth_client, persist_web_simulation, web_setup_environment, monkeypatch, fault
+):
+    run, _result = persist_web_simulation()
+    snapshot, _listing, store = web_setup_environment
+    url = reverse("simulation-detail", args=[run.id])
+    assert auth_client.get(url).context["metrics_verified"] is True
+    if fault == "definition":
+        other_definition = SimulationDefinition.objects.create(
+            name="Unrelated synthetic definition", mode="portfolio", config={}
+        )
+        SimulationRun.objects.filter(pk=run.id).update(definition=other_definition)
+    elif fault == "snapshot":
+        other_snapshot = UniverseSnapshot.objects.create(
+            universe=snapshot.universe,
+            as_of_date=date(2025, 12, 31),
+            grade=UniverseSnapshot.Grade.RESEARCH,
+            config_hash="unrelated-synthetic-snapshot",
+        )
+        SimulationRun.objects.filter(pk=run.id).update(universe_snapshot=other_snapshot)
+    else:
+        asset = DataAsset.objects.get(kind=fault.removeprefix("missing_"), subject=str(run.id))
+        path = store.resolve(asset.relative_path)
+        if fault.startswith("missing_"):
+            path.unlink()
+        else:
+            path.write_bytes(b"corrupt synthetic registered evidence")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("GET cannot calculate, fetch, resolve credentials or write assets")
+
+    monkeypatch.setattr(AccountingEngine, "run", forbidden)
+    monkeypatch.setattr(AssetStore, "write_bytes", forbidden)
+    monkeypatch.setattr(AssetStore, "write_frame", forbidden)
+    monkeypatch.setattr("httpx.Client.send", forbidden)
+    monkeypatch.setattr("httpx.AsyncClient.send", forbidden)
+    monkeypatch.setattr("stanstock.data.providers.twelve_data.resolve_api_key", forbidden)
+
+    def read_only(execute, sql, params, many, context):
+        assert sql.lstrip().split()[0].upper() not in {"INSERT", "UPDATE", "DELETE"}
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(read_only):
+        response = auth_client.get(url)
+    assert response.status_code == 200
+    assert response.context["metrics_verified"] is False
+    assert response.context["metrics"] == []
+    assert response.context["holdings"] == response.context["trades"] == []
+    assert b"Calculation provenance could not be verified" in response.content
+    assert str(store.root).encode() not in response.content
+    assert b"No metrics were persisted" not in response.content
+    assert b"No trades were persisted" not in response.content
+    assert b"No holdings were persisted" not in response.content
+    with pytest.raises((ValueError, RefreshVerificationError)):
+        load_simulation_run(run.id, asset_store=store)
+
+
+@pytest.mark.django_db
+def test_simulation_detail_preserves_recorded_execution_context(
+    auth_client, persist_web_simulation, web_setup_environment
+):
+    run, _result = persist_web_simulation()
+    snapshot, _listing, store = web_setup_environment
+    definition = run.definition
+    definition.mode = SimulationDefinition.Mode.PORTFOLIO
+    definition.config = {
+        "top_n": 99,
+        "custom_parameters": {ACCOUNTING_VERSION_PARAMETER: "unknown"},
+    }
+    definition.save(update_fields=["mode", "config"])
+    snapshot.grade = UniverseSnapshot.Grade.RESEARCH
+    snapshot.save(update_fields=["grade"])
+    response = auth_client.get(reverse("simulation-detail", args=[run.id]))
+    assert response.status_code == 200
+    assert response.context["metrics_verified"] is True
+    assert response.context["calculation"]["version"] == ACCOUNTING_VERSION
+    expected = (
+        f'<p class="eyebrow">{SimulationDefinition.Mode.BACKTEST.label} \u00b7 '
+        f"{UniverseSnapshot.Grade.OBSERVED.label}</p>"
+    )
+    assert expected.encode() in response.content
+    assert load_simulation_run(run.id, asset_store=store).calculation_version == ACCOUNTING_VERSION
 
 
 @pytest.mark.django_db

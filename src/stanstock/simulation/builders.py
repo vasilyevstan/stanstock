@@ -22,6 +22,8 @@ from stanstock.research.timing import is_observed_issuance_on_time
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
 from stanstock.simulation.service import execute_and_persist_simulation
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    ACCOUNTING_VERSION_PARAMETER,
     RebalanceFrequency,
     SimulationConfig,
     SimulationGrade,
@@ -639,6 +641,7 @@ def run_simulation_workflow(
         selected_symbols=cfg_selected_symbols,
         benchmark_symbol=benchmark_subject,
         base_currency=panel.base_currency,
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
     )
     config.validate()
 

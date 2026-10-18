@@ -513,6 +513,56 @@ Keep distinct:
 Registration is a separate authorized local operation; a source-code revision
 alone does not establish that it has run.
 
+## Forward scorecard and paper research
+
+These commands use existing authorized local evidence and contact no provider.
+They do not issue predictions, place orders, modify personal portfolios or
+activate the separate prospective drift study. Run them with the approved
+owner environment and exact committed execution revision, not demo defaults.
+Run from the reviewed Git checkout; an image without `.git` cannot establish
+the required execution revision for these commands.
+Replace `USER` with the intended existing owner; keep reports containing
+listing or source details out of public logs and issues.
+
+```bash
+uv run --no-sync python manage.py forecast_scorecard --owner USER --declare
+uv run --no-sync python manage.py forecast_scorecard --owner USER
+uv run --no-sync python manage.py paper_portfolio --owner USER --preview
+uv run --no-sync python manage.py paper_portfolio --owner USER --activate
+uv run --no-sync python manage.py paper_portfolio --owner USER --session YYYY-MM-DD
+uv run --no-sync python manage.py paper_portfolio --owner USER
+```
+
+Declaration is an explicit append-only operation and precedes reading matured
+losses. Reporting does not replace an existing declaration or reset its clock.
+An unmatured report has null metrics and no skill claim.
+
+Preview writes nothing. Activation publishes one immutable research policy per
+owner/version and requires the declared protocol. Retry reuses its exact
+evidence; do not delete or reseed it to improve performance. Activation freezes
+selection, not an immediate purchase: the first hypothetical execution uses
+the XNYS close strictly after activation's New York date. Session measurements
+require admissible retained prices and actual prospective chronology. Future
+or unavailable evidence is not acquired or filled in by these commands. See
+[the paper policy](methodology.md#current-method-paper-policy) for allocation,
+cost and cash conventions.
+
+Activation does not schedule measurements. The existing price-refresh job does
+not invoke the paper command: each session must be captured explicitly after
+its close and before the next session opens. A missed capture stays missing
+and withholds the complete paper measurement; a later command cannot repair
+it by backfilling. Preview and scorecard declaration do not start this one-shot
+paper experiment.
+
+The performance page uses a narrower verified projection than prediction
+history: it still validates every included historical run but builds full
+cards and frequency disclosure only for the current run. Work is shared only
+within the exact verifier invocation/request, never through a persistent
+cache. A corrupt older source suppresses complete historical reporting.
+HTTP GET does not declare protocols, calculate new forecasts or publish paper
+measurements. Verify actual page responsiveness as well as health and complete
+authorized source closure; a responsive health endpoint alone is insufficient.
+
 ## Job states
 
 | State | Meaning |
