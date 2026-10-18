@@ -237,6 +237,14 @@ the measured request must not mock authorization, physical integrity,
 canonical selection or rendering. Record phase/query/asset-read receipts
 without production profiling infrastructure or a tight CI clock assertion.
 Candidate-bound native cold and repeated HTTP checks remain separate evidence.
+The scale fixture explicitly has ABSENT frequency reports; a separate real
+producer-to-AVAILABLE-child-to-authenticated-page case counts both imported
+source-verifier paths. It proves exact-run proof sharing without memoizing
+child checks, then detects child/source corruption on the next request.
+Standalone and initially unverified-session reads must still verify their
+source. Column/config work bounds retain full raw validation and load frozen
+horizon authority once per document, only after earlier row checks pass;
+retained raw histories can be longer than the synthetic forecast window.
 
 `tests/test_forward_scorecard.py` and `tests/test_current_method_paper.py`
 exercise persistence through calculation, authorized checksum-verifying reads

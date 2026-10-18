@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -18,6 +19,7 @@ from stanstock.data.assets import AssetStore
 from stanstock.data.models import DataAsset, Listing
 from stanstock.data.research_product_demo import execute_demo_product_refresh
 from stanstock.research import product_frequency_evidence as evidence
+from stanstock.research import product_reader
 from stanstock.research.models import AnalysisRun
 from stanstock.research.price_product_frequencies import classify_terminal_log_returns
 from stanstock.research.product_frequency_evidence import (
@@ -94,6 +96,67 @@ def _assert_report_rejected(user, run, store):
     assert not result.available
     with pytest.raises((ValueError, RefreshVerificationError)):
         verify_registered_product_frequencies(run=run, store=store)
+
+
+def test_frequency_document_loads_frozen_horizons_once_per_read(registered_demo, monkeypatch):
+    _user, store = registered_demo
+    asset = DataAsset.objects.get(kind=FREQUENCY_EVIDENCE_KIND)
+    document = json.loads(store.read_bytes(asset.relative_path))
+    config = Mock(wraps=evidence.load_price_product_config)
+    monkeypatch.setattr(evidence, "load_price_product_config", config)
+
+    first = evidence._read_document(document)
+    assert first.available and len(first.frequencies) == 12
+    assert config.call_count == 1
+    assert evidence._read_document(document) == first
+    assert config.call_count == 2
+
+
+@pytest.mark.parametrize("fault", ["shape", "listing", "horizon"])
+def test_frequency_document_does_not_load_config_before_session_validation(
+    registered_demo, monkeypatch, fault
+):
+    _user, store = registered_demo
+    asset = DataAsset.objects.get(kind=FREQUENCY_EVIDENCE_KIND)
+    document = json.loads(store.read_bytes(asset.relative_path))
+    if fault == "shape":
+        document["rows"] = None
+    elif fault == "listing":
+        document["rows"][0]["unexpected"] = True
+    else:
+        document["rows"][0]["horizons"][0]["horizon"] = "unknown"
+    config = Mock(side_effect=AssertionError("configuration read preceded row validation"))
+    monkeypatch.setattr(evidence, "load_price_product_config", config)
+    with pytest.raises(ValueError, match="shape|listing row|horizon identity"):
+        evidence._read_document(document)
+    config.assert_not_called()
+
+
+@pytest.mark.parametrize("session_state", ["standalone", "empty", "verified"])
+def test_frequency_reader_requires_source_proof_with_or_without_session(
+    registered_demo, monkeypatch, session_state
+):
+    user, store = registered_demo
+    run = AnalysisRun.objects.get()
+    independent = Mock(wraps=evidence.verify_price_product_output)
+    shared = Mock(wraps=product_reader.verify_price_product_output)
+    monkeypatch.setattr(evidence, "verify_price_product_output", independent)
+    monkeypatch.setattr(product_reader, "verify_price_product_output", shared)
+    verification = (
+        None if session_state == "standalone" else product_reader.ProductVerificationSession()
+    )
+    if session_state == "verified":
+        verification.verify(run=run, store=store)
+    result = read_registered_product_frequencies(
+        user=user,
+        run=run,
+        decision_time=timezone.now(),
+        store=store,
+        verification=verification,
+    )
+    assert result.available
+    assert independent.call_count == (session_state == "standalone")
+    assert shared.call_count == (session_state != "standalone")
 
 
 def test_publication_cannot_release_its_lock_before_an_outer_transaction_commits(source_demo):

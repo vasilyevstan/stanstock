@@ -617,6 +617,7 @@ def _verify_candidate(
         run=candidate.run,
         decision_time=timezone.now(),
         store=store,
+        verification=verification,
     )
     return ProductCohort(
         run=candidate.run,

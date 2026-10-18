@@ -4,6 +4,7 @@ import hashlib
 import itertools
 import json
 import sys
+from collections import Counter
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import Mock
@@ -14,6 +15,7 @@ import polars as pl
 import pytest
 
 from stanstock.core.verification_types import RefreshVerificationError
+from stanstock.data.asof import AsOfData, PriceFrameRead
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import (
     Company,
@@ -54,6 +56,63 @@ from stanstock.research.refresh_evidence import (
 from stanstock.research.service import analyze_snapshot
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.mark.parametrize("with_volume", [False, True])
+def test_source_series_materializes_each_column_once(tmp_path, monkeypatch, with_volume) -> None:
+    from exchange_calendars import get_calendar
+
+    from stanstock.research.product_pipeline import _series_for_asset
+
+    target = date(2026, 9, 11)
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    config = load_price_product_config()
+    calendar = get_calendar("XNYS")
+    dates = [
+        day.date() for day in calendar.sessions_window(calendar.date_to_session(target), -1758)
+    ]
+    closes = [64.0 + index / 64 for index in range(len(dates))]
+    closes[0] = float("nan")  # Outside the selected window; do not validate new values.
+    volumes = [None if index % 7 == 0 else index for index in range(len(dates))]
+    columns = {"date": dates, "close": closes}
+    if with_volume:
+        columns["volume"] = volumes
+    frame = pl.DataFrame(columns)
+    asset = DataAsset(
+        provider="synthetic_demo",
+        subject="SYN",
+        sha256="a" * 64,
+        retrieved_at=now,
+        available_at=now,
+        metadata={"currency": "USD", "volume_adjustment_compatible": True},
+    )
+    calls = Counter()
+    original = pl.DataFrame.get_column
+
+    def get_column(self, name, *args, **kwargs):
+        calls[name] += 1
+        return original(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "get_column", get_column)
+    result = _series_for_asset(
+        asof=AsOfData(now, AssetStore(tmp_path)),
+        asset=asset,
+        target_date=target,
+        config=config,
+        validated_read=PriceFrameRead(asset, frame, 0),
+    )
+    assert result.dates == tuple(dates[-config.required_closes :])
+    assert result.closes == tuple(closes[-config.required_closes :])
+    assert result.volumes == (
+        tuple(
+            None if value is None else float(value) for value in volumes[-config.required_closes :]
+        )
+        if with_volume
+        else None
+    )
+    assert result.identity.asset_id == asset.id
+    assert result.volume_adjustment_compatible is True
+    assert calls == {"date": 1, "close": 1, **({"volume": 1} if with_volume else {})}
 
 
 # Full payloads captured on unchanged 5aa301d sources in both math runtimes.

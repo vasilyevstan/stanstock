@@ -50,6 +50,12 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Absent dependencies do not prove shared verification.** Performance work
+  bounds must include a real AVAILABLE frequency child and count both imported
+  source-verifier paths. Reuse only the existing exact-run proof; checksum and
+  bind the child on every read. Retained raw histories can exceed the selected
+  forecast window, so synthetic work bounds do not replace native fresh/repeat
+  timing or justify skipping full raw validation.
 - **Recorded metadata is not current physical verification.** V2 simulation
   loaders and detail pages share exact registered input/result checksum
   reads. Bind stable definition/snapshot IDs separately from the frozen
