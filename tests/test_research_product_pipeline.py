@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import Mock
@@ -55,11 +56,18 @@ from stanstock.research.service import analyze_snapshot
 pytestmark = pytest.mark.django_db
 
 
-# Full native issuance/replay payload pins, captured on unchanged 5aa301d sources.
-# No output field is stripped. Identity and clock are controlled BEFORE issuance.
-FROZEN_CHECKPOINT_PRODUCT: dict[bool, str] = {
-    False: "9eb44ebb027cde8f30b185f19da2c82849b1d11bc80b3c04ffdf8d4892d6b736",
-    True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+# Full payloads captured on unchanged 5aa301d sources in both math runtimes.
+# Unrounded NumPy/libm results differ between Darwin and Linux. Neither output
+# fields nor precision are changed; identity and clock are fixed BEFORE issuance.
+FROZEN_CHECKPOINT_PRODUCT: dict[str, dict[bool, str]] = {
+    "darwin": {
+        False: "9eb44ebb027cde8f30b185f19da2c82849b1d11bc80b3c04ffdf8d4892d6b736",
+        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+    },
+    "linux": {
+        False: "671cc0cc446541cc2e2f889dd2c6f771efca94b654bd797a6245f5a9faa54f9a",
+        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+    },
 }
 
 
@@ -173,7 +181,12 @@ def test_checkpoint_frozen_native_issuance_replay(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
     digest = hashlib.sha256(complete_bytes).hexdigest()
-    assert digest == FROZEN_CHECKPOINT_PRODUCT[withheld], (withheld, digest, len(complete_bytes))
+    assert digest == FROZEN_CHECKPOINT_PRODUCT[sys.platform][withheld], (
+        sys.platform,
+        withheld,
+        digest,
+        len(complete_bytes),
+    )
 
 
 @pytest.mark.parametrize(

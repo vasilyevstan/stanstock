@@ -230,6 +230,9 @@ reviews and should not be re-litigated without an explicit new decision.
   input generation can differ across platforms. Use exactly representable
   inputs for a literal content-hash golden and separately prove sensitivity
   to a one-ULP input change; do not weaken production precision or hashing.
+  Complete unrounded NumPy/libm outputs can still differ between Darwin and
+  Linux: capture strict per-runtime goldens from the same frozen base, not
+  rounded or stripped output.
 - **Dependency diagnostics are command output too.** A count-only summary
   does not protect private symbols when HTTP-client logs contain request URLs.
   Protect native acquisition services, not only command wrappers. Overlapping

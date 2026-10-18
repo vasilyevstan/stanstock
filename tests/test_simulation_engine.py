@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import date, timedelta
 
 import polars as pl
@@ -23,18 +24,26 @@ def _make_daily_dates(start: date, count: int) -> list[date]:
     return [start + timedelta(days=i) for i in range(count)]
 
 
-# Captured before behavior edits at 5aa301dd87a512342d0a10a84aa4eab7630cc5fa.
+# Captured from unchanged 5aa301d sources on Darwin and Linux.
 # These hashes cover COMPLETE canonical config, input identity, frames (including
 # schemas), metrics and unresolved payloads, not a selection of corrected fields.
-FROZEN_V1_PAYLOADS: dict[str, str] = {
-    "success": "c09905056a3031fd9d9552b9fd7e3213497260f647747246e2fa4253ccdad9a9",
-    "gap": "288283deae1fd0ec6ad0c296eb1b9850f5bb74989bd4a86ac4d1fa0be41e7e43",
-    "friction": "fb4cf2845661e43f21279507304ad77411e4c4c509984b8cad087d07b481216c",
-    "insufficiency": "9870046fd769342b8e311b7b6656e374c713d2ca2d1dc4f103b6f324a107a1b3",
+FROZEN_V1_PAYLOADS: dict[str, dict[str, str]] = {
+    "darwin": {
+        "success": "c09905056a3031fd9d9552b9fd7e3213497260f647747246e2fa4253ccdad9a9",
+        "gap": "288283deae1fd0ec6ad0c296eb1b9850f5bb74989bd4a86ac4d1fa0be41e7e43",
+        "friction": "fb4cf2845661e43f21279507304ad77411e4c4c509984b8cad087d07b481216c",
+        "insufficiency": "9870046fd769342b8e311b7b6656e374c713d2ca2d1dc4f103b6f324a107a1b3",
+    },
+    "linux": {
+        "success": "b5fd6b2a4d6c8dabdb561824132c17c014936fb4c8d063fa5c9489f1a046f07d",
+        "gap": "288283deae1fd0ec6ad0c296eb1b9850f5bb74989bd4a86ac4d1fa0be41e7e43",
+        "friction": "fb4cf2845661e43f21279507304ad77411e4c4c509984b8cad087d07b481216c",
+        "insufficiency": "9870046fd769342b8e311b7b6656e374c713d2ca2d1dc4f103b6f324a107a1b3",
+    },
 }
 
 
-@pytest.mark.parametrize("case", FROZEN_V1_PAYLOADS)
+@pytest.mark.parametrize("case", FROZEN_V1_PAYLOADS[sys.platform])
 def test_checkpoint_frozen_v1_complete_payload(case: str) -> None:
     dates = _make_daily_dates(date(2026, 1, 5), 5)
     # All inputs are exactly representable; no platform-dependent exp/sin fixture.
@@ -78,7 +87,12 @@ def test_checkpoint_frozen_v1_complete_payload(case: str) -> None:
         payload, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
     ).encode()
     digest = hashlib.sha256(complete_bytes).hexdigest()
-    assert digest == FROZEN_V1_PAYLOADS[case], (case, digest, len(complete_bytes))
+    assert digest == FROZEN_V1_PAYLOADS[sys.platform][case], (
+        sys.platform,
+        case,
+        digest,
+        len(complete_bytes),
+    )
 
 
 @pytest.mark.parametrize(
