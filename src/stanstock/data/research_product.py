@@ -610,11 +610,9 @@ def _verify_product_price_content(
         ):
             raise ValueError("Synthetic normalized prices diverge from their raw source")
         return read
-    parsed = twelve_data.parse_daily_price_series(
+    parsed = twelve_data._parse_daily_price_projection(
         read_checksummed_bytes(store, raw),
         symbol=asset.subject,
-        retrieved_at=raw.retrieved_at,
-        source_url=str(raw.metadata.get("source_url", "")),
         start_date=asset.period_start,
         end_date=min(target_date, asset.period_end) if asset.period_end else target_date,
         adjustment=str(raw.metadata.get("adjustment", "")),
@@ -635,7 +633,7 @@ def _verify_product_price_content(
         frame.schema.get("close") != pl.Float64
         or frame.schema.get("volume") != pl.Int64
         or frame.select("date", "close", "volume").rows()
-        != [(bar.trade_date, float(bar.close), bar.volume) for bar in parsed.bars]
+        != [(day, float(close), volume) for day, close, volume in parsed.values]
     ):
         raise ValueError("Normalized prices diverge from their registered raw response")
     return read

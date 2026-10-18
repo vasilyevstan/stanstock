@@ -456,7 +456,7 @@ def _select_product_source(
             listing_id=listing.id,
             target_date=target_date,
             decision_time=decision_time,
-            calendar_sessions=_required_sessions(target_date, config.required_closes),
+            calendar_sessions=stock_series.dates,
             stock=stock_series,
             benchmark=benchmark_series,
             source_execution=source_execution,
@@ -1599,7 +1599,8 @@ def _series_for_asset(
             "price_sessions_incomplete", "Price evidence has a missing XNYS session"
         )
     indices = [values[day] for day in sessions]
-    closes = tuple(float(frame.get_column("close")[index]) for index in indices)
+    close_values = frame.get_column("close").to_list()
+    closes = tuple(float(close_values[index]) for index in indices)
     if any(not math.isfinite(value) or value <= 0 for value in closes):
         raise PriceProductInputError(
             "price_close_invalid", "Price evidence has a non-positive or non-finite close"
@@ -1616,11 +1617,9 @@ def _series_for_asset(
         ) from None
     volume_values: tuple[float | None, ...] | None = None
     if "volume" in frame.columns:
+        volumes = frame.get_column("volume").to_list()
         volume_values = tuple(
-            None
-            if frame.get_column("volume")[index] is None
-            else float(frame.get_column("volume")[index])
-            for index in indices
+            None if volumes[index] is None else float(volumes[index]) for index in indices
         )
     metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
     return PriceSeries(

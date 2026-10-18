@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID
 
 from django.conf import settings
@@ -59,6 +59,9 @@ from stanstock.research.price_product_frequencies import (
 )
 from stanstock.research.price_product_study import load_price_product_sources
 from stanstock.research.product_pipeline import _jsonable, verify_price_product_output
+
+if TYPE_CHECKING:
+    from stanstock.research.product_reader import ProductVerificationSession
 
 FREQUENCY_EVIDENCE_KIND = "research_product_frequency_evidence"
 FREQUENCY_EVIDENCE_CONTRACT = "research-product-frequency-evidence@1"
@@ -252,6 +255,7 @@ def read_registered_product_frequencies(
     run: AnalysisRun,
     decision_time: datetime,
     store: AssetStore,
+    verification: ProductVerificationSession | None = None,
 ) -> ProductFrequencyRead:
     """Read one exact-run report subject to current rights and an as-of cutoff."""
 
@@ -305,6 +309,7 @@ def read_registered_product_frequencies(
             expected_provider=expected_provider,
             decision_time=decision_time,
             verify_source=True,
+            verification=verification,
         )
         return _read_document(document)
     except ProviderConfigurationError:
@@ -708,6 +713,7 @@ def _validate_registered_asset(
     expected_provider: str | None = None,
     decision_time: datetime | None = None,
     verify_source: bool = False,
+    verification: ProductVerificationSession | None = None,
 ) -> dict[str, Any]:
     payload = read_checksummed_bytes(store, asset)
     try:
@@ -767,7 +773,10 @@ def _validate_registered_asset(
     parsed = _read_document(document)
     _verify_reader_row_bindings(parsed=parsed, run=expected_run, document=document)
     if verify_source:
-        verify_price_product_output(run=expected_run, store=store, replay=False)
+        if verification is None:
+            verify_price_product_output(run=expected_run, store=store, replay=False)
+        else:
+            verification.verify(run=expected_run, store=store)
     return document
 
 
@@ -831,6 +840,7 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
         raise ValueError("Frequency evidence shape is invalid")
     expected: set[tuple[str, str]] = set()
     values: list[RegisteredFrequency] = []
+    horizon_sessions: dict[str, int] | None = None
     for listing in rows:
         if not isinstance(listing, Mapping) or set(listing) != _FREQUENCY_LISTING_KEYS:
             raise ValueError("Frequency listing row is invalid")
@@ -859,9 +869,13 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
             ):
                 raise ValueError("Frequency horizon source identity is invalid")
             expected.add((str(listing_id), horizon))
+            if horizon_sessions is None:
+                horizon_sessions = dict(load_price_product_config().simulation.horizons)
             frequency = HorizonFrequencies(
                 horizon=horizon,
-                sessions=_sessions_for_horizon(horizon, raw.get("sessions")),
+                sessions=_sessions_for_horizon(
+                    raw.get("sessions"), expected=horizon_sessions.get(horizon)
+                ),
                 path_count=_positive_int(raw.get("path_count")),
                 counts=_read_counts(raw.get("counts"), path_count=path_count),
                 zero_drift_counts=_read_counts(raw.get("zero_drift_counts"), path_count=path_count),
@@ -984,8 +998,7 @@ def _optional_reason(value: object) -> str | None:
     return value
 
 
-def _sessions_for_horizon(horizon: str, value: object) -> int:
-    expected = dict(load_price_product_config().simulation.horizons).get(horizon)
+def _sessions_for_horizon(value: object, *, expected: int | None) -> int:
     if type(value) is not int or expected is None or value != expected:
         raise ValueError("Frequency horizon sessions do not match the frozen configuration")
     return value

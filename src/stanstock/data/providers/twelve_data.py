@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -52,6 +53,18 @@ DEFAULT_USER_AGENT = (
 )
 MAX_OUTPUT_SIZE = 5_000
 SUPPORTED_ADJUSTMENTS = frozenset({"all", "splits", "dividends", "none"})
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedDailyPrices:
+    currency: str | None
+    exchange: str | None
+    mic_code: str | None
+    instrument_type: str | None
+    exchange_timezone: str | None
+    adjustment: str
+    bars: tuple[PriceBar, ...]
+    values: tuple[tuple[date, Decimal, int | None], ...]
 
 
 def resolve_api_key(
@@ -159,10 +172,9 @@ def parse_daily_price_series(
     adjustment: str = "splits",
 ) -> PriceSeries:
     """Reproduce a registered provider response without credentials or network."""
-    normalized_symbol = _normalize_symbol(symbol)
-    if adjustment not in SUPPORTED_ADJUSTMENTS:
-        raise ValueError("Persisted price adjustment is unsupported")
-    payload = _load_json_payload(raw_bytes, context=f"daily prices for {normalized_symbol}")
+    normalized_symbol, payload = _persisted_price_payload(
+        raw_bytes, symbol=symbol, adjustment=adjustment
+    )
     return _price_series_from_payload(
         payload,
         symbol=normalized_symbol,
@@ -173,6 +185,38 @@ def parse_daily_price_series(
         source_url=source_url,
         raw_bytes=raw_bytes,
     )
+
+
+def _parse_daily_price_projection(
+    raw_bytes: bytes,
+    *,
+    symbol: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    adjustment: str = "splits",
+) -> _ParsedDailyPrices:
+    """Fully validate raw prices without collecting discarded public records."""
+    normalized_symbol, payload = _persisted_price_payload(
+        raw_bytes, symbol=symbol, adjustment=adjustment
+    )
+    return _parse_price_payload(
+        payload,
+        symbol=normalized_symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjustment=adjustment,
+        projection=True,
+    )
+
+
+def _persisted_price_payload(
+    raw_bytes: bytes, *, symbol: str, adjustment: str
+) -> tuple[str, dict[str, Any]]:
+    normalized_symbol = _normalize_symbol(symbol)
+    if adjustment not in SUPPORTED_ADJUSTMENTS:
+        raise ValueError("Persisted price adjustment is unsupported")
+    payload = _load_json_payload(raw_bytes, context=f"daily prices for {normalized_symbol}")
+    return normalized_symbol, payload
 
 
 def _price_series_from_payload(
@@ -186,6 +230,39 @@ def _price_series_from_payload(
     source_url: str,
     raw_bytes: bytes,
 ) -> PriceSeries:
+    parsed = _parse_price_payload(
+        payload,
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjustment=adjustment,
+        projection=False,
+    )
+    return PriceSeries(
+        provider=PROVIDER,
+        symbol=symbol,
+        currency=parsed.currency,
+        bars=parsed.bars,
+        retrieved_at=retrieved_at,
+        source_url=source_url,
+        raw_bytes=raw_bytes,
+        exchange=parsed.exchange,
+        mic_code=parsed.mic_code,
+        instrument_type=parsed.instrument_type,
+        exchange_timezone=parsed.exchange_timezone,
+        adjustment=parsed.adjustment,
+    )
+
+
+def _parse_price_payload(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    start_date: date | None,
+    end_date: date | None,
+    adjustment: str,
+    projection: bool,
+) -> _ParsedDailyPrices:
     normalized_symbol = symbol
     try:
         meta = _required_mapping(payload, "meta", context=normalized_symbol)
@@ -206,27 +283,24 @@ def _price_series_from_payload(
             raise ProviderResponseError(
                 f"Twelve Data returned no daily values for symbol {normalized_symbol!r}"
             )
-        bars = _parse_bars(
+        bars, values = _parse_bars(
             raw_values,
             symbol=normalized_symbol,
             start_date=start_date,
             end_date=end_date,
+            projection=projection,
         )
     except ProviderResponseError as exc:
         raise ProviderDataError(str(exc)) from exc
-    return PriceSeries(
-        provider=PROVIDER,
-        symbol=normalized_symbol,
+    return _ParsedDailyPrices(
         currency=_optional_text(meta.get("currency")),
-        bars=bars,
-        retrieved_at=retrieved_at,
-        source_url=source_url,
-        raw_bytes=raw_bytes,
         exchange=_optional_text(meta.get("exchange")),
         mic_code=_optional_text(meta.get("mic_code")),
         instrument_type=_optional_text(meta.get("type")),
         exchange_timezone=_optional_text(meta.get("exchange_timezone")),
         adjustment=adjustment,
+        bars=bars,
+        values=values,
     )
 
 
@@ -480,8 +554,10 @@ def _parse_bars(
     symbol: str,
     start_date: date | None,
     end_date: date | None,
-) -> tuple[PriceBar, ...]:
+    projection: bool,
+) -> tuple[tuple[PriceBar, ...], tuple[tuple[date, Decimal, int | None], ...]]:
     bars: list[PriceBar] = []
+    values: list[tuple[date, Decimal, int | None]] = []
     seen_dates: set[date] = set()
     for index, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
@@ -511,34 +587,42 @@ def _parse_bars(
         low = _optional_decimal(raw_row.get("low"), field="low", symbol=symbol)
         close = _required_decimal(raw_row.get("close"), field="close", symbol=symbol)
         volume = _optional_volume(raw_row.get("volume"), symbol=symbol)
-        prices = [value for value in (open_price, high, low, close) if value is not None]
-        if any(value <= 0 for value in prices):
+        if (
+            (open_price is not None and open_price <= 0)
+            or (high is not None and high <= 0)
+            or (low is not None and low <= 0)
+            or close <= 0
+        ):
             raise ProviderResponseError(
                 f"Twelve Data returned a non-positive OHLC value for {symbol!r} on {trade_date}"
             )
-        if high is not None and high < max(value for value in (open_price, close) if value):
+        if high is not None and (high < close or (open_price is not None and high < open_price)):
             raise ProviderResponseError(
                 f"Twelve Data high was below open/close for {symbol!r} on {trade_date}"
             )
-        if low is not None and low > min(value for value in (open_price, close) if value):
+        if low is not None and (low > close or (open_price is not None and low > open_price)):
             raise ProviderResponseError(
                 f"Twelve Data low was above open/close for {symbol!r} on {trade_date}"
             )
-        bars.append(
-            PriceBar(
-                trade_date=trade_date,
-                open=open_price,
-                high=high,
-                low=low,
-                close=close,
-                volume=volume,
+        if projection:
+            values.append((trade_date, close, volume))
+        else:
+            bars.append(
+                PriceBar(
+                    trade_date=trade_date,
+                    open=open_price,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                )
             )
-        )
         seen_dates.add(trade_date)
-    if not bars:
+    if not seen_dates:
         raise ProviderResponseError(f"Twelve Data returned no rows for {symbol!r}")
     bars.sort(key=lambda bar: bar.trade_date)
-    return tuple(bars)
+    values.sort(key=lambda row: row[0])
+    return tuple(bars), tuple(values)
 
 
 def _required_decimal(value: object, *, field: str, symbol: str) -> Decimal:
@@ -554,10 +638,13 @@ def _optional_decimal(
     field: str,
     symbol: str,
 ) -> Decimal | None:
-    if value is None or str(value).strip() == "":
+    if value is None:
+        return None
+    text = str(value)
+    if text.strip() == "":
         return None
     try:
-        parsed = Decimal(str(value))
+        parsed = Decimal(text)
     except InvalidOperation as exc:
         raise ProviderResponseError(
             f"Twelve Data row for {symbol!r} had invalid {field!r}: {value!r}"

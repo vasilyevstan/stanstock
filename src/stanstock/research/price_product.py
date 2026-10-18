@@ -1249,6 +1249,8 @@ def _finite_positive_array(values: tuple[float, ...], reason_code: str) -> npt.N
 
 
 def _canonical_float(value: float) -> str:
+    if type(value) is float and math.isfinite(value):
+        return value.hex()
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))

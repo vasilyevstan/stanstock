@@ -4,6 +4,8 @@ import hashlib
 import itertools
 import json
 import sys
+from collections import Counter
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import Mock
@@ -14,6 +16,7 @@ import polars as pl
 import pytest
 
 from stanstock.core.verification_types import RefreshVerificationError
+from stanstock.data.asof import AsOfData, PriceFrameRead
 from stanstock.data.assets import AssetStore, register_asset
 from stanstock.data.models import (
     Company,
@@ -24,6 +27,7 @@ from stanstock.data.models import (
     UniverseSnapshot,
 )
 from stanstock.data.research_product import capture_product_intake, materialize_product_membership
+from stanstock.research import product_pipeline
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product import SourceExecutionBinding, calculate_price_product
 from stanstock.research.price_product_config import (
@@ -54,6 +58,63 @@ from stanstock.research.refresh_evidence import (
 from stanstock.research.service import analyze_snapshot
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.mark.parametrize("with_volume", [False, True])
+def test_source_series_materializes_each_column_once(tmp_path, monkeypatch, with_volume) -> None:
+    from exchange_calendars import get_calendar
+
+    from stanstock.research.product_pipeline import _series_for_asset
+
+    target = date(2026, 9, 11)
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    config = load_price_product_config()
+    calendar = get_calendar("XNYS")
+    dates = [
+        day.date() for day in calendar.sessions_window(calendar.date_to_session(target), -1758)
+    ]
+    closes = [64.0 + index / 64 for index in range(len(dates))]
+    closes[0] = float("nan")  # Outside the selected window; do not validate new values.
+    volumes = [None if index % 7 == 0 else index for index in range(len(dates))]
+    columns = {"date": dates, "close": closes}
+    if with_volume:
+        columns["volume"] = volumes
+    frame = pl.DataFrame(columns)
+    asset = DataAsset(
+        provider="synthetic_demo",
+        subject="SYN",
+        sha256="a" * 64,
+        retrieved_at=now,
+        available_at=now,
+        metadata={"currency": "USD", "volume_adjustment_compatible": True},
+    )
+    calls = Counter()
+    original = pl.DataFrame.get_column
+
+    def get_column(self, name, *args, **kwargs):
+        calls[name] += 1
+        return original(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "get_column", get_column)
+    result = _series_for_asset(
+        asof=AsOfData(now, AssetStore(tmp_path)),
+        asset=asset,
+        target_date=target,
+        config=config,
+        validated_read=PriceFrameRead(asset, frame, 0),
+    )
+    assert result.dates == tuple(dates[-config.required_closes :])
+    assert result.closes == tuple(closes[-config.required_closes :])
+    assert result.volumes == (
+        tuple(
+            None if value is None else float(value) for value in volumes[-config.required_closes :]
+        )
+        if with_volume
+        else None
+    )
+    assert result.identity.asset_id == asset.id
+    assert result.volume_adjustment_compatible is True
+    assert calls == {"date": 1, "close": 1, **({"volume": 1} if with_volume else {})}
 
 
 # Full payloads captured on unchanged 5aa301d sources in both math runtimes.
@@ -507,13 +568,20 @@ def test_public_analyze_snapshot_dispatches_product_writer(tmp_path) -> None:
     assert results[0].run.config_version == "research-product-v1"
 
 
-def test_verified_source_window_round_trips_without_asset_reselection(tmp_path) -> None:
+@pytest.mark.parametrize("bound_assets", [False, True])
+def test_verified_source_window_round_trips_without_asset_reselection(
+    tmp_path, monkeypatch, bound_assets
+) -> None:
     store = AssetStore(tmp_path)
     target = date(2026, 9, 11)
     decision_time = datetime(2026, 9, 12, tzinfo=UTC)
     listing, _snapshot = _listing_and_snapshot(target, store)
-    _price_assets(store, "SYN", target, decision_time)
-    _price_assets(store, "SPY", target, decision_time)
+    stock_asset = _price_assets(store, "SYN", target, decision_time)
+    benchmark_asset = _price_assets(store, "SPY", target, decision_time)
+    config = load_price_product_config()
+    expected_sessions = product_pipeline._required_sessions(target, config.required_closes)
+    calendar = Mock(wraps=product_pipeline._required_sessions)
+    monkeypatch.setattr(product_pipeline, "_required_sessions", calendar)
     source = select_product_source(
         listing=listing,
         target_date=target,
@@ -522,9 +590,21 @@ def test_verified_source_window_round_trips_without_asset_reselection(tmp_path) 
         benchmark_subject="SPY",
         source_execution=SourceExecutionBinding(mode="synthetic_demo", evidence_grade="research"),
         store=store,
-        config=load_price_product_config(),
+        config=config,
+        stock_asset=stock_asset if bound_assets else None,
+        benchmark_asset=benchmark_asset if bound_assets else None,
     )
 
+    assert calendar.call_count == (2 if bound_assets else 4)
+    assert source.product_input.calendar_sessions is source.product_input.stock.dates
+    expected_input = replace(source.product_input, calendar_sessions=expected_sessions)
+    assert source.product_input.calendar_sessions == expected_sessions
+    assert product_pipeline.complete_input_hash(source.product_input) == (
+        product_pipeline.complete_input_hash(expected_input)
+    )
+    assert verified_source_window_payload(source) == verified_source_window_payload(
+        replace(source, product_input=expected_input)
+    )
     assert (
         price_product_input_from_verified_source_window(verified_source_window_payload(source))
         == source.product_input

@@ -30,7 +30,7 @@ from stanstock.data.research_product import (
     materialize_product_membership,
 )
 from stanstock.portfolio.models import TrackedSymbol
-from stanstock.research import product_pipeline, product_reader
+from stanstock.research import product_frequency_evidence, product_pipeline, product_reader
 from stanstock.research.models import Prediction
 from stanstock.research.price_product import (
     SourceExecutionBinding,
@@ -300,6 +300,7 @@ def measured_request(monkeypatch):
 
     instrument(product_reader, "_select_authorized_candidates", "selection")
     instrument(product_reader, "verify_price_product_output", "verification")
+    instrument(product_frequency_evidence, "verify_price_product_output", "verification")
     instrument(product_pipeline, "product_catalog_references", "catalog_proofs")
     instrument(product_pipeline, "_validate_price_asset_with_frame", "price_proofs")
     instrument(product_reader, "_build_cards", "current_cards")
@@ -362,11 +363,66 @@ def test_native_performance_workload(
     assert calls["scalar_projections"] == 1
     assert calls["aggregation_queries"] == 1
     assert calls["current_cards"] == calls["current_frequency"] == 1
+    assert all(
+        projection.frequency_status == "absent"
+        for card in response.context["product"].cards
+        for projection in card.projections
+    )
     assert len(response.context["product"].admissions) == 109
     assert response.context["product"].admitted_count == analyzed
     assert response.context["product"].rejected_count == 109 - analyzed
     blocked.assert_not_called()
     print(f"\nPERFORMANCE cohorts={cohorts} analyzed={analyzed} {dict(timings)} {dict(calls)}")
+
+
+@pytest.mark.parametrize("fault", ["frequency_child", "source_price"])
+def test_available_frequency_child_shares_only_exact_source_proof(
+    tmp_path, monkeypatch, django_user_model, settings, client, fault
+):
+    owner, store, runs, blocked = build_native_workload(
+        tmp_path, monkeypatch, django_user_model, settings, cohorts=1, analyzed=2
+    )
+    monkeypatch.setattr(timezone, "now", lambda: NOW + timedelta(minutes=5))
+    child = product_frequency_evidence.register_product_frequencies(run=runs[0], store=store)
+    child_read = Mock(wraps=product_frequency_evidence._validate_registered_asset)
+    monkeypatch.setattr(product_frequency_evidence, "_validate_registered_asset", child_read)
+    client.force_login(owner)
+    with measured_request(monkeypatch) as (_timings, calls):
+        first = client.get(reverse("performance"))
+    assert first.status_code == 200 and first.context["history"].available
+    assert len(first.context["history"].runs) == 1
+    assert first.context["product"].cards[0].projections[0].frequency_status == "available"
+    assert b"Registered terminal-path shares are available for this issuance." in first.content
+    assert calls["verification"] == calls["registry_enumerations"] == 1
+    assert child_read.call_count == 1
+
+    if fault == "frequency_child":
+        store.resolve(child.relative_path).write_bytes(b"corrupt registered child")
+    else:
+        price = DataAsset.objects.filter(
+            kind="price_history", subject=first.context["product"].cards[0].listing.provider_symbol
+        ).get()
+        store.resolve(price.relative_path).write_bytes(b"corrupt current source")
+    with measured_request(monkeypatch) as (_timings, second_calls):
+        second = client.get(reverse("performance"))
+    assert second.status_code == 200
+    if fault == "frequency_child":
+        assert second.context["history"].available
+        assert (
+            second.context["product"].cards[0].projections[0].frequency_status == "integrity_failed"
+        )
+        assert (
+            b"Registered terminal-path shares are available for this issuance."
+            not in second.content
+        )
+        assert child_read.call_count == 2
+    else:
+        assert second.context["history"].status == "integrity_failed"
+        assert second.context["history"].verification_code == "asset_corrupt"
+        assert second.context["history"].runs == ()
+        assert second.context["decision_groups"] == []
+    assert second_calls["verification"] == 1
+    blocked.assert_not_called()
 
 
 @pytest.mark.parametrize("fault", ["calculation", "price", "missing_price"])
