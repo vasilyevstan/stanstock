@@ -511,16 +511,20 @@ def _parse_bars(
         low = _optional_decimal(raw_row.get("low"), field="low", symbol=symbol)
         close = _required_decimal(raw_row.get("close"), field="close", symbol=symbol)
         volume = _optional_volume(raw_row.get("volume"), symbol=symbol)
-        prices = [value for value in (open_price, high, low, close) if value is not None]
-        if any(value <= 0 for value in prices):
+        if (
+            (open_price is not None and open_price <= 0)
+            or (high is not None and high <= 0)
+            or (low is not None and low <= 0)
+            or close <= 0
+        ):
             raise ProviderResponseError(
                 f"Twelve Data returned a non-positive OHLC value for {symbol!r} on {trade_date}"
             )
-        if high is not None and high < max(value for value in (open_price, close) if value):
+        if high is not None and (high < close or (open_price is not None and high < open_price)):
             raise ProviderResponseError(
                 f"Twelve Data high was below open/close for {symbol!r} on {trade_date}"
             )
-        if low is not None and low > min(value for value in (open_price, close) if value):
+        if low is not None and (low > close or (open_price is not None and low > open_price)):
             raise ProviderResponseError(
                 f"Twelve Data low was above open/close for {symbol!r} on {trade_date}"
             )
@@ -554,10 +558,13 @@ def _optional_decimal(
     field: str,
     symbol: str,
 ) -> Decimal | None:
-    if value is None or str(value).strip() == "":
+    if value is None:
+        return None
+    text = str(value)
+    if text.strip() == "":
         return None
     try:
-        parsed = Decimal(str(value))
+        parsed = Decimal(text)
     except InvalidOperation as exc:
         raise ProviderResponseError(
             f"Twelve Data row for {symbol!r} had invalid {field!r}: {value!r}"

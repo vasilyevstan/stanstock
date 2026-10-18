@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
-from datetime import date
+from dataclasses import asdict
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -83,6 +87,103 @@ def _result(
         content=json.dumps(payload).encode(),
         url=url,
     )
+
+
+def _price_parser_characterization() -> tuple[str, int, int]:
+    row = {
+        "datetime": "2026-09-04",
+        "open": "2",
+        "high": "3",
+        "low": "1",
+        "close": "2",
+        "volume": "10",
+    }
+    values = (None, "", "1", "2", "3", "0", "-1", "NaN", "Infinity", "bad")
+    cases = [
+        ([{**row, "open": opening, "high": high, "low": low}], None, None)
+        for opening, high, low in itertools.product(values, repeat=3)
+    ]
+    for field in row:
+        cases.extend(
+            ([{**row, field: value}], None, None)
+            for value in (
+                None,
+                "",
+                " \t",
+                True,
+                False,
+                0,
+                1.5,
+                "sNaN",
+                "1E-999",
+                "1E+999",
+                " 2.000 ",
+            )
+        )
+    cases.extend(
+        [
+            ([], None, None),
+            ([None], None, None),
+            ([row, row], None, None),
+            ([row, {**row, "datetime": "2026-09-03"}], None, None),
+            ([row], date(2026, 9, 5), None),
+            ([row], None, date(2026, 9, 3)),
+            ([{**row, "open": "0", "volume": "bad"}], None, None),
+            ([{**row, "high": "1", "low": "3"}], None, None),
+            ([{**row, "low": "bad", "close": "bad"}], None, None),
+            ([{**row, "datetime": "bad", "open": "bad"}], None, None),
+        ]
+    )
+    outcomes = []
+    accepted = rejected = 0
+    for rows, start, end in cases:
+        raw = json.dumps({**VALID_SERIES, "values": rows}, sort_keys=True).encode()
+        outcome = {"raw": raw.hex(), "start": start, "end": end}
+        try:
+            parsed = twelve_data.parse_daily_price_series(
+                raw,
+                symbol="AAPL",
+                retrieved_at=datetime(2026, 9, 5, tzinfo=UTC),
+                source_url="https://example.invalid/synthetic-prices",
+                start_date=start,
+                end_date=end,
+            )
+        except ProviderDataError as error:
+            causes = []
+            cause = error
+            while cause is not None:
+                causes.append((type(cause).__name__, str(cause)))
+                cause = cause.__cause__
+            outcome["errors"] = causes
+            rejected += 1
+        else:
+            outcome["series"] = asdict(parsed)
+            accepted += 1
+        outcomes.append(outcome)
+    payload = json.dumps(outcomes, default=str, sort_keys=True).encode()
+    return hashlib.sha256(payload).hexdigest(), accepted, rejected
+
+
+def test_price_parser_preserves_complete_base_payloads_and_exact_errors() -> None:
+    # Complete series and exception chains captured before edits on unchanged 8f2daad.
+    assert _price_parser_characterization() == (
+        "6eaced43582adbf6f33f14af07daebe6ebfdcba8ed6d0188d1c928e51261ef8d",
+        95,
+        981,
+    )
+
+
+def test_optional_decimal_converts_nonblank_text_once() -> None:
+    class Text:
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return " 2.000 "
+
+    value = Text()
+    assert twelve_data._optional_decimal(value, field="close", symbol="SYN") == Decimal("2.000")
+    assert value.calls == 1
 
 
 def test_parses_split_adjusted_daily_series_and_uses_header_auth(
