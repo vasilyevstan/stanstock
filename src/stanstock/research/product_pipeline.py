@@ -456,7 +456,7 @@ def _select_product_source(
             listing_id=listing.id,
             target_date=target_date,
             decision_time=decision_time,
-            calendar_sessions=_required_sessions(target_date, config.required_closes),
+            calendar_sessions=stock_series.dates,
             stock=stock_series,
             benchmark=benchmark_series,
             source_execution=source_execution,

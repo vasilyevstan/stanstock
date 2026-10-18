@@ -5,6 +5,7 @@ import itertools
 import json
 import sys
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import Mock
@@ -26,6 +27,7 @@ from stanstock.data.models import (
     UniverseSnapshot,
 )
 from stanstock.data.research_product import capture_product_intake, materialize_product_membership
+from stanstock.research import product_pipeline
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product import SourceExecutionBinding, calculate_price_product
 from stanstock.research.price_product_config import (
@@ -566,13 +568,20 @@ def test_public_analyze_snapshot_dispatches_product_writer(tmp_path) -> None:
     assert results[0].run.config_version == "research-product-v1"
 
 
-def test_verified_source_window_round_trips_without_asset_reselection(tmp_path) -> None:
+@pytest.mark.parametrize("bound_assets", [False, True])
+def test_verified_source_window_round_trips_without_asset_reselection(
+    tmp_path, monkeypatch, bound_assets
+) -> None:
     store = AssetStore(tmp_path)
     target = date(2026, 9, 11)
     decision_time = datetime(2026, 9, 12, tzinfo=UTC)
     listing, _snapshot = _listing_and_snapshot(target, store)
-    _price_assets(store, "SYN", target, decision_time)
-    _price_assets(store, "SPY", target, decision_time)
+    stock_asset = _price_assets(store, "SYN", target, decision_time)
+    benchmark_asset = _price_assets(store, "SPY", target, decision_time)
+    config = load_price_product_config()
+    expected_sessions = product_pipeline._required_sessions(target, config.required_closes)
+    calendar = Mock(wraps=product_pipeline._required_sessions)
+    monkeypatch.setattr(product_pipeline, "_required_sessions", calendar)
     source = select_product_source(
         listing=listing,
         target_date=target,
@@ -581,9 +590,21 @@ def test_verified_source_window_round_trips_without_asset_reselection(tmp_path) 
         benchmark_subject="SPY",
         source_execution=SourceExecutionBinding(mode="synthetic_demo", evidence_grade="research"),
         store=store,
-        config=load_price_product_config(),
+        config=config,
+        stock_asset=stock_asset if bound_assets else None,
+        benchmark_asset=benchmark_asset if bound_assets else None,
     )
 
+    assert calendar.call_count == (2 if bound_assets else 4)
+    assert source.product_input.calendar_sessions is source.product_input.stock.dates
+    expected_input = replace(source.product_input, calendar_sessions=expected_sessions)
+    assert source.product_input.calendar_sessions == expected_sessions
+    assert product_pipeline.complete_input_hash(source.product_input) == (
+        product_pipeline.complete_input_hash(expected_input)
+    )
+    assert verified_source_window_payload(source) == verified_source_window_payload(
+        replace(source, product_input=expected_input)
+    )
     assert (
         price_product_input_from_verified_source_window(verified_source_window_payload(source))
         == source.product_input

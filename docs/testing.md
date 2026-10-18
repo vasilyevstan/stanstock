@@ -245,6 +245,13 @@ Standalone and initially unverified-session reads must still verify their
 source. Column/config work bounds retain full raw validation and load frozen
 horizon authority once per document, only after earlier row checks pass;
 retained raw histories can be longer than the synthetic forecast window.
+`tests/test_raw_price_verification_projection.py` proves the private raw
+projection validates all four OHLC fields across 1,758 rows without creating
+discarded public records. It rejects early/late raw faults and normalized
+value/identity mismatches, and checks identity before float conversion.
+The public parser's 1,076-case complete-output/error pin and the seven frozen
+forecast/simulation payload pins remain unchanged; projection metadata and
+exception chains must match the public path.
 
 `tests/test_forward_scorecard.py` and `tests/test_current_method_paper.py`
 exercise persistence through calculation, authorized checksum-verifying reads

@@ -352,6 +352,72 @@ def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        math.nextafter(0.0, 1.0),
+        -math.nextafter(0.0, 1.0),
+        float.fromhex("0x1.fffffffffffffp+1023"),
+        -float.fromhex("0x1.fffffffffffffp+1023"),
+        0,
+        1,
+        -1,
+        2**63,
+        pytest.param(10**1000, id="overflowing-int"),
+        True,
+        False,
+        None,
+        "1",
+        np.float32(1),
+        np.float64(1),
+        np.int64(1),
+        math.nan,
+        math.inf,
+        -math.inf,
+    ],
+)
+def test_canonical_float_preserves_exact_base_bytes_and_exceptions(value) -> None:
+    def original():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise PriceProductInputError(
+                "input_hash_nonfinite", "Canonical input values must be finite"
+            )
+        return float(value).hex()
+
+    try:
+        expected = original()
+    except (PriceProductInputError, OverflowError) as error:
+        with pytest.raises(type(error)) as actual:
+            price_product_module._canonical_float(value)
+        assert actual.value.args == error.args and vars(actual.value) == vars(error)
+    else:
+        assert price_product_module._canonical_float(value) == expected
+
+
+def test_canonical_float_preserves_subclass_conversion_instead_of_custom_hex() -> None:
+    class CustomFloat(float):
+        calls = 0
+
+        def __float__(self):
+            self.calls += 1
+            return 2.0
+
+        def hex(self):
+            raise AssertionError("subclass hex must not replace original float conversion")
+
+    value = CustomFloat(1)
+    assert price_product_module._canonical_float(value) == (2.0).hex()
+    assert value.calls == 2
+
+
 def test_method_identity_is_stable_while_issuance_versions_remain_unique() -> None:
     first = prediction_model_version(
         method_version=FHS_METHOD_VERSION,

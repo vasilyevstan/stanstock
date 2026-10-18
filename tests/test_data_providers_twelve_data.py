@@ -89,7 +89,7 @@ def _result(
     )
 
 
-def _price_parser_characterization() -> tuple[str, int, int]:
+def _price_parser_cases():
     row = {
         "datetime": "2026-09-04",
         "open": "2",
@@ -134,9 +134,21 @@ def _price_parser_characterization() -> tuple[str, int, int]:
             ([{**row, "datetime": "bad", "open": "bad"}], None, None),
         ]
     )
+    return cases
+
+
+def _price_error_chain(error):
+    causes = []
+    while error is not None:
+        causes.append((type(error).__name__, str(error)))
+        error = error.__cause__
+    return causes
+
+
+def _price_parser_characterization() -> tuple[str, int, int]:
     outcomes = []
     accepted = rejected = 0
-    for rows, start, end in cases:
+    for rows, start, end in _price_parser_cases():
         raw = json.dumps({**VALID_SERIES, "values": rows}, sort_keys=True).encode()
         outcome = {"raw": raw.hex(), "start": start, "end": end}
         try:
@@ -149,12 +161,7 @@ def _price_parser_characterization() -> tuple[str, int, int]:
                 end_date=end,
             )
         except ProviderDataError as error:
-            causes = []
-            cause = error
-            while cause is not None:
-                causes.append((type(cause).__name__, str(cause)))
-                cause = cause.__cause__
-            outcome["errors"] = causes
+            outcome["errors"] = _price_error_chain(error)
             rejected += 1
         else:
             outcome["series"] = asdict(parsed)
@@ -162,6 +169,77 @@ def _price_parser_characterization() -> tuple[str, int, int]:
         outcomes.append(outcome)
     payload = json.dumps(outcomes, default=str, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest(), accepted, rejected
+
+
+def test_verification_projection_matches_frozen_public_parser_corpus() -> None:
+    for rows, start, end in _price_parser_cases():
+        raw = json.dumps({**VALID_SERIES, "values": rows}, sort_keys=True).encode()
+        arguments = {"symbol": "AAPL", "start_date": start, "end_date": end}
+        try:
+            public = twelve_data.parse_daily_price_series(
+                raw,
+                **arguments,
+                retrieved_at=datetime(2026, 9, 5, tzinfo=UTC),
+                source_url="https://example.invalid/synthetic-prices",
+            )
+        except ProviderDataError as expected:
+            with pytest.raises(ProviderDataError) as actual:
+                twelve_data._parse_daily_price_projection(raw, **arguments)
+            assert _price_error_chain(actual.value) == _price_error_chain(expected)
+        else:
+            projection = twelve_data._parse_daily_price_projection(raw, **arguments)
+            assert projection.values == tuple(
+                (bar.trade_date, bar.close, bar.volume) for bar in public.bars
+            )
+            for field in (
+                "currency",
+                "exchange",
+                "mic_code",
+                "instrument_type",
+                "exchange_timezone",
+                "adjustment",
+            ):
+                assert getattr(projection, field) == getattr(public, field)
+
+
+@pytest.mark.parametrize("field", ["currency", "exchange", "mic_code", "type", "exchange_timezone"])
+@pytest.mark.parametrize("value", [None, "", {"vendor": "synthetic"}, 42])
+def test_verification_projection_preserves_all_optional_metadata(field, value) -> None:
+    raw = json.dumps({**VALID_SERIES, "meta": {**VALID_SERIES["meta"], field: value}}).encode()
+    public = twelve_data.parse_daily_price_series(
+        raw,
+        symbol="AAPL",
+        retrieved_at=datetime(2026, 9, 5, tzinfo=UTC),
+        source_url="https://example.invalid/synthetic-prices",
+    )
+    projection = twelve_data._parse_daily_price_projection(raw, symbol="AAPL")
+    attribute = "instrument_type" if field == "type" else field
+    expected = None if value is None else str(value).strip() or None
+    assert getattr(public, attribute) == getattr(projection, attribute) == expected
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        [],
+        {**VALID_SERIES["meta"], "symbol": None},
+        {**VALID_SERIES["meta"], "symbol": "OTHER"},
+        {**VALID_SERIES["meta"], "interval": "1min"},
+    ],
+)
+def test_verification_projection_preserves_envelope_error_chains(metadata) -> None:
+    raw = json.dumps({**VALID_SERIES, "meta": metadata}).encode()
+    with pytest.raises(ProviderDataError) as public:
+        twelve_data.parse_daily_price_series(
+            raw,
+            symbol="AAPL",
+            retrieved_at=datetime(2026, 9, 5, tzinfo=UTC),
+            source_url="https://example.invalid/synthetic-prices",
+        )
+    with pytest.raises(ProviderDataError) as projection:
+        twelve_data._parse_daily_price_projection(raw, symbol="AAPL")
+    assert _price_error_chain(projection.value) == _price_error_chain(public.value)
 
 
 def test_price_parser_preserves_complete_base_payloads_and_exact_errors() -> None:
