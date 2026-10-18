@@ -165,6 +165,30 @@ exact listing/target/horizon/role/method/config/provider observation. Later
 valid reissues remain immutable ledger rows but do not duplicate one market
 observation.
 
+## Forward scorecard
+
+`forward-forecast-scorecard-v1` declares an immutable owner-scoped evaluation
+protocol before reading matured losses. A declaration made after an included
+forecast's issuance but before maturity is labeled accordingly; it is not
+pre-issuance preregistration. Equal timestamps do not prove prior declaration.
+
+The scorecard uses verified historical runs and the existing earliest
+reportable observation rule before considering outcome status. It keeps
+decision/advisory roles, horizons, methods, configurations, providers and source
+grades separate. BUY and AVOID success are separate; HOLD has no success metric.
+Advisory losses use the existing definitions above. The recorded zero-log-drift
+sensitivity is a paired comparator only where both models have the same
+supported observations; missing comparator evidence does not erase an otherwise
+evaluable native forecast.
+
+Results are averaged within target cohorts, then equally across cohorts.
+Reports retain raw rows, distinct listings, cohort support, calendar span and
+pending, unresolved, corporate-event and non-evaluable denominators. Overlapping
+daily forecasts are not independent trials. Before maturity, metrics remain
+null and the conclusion is **unmatured; skill not established**, not zero
+accuracy. This protocol neither activates the separate drift study nor
+establishes calibrated probabilities or investment skill.
+
 ## Retrospective comparison
 
 The registered study is current-universe/current-vintage research. It compares
@@ -215,10 +239,12 @@ That pinned reference covers `us-price-baseline-v1/v2/v3`,
 product specification. Historical evidence should be interpreted using its
 recorded version, not the new momentum/FHS rules.
 
-## Unchanged portfolio and simulation methodology
+## Portfolio policy and versioned simulation accounting
 
-The price-product redesign does not turn suggestions into orders or change
-portfolio/simulation accounting. Existing safeguards remain:
+Research suggestions are not orders. Existing personal portfolio bookkeeping,
+frozen sample baskets and the legacy contribution planner retain their
+contracts. The current six-month momentum decision is not silently substituted
+for the legacy planner's short-horizon satellite. Existing safeguards remain:
 
 - one explicit base currency per multi-currency simulation;
 - dated point-in-time FX for each valued date;
@@ -226,3 +252,58 @@ portfolio/simulation accounting. Existing safeguards remain:
 - complete input/calendar hashing;
 - missing/stale/ambiguous FX failure; and
 - immutable deposits, purchases, performance boundaries, and valuations.
+
+New simulation workflows explicitly select `simulation-accounting-v2`.
+Configurations without an accounting-version marker retain legacy behavior,
+including historical result bytes; unknown versions are rejected. No stored
+simulation is rewritten.
+
+In v2, portfolio and benchmark daily returns must share both adjacent
+simulation-session endpoints. A missing benchmark observation cannot turn a
+multi-session benchmark return into a one-session comparison. Tracking error
+and related paired statistics retain minimum-support and zero-variance
+withholding. Full-period benchmark and excess returns require both exact
+boundary prices. An interior gap can leave those endpoint totals calculable
+while withholding benchmark path drawdown. Comparison coverage and reasons are
+part of the versioned result provenance.
+
+Portfolio drawdown includes pre-trade starting capital in its high-water mark,
+so inception transaction costs count as a loss. The curve and summary use the
+same definition; the first row's daily-return convention is unchanged.
+Historical v1 detail pages disclose the benchmark-gap and inception-drawdown
+limitations rather than presenting them as corrected metrics.
+
+V2 immutable provenance binds the definition and universe-snapshot identities
+as well as the effective execution configuration. Both the loader and detail
+page checksum-read the registered result and inputs. Reparented runs or missing
+or corrupt files withhold financial output. Detail-page mode and grade labels
+come from the recorded execution, not later edits to mutable parent configuration.
+
+### Current-method paper policy
+
+`current-method-paper-6m-v1` is a separate prospective research experiment,
+not a personal portfolio or broker order. Its USD 100,000 is **notional**, not
+a deposit. It allocates 70% to SPY and equally divides a 30% stock sleeve among
+all qualifying native current-method six-month BUY decisions. These allocation
+weights are policy assumptions, not optimized or scientifically established
+weights. Advisory projections never determine selection.
+
+All native identity, authorization, risk, compatible-volume and affordability
+gates remain mandatory. Under-$10 new allocation remains zero. A valid empty
+BUY set leaves the stock sleeve as cash; missing or invalid required evidence
+withholds the plan rather than pretending that the set was empty.
+
+One immutable activation per owner and policy version records its actual
+publication time and frozen selection. The first hypothetical execution is
+the XNYS session close strictly after activation's New York calendar date.
+Quantities then remain fixed for 126 sessions: no contributions, rebalancing
+or invented terminal liquidation. Costs are 10 bps transaction cost plus 5 bps slippage.
+Dividends and cash yield are excluded. The SPY-only comparison uses the same
+notional, inception, calendar, costs and price-return basis.
+
+Activation, execution and measurement use append-only research assets, not
+portfolio, purchase or generic simulation-run rows. Missing prices or sessions
+and incompatible share-basis evidence remain explicit; later retrieval must
+not manufacture an earlier observed paper curve. The fixed experiment can
+produce cash, unavailable valuations or adverse results without implying an
+application failure or a profitable strategy.

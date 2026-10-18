@@ -228,6 +228,30 @@ class ProductHistoryRead:
         return self.status == "available"
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedProductRun:
+    """Verified historical scope, deliberately NOT a partially hydrated cohort."""
+
+    run: AnalysisRun
+    provider: str
+    evidence_grade: str
+    owner_id: str
+    admissions: tuple[ProductAdmission, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProductPerformanceRead:
+    status: ReaderStatus
+    message: str
+    current: ProductRead
+    runs: tuple[VerifiedProductRun, ...] = ()
+    verification_code: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.status == "available"
+
+
 class ProductVerificationSession:
     """Request-scoped exact-run verifier memo without a persistent cache."""
 
@@ -377,6 +401,44 @@ def read_research_product_history(
     store: AssetStore | None = None,
     verification: ProductVerificationSession | None = None,
 ) -> ProductHistoryRead:
+    result = _read_product_history(
+        user=user, store=store, verification=verification, full_history=True
+    )
+    assert isinstance(result, ProductHistoryRead)
+    return result
+
+
+def read_research_product_performance(
+    *,
+    user: ProductUser,
+    store: AssetStore | None = None,
+    verification: ProductVerificationSession | None = None,
+) -> ProductPerformanceRead:
+    """Complete verified run scope with only the ordinary current cards.
+
+    Shares selection, rights, exact-run verification and error mapping with
+    full history. No historical frequency/card/promotion hydration is implied.
+    """
+    result = _read_product_history(
+        user=user, store=store, verification=verification, full_history=False
+    )
+    if isinstance(result, ProductPerformanceRead):
+        return result
+    return ProductPerformanceRead(
+        status=result.status,
+        message=result.message,
+        current=result.current,
+        verification_code=result.verification_code,
+    )
+
+
+def _read_product_history(
+    *,
+    user: ProductUser,
+    store: AssetStore | None,
+    verification: ProductVerificationSession | None,
+    full_history: bool,
+) -> ProductHistoryRead | ProductPerformanceRead:
     """Verify and return every owner-authorized active-product run.
 
     Runs are fetched with bounded database iteration, and each included run's
@@ -433,15 +495,29 @@ def read_research_product_history(
         # any private historical output.
         _require_current_display_authorization(candidates[0].intake, user=user)
         request_verification = verification or ProductVerificationSession()
-        cohorts = tuple(
-            _verify_candidate(
-                candidate,
-                store=asset_store,
-                verification=request_verification,
-                user=user,
+        expected_target = _expected_current_target()
+        cohorts = []
+        verified_runs = []
+        current_cohort = None
+        for index, candidate in enumerate(candidates):
+            request_verification.verify(run=candidate.run, store=asset_store)
+            verified_runs.append(
+                VerifiedProductRun(
+                    run=candidate.run,
+                    provider=str(candidate.intake["source_provider"]),
+                    evidence_grade=candidate.run.universe_snapshot.grade,
+                    owner_id=str(candidate.intake["owner_id"]),
+                    admissions=_build_admissions(candidate),
+                )
             )
-            for candidate in candidates
-        )
+            if full_history or (index == 0 and candidate.run.target_date == expected_target):
+                cohort = _verify_candidate(
+                    candidate, store=asset_store, verification=request_verification, user=user
+                )
+                if full_history:
+                    cohorts.append(cohort)
+                if index == 0:
+                    current_cohort = cohort
     except RefreshVerificationError as exc:
         return _history_failure(
             status="integrity_failed",
@@ -466,10 +542,9 @@ def read_research_product_history(
             verification_code="product_reader_shape_invalid",
         )
 
-    newest = cohorts[0]
-    expected_target = _expected_current_target()
-    if newest.run.target_date == expected_target:
-        current = _product_read_from_cohort(newest)
+    newest = candidates[0]
+    if newest.run.target_date == expected_target and current_cohort is not None:
+        current = _product_read_from_cohort(current_cohort)
     else:
         current = ProductRead(
             status="stale",
@@ -480,11 +555,19 @@ def read_research_product_history(
             run=newest.run,
             verification_code="product_target_stale",
         )
+    if not full_history:
+        return ProductPerformanceRead(
+            status="available",
+            message="Registered owner-authorized research-product history verified.",
+            current=current,
+            runs=tuple(verified_runs),
+            verification_code="verified",
+        )
     return ProductHistoryRead(
         status="available",
         message="Registered owner-authorized research-product history verified.",
         current=current,
-        cohorts=cohorts,
+        cohorts=tuple(cohorts),
         verification_code="verified",
     )
 

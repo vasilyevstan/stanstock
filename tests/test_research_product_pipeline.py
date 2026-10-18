@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
+import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import polars as pl
@@ -51,6 +54,139 @@ from stanstock.research.refresh_evidence import (
 from stanstock.research.service import analyze_snapshot
 
 pytestmark = pytest.mark.django_db
+
+
+# Full payloads captured on unchanged 5aa301d sources in both math runtimes.
+# Unrounded NumPy/libm results differ between Darwin and Linux. Neither output
+# fields nor precision are changed; identity and clock are fixed BEFORE issuance.
+FROZEN_CHECKPOINT_PRODUCT: dict[str, dict[bool, str]] = {
+    "darwin": {
+        False: "9eb44ebb027cde8f30b185f19da2c82849b1d11bc80b3c04ffdf8d4892d6b736",
+        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+    },
+    "linux": {
+        False: "671cc0cc446541cc2e2f889dd2c6f771efca94b654bd797a6245f5a9faa54f9a",
+        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+    },
+}
+
+
+@pytest.mark.parametrize("withheld", [False, True], ids=["success", "genuinely-withheld"])
+def test_checkpoint_frozen_native_issuance_replay(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+) -> None:
+    from django.utils import timezone
+
+    from stanstock.data.models import UniverseSnapshot
+    from stanstock.research.product_pipeline import _jsonable
+
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    counter = itertools.count(1)
+
+    def identity() -> UUID:
+        return UUID(int=next(counter))
+
+    for model in (Company, Security, Listing, UniverseSnapshot, DataAsset):
+        monkeypatch.setattr(model._meta.pk, "_get_default", identity)
+    monkeypatch.setattr("stanstock.research.product_pipeline.uuid4", identity)
+    monkeypatch.setattr("test_research_product_pipeline.uuid4", identity)
+    monkeypatch.setattr(timezone, "now", lambda: now)
+    store = AssetStore(tmp_path)
+    target = date(2026, 9, 11)
+    _listing, snapshot = _listing_and_snapshot(target, store)
+    from exchange_calendars import get_calendar
+
+    sessions = [
+        item.date()
+        for item in get_calendar("XNYS").sessions_window(
+            get_calendar("XNYS").date_to_session(target), -757
+        )
+    ]
+    for subject in ("SYN", "SPY"):
+        closes = [
+            64.0 if withheld and subject == "SYN" else 64.0 + i / 64 + (i % 7) / 8
+            for i in range(len(sessions))
+        ]
+        frame = pl.DataFrame(
+            {"date": sessions, "close": closes, "volume": [1_000_000] * len(sessions)}
+        )
+        raw_document = {
+            "schema": "research-product-synthetic-prices@1",
+            "subject": subject,
+            "currency": "USD",
+            "adjustment": "splits",
+            "volume_adjustment_compatible": True,
+            "values": [
+                {"date": row["date"].isoformat(), "close": row["close"], "volume": row["volume"]}
+                for row in frame.iter_rows(named=True)
+            ],
+        }
+        raw = register_asset(
+            provider="synthetic_demo",
+            kind="raw_price_history",
+            subject=subject,
+            stored=store.write_bytes(f"raw/{subject}.json", json.dumps(raw_document).encode()),
+            retrieved_at=now,
+            available_at=now,
+        )
+        register_asset(
+            provider="synthetic_demo",
+            kind="price_history",
+            subject=subject,
+            stored=store.write_frame(f"prices/{subject}.parquet", frame),
+            retrieved_at=now,
+            available_at=now,
+            period_start=sessions[0],
+            period_end=sessions[-1],
+            metadata={
+                "currency": "USD",
+                "adjustment": "splits",
+                "volume_adjustment_compatible": True,
+                "raw_asset_id": str(raw.id),
+                "raw_sha256": raw.sha256,
+            },
+        )
+    issued = issue_price_product_snapshot(
+        universe_snapshot=snapshot,
+        decision_time=now,
+        target_date=target,
+        provider="synthetic_demo",
+        benchmark_subject="SPY",
+        source_execution=SourceExecutionBinding(mode="synthetic_demo", evidence_grade="research"),
+        store=store,
+        code_revision="a" * 40,
+        issued_on_time=False,
+    )[0]
+    run = AnalysisRun.objects.get(pk=issued.run.id)
+    verify_price_product_output(run=run, store=store, replay=True)
+    predictions = list(Prediction.objects.filter(analysis__run=run).order_by("id"))
+    advisory = [row for row in predictions if row.evidence_role == "advisory"]
+    assert len(advisory) == 4
+    assert all(bool(row.insufficiency_reason) is withheld for row in advisory)
+    payload = {
+        "rows": [
+            {
+                field.attname: _jsonable(getattr(row, field.attname))
+                for field in row._meta.concrete_fields
+            }
+            for row in (run, StockAnalysis.objects.get(run=run), *predictions)
+        ],
+        "documents": {
+            asset.kind: store.read_bytes(asset.relative_path).decode()
+            for asset in DataAsset.objects.filter(subject=str(run.id)).order_by("kind")
+        },
+        "verification": "complete-native-replay",
+    }
+    complete_bytes = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    digest = hashlib.sha256(complete_bytes).hexdigest()
+    assert digest == FROZEN_CHECKPOINT_PRODUCT[sys.platform][withheld], (
+        sys.platform,
+        withheld,
+        digest,
+        len(complete_bytes),
+    )
 
 
 @pytest.mark.parametrize(

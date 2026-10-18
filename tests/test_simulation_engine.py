@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sys
 from datetime import date, timedelta
 
 import polars as pl
@@ -7,6 +10,8 @@ import pytest
 
 from stanstock.simulation.engine import AccountingEngine
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    ACCOUNTING_VERSION_PARAMETER,
     ExecutionPriceBasis,
     RebalanceFrequency,
     SimulationConfig,
@@ -17,6 +22,223 @@ from stanstock.simulation.types import (
 
 def _make_daily_dates(start: date, count: int) -> list[date]:
     return [start + timedelta(days=i) for i in range(count)]
+
+
+# Captured from unchanged 5aa301d sources on Darwin and Linux.
+# These hashes cover COMPLETE canonical config, input identity, frames (including
+# schemas), metrics and unresolved payloads, not a selection of corrected fields.
+FROZEN_V1_PAYLOADS: dict[str, dict[str, str]] = {
+    "darwin": {
+        "success": "c09905056a3031fd9d9552b9fd7e3213497260f647747246e2fa4253ccdad9a9",
+        "gap": "288283deae1fd0ec6ad0c296eb1b9850f5bb74989bd4a86ac4d1fa0be41e7e43",
+        "friction": "fb4cf2845661e43f21279507304ad77411e4c4c509984b8cad087d07b481216c",
+        "insufficiency": "9870046fd769342b8e311b7b6656e374c713d2ca2d1dc4f103b6f324a107a1b3",
+    },
+    "linux": {
+        "success": "b5fd6b2a4d6c8dabdb561824132c17c014936fb4c8d063fa5c9489f1a046f07d",
+        "gap": "288283deae1fd0ec6ad0c296eb1b9850f5bb74989bd4a86ac4d1fa0be41e7e43",
+        "friction": "fb4cf2845661e43f21279507304ad77411e4c4c509984b8cad087d07b481216c",
+        "insufficiency": "9870046fd769342b8e311b7b6656e374c713d2ca2d1dc4f103b6f324a107a1b3",
+    },
+}
+
+
+@pytest.mark.parametrize("case", FROZEN_V1_PAYLOADS[sys.platform])
+def test_checkpoint_frozen_v1_complete_payload(case: str) -> None:
+    dates = _make_daily_dates(date(2026, 1, 5), 5)
+    # All inputs are exactly representable; no platform-dependent exp/sin fixture.
+    closes = [64.0, 80.0, 72.0, 96.0, 88.0]
+    if case == "friction":
+        closes = [64.0] * 5
+    if case == "insufficiency":
+        dates, closes = dates[:1], closes[:1]
+    config = SimulationConfig(
+        name="frozen-checkpoint",
+        mode=SimulationMode.PORTFOLIO,
+        selected_symbols=["SYN"],
+        starting_capital=1024.0,
+        rebalance_frequency=RebalanceFrequency.NEVER,
+        transaction_cost_bps=50.0 if case == "friction" else 0.0,
+        slippage_bps=50.0 if case == "friction" else 0.0,
+    )
+    prices = pl.DataFrame({"date": dates, "listing_id": ["SYN"] * len(dates), "close": closes})
+    benchmark = pl.DataFrame({"date": dates, "close": closes})
+    if case == "gap":
+        benchmark = benchmark.filter(pl.col("date") != dates[2])
+    result = AccountingEngine(config).run(prices=prices, benchmark_prices=benchmark, calendar=dates)
+    payload = {
+        "config": result.config.to_dict(),
+        "input_hash": result.input_hash,
+        "metrics": result.metrics.to_dict(),
+        "unresolved": [item.to_dict() for item in result.unresolved_observations],
+        **{
+            name: {
+                "schema": [(key, str(dtype)) for key, dtype in frame.schema.items()],
+                "rows": frame.to_dicts(),
+            }
+            for name, frame in (
+                ("curves", result.daily_curves),
+                ("holdings", result.holdings),
+                ("trades", result.trades),
+            )
+        },
+    }
+    complete_bytes = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
+    ).encode()
+    digest = hashlib.sha256(complete_bytes).hexdigest()
+    assert digest == FROZEN_V1_PAYLOADS[sys.platform][case], (
+        sys.platform,
+        case,
+        digest,
+        len(complete_bytes),
+    )
+
+
+@pytest.mark.parametrize(
+    ("closes", "missing", "matched"),
+    [
+        ([100.0, 110.0, 121.0, 133.1, 146.41], {2}, 2),
+        ([64.0, 80.0, 72.0, 96.0, 88.0, 104.0], {2}, 3),
+        ([64.0, 80.0, 72.0, 96.0, 88.0, 104.0], {2, 3}, 2),
+        ([64.0, 80.0, 72.0, 96.0, 88.0], set(), 4),
+    ],
+)
+def test_v2_benchmark_uses_only_adjacent_calendar_pairs(closes, missing, matched) -> None:
+    dates = _make_daily_dates(date(2026, 1, 5), len(closes))
+    config = SimulationConfig(
+        mode=SimulationMode.PORTFOLIO,
+        selected_symbols=["SYN"],
+        starting_capital=100.0,
+        rebalance_frequency=RebalanceFrequency.NEVER,
+        transaction_cost_bps=0,
+        slippage_bps=0,
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    )
+    prices = pl.DataFrame({"date": dates, "listing_id": ["SYN"] * len(dates), "close": closes})
+    benchmark = pl.DataFrame({"date": dates, "close": closes}).filter(
+        ~pl.col("date").is_in([dates[index] for index in missing])
+    )
+    result = AccountingEngine(config).run(prices=prices, benchmark_prices=benchmark, calendar=dates)
+    assert result.metrics.tracking_error == pytest.approx(0, abs=1e-12)
+    coverage = result.metrics.comparison_coverage
+    assert coverage["matched_intervals"] == matched
+    assert coverage["omitted_intervals"] == len(dates) - 1 - matched
+    assert result.metrics.benchmark_cumulative_return == pytest.approx(closes[-1] / closes[0] - 1)
+    assert (
+        result.metrics.benchmark_max_drawdown is None
+        if missing
+        else (result.metrics.benchmark_max_drawdown is not None)
+    )
+    for index in missing:
+        if index + 1 < len(dates):
+            assert result.daily_curves["benchmark_return"][index + 1] is None
+    if len(closes) == 5 and missing == {2}:
+        legacy_config = SimulationConfig.from_dict(config.to_dict())
+        legacy_config.custom_parameters = {}
+        legacy = AccountingEngine(legacy_config).run(
+            prices=prices, benchmark_prices=benchmark, calendar=dates
+        )
+        assert legacy.metrics.tracking_error == pytest.approx(1.0081666528902848)
+
+
+@pytest.mark.parametrize("missing", [{0}, {4}, {0, 4}, {1, 2, 3}, {0, 1, 2, 3, 4}])
+def test_v2_benchmark_edges_and_insufficient_pairs_are_explicit(missing) -> None:
+    dates = _make_daily_dates(date(2026, 1, 5), 5)
+    config = SimulationConfig(
+        mode=SimulationMode.PORTFOLIO,
+        selected_symbols=["SYN"],
+        starting_capital=1024,
+        rebalance_frequency=RebalanceFrequency.NEVER,
+        transaction_cost_bps=0,
+        slippage_bps=0,
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    )
+    prices = pl.DataFrame({"date": dates, "listing_id": ["SYN"] * 5, "close": [64.0] * 5})
+    benchmark = pl.DataFrame({"date": dates, "close": [64.0] * 5}).filter(
+        ~pl.col("date").is_in([dates[index] for index in missing])
+    )
+    result = AccountingEngine(config).run(prices=prices, benchmark_prices=benchmark, calendar=dates)
+    coverage = result.metrics.comparison_coverage
+    assert result.metrics.benchmark_max_drawdown is None
+    if 0 in missing or 4 in missing:
+        assert result.metrics.benchmark_cumulative_return is None
+        assert result.metrics.excess_return is None
+        assert not coverage["boundaries_complete"]
+    if coverage["matched_intervals"] < 2:
+        assert result.metrics.tracking_error is None
+        assert "insufficient_matched_return_pairs" in coverage["reasons"]
+    else:
+        assert result.metrics.tracking_error == 0
+        assert "benchmark_return_variance_zero" in coverage["reasons"]
+    assert result.metrics.beta is None
+    assert result.metrics.alpha is None
+    assert result.metrics.information_ratio is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("starting_capital", float("nan")),
+        ("starting_capital", float("inf")),
+        ("transaction_cost_bps", float("inf")),
+        ("slippage_bps", float("nan")),
+        ("risk_free_rate", -1.0),
+    ],
+)
+def test_v2_rejects_invalid_numeric_config(field, value) -> None:
+    config = SimulationConfig(
+        selected_symbols=["SYN"],
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    )
+    setattr(config, field, value)
+    with pytest.raises(ValueError):
+        AccountingEngine(config)
+
+
+def test_unknown_accounting_version_rejects_before_calculation() -> None:
+    with pytest.raises(ValueError, match="Unknown simulation calculation version"):
+        AccountingEngine(
+            SimulationConfig(
+                top_n=1, custom_parameters={ACCOUNTING_VERSION_PARAMETER: "future-version"}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("capital", "close", "cost", "slippage"),
+    [
+        (1e-300, 1e300, 0, 0),  # positive ratio underflows
+        (1e300, 1e-300, 0, 0),  # positive ratio overflows
+        (100.0, 1e20, 0, 0),  # positive, but below quantity precision
+        (100.0, 100.0, 1e308, 1e308),  # finite components overflow when combined
+        (1e100, 100.0, 1e308, 0),  # representable friction, unrepresentable outlay
+        (100.0, float("inf"), 0, 0),
+        (100.0, float("nan"), 0, 0),
+    ],
+)
+def test_v2_unrepresentable_operations_fail_instead_of_empty_cash_success(
+    capital,
+    close,
+    cost,
+    slippage,
+) -> None:
+    config = SimulationConfig(
+        starting_capital=capital,
+        selected_symbols=["SYN"],
+        transaction_cost_bps=cost,
+        slippage_bps=slippage,
+        custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+    )
+    prices = pl.DataFrame(
+        {
+            "date": [date(2026, 1, 5)],
+            "listing_id": ["SYN"],
+            "close": [close],
+        }
+    )
+    with pytest.raises(ValueError):
+        AccountingEngine(config).run(prices=prices)
 
 
 def test_equal_weight_rebalancing_entries_exits_and_weights() -> None:

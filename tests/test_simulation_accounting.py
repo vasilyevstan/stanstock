@@ -10,16 +10,49 @@ from hypothesis import strategies as st
 from stanstock.simulation.engine import AccountingEngine
 from stanstock.simulation.hooks import CashSettlementHook
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    ACCOUNTING_VERSION_PARAMETER,
     ExecutionPriceBasis,
     MissingPriceError,
     MissingPricePolicy,
     RebalanceFrequency,
     SimulationConfig,
+    SimulationMode,
 )
 
 
 def _make_daily_dates(start: date, count: int) -> list[date]:
     return [start + timedelta(days=i) for i in range(count)]
+
+
+@pytest.mark.parametrize(
+    ("closes", "costs", "expected"),
+    [
+        ([100.0] * 5, 50, -0.009900990099009875),
+        ([100.0] * 5, 0, 0.0),
+        ([100.0, 99.5, 100.5], 50, -0.014851485148514924),
+        ([100.0, 110.0, 105.0], 0, 105 / 110 - 1),
+        ([100.0], 50, -0.009900990099009875),
+    ],
+)
+def test_v2_drawdown_includes_inception_and_agrees_with_curve(closes, costs, expected) -> None:
+    dates = _make_daily_dates(date(2026, 1, 5), len(closes))
+    result = AccountingEngine(
+        SimulationConfig(
+            mode=SimulationMode.PORTFOLIO,
+            selected_symbols=["SYN"],
+            starting_capital=100,
+            rebalance_frequency=RebalanceFrequency.NEVER,
+            transaction_cost_bps=costs,
+            slippage_bps=costs,
+            custom_parameters={ACCOUNTING_VERSION_PARAMETER: ACCOUNTING_VERSION},
+        )
+    ).run(prices=pl.DataFrame({"date": dates, "listing_id": ["SYN"] * len(dates), "close": closes}))
+    assert result.daily_curves["daily_return"][0] == 0
+    assert result.metrics.max_drawdown == pytest.approx(expected)
+    assert result.metrics.max_drawdown == min(result.daily_curves["drawdown"])
+    if len(set(closes)) == 1:
+        assert result.metrics.cumulative_return == result.metrics.max_drawdown
 
 
 def test_conservation_of_cash_and_holdings_exact() -> None:

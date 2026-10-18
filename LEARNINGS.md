@@ -50,6 +50,12 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Recorded metadata is not current physical verification.** V2 simulation
+  loaders and detail pages share exact registered input/result checksum
+  reads. Bind stable definition/snapshot IDs separately from the frozen
+  execution configuration; mutable parent edits must not relabel it.
+  Exercise corruption and missing files between requests through the real
+  writer, requery and render path, with the fixture's actual store configured.
 - **Shared headings can mask row-label regressions.** A page-wide text check
   passed because an `aria-hidden` heading contained the expected horizon,
   while mobile and screen-reader labels used raw codes. Assert each row's
@@ -100,7 +106,9 @@ reviews and should not be re-litigated without an explicit new decision.
   matching contract or verified accessible content without exposing private
   paths; retrieval-only failures are not completed reviews. Timing, counts,
   preservation and model identity require actual command/runtime evidence,
-  not a reviewer's assertion.
+  not a reviewer's assertion. Different agent roles or requested model names
+  do not prove different runtime families; bind the actual dispatch and
+  completion identity, including any fallback.
 - **Public-safe Markdown can still have private Git metadata.** A new wiki
   checkout may fall back to an auto-detected author/committer identity.
   Preflight an approved public identity before committing, then verify the
@@ -222,6 +230,9 @@ reviews and should not be re-litigated without an explicit new decision.
   input generation can differ across platforms. Use exactly representable
   inputs for a literal content-hash golden and separately prove sensitivity
   to a one-ULP input change; do not weaken production precision or hashing.
+  Complete unrounded NumPy/libm outputs can still differ between Darwin and
+  Linux: capture strict per-runtime goldens from the same frozen base, not
+  rounded or stripped output.
 - **Dependency diagnostics are command output too.** A count-only summary
   does not protect private symbols when HTTP-client logs contain request URLs.
   Protect native acquisition services, not only command wrappers. Overlapping
@@ -457,6 +468,17 @@ reviews and should not be re-litigated without an explicit new decision.
 - **Simulation identity and inputs are durable.** Trades and holdings persist
   listing UUIDs, and every completed run records immutable price, signal,
   benchmark, and (when converted) FX input assets alongside its result curve.
+- **Risk comparisons need identical measurement boundaries.** Pair benchmark
+  and portfolio returns on both adjacent session endpoints, not only the
+  ending date; an interior benchmark gap cannot create a daily tracking error.
+  Include pre-trade capital in drawdown so inception costs are not hidden.
+  Version corrected calculations and disclose, rather than rewrite, immutable
+  legacy results.
+- **Historical proof need not hydrate historical presentation.** Performance
+  reads still verify complete authorized source history, but do not build
+  unused historical cards/frequencies or enumerate a run-wide asset registry
+  once per listing. Share exact-identity proofs only within the bounded
+  verifier/request, and test corruption again across requests.
 - **Cash flows and allocation decisions need their own immutable evidence.**
   Keep deposits, confirmed purchases, and manual performance baselines
   separate from mutable portfolio state. A preview is not an event, and a

@@ -40,19 +40,17 @@ from stanstock.research.models import (
     Recommendation,
     StockAnalysis,
 )
-from stanstock.research.price_product_config import (
-    FHS_METHOD_VERSION,
-    MOMENTUM_METHOD_VERSION,
-)
 from stanstock.research.product_reader import (
     ProductAdmission,
     ProductCard,
     ProductHistoryRead,
+    ProductPerformanceRead,
     ProductProjection,
     ProductRead,
     ProductVerificationSession,
     read_research_product,
     read_research_product_history,
+    read_research_product_performance,
 )
 from stanstock.research.product_study_evidence import (
     ProductStudyComparisonRow,
@@ -60,10 +58,7 @@ from stanstock.research.product_study_evidence import (
     ProductStudyScopeView,
     read_registered_price_product_study,
 )
-from stanstock.research.reporting import (
-    canonical_reportable_prediction_filter,
-    reportable_prediction_filter,
-)
+from stanstock.research.reporting import product_performance_groups
 from stanstock.web import views as legacy_views
 from stanstock.web.forms import (
     PRODUCT_HORIZON_CHOICES,
@@ -72,7 +67,6 @@ from stanstock.web.forms import (
 )
 from stanstock.web.templatetags.stanstock import percentage
 
-_PERFORMANCE_RUN_BATCH_SIZE = 200
 _OPPORTUNITIES_PAGE_SIZE = 20
 _SHORTLIST_LIMIT = 3
 
@@ -680,7 +674,10 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             return archive_performance_page(request)
         return legacy_views.performance_page(request)
     verification = ProductVerificationSession()
-    history = _read_history(request, verification=verification)
+    history = read_research_product_performance(
+        user=cast(User, request.user), verification=verification
+    )
+    request._stanstock_product_read = history.current  # type: ignore[attr-defined]
     product = history.current
     registered_study = read_registered_price_product_study(
         user=cast(User, request.user),
@@ -767,138 +764,13 @@ def _comparison_scope_summaries(
 
 
 def _observed_performance_groups(
-    history: ProductHistoryRead,
+    history: ProductPerformanceRead,
 ) -> tuple[
     list[dict[str, object]],
     list[dict[str, object]],
     dict[str, dict[str, int]],
 ]:
-    """Aggregate all verified runs without an unbounded SQL ``IN`` clause."""
-
-    decision_counts: Counter[str] = Counter()
-    advisory_counts: Counter[tuple[str, str]] = Counter()
-    scope = {
-        "decision": {
-            "not_eligible_for_observed": 0,
-            "eligible_canonical": 0,
-            "outcome_pending": 0,
-            "matured": 0,
-            "unresolved": 0,
-            "corporate_event": 0,
-        },
-        "advisory": {
-            "not_eligible_for_observed": 0,
-            "eligible_canonical": 0,
-            "outcome_pending": 0,
-            "matured": 0,
-            "unresolved": 0,
-            "corporate_event": 0,
-            "non_evaluable": 0,
-        },
-    }
-    run_ids = tuple(cohort.run.id for cohort in history.cohorts)
-    for offset in range(0, len(run_ids), _PERFORMANCE_RUN_BATCH_SIZE):
-        run_batch = run_ids[offset : offset + _PERFORMANCE_RUN_BATCH_SIZE]
-        prediction_base = Prediction.objects.filter(analysis__run_id__in=run_batch)
-        decision_predictions = prediction_base.filter(
-            method_version=MOMENTUM_METHOD_VERSION,
-            evidence_role=Prediction.EvidenceRole.DECISION,
-        )
-        advisory_predictions = prediction_base.filter(
-            method_version=FHS_METHOD_VERSION,
-            evidence_role=Prediction.EvidenceRole.ADVISORY,
-        )
-        non_evaluable_advisory = Q(
-            bear_return__isnull=True,
-            base_return__isnull=True,
-            bull_return__isnull=True,
-        )
-        evaluable_advisory = advisory_predictions.exclude(non_evaluable_advisory)
-        for name, predictions in (
-            ("decision", decision_predictions),
-            ("advisory", evaluable_advisory),
-        ):
-            canonical = predictions.filter(canonical_reportable_prediction_filter())
-            scope[name]["not_eligible_for_observed"] += predictions.exclude(
-                reportable_prediction_filter()
-            ).count()
-            scope[name]["eligible_canonical"] += canonical.count()
-            scope[name]["outcome_pending"] += canonical.filter(outcome__isnull=True).count()
-        scope["advisory"]["non_evaluable"] += advisory_predictions.filter(
-            non_evaluable_advisory
-        ).count()
-
-        base = PredictionOutcome.objects.filter(
-            canonical_reportable_prediction_filter("prediction__"),
-            prediction__analysis__run_id__in=run_batch,
-        )
-        decision_query = (
-            base.filter(
-                prediction__method_version=MOMENTUM_METHOD_VERSION,
-                prediction__evidence_role=Prediction.EvidenceRole.DECISION,
-            )
-            .values("status")
-            .annotate(count=Count("prediction"))
-            .order_by("status")
-        )
-        for row in decision_query.iterator(chunk_size=25):
-            decision_counts[str(row["status"])] += int(row["count"])
-        advisory_query = (
-            base.exclude(
-                prediction__bear_return__isnull=True,
-                prediction__base_return__isnull=True,
-                prediction__bull_return__isnull=True,
-            )
-            .filter(
-                prediction__method_version=FHS_METHOD_VERSION,
-                prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
-            )
-            .values("prediction__horizon", "status")
-            .annotate(count=Count("prediction"))
-            .order_by("prediction__horizon", "status")
-        )
-        for row in advisory_query.iterator(chunk_size=25):
-            advisory_counts[(str(row["prediction__horizon"]), str(row["status"]))] += int(
-                row["count"]
-            )
-        for name, outcomes in (
-            (
-                "decision",
-                base.filter(
-                    prediction__method_version=MOMENTUM_METHOD_VERSION,
-                    prediction__evidence_role=Prediction.EvidenceRole.DECISION,
-                ),
-            ),
-            (
-                "advisory",
-                base.exclude(
-                    prediction__bear_return__isnull=True,
-                    prediction__base_return__isnull=True,
-                    prediction__bull_return__isnull=True,
-                ).filter(
-                    prediction__method_version=FHS_METHOD_VERSION,
-                    prediction__evidence_role=Prediction.EvidenceRole.ADVISORY,
-                ),
-            ),
-        ):
-            for status, count in (
-                outcomes.values("status")
-                .annotate(count=Count("prediction"))
-                .values_list("status", "count")
-            ):
-                scope[name][str(status)] += int(count)
-    return (
-        [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
-        [
-            {
-                "prediction__horizon": horizon,
-                "status": status,
-                "count": count,
-            }
-            for (horizon, status), count in sorted(advisory_counts.items())
-        ],
-        scope,
-    )
+    return product_performance_groups(tuple(item.run.id for item in history.runs))
 
 
 @login_required

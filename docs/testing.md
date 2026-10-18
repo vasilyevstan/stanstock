@@ -202,6 +202,51 @@ fewer links or removed adapters alone do not establish lower RAM use.
 No live-data benchmark, permanent telemetry or new benchmark framework is
 required.
 
+## Versioned accounting and forward research
+
+`tests/test_simulation_engine.py` pins legacy success, benchmark-gap,
+inception-friction and insufficiency payloads before accounting changes.
+`tests/test_research_product_pipeline.py` also pins native successful and
+genuinely withheld issuance/replay. Preserve complete bytes and hashes, not
+just output counts. V2 regressions assert exact matched return boundaries,
+edge-gap withholding, valid zero tracking error, and drawdown measured from
+pre-trade capital. Simulation service/web cases bind version/configuration,
+coverage and execution revision to immutable result evidence and reject
+invalid v2 provenance instead of falling back to legacy.
+
+The full-payload pins separately capture Darwin and Linux numerical
+runtimes from the same frozen base. Exact source prices do not make unrounded
+`pow`, NumPy/BLAS or libm outputs byte-identical across operating systems. Prove complete
+base/head equality within each runtime; never round or omit fields to force
+a cross-runtime hash match.
+
+The real writer/requery/detail chain must reject changed definition/snapshot
+parents and missing or corrupt result/input bytes between two requests.
+Withhold metrics, trades and holdings without paths, accounting replay,
+provider/credential access or writes. Ordinary parent-configuration edits
+must preserve recorded execution labels. Bind a web fixture's configured
+data root to its actual asset store; do not relax physical verification to
+make a mismatched fixture appear readable. Retain the converted-FX case.
+
+`tests/test_research_performance_read.py` covers real registered history,
+physical verification, scalar canonical aggregation and authenticated
+rendering. Small fixtures establish deterministic work bounds; one generated
+26-cohort, 105-analyzed, five-prediction workload retains its 109 requested
+members and explicit exclusions. Fixture setup may reuse numerical work;
+the measured request must not mock authorization, physical integrity,
+canonical selection or rendering. Record phase/query/asset-read receipts
+without production profiling infrastructure or a tight CI clock assertion.
+Candidate-bound native cold and repeated HTTP checks remain separate evidence.
+
+`tests/test_forward_scorecard.py` and `tests/test_current_method_paper.py`
+exercise persistence through calculation, authorized checksum-verifying reads
+and actual command output. Cover declaration chronology, canonical-before-
+status selection, paired cohort support, null immature results, valid cash
+versus withheld selection, fixed quantities, future/missing prices, exact-byte
+retry reuse, concurrent single-winner publication and owner isolation.
+Research evidence must not create personal ledger or generic simulation rows.
+All these fixtures remain synthetic and offline.
+
 ## Model-outcome summary coverage
 
 The immutable FHS prediction contract stays unchanged. A separate report must

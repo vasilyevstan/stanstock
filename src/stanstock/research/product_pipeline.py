@@ -26,7 +26,12 @@ from django.utils import timezone
 
 from stanstock.core.revision import clean_git_revision
 from stanstock.core.verification_types import AssetRef, RefreshVerificationError
-from stanstock.data.asof import AsOfData, raw_price_asset_for
+from stanstock.data.asof import (
+    AsOfData,
+    PriceFrameChecksumMismatchError,
+    PriceFrameRead,
+    raw_price_asset_for,
+)
 from stanstock.data.assets import (
     AssetStore,
     asset_ref_for,
@@ -36,10 +41,13 @@ from stanstock.data.assets import (
 )
 from stanstock.data.models import DataAsset, Listing, UniverseMembership, UniverseSnapshot
 from stanstock.data.research_product import (
+    _ProductCatalogReference,
+    _verify_product_listing_catalog,
+    _verify_product_price_content,
+    product_catalog_references,
     product_membership_payload,
     verify_product_intake_membership,
     verify_product_listing_catalog,
-    verify_product_price_content,
 )
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product import (
@@ -306,6 +314,37 @@ def select_product_source(
     benchmark_asset: DataAsset | None = None,
     catalog_assets: tuple[DataAsset, ...] = (),
 ) -> ProductSourceSelection:
+    return _select_product_source(
+        listing=listing,
+        target_date=target_date,
+        decision_time=decision_time,
+        provider=provider,
+        benchmark_subject=benchmark_subject,
+        source_execution=source_execution,
+        store=store,
+        config=config,
+        stock_asset=stock_asset,
+        benchmark_asset=benchmark_asset,
+        catalog_assets=catalog_assets,
+    )
+
+
+def _select_product_source(
+    *,
+    listing: Listing,
+    target_date: date,
+    decision_time: datetime,
+    provider: str,
+    benchmark_subject: str,
+    source_execution: SourceExecutionBinding,
+    store: AssetStore,
+    config: PriceProductConfig,
+    stock_asset: DataAsset | None = None,
+    benchmark_asset: DataAsset | None = None,
+    catalog_assets: tuple[DataAsset, ...] = (),
+    benchmark_proof: tuple[DataAsset, DataAsset, PriceSeries] | None = None,
+    catalog_references: tuple[_ProductCatalogReference, ...] | None = None,
+) -> ProductSourceSelection:
     """Select and prove one exact qualified source closure before calculation.
 
     A short current-price asset never shadows a qualified full history: assets
@@ -353,7 +392,7 @@ def select_product_source(
         provider=provider,
         source_execution=source_execution,
     )
-    stock_raw = _validate_price_asset(
+    stock_raw, stock_read = _validate_price_asset_with_frame(
         asof=asof,
         asset=stock,
         subject=listing.provider_symbol,
@@ -361,26 +400,50 @@ def select_product_source(
         config=config,
         store=store,
     )
-    benchmark_raw = _validate_price_asset(
-        asof=asof,
-        asset=benchmark,
-        subject=benchmark_subject,
-        target_date=target_date,
-        config=config,
-        store=store,
-    )
-    if source_execution.mode == "provider":
-        verify_product_listing_catalog(
-            listing=listing,
-            stock_asset=stock,
-            benchmark_asset=benchmark,
-            catalog_assets=catalog_assets,
-            cutoff=decision_time,
+    benchmark_read = None
+    if benchmark_proof is not None:
+        benchmark_raw = benchmark_proof[1]
+    else:
+        benchmark_raw, benchmark_read = _validate_price_asset_with_frame(
+            asof=asof,
+            asset=benchmark,
+            subject=benchmark_subject,
+            target_date=target_date,
+            config=config,
             store=store,
         )
-    stock_series = _series_for_asset(asof=asof, asset=stock, target_date=target_date, config=config)
-    benchmark_series = _series_for_asset(
-        asof=asof, asset=benchmark, target_date=target_date, config=config
+    if source_execution.mode == "provider":
+        if catalog_references is None:
+            verify_product_listing_catalog(
+                listing=listing,
+                stock_asset=stock,
+                benchmark_asset=benchmark,
+                catalog_assets=catalog_assets,
+                cutoff=decision_time,
+                store=store,
+            )
+        else:
+            _verify_product_listing_catalog(
+                listing=listing,
+                stock_asset=stock,
+                benchmark_asset=benchmark,
+                references=tuple(
+                    ref for ref in catalog_references if ref.symbol == listing.provider_symbol
+                ),
+            )
+    stock_series = _series_for_asset(
+        asof=asof, asset=stock, target_date=target_date, config=config, validated_read=stock_read
+    )
+    benchmark_series = (
+        benchmark_proof[2]
+        if benchmark_proof is not None
+        else _series_for_asset(
+            asof=asof,
+            asset=benchmark,
+            target_date=target_date,
+            config=config,
+            validated_read=benchmark_read,
+        )
     )
     return ProductSourceSelection(
         listing=listing,
@@ -601,7 +664,6 @@ def verify_price_product_output(
             "product_manifest_missing", "Research product manifest is missing or ambiguous"
         )
     manifest_asset = lookup.asset
-    read_checksummed_bytes(store, manifest_asset)
     try:
         manifest_run_id, plan, entries = parse_manifest_envelope(
             read_checksummed_bytes(store, manifest_asset)
@@ -610,7 +672,11 @@ def verify_price_product_output(
         raise RefreshVerificationError(
             "product_manifest_malformed", "Research product manifest is malformed"
         ) from exc
-    analyses = list(StockAnalysis.objects.filter(run=run).order_by("listing_id"))
+    analyses = list(
+        StockAnalysis.objects.filter(run=run)
+        .select_related("run__universe_snapshot__universe", "listing__security")
+        .order_by("listing_id")
+    )
     predictions = list(Prediction.objects.filter(analysis__run=run).order_by("id"))
     providers = {prediction.price_provider for prediction in predictions}
     if len(providers) != 1:
@@ -670,9 +736,64 @@ def verify_price_product_output(
         raise RefreshVerificationError(
             "product_analysis_duplicate", "Research product has duplicate listing analyses"
         )
-    for _listing_id, analysis in by_listing.items():
-        rows = [prediction for prediction in predictions if prediction.analysis_id == analysis.id]
-        _verify_product_rows(analysis=analysis, rows=rows, store=store, replay=replay)
+    by_analysis: dict[int, list[Prediction]] = {}
+    for prediction in predictions:
+        by_analysis.setdefault(prediction.analysis_id, []).append(prediction)
+    source_ids: set[UUID] = set()
+    for prediction in predictions:
+        if not isinstance(prediction.source_assets, list):
+            raise RefreshVerificationError(
+                "product_source_closure_invalid", "Product source closure is invalid"
+            )
+        try:
+            source_ids.update(UUID(str(raw["id"])) for raw in prediction.source_assets)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RefreshVerificationError(
+                "product_source_closure_invalid", "Product source asset identity is invalid"
+            ) from exc
+    # Registry rows only, not cached validation: each exact closure below still
+    # binds the complete ref, cutoff, raw bytes, window and complete input.
+    sources_by_id = DataAsset.objects.in_bulk(source_ids)
+    registry = list(
+        DataAsset.objects.filter(
+            provider="stanstock", kind=CALCULATION_ARTIFACT_KIND, subject=str(run.id)
+        )
+    )
+    artifacts_by_id = {asset.id: asset for asset in registry}
+    artifacts_by_listing: dict[str, list[DataAsset]] = {}
+    for asset in registry:
+        artifacts_by_listing.setdefault(str(asset.metadata.get("listing_id")), []).append(asset)
+    source_time = datetime.fromisoformat(str(membership_authority["decision_time"]))
+    catalog_assets = _catalogs_for_membership(membership_authority, source_time)
+    config = load_price_product_config()
+    catalog_references = (
+        product_catalog_references(
+            catalog_assets=catalog_assets,
+            symbols=tuple(analysis.listing.provider_symbol for analysis in analyses),
+            cutoff=source_time,
+            store=store,
+        )
+        if next(iter(providers)) != "synthetic_demo"
+        else None
+    )
+    # Invocation-local validated facts, keyed by BOTH complete source refs and
+    # cutoff/target/mode. Never stored on a session or reused across runs/requests.
+    benchmark_proofs: dict[tuple[object, ...], tuple[DataAsset, DataAsset, PriceSeries]] = {}
+    for analysis in by_listing.values():
+        _verify_product_rows(
+            analysis=analysis,
+            rows=by_analysis.get(analysis.id, []),
+            store=store,
+            replay=replay,
+            artifacts_by_id=artifacts_by_id,
+            artifacts_by_listing=artifacts_by_listing,
+            membership=membership_authority,
+            catalog_assets=catalog_assets,
+            benchmark_proofs=benchmark_proofs,
+            config=config,
+            catalog_references=catalog_references,
+            sources_by_id=sources_by_id,
+        )
 
 
 def _require_membership_authority(
@@ -730,7 +851,19 @@ def _membership_ids_from_payload(payload: Mapping[str, object]) -> set[UUID]:
 
 
 def _verify_product_rows(
-    *, analysis: StockAnalysis, rows: list[Prediction], store: AssetStore, replay: bool
+    *,
+    analysis: StockAnalysis,
+    rows: list[Prediction],
+    store: AssetStore,
+    replay: bool,
+    artifacts_by_id: Mapping[UUID, DataAsset],
+    artifacts_by_listing: Mapping[str, list[DataAsset]],
+    membership: Mapping[str, object],
+    catalog_assets: tuple[DataAsset, ...],
+    benchmark_proofs: dict[tuple[object, ...], tuple[DataAsset, DataAsset, PriceSeries]],
+    config: PriceProductConfig,
+    catalog_references: tuple[_ProductCatalogReference, ...] | None,
+    sources_by_id: dict[UUID, DataAsset],
 ) -> None:
     keys = {(row.method_version, row.evidence_role, row.horizon) for row in rows}
     expected = {
@@ -763,9 +896,12 @@ def _verify_product_rows(
             "product_calculation_binding_invalid",
             "Product calculation artifact reference is invalid",
         ) from exc
-    artifact = DataAsset.objects.filter(
-        id=artifact_id, kind=CALCULATION_ARTIFACT_KIND, provider="stanstock"
-    ).first()
+    artifact = artifacts_by_id.get(artifact_id)
+    if artifact is None:
+        # Preserve the wrong-subject vs missing-registry rejection distinction.
+        artifact = DataAsset.objects.filter(
+            id=artifact_id, kind=CALCULATION_ARTIFACT_KIND, provider="stanstock"
+        ).first()
     if artifact is None:
         raise RefreshVerificationError(
             "product_calculation_missing", "Product calculation artifact is missing"
@@ -779,15 +915,7 @@ def _verify_product_rows(
             "product_calculation_identity_invalid",
             "Product calculation artifact registry identity mismatches output",
         )
-    matching_artifacts = [
-        item
-        for item in DataAsset.objects.filter(
-            provider="stanstock",
-            kind=CALCULATION_ARTIFACT_KIND,
-            subject=str(analysis.run_id),
-        )
-        if item.metadata.get("listing_id") == str(analysis.listing_id)
-    ]
+    matching_artifacts = artifacts_by_listing.get(str(analysis.listing_id), [])
     if len(matching_artifacts) != 1:
         raise RefreshVerificationError(
             "product_calculation_ambiguous",
@@ -817,7 +945,17 @@ def _verify_product_rows(
             "product_calculation_run_mismatch",
             "Product run metadata diverges from its registered calculation artifact",
         )
-    selection = _selection_from_artifact(analysis=analysis, document=document, store=store)
+    selection = _selection_from_artifact(
+        analysis=analysis,
+        document=document,
+        store=store,
+        membership=membership,
+        catalog_assets=catalog_assets,
+        benchmark_proofs=benchmark_proofs,
+        config=config,
+        catalog_references=catalog_references,
+        sources_by_id=sources_by_id,
+    )
     source_window = document.get("source_window")
     if not isinstance(source_window, Mapping):
         raise RefreshVerificationError(
@@ -853,7 +991,7 @@ def _verify_product_rows(
     if replay:
         result = calculate_price_product(
             selection.product_input,
-            config=load_price_product_config(),
+            config=config,
             effective_config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
         )
         if document.get("input_hash") != result.input_hash:
@@ -869,7 +1007,16 @@ def _verify_product_rows(
 
 
 def _selection_from_artifact(
-    *, analysis: StockAnalysis, document: dict[str, Any], store: AssetStore
+    *,
+    analysis: StockAnalysis,
+    document: dict[str, Any],
+    store: AssetStore,
+    membership: Mapping[str, object],
+    catalog_assets: tuple[DataAsset, ...],
+    benchmark_proofs: dict[tuple[object, ...], tuple[DataAsset, DataAsset, PriceSeries]],
+    config: PriceProductConfig,
+    catalog_references: tuple[_ProductCatalogReference, ...] | None,
+    sources_by_id: dict[UUID, DataAsset],
 ) -> ProductSourceSelection:
     refs = document.get("source_assets")
     if not isinstance(refs, list) or len(refs) != 4:
@@ -888,18 +1035,11 @@ def _selection_from_artifact(
             raise RefreshVerificationError(
                 "product_source_closure_invalid", "Product source asset identity is invalid"
             ) from exc
-        asset = DataAsset.objects.filter(
-            id=asset_id,
-            provider=raw.get("provider"),
-            kind=raw.get("kind"),
-            subject=raw.get("subject"),
-            sha256=raw.get("sha256"),
-        ).first()
-        if asset is None:
+        asset = sources_by_id.get(asset_id)
+        if asset is None or asset_ref_for(asset).to_json() != raw:
             raise RefreshVerificationError(
                 "product_source_closure_invalid", "Product source asset is not registered"
             )
-        read_checksummed_bytes(store, asset)
         assets.append(asset)
     source = document.get("source_execution")
     if not isinstance(source, dict):
@@ -914,7 +1054,6 @@ def _selection_from_artifact(
         raise RefreshVerificationError(
             "product_source_mode_invalid", "Product source mode is invalid"
         ) from exc
-    membership = product_membership_payload(analysis.run.universe_snapshot, store=store)
     source_time = datetime.fromisoformat(str(membership["decision_time"]))
     if source_time > analysis.run.generated_at or (
         analysis.run.issued_on_time and source_time != analysis.run.data_cutoff
@@ -922,7 +1061,6 @@ def _selection_from_artifact(
         raise RefreshVerificationError(
             "product_source_time_invalid", "Product source boundary conflicts with its run"
         )
-    catalog_assets: tuple[DataAsset, ...] = ()
     if binding.mode == "provider":
         admissions = membership["admissions"]
         if not isinstance(admissions, dict):
@@ -936,12 +1074,21 @@ def _selection_from_artifact(
             or membership["benchmark_asset"] != asset_ref_for(assets[2]).to_json()
         ):
             raise ValueError("Product calculation substituted captured source authority")
-        catalog_assets = _catalogs_for_membership(membership, source_time)
     if document.get("catalog_assets") != [
         asset_ref_for(asset).to_json() for asset in catalog_assets
     ]:
         raise ValueError("Product calculation substituted its registered catalog authority")
-    return select_product_source(
+    proof_key = (
+        json.dumps(refs[2:], sort_keys=True),
+        source_time,
+        analysis.run.target_date,
+        binding.mode,
+        binding.evidence_grade,
+        analysis.run.config_hash,
+        analysis.run.id,
+    )
+    proof = benchmark_proofs.get(proof_key)
+    selection = _select_product_source(
         listing=analysis.listing,
         target_date=analysis.run.target_date,
         decision_time=source_time,
@@ -949,11 +1096,20 @@ def _selection_from_artifact(
         benchmark_subject=assets[2].subject,
         source_execution=binding,
         store=store,
-        config=load_price_product_config(),
+        config=config,
         stock_asset=assets[0],
         benchmark_asset=assets[2],
         catalog_assets=catalog_assets,
+        benchmark_proof=proof,
+        catalog_references=catalog_references,
     )
+    if proof is None:
+        benchmark_proofs[proof_key] = (
+            selection.benchmark_asset,
+            selection.benchmark_raw_asset,
+            selection.product_input.benchmark,
+        )
+    return selection
 
 
 def _require_row_calculation_bindings(
@@ -1364,6 +1520,20 @@ def _validate_price_asset(
     config: PriceProductConfig,
     store: AssetStore,
 ) -> DataAsset:
+    return _validate_price_asset_with_frame(
+        asof=asof, asset=asset, subject=subject, target_date=target_date, config=config, store=store
+    )[0]
+
+
+def _validate_price_asset_with_frame(
+    *,
+    asof: AsOfData,
+    asset: DataAsset,
+    subject: str,
+    target_date: date,
+    config: PriceProductConfig,
+    store: AssetStore,
+) -> tuple[DataAsset, PriceFrameRead]:
     if asset.subject != subject or asset.provider not in {config.price_provider, "synthetic_demo"}:
         raise PriceProductInputError(
             "price_identity_invalid", "Selected price asset has the wrong provider identity"
@@ -1380,22 +1550,36 @@ def _validate_price_asset(
         raise PriceProductInputError(
             "raw_price_identity_invalid", "Raw price evidence does not bind selected series"
         )
-    read_checksummed_bytes(store, raw)
-    read_checksummed_bytes(store, asset)
-    verify_product_price_content(
-        asset=asset, raw=raw, cutoff=asof.decision_time, target_date=target_date, store=store
-    )
+    try:
+        read = _verify_product_price_content(
+            asset=asset, raw=raw, cutoff=asof.decision_time, target_date=target_date, store=store
+        )
+    except PriceFrameChecksumMismatchError:
+        raise RefreshVerificationError(
+            "asset_corrupt", "A referenced asset's file does not match its registered checksum"
+        ) from None
+    except OSError:
+        raise RefreshVerificationError(
+            "asset_unreadable", "A referenced asset's file could not be read"
+        ) from None
     if asset.period_end is not None and asset.period_end < target_date:
         raise PriceProductInputError(
             "price_target_missing", "Selected price asset ends before the target date"
         )
-    return raw
+    return raw, read
 
 
 def _series_for_asset(
-    *, asof: AsOfData, asset: DataAsset, target_date: date, config: PriceProductConfig
+    *,
+    asof: AsOfData,
+    asset: DataAsset,
+    target_date: date,
+    config: PriceProductConfig,
+    validated_read: PriceFrameRead | None = None,
 ) -> PriceSeries:
-    read = asof.price_frame_for_asset_with_diagnostics(asset=asset, through_date=target_date)
+    read = validated_read or asof.price_frame_for_asset_with_diagnostics(
+        asset=asset, through_date=target_date
+    )
     if read.invalid_session_date_rows:
         raise PriceProductInputError(
             "price_date_invalid", "Price evidence has invalid session dates"

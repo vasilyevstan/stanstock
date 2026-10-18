@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import math
+from typing import Any
+
 import numpy as np
 import polars as pl
 
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
     FxAttribution,
     SimulationConfig,
     SimulationMetrics,
     UnresolvedObservation,
+    resolve_accounting_version,
 )
 
 
@@ -21,6 +26,7 @@ def calculate_simulation_metrics(
 ) -> SimulationMetrics:
     if daily_curves.height == 0:
         raise ValueError("Cannot calculate metrics from empty daily curves")
+    v2 = resolve_accounting_version(config.custom_parameters) == ACCOUNTING_VERSION
 
     start_date = daily_curves["date"][0]
     end_date = daily_curves["date"][-1]
@@ -59,7 +65,7 @@ def calculate_simulation_metrics(
         sharpe_ratio = None
 
     # Max Drawdown
-    peaks = np.maximum.accumulate(values)
+    peaks = np.maximum.accumulate(np.maximum(values, starting_capital) if v2 else values)
     drawdowns = (values - peaks) / np.maximum(peaks, 1e-12)
     max_drawdown = float(np.min(drawdowns))
 
@@ -97,6 +103,10 @@ def calculate_simulation_metrics(
     beta: float | None = None
     tracking_error: float | None = None
     information_ratio: float | None = None
+    comparison_coverage: dict[str, Any] | None = None
+    matched = daily_curves
+    if v2:
+        comparison_coverage, matched = _comparison_coverage(daily_curves)
 
     has_benchmark = (
         "benchmark_value" in daily_curves.columns
@@ -110,7 +120,7 @@ def calculate_simulation_metrics(
             bench_vals = valid_bench["benchmark_value"].to_numpy()
             b_start = float(bench_vals[0])
             b_end = float(bench_vals[-1])
-            if b_start > 0:
+            if b_start > 0 and (not v2 or comparison_coverage["boundaries_complete"]):  # type: ignore[index]
                 benchmark_cumulative_return = float((b_end - b_start) / b_start)
                 excess_return = float(cumulative_return - benchmark_cumulative_return)
 
@@ -119,16 +129,21 @@ def calculate_simulation_metrics(
                         (1.0 + benchmark_cumulative_return) ** (1.0 / years) - 1.0
                     )
 
-                b_peaks = np.maximum.accumulate(bench_vals)
-                b_drawdowns = (bench_vals - b_peaks) / np.maximum(b_peaks, 1e-12)
-                benchmark_max_drawdown = float(np.min(b_drawdowns))
+                if not v2 or comparison_coverage["path_complete"]:  # type: ignore[index]
+                    b_peaks = np.maximum.accumulate(bench_vals)
+                    b_drawdowns = (bench_vals - b_peaks) / np.maximum(b_peaks, 1e-12)
+                    benchmark_max_drawdown = float(np.min(b_drawdowns))
 
         if "benchmark_return" in daily_curves.columns:
-            aligned = daily_curves.slice(1).filter(
-                pl.col("daily_return").is_not_null()
-                & pl.col("benchmark_return").is_not_null()
-                & ~pl.col("daily_return").is_nan()
-                & ~pl.col("benchmark_return").is_nan()
+            aligned = (
+                matched
+                if v2
+                else daily_curves.slice(1).filter(
+                    pl.col("daily_return").is_not_null()
+                    & pl.col("benchmark_return").is_not_null()
+                    & ~pl.col("daily_return").is_nan()
+                    & ~pl.col("benchmark_return").is_nan()
+                )
             )
             if aligned.height >= 2:
                 r_p = aligned["daily_return"].to_numpy()
@@ -193,4 +208,53 @@ def calculate_simulation_metrics(
         beta=beta,
         tracking_error=tracking_error,
         information_ratio=information_ratio,
+        comparison_coverage=comparison_coverage,
     )
+
+
+def _comparison_coverage(curves: pl.DataFrame) -> tuple[dict[str, Any], pl.DataFrame]:
+    """One adjacent-calendar support proof shared by every v2 comparison."""
+    days = curves["date"].to_list()
+    if days != sorted(set(days)):
+        raise ValueError("Simulation calendar must contain unique ordered session dates")
+    values = (
+        curves["benchmark_value"].to_list()
+        if "benchmark_value" in curves.columns
+        else [None] * len(days)
+    )
+    present = [value is not None and math.isfinite(value) and value > 0 for value in values]
+    indices = [index for index in range(1, len(days)) if present[index - 1] and present[index]]
+    for index in indices:
+        current, previous = values[index], values[index - 1]
+        assert current is not None and previous is not None
+        if current / previous == 0:
+            raise ValueError("Benchmark ratio is not representable")
+        if curves["benchmark_return"][index] is None:
+            raise ValueError("Benchmark adjacent return is missing")
+    reasons = []
+    if not present[0]:
+        reasons.append("benchmark_start_boundary_missing")
+    if not present[-1]:
+        reasons.append("benchmark_end_boundary_missing")
+    if not all(present):
+        reasons.append("benchmark_path_incomplete")
+    if len(indices) < 2:
+        reasons.append("insufficient_matched_return_pairs")
+    elif np.var(curves[indices]["benchmark_return"].to_numpy(), ddof=1) <= 1e-12:
+        reasons.append("benchmark_return_variance_zero")
+    if len(indices) >= 2:
+        differences = curves[indices]["daily_return"] - curves[indices]["benchmark_return"]
+        if np.std(differences.to_numpy(), ddof=1) <= 1e-12:
+            reasons.append("active_return_variance_zero")
+    return {
+        "start_date": days[0].isoformat(),
+        "end_date": days[-1].isoformat(),
+        "benchmark_start_present": present[0],
+        "benchmark_end_present": present[-1],
+        "boundaries_complete": present[0] and present[-1],
+        "path_complete": all(present),
+        "calendar_intervals": max(0, len(days) - 1),
+        "matched_intervals": len(indices),
+        "omitted_intervals": max(0, len(days) - 1) - len(indices),
+        "reasons": reasons,
+    }, curves[indices]

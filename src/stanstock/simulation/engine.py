@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from datetime import date
 from typing import Any
@@ -22,6 +23,7 @@ from stanstock.simulation.hooks import (
 )
 from stanstock.simulation.metrics import calculate_simulation_metrics
 from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
     ExecutionPriceBasis,
     FxAttribution,
     HoldingRecord,
@@ -30,6 +32,7 @@ from stanstock.simulation.types import (
     SimulationResult,
     TradeRecord,
     UnresolvedObservation,
+    resolve_accounting_version,
 )
 
 MIN_PERSISTED_QUANTITY = 1e-8
@@ -51,6 +54,9 @@ class AccountingEngine:
     ) -> None:
         config.validate()
         self.config = config
+        self.accounting_v2 = (
+            resolve_accounting_version(config.custom_parameters) == ACCOUNTING_VERSION
+        )
         self.corporate_event_hook = corporate_event_hook or default_corporate_event_hook
 
     def run(
@@ -62,11 +68,28 @@ class AccountingEngine:
         calendar: Sequence[date] | None = None,
         fx_rates: pl.DataFrame | None = None,
     ) -> SimulationResult:
+        if self.accounting_v2 and calendar is not None:
+            if list(calendar) != sorted(set(calendar)) or any(
+                type(day) is not date for day in calendar
+            ):
+                raise ValueError("Simulation calendar must contain unique ordered session dates")
         normalized_prices = self._normalize_prices(prices)
         normalized_signals = self._normalize_signals(signals) if signals is not None else None
         normalized_bench = (
             self._normalize_benchmark(benchmark_prices) if benchmark_prices is not None else None
         )
+        if self.accounting_v2:
+            for frame in (normalized_prices, normalized_bench):
+                if frame is None:
+                    continue
+                if frame["date"].null_count():
+                    raise ValueError("Simulation prices require session dates")
+                for column in ("close", "open"):
+                    if column in frame.columns and any(
+                        not math.isfinite(value) or value <= 0
+                        for value in frame[column].drop_nulls()
+                    ):
+                        raise ValueError("Simulation prices must be finite and positive")
         normalized_fx = (
             normalize_fx_frame(fx_rates, base_currency=self.config.base_currency)
             if fx_rates is not None
@@ -156,6 +179,8 @@ class AccountingEngine:
 
         friction_bps = self.config.transaction_cost_bps + self.config.slippage_bps
         friction_rate = friction_bps / 10000.0
+        if self.accounting_v2 and not math.isfinite(friction_rate):
+            raise ValueError("Simulation friction is not finitely representable")
 
         for t_idx, current_date in enumerate(trading_dates):
             # Check if current_date is an execution date for a prior signal
@@ -261,6 +286,8 @@ class AccountingEngine:
 
                     if lid in target_listings:
                         target_qty = target_dollars / p_exec
+                        if self.accounting_v2:
+                            _require_ratio(target_dollars, p_exec, target_qty)
                     else:
                         target_qty = 0.0
 
@@ -311,12 +338,26 @@ class AccountingEngine:
                         continue
                     curr_qty = holdings_qty.get(lid, 0.0)
                     target_qty = target_dollars / p_exec
+                    if self.accounting_v2:
+                        _require_ratio(target_dollars, p_exec, target_qty)
+                        if (
+                            curr_qty == 0
+                            and target_dollars > 0
+                            and (target_qty < MIN_PERSISTED_QUANTITY)
+                        ):
+                            raise ValueError("Simulation inception quantity is below precision")
                     if target_qty > curr_qty:
                         buy_qty = target_qty - curr_qty
                         gross_needed = buy_qty * p_exec
                         cash_needed = gross_needed * (1.0 + friction_rate)
+                        if self.accounting_v2 and not math.isfinite(cash_needed):
+                            raise ValueError(
+                                "Simulation trade outlay is not finitely representable"
+                            )
                         buy_orders.append((lid, p_exec, buy_qty, gross_needed))
                         total_cash_needed += cash_needed
+                if self.accounting_v2 and not math.isfinite(total_cash_needed):
+                    raise ValueError("Simulation trade outlay is not finitely representable")
 
                 # Scale buys if available cash is insufficient
                 scale = 1.0
@@ -444,6 +485,10 @@ class AccountingEngine:
                 )
 
             portfolio_val = cash + daily_gross_market_val
+            if self.accounting_v2 and (
+                not math.isfinite(portfolio_val) or portfolio_val <= 0 or not math.isfinite(cash)
+            ):
+                raise ValueError("Simulation valuation is not finite and positive")
             if fx_ledger is not None:
                 terminal_shadow_market_value = fx_ledger.shadow_market_value(
                     (holding.listing_id, holding.market_value) for holding in day_holdings
@@ -457,7 +502,11 @@ class AccountingEngine:
             # Daily return & drawdown
             if t_idx == 0:
                 daily_ret = 0.0
-                peak_portfolio_value = portfolio_val
+                peak_portfolio_value = (
+                    max(peak_portfolio_value, portfolio_val)
+                    if self.accounting_v2
+                    else portfolio_val
+                )
             else:
                 if prev_portfolio_value > 0:
                     daily_ret = (portfolio_val - prev_portfolio_value) / prev_portfolio_value
@@ -483,14 +532,17 @@ class AccountingEngine:
                 if bench_start_price is None:
                     bench_start_price = b_price
                     bench_val = float(self.config.starting_capital)
-                    bench_ret = 0.0
+                    bench_ret = 0.0 if not self.accounting_v2 or t_idx == 0 else None
                     bench_cum_ret = 0.0
                 else:
                     bench_val = float(self.config.starting_capital * (b_price / bench_start_price))
+                    if self.accounting_v2:
+                        _require_ratio(b_price, bench_start_price, b_price / bench_start_price)
+                        bench_prev_price = bench_lookup.get(trading_dates[t_idx - 1])
                     if bench_prev_price and bench_prev_price > 0:
                         bench_ret = (b_price - bench_prev_price) / bench_prev_price
                     else:
-                        bench_ret = 0.0
+                        bench_ret = None if self.accounting_v2 else 0.0
                     bench_cum_ret = (b_price - bench_start_price) / bench_start_price
                 bench_prev_price = b_price
 
@@ -557,6 +609,19 @@ class AccountingEngine:
             config=self.config,
             fx_attribution=fx_attribution,
         )
+        if self.accounting_v2:
+            # Reject unrepresentable intermediates before a caller can write
+            # success-shaped JSON/frames. This does not change v1 insufficiency.
+            json.dumps(
+                {
+                    "metrics": metrics.to_dict(),
+                    "curves": daily_curves.to_dicts(),
+                    "holdings": holdings_df.to_dicts(),
+                    "trades": trades_df.to_dicts(),
+                },
+                default=str,
+                allow_nan=False,
+            )
 
         return SimulationResult(
             daily_curves=daily_curves,
@@ -1214,6 +1279,11 @@ def _persistable_trade(quantity: float, price: float) -> bool:
         and price >= MIN_PERSISTED_VALUE
         and quantity * price >= MIN_PERSISTED_VALUE
     )
+
+
+def _require_ratio(numerator: float, denominator: float, result: float) -> None:
+    if not math.isfinite(result) or (numerator > 0 and denominator > 0 and result == 0):
+        raise ValueError("Simulation ratio is not representable")
 
 
 def _update_frame_hash(

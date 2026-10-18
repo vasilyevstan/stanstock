@@ -6,7 +6,7 @@
 {% block content %}
   <section class="page-heading">
     <div>
-      <p class="eyebrow">{{ run.definition.get_mode_display }} · {{ run.universe_snapshot.get_grade_display }}</p>
+      <p class="eyebrow">{% if metrics_verified %}{{ calculation.mode_label }} · {{ calculation.grade_label }}{% else %}Calculation evidence unavailable{% endif %}</p>
       <h1>{{ run.definition.name }}</h1>
       <p class="lede">
         Input hash {{ run.input_hash }} · code revision {{ run.code_revision }}
@@ -20,7 +20,21 @@
     <div class="error-box" role="alert">{{ run.error }}</div>
   {% endif %}
 
-  {% if run.metrics.fx_conversion_applied %}
+  <div class="{% if metrics_verified %}notice{% else %}error-box{% endif %}" role="note">
+    {% if calculation.version %}<strong>{{ calculation.version }}</strong> · {% endif %}
+    {{ calculation.message }}
+    {% if calculation.coverage %}
+      <p>
+        {{ calculation.coverage.start_date }} to {{ calculation.coverage.end_date }}:
+        {{ calculation.coverage.matched_intervals }} matched benchmark intervals,
+        {{ calculation.coverage.omitted_intervals }} omitted.
+        {% if calculation.coverage.reasons %}Withholding reasons: {{ calculation.coverage.reasons|join:", " }}.{% endif %}
+      </p>
+      <p>Execution revision {{ calculation.execution_revision }}.</p>
+    {% endif %}
+  </div>
+
+  {% if metrics_verified and run.metrics.fx_conversion_applied %}
     <section class="panel" aria-label="Currency conversion">
       <p class="eyebrow">Point-in-time FX</p>
       <h2>Converted into {{ run.metrics.base_currency }}</h2>
@@ -55,6 +69,7 @@
     </section>
   {% endif %}
 
+  {% if metrics_verified %}
   <section class="metric-grid" aria-label="Simulation metrics">
     {% for name, value in metrics %}
       <article>
@@ -102,4 +117,5 @@
       </div>
     </section>
   </div>
+  {% endif %}
 {% endblock %}

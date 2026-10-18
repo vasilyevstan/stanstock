@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -8,6 +9,20 @@ from typing import Any
 
 import polars as pl
 import yaml
+
+LEGACY_ACCOUNTING_VERSION = "simulation-accounting-v1"
+ACCOUNTING_VERSION = "simulation-accounting-v2"
+ACCOUNTING_VERSION_PARAMETER = "calculation_version"
+
+
+def resolve_accounting_version(parameters: dict[str, Any]) -> str:
+    """The sole version dispatch: absent markers retain frozen legacy bytes."""
+    if not isinstance(parameters, dict):
+        raise ValueError("Simulation calculation parameters must be an object")
+    version = parameters.get(ACCOUNTING_VERSION_PARAMETER, LEGACY_ACCOUNTING_VERSION)
+    if version not in (LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION):
+        raise ValueError("Unknown simulation calculation version")
+    return str(version)
 
 
 class SimulationMode(StrEnum):
@@ -87,6 +102,18 @@ class SimulationConfig:
     }
 
     def validate(self) -> None:
+        if resolve_accounting_version(self.custom_parameters) == ACCOUNTING_VERSION:
+            for name in (
+                "starting_capital",
+                "transaction_cost_bps",
+                "slippage_bps",
+                "cash_buffer_bps",
+                "risk_free_rate",
+            ):
+                if not math.isfinite(getattr(self, name)):
+                    raise ValueError(f"{name} must be finite")
+            if self.risk_free_rate <= -1:
+                raise ValueError("risk_free_rate must be greater than -1")
         if self.starting_capital <= 0:
             raise ValueError(f"starting_capital must be positive, got {self.starting_capital}")
         if self.transaction_cost_bps < 0:
@@ -331,11 +358,15 @@ class SimulationMetrics:
     beta: float | None = None
     tracking_error: float | None = None
     information_ratio: float | None = None
+    comparison_coverage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["start_date"] = self.start_date.isoformat()
         data["end_date"] = self.end_date.isoformat()
+        # A new optional dataclass member must NOT add a null key to v1 bytes.
+        if self.comparison_coverage is None:
+            data.pop("comparison_coverage")
         return data
 
 

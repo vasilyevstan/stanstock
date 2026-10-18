@@ -27,6 +27,7 @@ from django.views.decorators.http import require_POST, require_safe
 from stanstock.core.launchd import SCHEDULE_TIME_LABEL, launch_agent_status
 from stanstock.core.models import JobRun
 from stanstock.core.services import system_status
+from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.etfs import (
     INVESTABLE_US_ETF_MIC,
     INVESTABLE_US_ETF_SYMBOL,
@@ -169,6 +170,7 @@ from stanstock.research.under10 import (
     under10_policy_hash,
 )
 from stanstock.simulation.models import SimulationDefinition, SimulationRun
+from stanstock.simulation.service import simulation_calculation_disclosure
 from stanstock.web.demo import DEMO_OPPORTUNITIES
 from stanstock.web.forms import (
     PRODUCT_HORIZON_CHOICES,
@@ -882,20 +884,46 @@ def simulation_detail_page(request: HttpRequest, run_id: UUID) -> HttpResponse:
         SimulationRun.objects.select_related("definition", "universe_snapshot__universe"),
         pk=run_id,
     )
+    try:
+        calculation = simulation_calculation_disclosure(run)
+        metrics_verified = True
+    except (ValueError, TypeError, KeyError, RefreshVerificationError):
+        calculation = {
+            "version": None,
+            "coverage": None,
+            "execution_revision": None,
+            "message": (
+                "Calculation provenance could not be verified. Metrics, trades and holdings "
+                "are withheld; retain this run's identity when requesting an evidence review."
+            ),
+        }
+        metrics_verified = False
     return render(
         request,
         "web/simulation_detail.html",
         {
             "run": run,
-            "metrics": run.metrics.items() if isinstance(run.metrics, dict) else [],
+            "calculation": calculation,
+            "metrics_verified": metrics_verified,
+            "metrics": [
+                (name, value)
+                for name, value in run.metrics.items()
+                if name not in {"calculation_contract", "comparison_coverage"}
+            ]
+            if metrics_verified
+            else [],
             "holdings": run.holdings.select_related("listing").order_by(
                 "-observation_date",
                 "-market_value",
-            )[:50],
+            )[:50]
+            if metrics_verified
+            else [],
             "trades": run.trades.select_related("listing").order_by(
                 "-trade_date",
                 "listing__ticker",
-            )[:50],
+            )[:50]
+            if metrics_verified
+            else [],
         },
     )
 

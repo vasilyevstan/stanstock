@@ -19,12 +19,16 @@ correlated SQL ``NOT EXISTS`` via ``Exists``/``OuterRef``.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal, DecimalException
-from typing import cast
+from typing import Any, cast
+from uuid import UUID
 
 from django.db.models import (
+    BooleanField,
+    Case,
     Count,
     DecimalField,
     Exists,
@@ -36,11 +40,123 @@ from django.db.models import (
     Q,
     QuerySet,
     Sum,
+    Value,
+    When,
 )
 from django.db.models.functions import Round
 
 from stanstock.data.models import UniverseSnapshot
 from stanstock.research.models import Prediction, PredictionOutcome
+from stanstock.research.price_product_config import FHS_METHOD_VERSION, MOMENTUM_METHOD_VERSION
+
+PRODUCT_RUN_BATCH_SIZE = 200
+
+
+def iter_product_prediction_projection(
+    run_ids: Sequence[UUID], *, extra_fields: Sequence[str] = ()
+) -> Iterator[dict[str, Any]]:
+    """One bounded streaming scalar query per batch; canonical BEFORE status.
+
+    Retain non-reportable, null-triplet, pending and excluded reissue rows so
+    consumers cannot silently narrow their denominators. S2 extends this same
+    projection, not the SQL definition of a market observation.
+    """
+    fields = (
+        "id",
+        "analysis__run_id",
+        "listing_id",
+        "target_date",
+        "horizon",
+        "method_version",
+        "config_hash",
+        "price_provider",
+        "evidence_grade",
+        "evidence_role",
+        "bear_return",
+        "base_return",
+        "bull_return",
+        "outcome__status",
+        "reportable",
+        "canonical",
+    )
+    for offset in range(0, len(run_ids), PRODUCT_RUN_BATCH_SIZE):
+        queryset = (
+            Prediction.objects.filter(
+                analysis__run_id__in=run_ids[offset : offset + PRODUCT_RUN_BATCH_SIZE]
+            )
+            .annotate(
+                reportable=Case(
+                    When(reportable_prediction_filter(), then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                ),
+                canonical=Case(
+                    When(canonical_reportable_prediction_filter(), then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                ),
+            )
+            .order_by()
+            .values(*dict.fromkeys((*fields, *extra_fields)))
+        )
+        yield from queryset.iterator(chunk_size=1000)
+
+
+def product_performance_groups(
+    run_ids: Sequence[UUID],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, dict[str, int]]]:
+    decision_counts: Counter[str] = Counter()
+    advisory_counts: Counter[tuple[str, str]] = Counter()
+    scope = {
+        role: dict.fromkeys(
+            (
+                "not_eligible_for_observed",
+                "eligible_canonical",
+                "outcome_pending",
+                "matured",
+                "unresolved",
+                "corporate_event",
+            ),
+            0,
+        )
+        for role in ("decision", "advisory")
+    }
+    scope["advisory"]["non_evaluable"] = 0
+    for row in iter_product_prediction_projection(run_ids):
+        role = row["evidence_role"]
+        if (role, row["method_version"]) not in {
+            ("decision", MOMENTUM_METHOD_VERSION),
+            ("advisory", FHS_METHOD_VERSION),
+        }:
+            continue
+        if role == "advisory" and all(
+            row[field] is None for field in ("bear_return", "base_return", "bull_return")
+        ):
+            scope[role]["non_evaluable"] += 1
+            continue
+        if not row["reportable"]:
+            scope[role]["not_eligible_for_observed"] += 1
+        if not row["canonical"]:
+            continue
+        scope[role]["eligible_canonical"] += 1
+        status = row["outcome__status"]
+        if status is None:
+            scope[role]["outcome_pending"] += 1
+        else:
+            scope[role][status] += 1
+            if role == "decision":
+                decision_counts[status] += 1
+            else:
+                advisory_counts[(row["horizon"], status)] += 1
+    return (
+        [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
+        [
+            {"prediction__horizon": horizon, "status": status, "count": count}
+            for (horizon, status), count in sorted(advisory_counts.items())
+        ],
+        scope,
+    )
+
 
 # Deliberately excludes `model_version` and any run/analysis identifier:
 # those distinguish *versions* of the same observation, not distinct ones.

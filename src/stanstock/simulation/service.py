@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import math
+import re
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -11,10 +16,16 @@ from uuid import UUID
 
 import polars as pl
 from django.db import transaction
+from django.db.models import DecimalField
 from django.utils import timezone
 
-from stanstock.data.assets import AssetStore, register_asset
-from stanstock.data.models import Listing, UniverseSnapshot
+from stanstock.data.assets import (
+    AssetStore,
+    open_asset_store,
+    read_checksummed_bytes,
+    register_asset,
+)
+from stanstock.data.models import DataAsset, Listing, UniverseSnapshot
 from stanstock.simulation.engine import AccountingEngine
 from stanstock.simulation.hooks import CorporateEventHook
 from stanstock.simulation.models import (
@@ -23,7 +34,13 @@ from stanstock.simulation.models import (
     SimulationRun,
     SimulationTrade,
 )
-from stanstock.simulation.types import SimulationConfig, SimulationResult
+from stanstock.simulation.types import (
+    ACCOUNTING_VERSION,
+    LEGACY_ACCOUNTING_VERSION,
+    SimulationConfig,
+    SimulationResult,
+    resolve_accounting_version,
+)
 
 
 def _get_git_revision() -> str:
@@ -46,6 +63,8 @@ class LoadedSimulationRun:
     holdings_count: int
     trades_count: int
     input_assets: dict[str, pl.DataFrame] = field(default_factory=dict)
+    calculation_version: str = LEGACY_ACCOUNTING_VERSION
+    comparison_coverage: dict[str, Any] | None = None
 
 
 def persist_simulation_run(
@@ -88,6 +107,12 @@ def persist_simulation_run(
             f"SimulationDefinition mode '{definition.mode}'"
         )
     _validate_persistable_trades(result.trades)
+    v2 = resolve_accounting_version(result.config.custom_parameters) == ACCOUNTING_VERSION
+    if v2:
+        result.config.validate()
+        if not register_data_asset:
+            raise ValueError("V2 simulation results require immutable registration")
+        _validate_v2_persistence(result)
 
     # 2. Resolve and validate listings before writing asset or modifying DB
     needed_lids = set(
@@ -118,6 +143,17 @@ def persist_simulation_run(
     actual_run_id = run_id or uuid.uuid4()
     store = asset_store or AssetStore()
     rev = code_revision or _get_git_revision()
+    contract = (
+        _calculation_contract(
+            result,
+            definition_id=str(definition.id),
+            universe_snapshot_id=str(universe_snapshot.id),
+            code_revision=rev,
+            execution_revision=_get_git_revision(),
+        )
+        if v2
+        else None
+    )
 
     # 3. Write Parquet assets (primary result + immutable inputs)
     written_rel_paths: list[str] = []
@@ -265,11 +301,15 @@ def persist_simulation_run(
                         "simulation_kind": result.config.simulation_kind,
                         "metrics": result.metrics.to_dict(),
                         "input_assets": input_assets_info,
+                        **({"calculation_contract": contract} if contract is not None else {}),
                     },
                 )
 
             metrics_payload = result.metrics.to_dict()
             metrics_payload["input_assets"] = input_assets_info
+            if contract is not None:
+                metrics_payload["calculation_contract"] = contract
+                json.dumps(metrics_payload, allow_nan=False)
 
             run = SimulationRun.objects.create(
                 id=actual_run_id,
@@ -329,12 +369,20 @@ def load_simulation_run(
     """Load a persisted SimulationRun, its Parquet daily curve, and input frames."""
     store = asset_store or AssetStore()
     run = SimulationRun.objects.select_related("definition", "universe_snapshot").get(id=run_id)
-    daily_curves = store.read_frame(run.result_asset_key)
-
-    input_frames: dict[str, pl.DataFrame] = {}
-    for key, info in run.metrics.get("input_assets", {}).items():
-        if isinstance(info, dict) and "relative_path" in info:
-            input_frames[key] = store.read_frame(info["relative_path"])
+    contract = _validated_calculation_contract(run)
+    if contract is not None:
+        frames = {
+            name: pl.read_parquet(io.BytesIO(payload))
+            for name, payload in _verified_simulation_asset_payloads(run, store)
+        }
+        daily_curves = frames.pop("result")
+        input_frames = frames
+    else:
+        daily_curves = store.read_frame(run.result_asset_key)
+        input_frames = {}
+        for key, info in run.metrics.get("input_assets", {}).items():
+            if isinstance(info, dict) and "relative_path" in info:
+                input_frames[key] = store.read_frame(info["relative_path"])
 
     return LoadedSimulationRun(
         run=run,
@@ -342,6 +390,10 @@ def load_simulation_run(
         holdings_count=run.holdings.count(),
         trades_count=run.trades.count(),
         input_assets=input_frames,
+        calculation_version=(
+            ACCOUNTING_VERSION if contract is not None else LEGACY_ACCOUNTING_VERSION
+        ),
+        comparison_coverage=None if contract is None else contract["comparison_coverage"],
     )
 
 
@@ -425,3 +477,213 @@ def _validate_persistable_trades(trades: pl.DataFrame) -> None:
                 "Simulation produced a trade below persistence precision; "
                 "rebalance dust must be suppressed by the accounting engine"
             )
+
+
+def _calculation_contract(
+    result: SimulationResult,
+    *,
+    definition_id: str,
+    universe_snapshot_id: str,
+    code_revision: str,
+    execution_revision: str,
+) -> dict[str, Any]:
+    """The one v2 provenance document, copied identically to run and registration.
+
+    V2 pairs immediately adjacent calendar endpoints; totals need both exact
+    boundaries, path drawdown needs the full path. Portfolio drawdown includes
+    inception capital. First-row return and legacy volatility conventions stay
+    unchanged. Config is the effective execution snapshot, never today's mutable
+    definition; declared code revision does not replace actual execution identity.
+    """
+    if re.fullmatch(r"[0-9a-f]{40}", execution_revision) is None:
+        raise ValueError("Simulation execution revision is unavailable")
+    snapshot = result.config.to_dict()
+    config_bytes = json.dumps(
+        snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    return {
+        "version": ACCOUNTING_VERSION,
+        "definition_id": definition_id,
+        "universe_snapshot_id": universe_snapshot_id,
+        "effective_config": snapshot,
+        "effective_config_hash": hashlib.sha256(config_bytes).hexdigest(),
+        "code_revision": code_revision,
+        "execution_revision": execution_revision,
+        "input_hash": result.input_hash,
+        "comparison_coverage": result.metrics.comparison_coverage,
+    }
+
+
+def _validated_calculation_contract(run: SimulationRun) -> dict[str, Any] | None:
+    """Bind stored metrics and parent identities to the immutable registration."""
+    if not isinstance(run.metrics, dict):
+        raise ValueError("Simulation metrics must be an object")
+    contract = run.metrics.get("calculation_contract")
+    if contract is None:
+        config = SimulationConfig.from_dict(run.definition.config)
+        registrations = DataAsset.objects.filter(
+            provider="simulation", kind="simulation_result", subject=str(run.id)
+        )
+        if (
+            resolve_accounting_version(config.custom_parameters) != LEGACY_ACCOUNTING_VERSION
+            or "comparison_coverage" in run.metrics
+            or any(
+                not isinstance(asset.metadata, dict) or "calculation_contract" in asset.metadata
+                for asset in registrations
+            )
+        ):
+            raise ValueError("Simulation calculation provenance is missing")
+        return None
+    if not isinstance(contract, dict) or set(contract) != {
+        "version",
+        "definition_id",
+        "universe_snapshot_id",
+        "effective_config",
+        "effective_config_hash",
+        "code_revision",
+        "execution_revision",
+        "input_hash",
+        "comparison_coverage",
+    }:
+        raise ValueError("Simulation calculation provenance is invalid")
+    config = SimulationConfig.from_dict(contract["effective_config"])
+    config.validate()
+    version = resolve_accounting_version(config.custom_parameters)
+    config_hash = hashlib.sha256(
+        json.dumps(
+            config.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    ).hexdigest()
+    assets = list(
+        DataAsset.objects.filter(
+            provider="simulation",
+            kind="simulation_result",
+            subject=str(run.id),
+        )
+    )
+    if (
+        version != ACCOUNTING_VERSION
+        or contract["version"] != version
+        or contract["definition_id"] != str(run.definition_id)
+        or contract["universe_snapshot_id"] != str(run.universe_snapshot_id)
+        or contract["effective_config_hash"] != config_hash
+        or contract["input_hash"] != run.input_hash
+        or contract["code_revision"] != run.code_revision
+        or not isinstance(contract["execution_revision"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", contract["execution_revision"]) is None
+        or contract["comparison_coverage"] != run.metrics.get("comparison_coverage")
+        or not isinstance(contract["comparison_coverage"], dict)
+        or len(assets) != 1
+    ):
+        raise ValueError("Simulation calculation provenance is invalid")
+    asset = assets[0]
+    if (
+        not isinstance(asset.metadata, dict)
+        or asset.relative_path != run.result_asset_key
+        or asset.metadata.get("calculation_contract") != contract
+        or asset.metadata.get("input_assets") != run.metrics.get("input_assets")
+        or asset.metadata.get("metrics")
+        != {
+            key: value
+            for key, value in run.metrics.items()
+            if key not in {"calculation_contract", "input_assets"}
+        }
+    ):
+        raise ValueError("Simulation run differs from its immutable registration")
+    return contract
+
+
+def _verified_simulation_asset_payloads(
+    run: SimulationRun, store: AssetStore
+) -> Iterator[tuple[str, bytes]]:
+    assets = list(
+        DataAsset.objects.filter(
+            provider="simulation",
+            kind="simulation_result",
+            subject=str(run.id),
+            relative_path=run.result_asset_key,
+        )
+    )
+    if len(assets) != 1:
+        raise ValueError("Simulation result registration is invalid")
+    yield "result", read_checksummed_bytes(store, assets[0])
+    inputs = run.metrics.get("input_assets")
+    if not isinstance(inputs, dict):
+        raise ValueError("Simulation input registration is invalid")
+    for key, info in inputs.items():
+        if (
+            key not in {"prices", "signals", "benchmark", "fx"}
+            or not isinstance(info, dict)
+            or not isinstance(info.get("relative_path"), str)
+        ):
+            raise ValueError("Simulation input registration is invalid")
+        asset = DataAsset.objects.filter(
+            id=UUID(str(info.get("asset_id"))),
+            provider="simulation",
+            kind=f"simulation_input_{key}",
+            subject=str(run.id),
+            relative_path=info["relative_path"],
+            sha256=info.get("sha256"),
+        ).first()
+        if asset is None:
+            raise ValueError("Simulation input registration is invalid")
+        yield key, read_checksummed_bytes(store, asset)
+
+
+def simulation_calculation_disclosure(run: SimulationRun) -> dict[str, Any]:
+    """Validate before describing persisted metrics; never relabel old history."""
+    contract = _validated_calculation_contract(run)
+    if contract is None:
+        return {
+            "version": LEGACY_ACCOUNTING_VERSION,
+            "coverage": None,
+            "execution_revision": None,
+            "mode_label": run.definition.get_mode_display(),
+            "grade_label": run.universe_snapshot.get_grade_display(),
+            "message": (
+                "Legacy calculation: benchmark daily comparisons may bridge missing sessions, "
+                "and initial trading costs may be omitted from drawdown. "
+                "Historical results have not been recalculated."
+            ),
+        }
+    for _name, _payload in _verified_simulation_asset_payloads(run, open_asset_store()):
+        pass
+    config = contract["effective_config"]
+    return {
+        "version": contract["version"],
+        "coverage": contract["comparison_coverage"],
+        "execution_revision": contract["execution_revision"],
+        "mode_label": SimulationDefinition.Mode(config["mode"]).label,
+        "grade_label": UniverseSnapshot.Grade(config["grade"]).label,
+        "message": (
+            "Benchmark daily comparisons use adjacent matched sessions. "
+            "Drawdown includes inception capital."
+        ),
+    }
+
+
+def _validate_v2_persistence(result: SimulationResult) -> None:
+    json.dumps(result.config.to_dict(), allow_nan=False)
+    json.dumps(result.metrics.to_dict(), allow_nan=False)
+    if result.metrics.comparison_coverage is None:
+        raise ValueError("V2 simulation comparison coverage is missing")
+    # Validate actual model precision BEFORE file/row output. No clamping,
+    # signed-zero rewriting, or retrospective validation of legacy runs.
+    for model, frame, columns in (
+        (SimulationHolding, result.holdings, ("quantity", "price", "market_value", "weight")),
+        (SimulationTrade, result.trades, ("quantity", "price", "gross_value", "costs")),
+    ):
+        for row in frame.iter_rows(named=True):
+            for name in columns:
+                value = row[name]
+                field = model._meta.get_field(name)
+                if not isinstance(field, DecimalField):
+                    raise TypeError("Simulation persistence field must be a Decimal")
+                places = field.decimal_places
+                digits = field.max_digits
+                assert places is not None and digits is not None
+                if not math.isfinite(value) or abs(value) >= 10 ** (digits - places):
+                    raise ValueError("Simulation value exceeds persistence capacity")
+                rounded = Decimal(f"{value:.{places}f}")
+                if name in {"quantity", "price", "gross_value"} and rounded <= 0:
+                    raise ValueError("Simulation value is below persistence precision")
