@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -20,6 +21,7 @@ from stanstock.research.price_product_config import (
     PRODUCT_EFFECTIVE_CONFIG_HASH as FORECAST_HASH,
 )
 from stanstock.research.price_product_config import PRODUCT_VERSION as V1
+from stanstock.research.product_frequency_evidence import verified_registered_frequency_asset
 from stanstock.research.product_reader import read_research_product
 from stanstock.web.templatetags.stanstock import price
 
@@ -387,6 +389,62 @@ def test_v2_only_history_does_not_claim_v1_issuances(c2_web_product, client):
     assert "not independent market trials or one pooled strategy-performance claim" in _text(
         response
     )
+
+
+def test_stale_selected_v2_performance_rechecks_physical_frequency_child(
+    c2_web_product, client, monkeypatch
+):
+    env = c2_web_product
+    frequency = verified_registered_frequency_asset(run=env.run, store=env.store)
+    assert frequency is not None
+    client.force_login(env.owner)
+    no_simulation = _deny_get_work(env, monkeypatch)
+    counts = _counts()
+    assets = set(DataAsset.objects.values_list("pk", "sha256"))
+
+    fresh = client.get(reverse("performance"))
+    assert fresh.status_code == 200
+    assert fresh.context["history"].available and fresh.context["product"].available
+    assert [item.run.pk for item in fresh.context["history"].runs] == [env.run.pk]
+    assert all(
+        projection.frequency_status == "available"
+        for card in fresh.context["product"].cards
+        for projection in card.projections
+    )
+
+    env.clock["now"] += timedelta(days=4)
+    client.force_login(env.owner)  # Renew authentication after the original session expires.
+    stale = client.get(reverse("performance"))
+    assert stale.status_code == 200 and stale.wsgi_request.user.pk == env.owner.pk
+    assert stale.context["history"].available
+    assert [item.run.pk for item in stale.context["history"].runs] == [env.run.pk]
+    assert stale.context["product"].status == "stale"
+    assert stale.context["product"].run == env.run
+
+    env.store.resolve(frequency.relative_path).write_bytes(b"corrupt synthetic v2 frequency child")
+    history = client.get(reverse("predictions"))
+    assert history.status_code == 200
+    assert history.context["history"].status == "integrity_failed"
+    assert history.context["history_entries"] == []
+    failed = client.get(reverse("performance"))
+    assert failed.status_code == 200
+    assert failed.context["history"].status == "integrity_failed"
+    assert failed.context["history"].runs == ()
+    assert failed.context["decision_groups"] == failed.context["advisory_groups"] == []
+    observed_html = (
+        failed.content.decode()
+        .split('<section class="panel" aria-labelledby="observed-track-record">', 1)[1]
+        .split("</section>", 1)[0]
+    )
+    observed_text = " ".join(strip_tags(observed_html).split())
+    assert 'role="alert"' in observed_html
+    assert "Observed performance unavailable." in observed_text
+    assert failed.context["history"].message in observed_text
+    assert _counts() == counts
+    assert set(DataAsset.objects.values_list("pk", "sha256")) == assets
+    env.fetch.assert_not_called()
+    env.credentials.assert_not_called()
+    no_simulation.assert_not_called()
 
 
 def test_all_legacy_archive_routes_exclude_v2_and_disabled_rollback_never_relabels_it(

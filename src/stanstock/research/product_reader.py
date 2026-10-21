@@ -575,7 +575,7 @@ def _read_product_history(
             )
             if (
                 not full_history
-                and index != selected_index
+                and (index != selected_index or candidate.run.target_date != expected_target)
                 and candidate.run.config_version == V2_PRODUCT_VERSION
             ):
                 frequency = read_registered_product_frequencies(
