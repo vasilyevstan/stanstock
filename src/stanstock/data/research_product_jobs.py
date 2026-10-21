@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
@@ -140,6 +141,10 @@ def execute_daily_research_job(
     if v2:
         identity = liquidity_job_identity({"owner_id": str(owner.pk), "issuance_key": issuance_key})
 
+    def require_v2_acquisition_enabled() -> None:
+        if not settings.RESEARCH_PRODUCT_ENABLED:
+            raise ValueError("Research product v2 is disabled; fresh acquisition is not permitted")
+
     def daily_task(run: JobRun) -> JobExecutionResult:
         intake = load_product_intake(
             target_date=target_date,
@@ -155,6 +160,9 @@ def execute_daily_research_job(
                 if derive_frequencies:
                     register_product_frequencies(run=completed, store=asset_store)
                 return JobExecutionResult(details=_daily_details(intake, completed, recovered=True))
+        if v2 and intake is None:
+            # Without an intake, neither completed output nor a closed batch can be recovered.
+            require_v2_acquisition_enabled()
         resolve_us_target_date(decision_time=timezone.now(), explicit_target=target_date)
         if issued_on_time:
             if v2:
@@ -218,6 +226,7 @@ def execute_daily_research_job(
                     return _materialize_closed_liquidity(
                         intake=intake, closed=closed, store=asset_store
                     )
+                require_v2_acquisition_enabled()
                 if declaration is None:
                     raise ValueError("V2 acquisition lost its separately verified declaration")
                 _child.details = {

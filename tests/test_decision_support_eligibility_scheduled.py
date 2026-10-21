@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from stanstock.core import research_product_refresh as refresh
 from stanstock.core.models import JobRun
@@ -340,6 +341,80 @@ def test_claimed_verified_v2_catalog_parent_corruption_fails_closed(
     env.fetch.assert_not_called()
 
 
+@pytest.mark.parametrize("entry_point", ["scheduled", "daily_with_captured_intake"])
+def test_disabled_v2_rejects_fresh_work_before_evidence_credentials_or_quota(
+    c2_scheduled_environment, monkeypatch, settings, entry_point
+):
+    from stanstock.data import live_us
+    from stanstock.data.research_product import capture_authorized_product_intake
+    from stanstock.data.research_product_jobs import execute_daily_research_job
+
+    env = c2_scheduled_environment
+    issuance_key = "disabled-fresh-direct"
+    if entry_point == "daily_with_captured_intake":
+        capture_authorized_product_intake(
+            target_date=env.target,
+            evidence_grade="research",
+            issuance_key=issuance_key,
+            owner=env.owner,
+            core_config_path=env.path,
+            policy_identity=env.config_hash,
+            captured_at=env.now,
+            store=env.store,
+            product_version=env.version,
+        )
+    assert not AnalysisRun.objects.exists()
+    assert not DataAsset.objects.filter(kind="liquidity_run_evidence").exists()
+    settings.RESEARCH_PRODUCT_ENABLED = False
+    assets = set(DataAsset.objects.values_list("pk", "sha256"))
+    files = {
+        path.relative_to(env.store.root): path.read_bytes()
+        for path in env.store.root.rglob("*")
+        if path.is_file()
+    }
+    metadata = copy.deepcopy(env.record.metadata)
+
+    def synthetic_sleep(seconds):
+        env.clock["now"] += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(live_us, "sleep", synthetic_sleep)
+    output = StringIO()
+    if entry_point == "scheduled":
+        with pytest.raises(CommandError, match="Scheduled research refresh failed"):
+            call_command("scheduled_refresh", config=env.path, stdout=output)
+        parent = JobRun.objects.get(job_name__startswith="scheduled_refresh_research_v2:")
+        assert parent.status == JobRun.Status.FAILED and parent.finished_at is not None
+    else:
+        with pytest.raises(ValueError, match="Research product v2 is disabled"):
+            execute_daily_research_job(
+                target_date=env.target,
+                owner=env.owner,
+                issuance_key=issuance_key,
+                store=env.store,
+                core_config_path=env.path,
+                enforce_rate_limit=False,
+                product_version=env.version,
+            )
+    daily = JobRun.objects.get(job_name__startswith="daily_research_v2:")
+    assert daily.status == JobRun.Status.FAILED and daily.finished_at is not None
+    assert "Research product v2 is disabled" in daily.error
+    assert not JobRun.objects.filter(status=JobRun.Status.RUNNING).exists()
+    assert "status=success" not in output.getvalue() and "status=skipped" not in output.getvalue()
+    assert set(DataAsset.objects.values_list("pk", "sha256")) == assets
+    assert {
+        path.relative_to(env.store.root): path.read_bytes()
+        for path in env.store.root.rglob("*")
+        if path.is_file()
+    } == files
+    assert not AnalysisRun.objects.exists()
+    assert not Prediction.objects.exists()
+    assert not UniverseMembership.objects.exists()
+    env.record.refresh_from_db()
+    assert env.record.metadata == metadata
+    env.fetch.assert_not_called()
+    env.credentials.assert_not_called()
+
+
 def test_scheduled_cli_selects_v2_from_environment_setting_and_recovers_when_disabled(
     c2_scheduled_environment, monkeypatch, settings
 ):
@@ -355,11 +430,19 @@ def test_scheduled_cli_selects_v2_from_environment_setting_and_recovers_when_dis
     call_command("scheduled_refresh", config=env.path, stdout=output)
     assert "profile=research_product_v2 status=success" in output.getvalue()
     assert "paper_capture" not in output.getvalue()
+    issued_run_id = AnalysisRun.objects.get().pk
+    predictions = set(Prediction.objects.values_list("pk", flat=True))
+    assets = set(DataAsset.objects.values_list("pk", "sha256"))
+    credits = ProviderRecord.objects.get(pk=env.record.pk).metadata["credits_used_local"]
     _deny_acquisition(env)
     settings.RESEARCH_PRODUCT_ENABLED = False
     output = StringIO()
     call_command("scheduled_refresh", config=env.path, stdout=output)
     assert "profile=research_product_v2 status=skipped" in output.getvalue()
+    assert AnalysisRun.objects.get().pk == issued_run_id
+    assert set(Prediction.objects.values_list("pk", flat=True)) == predictions
+    assert set(DataAsset.objects.values_list("pk", "sha256")) == assets
+    assert ProviderRecord.objects.get(pk=env.record.pk).metadata["credits_used_local"] == credits
     env.credentials.assert_not_called()
     env.fetch.assert_not_called()
 
