@@ -150,6 +150,8 @@ Treat each of these as an actionable stall signal:
 - an approval or test result names a stale SHA or worktree fingerprint;
 - CI, a deployment/environment gate, or a CLI-owned approval is pending
   without inspection;
+- installed acceptance fails despite a passing source-only screen, or a
+  cutover stops serving without promptly starting the replacement or fallback;
 - a dirty development worktree approaches an operational deadline such as
   the next scheduled refresh, which requires a clean committed revision.
 
@@ -166,6 +168,17 @@ Keep one owner and one active observer for each wait. Use bounded checkpoints
 to inspect required jobs and eligible gates, and report a concrete blocker
 when progress stops. A CI or provider wait is not permission to expand scope,
 add optional reviews, or create unrelated work.
+
+For performance repairs, check the actual retained workload shape and useful
+work counters before attributing a gain or starting another long CI cycle.
+Growing synthetic histories can hide shifted-window misses. Retain failed
+measurements; unexplained timing variation is not a measured cause or a repair.
+Source-only evidence never replaces complete installed acceptance.
+
+During a cutover, promptly restore a verified listener. If acceptance fails,
+return to the prior committed source on the same current data, not an older
+database, and complete the existing preservation, session and fence cleanup.
+Report the concrete blocker while the original work unit remains active.
 
 ## Exact revision evidence
 
