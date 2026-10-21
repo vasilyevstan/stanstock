@@ -603,6 +603,7 @@ def _parse_bars(
     admission_scope = _ROW_ADMISSIONS.get() if projection and decoded_rows else None
     previous = admission_scope.get(symbol, {}) if admission_scope is not None else None
     admitted: _AdmittedRows = {}
+    reused = False
     for index, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
             raise ProviderResponseError(f"Twelve Data row {index} for {symbol!r} was not an object")
@@ -636,12 +637,8 @@ def _parse_bars(
                 values.append((trade_date, close, volume))
                 seen_dates.add(trade_date)
                 admitted[trade_date] = cached
+                reused = True
                 continue
-            if index == 0 and previous:
-                # A leading miss opts out of this optimization, never out of
-                # admission. Avoid repeatedly snapshotting non-overlapping
-                # vintages. Publish the opt-out only after all rows succeed.
-                previous = None
         open_value = raw_row.get("open")
         open_price = _optional_decimal(open_value, field="open", symbol=symbol)
         high_value = raw_row.get("high")
@@ -701,7 +698,11 @@ def _parse_bars(
     if admission_scope is not None:
         # Replace, rather than accumulate, immutable vintages for each symbol.
         # A failing row never publishes this document's partial row set.
-        admission_scope[symbol] = admitted if previous is not None else None
+        # A leading date may be a new prefix of an overlapping older window.
+        # Only a fully admitted document with no exact reuse opts out.
+        admission_scope[symbol] = (
+            admitted if previous is not None and (not previous or reused) else None
+        )
     return tuple(bars), tuple(values)
 
 

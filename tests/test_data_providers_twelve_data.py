@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+from collections import Counter
 from dataclasses import asdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, Inexact, InvalidOperation, localcontext
 from unittest.mock import Mock
 
@@ -365,6 +366,118 @@ def test_nonoverlapping_rows_are_readmitted_and_scope_is_bounded(monkeypatch) ->
         raise RuntimeError("synthetic")
     assert admission.call_count == 16
     assert twelve_data._ROW_ADMISSIONS.get() is None
+
+
+@pytest.mark.parametrize(("cohorts", "retained"), [(3, 5), (26, 1758)])
+def test_rolling_oldest_first_rows_reuse_common_history(monkeypatch, cohorts, retained) -> None:
+    # Each older vintage adds a leading date, not a changed price level.
+    # Values must be keyed by absolute dates, not each window's row offset.
+    rows = [
+        {
+            "datetime": (date(2020, 1, 1) + timedelta(days=offset)).isoformat(),
+            "open": str(64 + offset / 64),
+            "high": str(65 + offset / 64),
+            "low": str(63 + offset / 64),
+            "close": str(64 + offset / 64),
+            "volume": str(1_000_000 + offset),
+        }
+        for offset in range(retained + cohorts - 1)
+    ]
+    documents = [
+        json.dumps({**VALID_SERIES, "values": rows[start : start + retained]}).encode()
+        for start in reversed(range(cohorts))
+    ]
+    expected = [
+        tuple(
+            (bar.trade_date, bar.close, bar.volume)
+            for bar in twelve_data.parse_daily_price_series(
+                raw,
+                symbol="AAPL",
+                retrieved_at=datetime(2026, 9, 5, tzinfo=UTC),
+                source_url="https://example.invalid/rolling",
+            ).bars
+        )
+        for raw in documents
+    ]
+    calls = Counter()
+    original_admission = twelve_data._required_decimal
+    original_comparison = twelve_data._same_admitted_row
+
+    def admit(*args, **kwargs):
+        calls["admissions"] += 1
+        return original_admission(*args, **kwargs)
+
+    def compare(*args, **kwargs):
+        matched = original_comparison(*args, **kwargs)
+        calls["comparisons"] += 1
+        calls["reuses"] += matched
+        return matched
+
+    monkeypatch.setattr(twelve_data, "_required_decimal", admit)
+    monkeypatch.setattr(twelve_data, "_same_admitted_row", compare)
+    residents = []
+    with twelve_data._reuse_admitted_price_rows():
+        for raw, values in zip(documents, expected, strict=True):
+            parsed = twelve_data._parse_daily_price_projection(
+                raw, symbol="AAPL", start_date=values[0][0], end_date=values[-1][0]
+            )
+            assert parsed.values == values
+            resident = twelve_data._ROW_ADMISSIONS.get()["AAPL"]
+            residents.append(None if resident is None else len(resident))
+    print(f"ROLLING {cohorts=} {retained=} {dict(calls)} {residents=}")
+    assert calls["admissions"] == retained + cohorts - 1
+    assert calls["comparisons"] == calls["reuses"] == (cohorts - 1) * (retained - 1)
+    assert residents == [retained] * cohorts
+    assert twelve_data._ROW_ADMISSIONS.get() is None
+
+
+def test_changed_leading_row_does_not_hide_later_exact_matches(monkeypatch) -> None:
+    admission = Mock(wraps=twelve_data._required_decimal)
+    monkeypatch.setattr(twelve_data, "_required_decimal", admission)
+    with twelve_data._reuse_admitted_price_rows():
+        twelve_data._parse_daily_price_projection(json.dumps(VALID_SERIES).encode(), symbol="AAPL")
+        changed = {
+            **VALID_SERIES,
+            "values": [
+                {**VALID_SERIES["values"][0], "volume": "123"},
+                VALID_SERIES["values"][1],
+            ],
+        }
+        result = twelve_data._parse_daily_price_projection(
+            json.dumps(changed).encode(), symbol="AAPL"
+        )
+        assert result.values[0][2] == 123
+        assert admission.call_count == 3
+        assert len(twelve_data._ROW_ADMISSIONS.get()["AAPL"]) == 2
+
+
+@pytest.mark.parametrize("fault", ["nonfinite", "volume", "duplicate", "future"])
+def test_rolling_prefix_then_error_never_publishes_partial_rows(fault) -> None:
+    prefix = {**VALID_SERIES["values"][0], "datetime": "2026-09-02"}
+    last = dict(VALID_SERIES["values"][1])
+    end = date(2026, 9, 4)
+    if fault == "nonfinite":
+        last.update(open="NaN", high="bad")
+        reason = "non-finite 'open'"
+    elif fault == "volume":
+        last.update(open="0", volume="bad")
+        reason = "invalid volume"
+    elif fault == "duplicate":
+        last["datetime"] = "2026-09-03"
+        reason = "duplicate date"
+    else:
+        end = date(2026, 9, 3)
+        reason = "after requested end"
+    raw = json.dumps({**VALID_SERIES, "values": [prefix, VALID_SERIES["values"][0], last]}).encode()
+    with localcontext() as context, twelve_data._reuse_admitted_price_rows():
+        context.clear_flags()
+        context.traps[InvalidOperation] = True
+        twelve_data._parse_daily_price_projection(json.dumps(VALID_SERIES).encode(), symbol="AAPL")
+        admitted = twelve_data._ROW_ADMISSIONS.get()["AAPL"]
+        with pytest.raises(ProviderDataError, match=reason):
+            twelve_data._parse_daily_price_projection(raw, symbol="AAPL", end_date=end)
+        assert not context.flags[InvalidOperation]
+        assert twelve_data._ROW_ADMISSIONS.get()["AAPL"] is admitted
 
 
 def test_untrusted_payload_objects_keep_original_coercion_and_get_order() -> None:

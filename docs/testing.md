@@ -258,12 +258,13 @@ The full-performance invocation may reuse successful numeric/OHLC admission
 across overlapping serialized-JSON rows only after exact symbol, validated
 date, consumed-value and type matches. Every raw row is still traversed;
 date/window, metadata, normalized binding and physical checks remain.
-Direct/custom payloads retain original coercion/getter order. A failed raw
-document publishes neither its row set nor its conservative leading-miss
-opt-out, and the scope resets on success or error. Cover overlapping,
-changed-value and disjoint histories, Decimal state, bounded retained row
-sets and cross-invocation corruption; measure non-overlap controls as well
-as favorable overlap rather than assuming memoization is always faster.
+Direct/custom payloads retain original coercion/getter order. Only a fully
+successful document with zero exact row reuses may opt that symbol out;
+failed documents publish neither rows nor opt-out state. The scope resets
+on success or error. Cover growing and shifted-start oldest-first histories,
+changed values, disjoint dates, Decimal state, bounded retained row sets and
+cross-invocation corruption. Measure non-overlap controls and actual retained
+source shapes rather than assuming favorable synthetic overlap is representative.
 `tests/test_raw_price_verification_projection.py` proves the private raw
 projection validates all four OHLC fields across 1,758 rows without creating
 discarded public records. It rejects early/late raw faults and normalized
