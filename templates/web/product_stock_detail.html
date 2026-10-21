@@ -13,7 +13,7 @@
   {% else %}
     <section class="page-heading">
       <div>
-        <p class="eyebrow">{{ card.captured_role }} member · verified price research</p>
+        <p class="eyebrow">{{ card.captured_role }} member · verified price research{% if card.product_version == stanstock_eligibility_v2_version %} · {{ card.product_version }}{% endif %}</p>
         <h1>{{ card.listing.ticker }}</h1>
         <p class="lede">{{ card.listing.security.company.name }}</p>
       </div>
@@ -35,6 +35,10 @@
         <div><dt>Evidence grade</dt><dd>{{ card.decision_prediction.evidence_grade|display_label }}</dd></div>
         <div><dt>Price coverage</dt><dd>{{ card.source_period_start }} – {{ card.source_period_end }}</dd></div>
         <div><dt>Retrieved</dt><dd>{{ card.source_retrieved_at }}</dd></div>
+        {% if card.product_version == stanstock_eligibility_v2_version %}
+          <div><dt>Eligibility contract</dt><dd>{{ card.product_version }}</dd></div>
+          <div><dt>Activity evidence</dt><dd>{{ card.liquidity_status|display_label }}</dd></div>
+        {% endif %}
       </dl>
     </details>
 
@@ -137,8 +141,20 @@
         <dl class="product-detail-list">
           <div><dt>Relative volatility</dt><dd>{{ card.relative_volatility|floatformat:2 }}× SPY · {{ card.relative_volatility_label|display_label }}</dd></div>
           <div><dt>Maximum 252-session drawdown</dt><dd>{{ card.maximum_drawdown|percentage }}</dd></div>
-          <div><dt>20-session mean dollar turnover</dt><dd>{% if card.average_dollar_turnover_20d != None %}${{ card.average_dollar_turnover_20d|floatformat:"0g" }}{% else %}Unavailable{% endif %}</dd></div>
+          <div><dt>{% if card.product_version == stanstock_eligibility_v2_version %}20-session closing-price activity proxy{% else %}20-session mean dollar turnover{% endif %}</dt><dd>{% if card.average_dollar_turnover_20d != None %}${{ card.average_dollar_turnover_20d|floatformat:"0g" }}{% else %}Unavailable{% endif %}</dd></div>
         </dl>
+        {% if card.product_version == stanstock_eligibility_v2_version %}
+          <p>
+            Eligibility requires exact closing-price and share-volume parity between same-batch
+            adjustment modes, plus the bounded NVDA mode control. The mean of closing price
+            times share volume is an activity proxy, not actual transaction-dollar turnover
+            or universal volume certification. Missing evidence withholds BUY, not an
+            independently valid projection.
+          </p>
+          {% if card.liquidity_window_dates %}
+            <p>Required 20-session window: {{ card.liquidity_window_dates.0 }} through {{ card.liquidity_window_dates|last }}.</p>
+          {% endif %}
+        {% endif %}
         {% if card.blocking_reasons %}
           <ul>{% for reason in card.blocking_reasons %}<li>{{ reason|display_label }}</li>{% endfor %}</ul>
         {% endif %}

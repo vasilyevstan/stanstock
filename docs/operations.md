@@ -13,6 +13,19 @@ STANSTOCK_RESEARCH_PRODUCT_ENABLED=true
 
 This selects the replacement product paths; it does not enable a provider.
 
+`STANSTOCK_RESEARCH_PRODUCT_VERSION` selects `research-product-v1` by default
+and accepts only that value or the explicit `research-product-v2`. V2 has no
+demo generator; do not expect demo mode to substitute v1 silently.
+Changing the selector does not enable a provider, declare a protocol,
+activate paper or retarget historical runs.
+
+Fresh v2 acquisition and issuance require the owner's separately declared
+v2 forward protocol, in addition to the unchanged source/rights/revision
+guards. Its prospective start follows actual declaration; never reset or
+backdate the v1 declaration. Exact completed-output and closed-batch recovery
+precedes credential resolution and additional quota spending. An incomplete
+attempt is not reusable as fragments of a later batch.
+
 | Profile | Provider/source | Issuance claim |
 |---|---|---|
 | Demo `refresh_demo` | `synthetic_demo` | Always research-grade |
@@ -244,7 +257,7 @@ A fresh scheduled issuance requires:
 
 - an observed target window;
 - current owner/display authorization;
-- `research-product-v1` and its pinned config;
+- the captured product version and its exact reviewed, pinned config;
 - `provider="twelve_data"` and benchmark `SPY`;
 - a clean committed checkout;
 - `STANSTOCK_CODE_REVISION` equal to that exact 40-hex commit; and
@@ -265,6 +278,10 @@ analyze_snapshot(
     config_path=default_price_product_config_path(),
 )
 ```
+
+The example above is the frozen v1 route. A v2 request must explicitly bind
+its reviewed v2 config, source contract and declaration; neither the current
+selector nor a provider/config flag makes a manual command observed.
 
 The parent/orchestrator must first bind the exact clean revision and
 independently reprove the deadline. No reissue inherits another version's
@@ -532,6 +549,19 @@ uv run --no-sync python manage.py paper_portfolio --owner USER --activate
 uv run --no-sync python manage.py paper_portfolio --owner USER --session YYYY-MM-DD
 uv run --no-sync python manage.py paper_portfolio --owner USER
 ```
+
+The forward-scorecard command defaults to v1. Before any v2 provider
+acquisition or issuance, declare and inspect the separate v2 protocol
+explicitly:
+
+```bash
+uv run --no-sync python manage.py forecast_scorecard --owner USER --product-version research-product-v2 --declare
+uv run --no-sync python manage.py forecast_scorecard --owner USER --product-version research-product-v2
+```
+
+Its first eligible target close is strictly after the actual declaration.
+Selecting v2 does not replace, reset or backdate the v1 declaration. These
+commands do not activate either paper policy or the separate study.
 
 Declaration is an explicit append-only operation and precedes reading matured
 losses. Reporting does not replace an existing declaration or reset its clock.

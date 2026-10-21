@@ -61,7 +61,12 @@ class Command(BaseCommand):
         config_path = options["config"]
         if not isinstance(config_path, Path):
             raise CommandError("--config must be a filesystem path")
-        if settings.RESEARCH_PRODUCT_ENABLED:
+        from stanstock.research.decision_support_eligibility import (
+            PRODUCT_VERSION as V2_PRODUCT_VERSION,
+        )
+        from stanstock.research.product_reader import current_product_version
+
+        if settings.RESEARCH_PRODUCT_ENABLED or current_product_version() == V2_PRODUCT_VERSION:
             self._handle_research_product(config_path, capture_paper=bool(options["capture_paper"]))
             return
         if options["capture_paper"]:
@@ -215,6 +220,10 @@ class Command(BaseCommand):
         from stanstock.core.research_product_refresh import (
             execute_scheduled_research_refresh,
         )
+        from stanstock.research.decision_support_eligibility import (
+            PRODUCT_VERSION as V2_PRODUCT_VERSION,
+        )
+        from stanstock.research.product_reader import current_product_version
 
         try:
             _validate_runtime_timezone()
@@ -223,13 +232,18 @@ class Command(BaseCommand):
                 if capture_paper
                 else execute_scheduled_research_refresh(core_config_path=config_path)
             )
+            profile = (
+                "research_product_v2"
+                if current_product_version() == V2_PRODUCT_VERSION
+                else "research_product_v1"
+            )
         except EXPECTED_STAGE_ERRORS as exc:
             if capture_paper:
                 self._paper_status(getattr(exc, "paper_capture", None))
             raise CommandError(f"Scheduled research refresh failed ({type(exc).__name__})") from exc
         self.stdout.write(
             self.style.SUCCESS(
-                f"scheduled_refresh profile=research_product_v1 "
+                f"scheduled_refresh profile={profile} "
                 f"status={result.parent.status} "
                 f"target_date={result.target_date.isoformat()} "
                 f"analyses={result.analysis_count} predictions={result.prediction_count}"

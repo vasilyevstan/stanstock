@@ -116,7 +116,7 @@ for the exact event, rounding, provenance, and nonclaim contract.
 
 ## Volume provenance
 
-The current Twelve Data price contract documents split adjustment for prices,
+The frozen v1 Twelve Data price contract documents split adjustment for prices,
 not a compatible adjustment basis for volume. StanStock does not infer
 split-compatible volume. Consequently, projections and raw direction can be
 available while dollar turnover is withheld and BUY remains blocked.
@@ -129,6 +129,22 @@ adjustment mode changes historical volume, not just prices. Post-event
 agreement in one control does not establish a universal share-volume
 contract. These private controls are not production assets and do not
 retroactively make the frozen v1 inputs liquidity-compatible.
+
+`research-product-v2` introduces a separate, purpose-qualified liquidity
+evidence lane. It requires exact raw Decimal-close and integer-volume parity
+between `none` and `splits` over the same 20 XNYS sessions, plus a fresh
+same-batch split-mode control. Its closing-price-times-volume mean is an
+activity proxy, not exact transaction-dollar turnover or universal proof of
+provider volume semantics. Missing evidence blocks BUY, not independently
+valid direction or projections; a corrupt registered proof is an integrity
+failure, not an ordinary missing-input fallback.
+
+Only this eligibility boundary is versioned. Momentum, other BUY gates and
+FHS numerical inputs, seed configuration and forecasts remain unchanged for
+identical split-adjusted inputs. V1 histories are not relabelled. See
+[Version 2 liquidity evidence](price-research.md#version-2-purpose-qualified-liquidity)
+for source isolation, the bounded control and the separate prospective
+declaration.
 
 ## Under-$10 policy
 

@@ -19,7 +19,7 @@
   </section>
   {% if stanstock_research_product_enabled %}
     <section class="panel active-methodology">
-      <p class="eyebrow">Active research-product-v1</p>
+      <p class="eyebrow">{% if stanstock_research_product_version == stanstock_eligibility_v2_version %}Selected {{ stanstock_research_product_version }}{% else %}Active research-product-v1{% endif %}</p>
       <h2>Relative momentum decision and conditional price projections</h2>
       <p>
         The active six-month suggestion uses stock and SPY split-adjusted
@@ -28,6 +28,17 @@
         foundations, not validation of this individual-stock sign policy or
         evidence of profitability.
       </p>
+      {% if stanstock_research_product_version == stanstock_eligibility_v2_version %}
+        <p>
+          Eligibility v2 uses a separate 20-session mean of closing price times share
+          volume. It requires exact close-and-volume parity between same-batch
+          adjustment modes and a passing bounded NVDA mode control. This is an
+          activity proxy, not actual transaction-dollar turnover or universal volume
+          certification. Missing evidence withholds BUY; independently valid momentum
+          and projections remain available. The split-adjusted FHS inputs and seed
+          policy remain v1, and historical v1 evidence is not rewritten.
+        </p>
+      {% endif %}
       <p>
         Four advisory horizons use fixed-parameter, variance-targeted filtered
         historical simulation: 756 daily log returns, 252-return burn-in, 504

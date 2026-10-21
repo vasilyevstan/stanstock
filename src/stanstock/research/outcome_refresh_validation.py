@@ -56,6 +56,11 @@ from stanstock.data.asof import (
 )
 from stanstock.data.assets import asset_ref_for, open_asset_store, read_checksummed_bytes
 from stanstock.data.models import DataAsset
+from stanstock.data.research_product import verify_product_price_content
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as V2_PRODUCT_VERSION
 from stanstock.research.models import Prediction, PredictionOutcome
 from stanstock.research.outcomes import ResolvedOutcome, _resolve_price_provider, resolve_outcome
 from stanstock.research.refresh_evidence import model_row_values
@@ -147,6 +152,7 @@ def verify_prediction_outcome(
             evaluation_time=evaluation_time,
             frame_cache=frame_cache,
             visited=visited,
+            v2_split_only=prediction.config_hash == V2_CONFIG_HASH,
         )
 
     try:
@@ -191,10 +197,11 @@ def _verifier_price_loader(
     evaluation_time: datetime,
     frame_cache: MutableMapping[tuple[str, str, date], pl.DataFrame],
     visited: _VisitedAssets,
+    v2_split_only: bool = False,
 ) -> pl.DataFrame:
     cache_key = (provider, subject, through_date)
     cached = frame_cache.get(cache_key)
-    if cached is not None:
+    if cached is not None and not v2_split_only:
         return cached
     asof = AsOfData(evaluation_time)
     # A genuine absence of any eligible asset is a real producer-domain
@@ -202,6 +209,29 @@ def _verifier_price_loader(
     # handled exceptions) and must propagate unchanged, not become a
     # verifier-only failure.
     asset = asof.latest_asset(provider=provider, kind=_PRICE_HISTORY_KIND, subject=subject)
+    if v2_split_only:
+        try:
+            if (
+                asset.metadata.get("adjustment") != "splits"
+                or asset.metadata.get("currency") != "USD"
+            ):
+                raise ValueError
+            raw = raw_price_asset_for(asset, cutoff=evaluation_time)
+            if raw is None:
+                raise ValueError
+            verify_product_price_content(
+                asset=asset,
+                raw=raw,
+                cutoff=evaluation_time,
+                target_date=through_date,
+                store=asof.store,
+                product_version=V2_PRODUCT_VERSION,
+            )
+        except (ValueError, OSError, pl.exceptions.PolarsError):
+            raise _VerifierLoadError(
+                "evaluation_outcome_maturity_unreadable",
+                "V2 maturity requires valid split-only raw/normalized USD evidence",
+            ) from None
     try:
         read = asof.price_frame_for_asset_with_diagnostics(asset=asset, through_date=through_date)
     except PriceFrameSchemaError:

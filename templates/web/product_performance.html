@@ -27,6 +27,13 @@
         this track record. Manual, synthetic, and research-grade rows do not
         become observed evidence by waiting.
       </p>
+      {% if has_eligibility_v2_history %}
+        <p class="muted">
+          This history includes eligibility v2. These are issuance counts,
+          not independent market trials or one pooled strategy-performance claim;
+          each method and configuration retains its recorded identity.
+        </p>
+      {% endif %}
       <div class="track-record-grid">
         <section>
           <h3>Six-month decisions</h3>
@@ -101,6 +108,12 @@
       Better/worse refers to paired error, not profitability or proven live skill;
       interval width and inclusion are descriptive.
     </p>
+    {% if has_eligibility_v2_history %}
+      <p class="muted">
+        The frozen historical comparison remains bound to its v1 source contract.
+        It does not validate the v2 activity evidence or eligibility correction.
+      </p>
+    {% endif %}
     {% if registered_study.available %}
       <p>
         <strong>Studied cohort:</strong> {{ registered_study.studied_listing_count }} of

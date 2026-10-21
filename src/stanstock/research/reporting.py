@@ -46,6 +46,10 @@ from django.db.models import (
 from django.db.models.functions import Round
 
 from stanstock.data.models import UniverseSnapshot
+from stanstock.research.decision_support_eligibility import MOMENTUM_METHOD_VERSION as V2_MOMENTUM
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
 from stanstock.research.models import Prediction, PredictionOutcome
 from stanstock.research.price_product_config import FHS_METHOD_VERSION, MOMENTUM_METHOD_VERSION
 
@@ -107,6 +111,8 @@ def product_performance_groups(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, dict[str, int]]]:
     decision_counts: Counter[str] = Counter()
     advisory_counts: Counter[tuple[str, str]] = Counter()
+    exact_counts: Counter[tuple[str, str, str, str, str, str, str]] = Counter()
+    has_v2 = False
     scope = {
         role: dict.fromkeys(
             (
@@ -123,9 +129,11 @@ def product_performance_groups(
     }
     scope["advisory"]["non_evaluable"] = 0
     for row in iter_product_prediction_projection(run_ids):
+        has_v2 |= row["config_hash"] == V2_CONFIG_HASH
         role = row["evidence_role"]
         if (role, row["method_version"]) not in {
             ("decision", MOMENTUM_METHOD_VERSION),
+            ("decision", V2_MOMENTUM),
             ("advisory", FHS_METHOD_VERSION),
         }:
             continue
@@ -148,6 +156,44 @@ def product_performance_groups(
                 decision_counts[status] += 1
             else:
                 advisory_counts[(row["horizon"], status)] += 1
+            exact_counts[
+                (
+                    row["method_version"],
+                    row["config_hash"],
+                    row["price_provider"],
+                    row["evidence_grade"],
+                    role,
+                    row["horizon"],
+                    status,
+                )
+            ] += 1
+    if has_v2:
+        # V1-only payloads remain frozen. Once v2 is present, every result
+        # carries its exact cohort; an FHS name alone never pools versions.
+        fields = (
+            "method_version",
+            "config_hash",
+            "price_provider",
+            "evidence_grade",
+            "evidence_role",
+            "horizon",
+        )
+        groups = [
+            {
+                **{
+                    f"prediction__{field}": value
+                    for field, value in zip(fields, identity[:-1], strict=True)
+                },
+                "status": identity[-1],
+                "count": count,
+            }
+            for identity, count in sorted(exact_counts.items())
+        ]
+        return (
+            [row for row in groups if row["prediction__evidence_role"] == "decision"],
+            [row for row in groups if row["prediction__evidence_role"] == "advisory"],
+            scope,
+        )
     return (
         [{"status": status, "count": count} for status, count in sorted(decision_counts.items())],
         [

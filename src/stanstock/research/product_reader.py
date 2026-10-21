@@ -18,7 +18,9 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
 from django.utils import timezone
 
 from stanstock.core.verification_types import AssetRef, RefreshVerificationError
@@ -38,6 +40,13 @@ from stanstock.data.provider_policy import (
 from stanstock.data.research_product import PRODUCT_INTAKE_KIND, product_membership_payload
 from stanstock.data.research_product_demo import DEMO_OWNER_ID
 from stanstock.data.research_product_demo import END_DATE as DEMO_TARGET_DATE
+from stanstock.research.decision_support_eligibility import (
+    MOMENTUM_METHOD_VERSION as V2_MOMENTUM,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as V2_PRODUCT_VERSION
 from stanstock.research.models import AnalysisRun, Prediction, StockAnalysis
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
@@ -156,6 +165,29 @@ class ProductCard:
     def listing(self) -> Listing:
         return self.analysis.listing
 
+    @property
+    def product_version(self) -> str:
+        return self.analysis.run.config_version
+
+    @property
+    def liquidity_status(self) -> str:
+        value = self.decision_prediction.calculation.get("liquidity")
+        return str(value["status"]) if isinstance(value, dict) else "unavailable"
+
+    @property
+    def liquidity_reasons(self) -> tuple[str, ...]:
+        value = self.decision_prediction.calculation.get("liquidity")
+        return (
+            tuple(value["reasons"]) if isinstance(value, dict) else self.risk_insufficiency_reasons
+        )
+
+    @property
+    def liquidity_window_dates(self) -> tuple[date, ...]:
+        return tuple(
+            date.fromisoformat(value)
+            for value in self.decision_prediction.calculation.get("liquidity_required_dates", ())
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ProductAdmission:
@@ -268,6 +300,7 @@ class ProductVerificationSession:
             run.config_hash,
             run.code_revision,
             run.status,
+            run.issued_on_time,
             store.root,
         )
         cached = self._verified.get(run.id)
@@ -275,7 +308,14 @@ class ProductVerificationSession:
             if cached != fingerprint:
                 raise ValueError("A verified product run changed within the request")
             return
-        verify_price_product_output(run=run, store=store, replay=False)
+        if run.config_version == V2_PRODUCT_VERSION:
+            from stanstock.research.product_eligibility_pipeline import (
+                verify_decision_support_output,
+            )
+
+            verify_decision_support_output(run=run, store=store, replay=False)
+        else:
+            verify_price_product_output(run=run, store=store, replay=False)
         self._verified[run.id] = fingerprint
 
 
@@ -291,6 +331,13 @@ def _expected_current_target() -> date:
         return DEMO_TARGET_DATE
     target, _grade = resolve_us_target_date(decision_time=timezone.now())
     return target
+
+
+def current_product_version() -> str:
+    version = getattr(settings, "RESEARCH_PRODUCT_VERSION", PRODUCT_VERSION)
+    if version not in (PRODUCT_VERSION, V2_PRODUCT_VERSION):
+        raise ValueError("Unsupported current research-product version")
+    return str(version)
 
 
 def read_research_product(
@@ -493,12 +540,28 @@ def _read_product_history(
         # Candidate construction proves every intake has this same exact owner
         # and provider. Revalidate current display rights once before reading
         # any private historical output.
-        _require_current_display_authorization(candidates[0].intake, user=user)
+        authority = next(
+            (
+                candidate.intake
+                for candidate in candidates
+                if candidate.run.config_version == V2_PRODUCT_VERSION
+            ),
+            candidates[0].intake,
+        )
+        _require_current_display_authorization(authority, user=user)
         request_verification = verification or ProductVerificationSession()
         expected_target = _expected_current_target()
         cohorts = []
         verified_runs = []
         current_cohort = None
+        selected_index = next(
+            (
+                index
+                for index, candidate in enumerate(candidates)
+                if candidate.run.config_version == current_product_version()
+            ),
+            None,
+        )
         for index, candidate in enumerate(candidates):
             request_verification.verify(run=candidate.run, store=asset_store)
             verified_runs.append(
@@ -510,13 +573,29 @@ def _read_product_history(
                     admissions=_build_admissions(candidate),
                 )
             )
-            if full_history or (index == 0 and candidate.run.target_date == expected_target):
+            if (
+                not full_history
+                and index != selected_index
+                and candidate.run.config_version == V2_PRODUCT_VERSION
+            ):
+                frequency = read_registered_product_frequencies(
+                    user=user,
+                    run=candidate.run,
+                    decision_time=timezone.now(),
+                    store=asset_store,
+                    verification=request_verification,
+                )
+                if frequency.status == "integrity_failed":
+                    raise ValueError("Historical v2 frequency child failed integrity verification")
+            if full_history or (
+                index == selected_index and candidate.run.target_date == expected_target
+            ):
                 cohort = _verify_candidate(
                     candidate, store=asset_store, verification=request_verification, user=user
                 )
                 if full_history:
                     cohorts.append(cohort)
-                if index == 0:
+                if index == selected_index:
                     current_cohort = cohort
     except RefreshVerificationError as exc:
         return _history_failure(
@@ -542,8 +621,13 @@ def _read_product_history(
             verification_code="product_reader_shape_invalid",
         )
 
-    newest = candidates[0]
-    if newest.run.target_date == expected_target and current_cohort is not None:
+    newest = candidates[selected_index] if selected_index is not None else None
+    if newest is None:
+        current = ProductRead(
+            status="absent",
+            message="No cohort exists for the selected current product version.",
+        )
+    elif newest.run.target_date == expected_target and current_cohort is not None:
         current = _product_read_from_cohort(current_cohort)
     else:
         current = ProductRead(
@@ -619,6 +703,11 @@ def _verify_candidate(
         store=store,
         verification=verification,
     )
+    if (
+        candidate.run.config_version == V2_PRODUCT_VERSION
+        and frequency_read.status == "integrity_failed"
+    ):
+        raise ValueError("V2 frequency child failed integrity verification")
     return ProductCohort(
         run=candidate.run,
         cards=_build_cards(candidate, store=store, frequency_read=frequency_read),
@@ -633,7 +722,10 @@ def _verify_candidate(
 def _select_authorized_candidate(
     *, user: ProductUser, store: AssetStore
 ) -> _AuthorizedCandidate | None:
-    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(user=user)
+    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(
+        user=user,
+        product_version=current_product_version(),
+    )
     if not intake_by_universe:
         return None
     run = next(_authorized_runs(intake_by_universe), None)
@@ -651,7 +743,10 @@ def _select_authorized_candidate(
 def _select_authorized_candidates(
     *, user: ProductUser, store: AssetStore
 ) -> tuple[_AuthorizedCandidate, ...]:
-    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(user=user)
+    expected_owner, expected_provider, intake_by_universe = _authorized_intakes(
+        user=user,
+        product_version=None,
+    )
     if not intake_by_universe:
         return ()
     return tuple(
@@ -666,7 +761,13 @@ def _select_authorized_candidates(
     )
 
 
-def _authorized_intakes(*, user: ProductUser) -> tuple[str, str, dict[str, DataAsset]]:
+def _authorized_intakes(
+    *,
+    user: ProductUser,
+    product_version: str | None = PRODUCT_VERSION,
+) -> tuple[str, str, dict[str, DataAsset]]:
+    if product_version not in (None, PRODUCT_VERSION, V2_PRODUCT_VERSION):
+        raise ValueError("Unsupported captured product version")
     expected_owner = DEMO_OWNER_ID if settings.DEMO_MODE else str(user.pk)
     expected_provider = "synthetic_demo" if settings.DEMO_MODE else TWELVE_DATA_PROVIDER
     intake_by_universe: dict[str, DataAsset] = {}
@@ -679,11 +780,12 @@ def _authorized_intakes(*, user: ProductUser) -> tuple[str, str, dict[str, DataA
         subject_parts = asset.subject.split(":")
         if (
             len(subject_parts) != 4
-            or subject_parts[0] != PRODUCT_VERSION
+            or subject_parts[0] not in (PRODUCT_VERSION, V2_PRODUCT_VERSION)
+            or (product_version is not None and subject_parts[0] != product_version)
             or subject_parts[2] != expected_owner
         ):
             continue
-        universe_slug = f"{PRODUCT_VERSION}-{asset.sha256[:16]}"
+        universe_slug = f"{subject_parts[0]}-{asset.sha256[:16]}"
         if universe_slug in intake_by_universe:
             raise ValueError("Authorized product intake identity is ambiguous")
         intake_by_universe[universe_slug] = asset
@@ -696,8 +798,8 @@ def _authorized_runs(
     runs = (
         AnalysisRun.objects.select_related("universe_snapshot__universe")
         .filter(
-            config_version=PRODUCT_VERSION,
-            config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
+            Q(config_version=PRODUCT_VERSION, config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH)
+            | Q(config_version=V2_PRODUCT_VERSION, config_hash=V2_CONFIG_HASH),
             status="complete",
         )
         .order_by("-target_date", "-generated_at", "-id")
@@ -721,7 +823,7 @@ def _candidate_for_run(
         not isinstance(intake, dict)
         or intake.get("owner_id") != expected_owner
         or intake.get("source_provider") != expected_provider
-        or intake.get("product_version") != PRODUCT_VERSION
+        or intake.get("product_version") != run.config_version
     ):
         raise ValueError("Authorized product intake identity is invalid")
     membership = product_membership_payload(run.universe_snapshot, store=store)
@@ -750,6 +852,11 @@ def _intake_payload(membership: Mapping[str, object], *, store: AssetStore) -> d
 def _require_current_display_authorization(
     intake: Mapping[str, object], *, user: ProductUser
 ) -> None:
+    if (
+        intake.get("product_version") == V2_PRODUCT_VERSION
+        and not get_user_model().objects.filter(pk=str(user.pk), is_active=True).exists()
+    ):
+        raise ProviderConfigurationError("Research display owner is not active")
     owner_id = str(intake.get("owner_id") or "")
     provider = str(intake.get("source_provider") or "")
     if settings.DEMO_MODE:
@@ -819,7 +926,12 @@ def _card(
     decision = next(
         row
         for row in rows
-        if row.method_version == MOMENTUM_METHOD_VERSION
+        if row.method_version
+        == (
+            V2_MOMENTUM
+            if analysis.run.config_version == V2_PRODUCT_VERSION
+            else MOMENTUM_METHOD_VERSION
+        )
         and row.evidence_role == Prediction.EvidenceRole.DECISION
     )
     advisory = tuple(
@@ -853,7 +965,11 @@ def _card(
     if tuple(item.horizon for item in projections) != ("6m", "12m", "3y", "5y"):
         raise ValueError("Product forecast horizons are invalid")
     source_refs = decision.source_assets
-    if not isinstance(source_refs, list) or len(source_refs) != 4:
+    if not isinstance(source_refs, list) or (
+        len(source_refs) < 4
+        if analysis.run.config_version == V2_PRODUCT_VERSION
+        else len(source_refs) != 4
+    ):
         raise ValueError("Product source closure is invalid")
     stock_asset = resolve_asset_ref(
         AssetRef.from_json(source_refs[0]), cutoff=analysis.run.generated_at

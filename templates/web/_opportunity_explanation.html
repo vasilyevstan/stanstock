@@ -47,10 +47,23 @@
       Projections never determine the action.
       {% if explanation.momentum_disagrees %}The median and momentum point in different directions; their measures and windows differ.{% endif %}
       {% if card.blocking_reasons %}Recorded restrictions: {% for reason in card.blocking_reasons %}{{ reason|display_label }}{% if not forloop.last %}; {% endif %}{% endfor %}.{% endif %}
-      {% if card.average_dollar_turnover_20d == None %}Missing compatible turnover means no valid liquidity evidence, not low or zero trading activity.{% endif %}
+      {% if card.average_dollar_turnover_20d == None %}
+        {% if card.product_version == stanstock_eligibility_v2_version %}Missing matched-mode activity evidence does not mean low or zero trading activity.{% else %}Missing compatible turnover means no valid liquidity evidence, not low or zero trading activity.{% endif %}
+      {% endif %}
       {% if card.allocation_restriction %}{{ card.allocation_restriction|display_label }}.{% endif %}
       {% if card.target_under_10 %}Under $10: speculative watch only · 0% new allocation.{% endif %}
     </p>
+    {% if card.product_version == stanstock_eligibility_v2_version %}
+      <p>
+        <strong>Eligibility v2 activity evidence:</strong> {{ card.liquidity_status|display_label }}.
+        The 20-session closing-price activity proxy is
+        {% if card.average_dollar_turnover_20d != None %}<strong>${{ card.average_dollar_turnover_20d|floatformat:"0g" }}</strong>{% else %}<strong>unavailable</strong>{% endif %}.
+        {% if card.liquidity_window_dates %}Required window: {{ card.liquidity_window_dates.0 }} through {{ card.liquidity_window_dates|last }}.{% endif %}
+        The gate requires exact close-and-volume parity between same-batch adjustment modes and a passing NVDA mode control.
+        This is closing price times share volume, not actual transaction-dollar turnover or universal volume certification.
+        The FHS projection inputs and seed policy are unchanged.
+      </p>
+    {% endif %}
     <small>
       Conditional historical price model; no validated real-world odds. Excludes dividends; price projections are advisory.
       Frequencies describe terminal simulated events, not interim drawdowns. Unavailable frequencies do not erase independently valid ranges.

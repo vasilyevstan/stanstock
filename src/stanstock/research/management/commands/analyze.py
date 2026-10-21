@@ -50,6 +50,17 @@ class Command(BaseCommand):
                 raise CommandError("--config must be a path")
             target_date = _parse_target_date(options.get("target_date"))
             if listing_id:
+                from stanstock.research.decision_support_eligibility import (
+                    default_decision_support_config_path,
+                )
+
+                if (
+                    config_path is not None
+                    and config_path.resolve() == default_decision_support_config_path().resolve()
+                ):
+                    raise CommandError(
+                        "V2 issuance is snapshot-wide; --listing cannot narrow its captured plan"
+                    )
                 listing = Listing.objects.select_related("security__company").get(
                     pk=UUID(str(listing_id))
                 )

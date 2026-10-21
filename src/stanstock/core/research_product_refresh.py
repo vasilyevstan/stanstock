@@ -53,9 +53,13 @@ from stanstock.data.research_product import (
 )
 from stanstock.data.research_product_jobs import (
     DAILY_RESEARCH_JOB,
+    DAILY_RESEARCH_V2_JOB,
     FREQUENCY_RESEARCH_JOB,
+    FREQUENCY_RESEARCH_V2_JOB,
     RESEARCH_INTAKE_JOB,
+    RESEARCH_INTAKE_V2_JOB,
     SCHEDULED_RESEARCH_JOB,
+    SCHEDULED_RESEARCH_V2_JOB,
     execute_daily_research_job,
     product_job_name,
 )
@@ -65,6 +69,11 @@ from stanstock.portfolio.jobs import (
 from stanstock.portfolio.jobs import (
     execute_portfolio_snapshot_job,
 )
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as V2_PRODUCT_VERSION
+from stanstock.research.decision_support_eligibility import SOURCE_CONTRACT
 from stanstock.research.jobs import (
     JOB_NAME as EVALUATION_JOB_NAME,
 )
@@ -93,6 +102,7 @@ if TYPE_CHECKING:
     from stanstock.simulation.paper_jobs import PaperCaptureResult
 
 PROFILE = "research_product_v1"
+PROFILE_V2 = "research_product_v2"
 ISSUANCE_KEY = "scheduled"
 REGION = "us"
 MARKET_STAGE = "market"
@@ -127,12 +137,18 @@ class ScheduledPaperRefreshError(ValueError):
         self.paper_capture = paper_capture
 
 
-def scheduled_identity(owner: object) -> dict[str, str]:
+def scheduled_identity(owner: object, *, product_version: str = PRODUCT_VERSION) -> dict[str, str]:
     """Return the stable owner/issuance/product identity used by all jobs."""
 
     user_model = get_user_model()
     if not isinstance(owner, user_model) or not owner.is_active:
         raise ValueError("Scheduled research owner must be an active user")
+    if product_version == V2_PRODUCT_VERSION:
+        from stanstock.data.liquidity_evidence import liquidity_job_identity
+
+        return liquidity_job_identity({"owner_id": str(owner.pk), "issuance_key": ISSUANCE_KEY})
+    if product_version != PRODUCT_VERSION:
+        raise ValueError("Unsupported scheduled research product version")
     return {
         "owner_id": str(owner.pk),
         "issuance_key": ISSUANCE_KEY,
@@ -182,8 +198,14 @@ def execute_scheduled_research_refresh(
     effective_time = decision_time or timezone.now()
     target_date, proposed_grade = resolve_us_target_date(decision_time=effective_time)
     owner = resolve_scheduled_owner()
-    identity = scheduled_identity(owner)
-    parent_job_name = product_job_name(SCHEDULED_RESEARCH_JOB, identity)
+    from stanstock.research.product_reader import current_product_version
+
+    product_version = current_product_version()
+    v2 = product_version == V2_PRODUCT_VERSION
+    identity = scheduled_identity(owner, product_version=product_version)
+    parent_job_name = product_job_name(
+        SCHEDULED_RESEARCH_V2_JOB if v2 else SCHEDULED_RESEARCH_JOB, identity
+    )
     asset_store = store or open_asset_store()
     config_path = core_config_path or default_us_universe_config_path()
     paper_invocation = None
@@ -227,18 +249,19 @@ def execute_scheduled_research_refresh(
             replayed_prior.append(
                 replay_recorded_research_product_refresh(prior, store=asset_store)
             )
-            _verify_recorded_frequency_stage(
-                parent=prior,
-                target_date=target_date,
-                owner_id=identity["owner_id"],
-                store=asset_store,
-            )
+            if not v2:
+                _verify_recorded_frequency_stage(
+                    parent=prior,
+                    target_date=target_date,
+                    owner_id=identity["owner_id"],
+                    store=asset_store,
+                )
         return None
 
     def parent_task(parent: JobRun) -> JobExecutionResult:
         nonlocal market_attempted
         details: dict[str, Any] = {
-            "profile": PROFILE,
+            "profile": PROFILE_V2 if v2 else PROFILE,
             "target_date": target_date.isoformat(),
             "invocation_identity": identity,
             "stages": {},
@@ -250,6 +273,7 @@ def execute_scheduled_research_refresh(
                 target_date=target_date,
                 owner_id=identity["owner_id"],
                 store=asset_store,
+                product_version=product_version,
             )
         except (OSError, ValueError):
             details["verification"] = {
@@ -280,7 +304,9 @@ def execute_scheduled_research_refresh(
                 parent=parent,
                 details=details,
                 stage_name=MARKET_STAGE,
-                job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
+                job_name=product_job_name(
+                    DAILY_RESEARCH_V2_JOB if v2 else DAILY_RESEARCH_JOB, identity
+                ),
                 region=REGION,
                 target_date=target_date,
                 task=lambda: execute_daily_research_job(
@@ -292,6 +318,7 @@ def execute_scheduled_research_refresh(
                     core_config_path=config_path,
                     enforce_rate_limit=enforce_rate_limit,
                     derive_frequencies=False,
+                    product_version=product_version,
                 ),
             )
             if market is None or market.status not in {
@@ -316,6 +343,7 @@ def execute_scheduled_research_refresh(
                     target_date=target_date,
                     owner_id=identity["owner_id"],
                     store=asset_store,
+                    product_version=product_version,
                 )
                 if frequency.status not in SATISFIED_DOWNSTREAM_STATUSES:
                     downstream_failures.append(FREQUENCY_STAGE)
@@ -370,6 +398,7 @@ def execute_scheduled_research_refresh(
                 stages=details["stages"],
                 store=asset_store,
                 core_config_path=config_path,
+                product_version=product_version,
             )
         except RefreshVerificationError as exc:
             details["verification"] = exc.to_failure_details()
@@ -477,6 +506,7 @@ def verify_scheduled_research_refresh(
     stages: dict[str, Any],
     store: AssetStore | None = None,
     core_config_path: Path | None = None,
+    product_version: str = PRODUCT_VERSION,
 ) -> dict[str, Any]:
     """Independently prove one prospective parent from persisted evidence."""
 
@@ -492,8 +522,10 @@ def verify_scheduled_research_refresh(
             "product_parent_stages_invalid",
             "The research parent has an unexpected child stage set",
         )
-    identity = scheduled_identity(owner)
-    daily_name = product_job_name(DAILY_RESEARCH_JOB, identity)
+    identity = scheduled_identity(owner, product_version=product_version)
+    v2 = product_version == V2_PRODUCT_VERSION
+    config_hash = V2_CONFIG_HASH if v2 else PRODUCT_EFFECTIVE_CONFIG_HASH
+    daily_name = product_job_name(DAILY_RESEARCH_V2_JOB if v2 else DAILY_RESEARCH_JOB, identity)
     market = _resolve_product_stage(
         stages,
         MARKET_STAGE,
@@ -513,6 +545,7 @@ def verify_scheduled_research_refresh(
         owner_id=identity["owner_id"],
         issuance_key=ISSUANCE_KEY,
         store=asset_store,
+        product_version=product_version,
     )
     if intake is None:
         raise RefreshVerificationError(
@@ -523,11 +556,11 @@ def verify_scheduled_research_refresh(
     if (
         intake_payload.get("owner_id") != identity["owner_id"]
         or intake_payload.get("issuance_key") != ISSUANCE_KEY
-        or intake_payload.get("product_version") != PRODUCT_VERSION
+        or intake_payload.get("product_version") != product_version
         or intake_payload.get("target_date") != target_date.isoformat()
         or intake_payload.get("evidence_grade") != UniverseSnapshot.Grade.OBSERVED
         or intake_payload.get("source_provider") != TWELVE_DATA_PROVIDER
-        or intake_payload.get("policy_identity") != PRODUCT_EFFECTIVE_CONFIG_HASH
+        or intake_payload.get("policy_identity") != config_hash
     ):
         raise RefreshVerificationError(
             "product_intake_identity_invalid",
@@ -546,15 +579,20 @@ def verify_scheduled_research_refresh(
             "The scheduled intake does not bind the reviewed production core configuration",
         )
 
-    snapshot, run = _exact_product_output(intake.asset, target_date=target_date, store=asset_store)
+    snapshot, run = _exact_product_output(
+        intake.asset,
+        target_date=target_date,
+        store=asset_store,
+        product_version=product_version,
+    )
     if (
         run.code_revision != code_revision
         or _REVISION_RE.fullmatch(code_revision) is None
         or not run.issued_on_time
         or run.target_date != target_date
         or snapshot.grade != UniverseSnapshot.Grade.OBSERVED
-        or run.config_version != PRODUCT_VERSION
-        or run.config_hash != PRODUCT_EFFECTIVE_CONFIG_HASH
+        or run.config_version != product_version
+        or run.config_hash != config_hash
     ):
         raise RefreshVerificationError(
             "product_run_identity_invalid",
@@ -576,7 +614,9 @@ def verify_scheduled_research_refresh(
             "The market child does not bind its exact intake and output",
         )
 
-    intake_child_name = product_job_name(RESEARCH_INTAKE_JOB, identity)
+    intake_child_name = product_job_name(
+        RESEARCH_INTAKE_V2_JOB if v2 else RESEARCH_INTAKE_JOB, identity
+    )
     intake_children = list(
         JobRun.objects.filter(
             job_name=intake_child_name,
@@ -601,7 +641,14 @@ def verify_scheduled_research_refresh(
         )
 
     try:
-        verify_price_product_output(run=run, store=asset_store, replay=False)
+        if v2:
+            from stanstock.research.product_eligibility_pipeline import (
+                verify_decision_support_output,
+            )
+
+            verify_decision_support_output(run=run, store=asset_store)
+        else:
+            verify_price_product_output(run=run, store=asset_store, replay=False)
     except (OSError, ValueError) as exc:
         if isinstance(exc, RefreshVerificationError):
             raise
@@ -673,13 +720,14 @@ def verify_scheduled_research_refresh(
         membership=membership,
         source_time=source_time,
         analyses=analyses,
+        store=asset_store,
     )
     asset_manifest = _verify_asset_evidence(
         product_asset_ids | evaluation_assets | portfolio_assets
     )
-    return {
+    verification = {
         "status": "verified",
-        "profile": PROFILE,
+        "profile": PROFILE_V2 if v2 else PROFILE,
         "target_date": target_date.isoformat(),
         "owner_id": identity["owner_id"],
         "snapshot_id": str(snapshot.pk),
@@ -702,6 +750,13 @@ def verify_scheduled_research_refresh(
             "portfolio_snapshots": str(portfolio.pk),
         },
     }
+    if v2:
+        verification.update(
+            product_version=product_version,
+            config_hash=config_hash,
+            source_contract=SOURCE_CONTRACT,
+        )
+    return verification
 
 
 def replay_recorded_research_product_refresh(
@@ -720,14 +775,30 @@ def replay_recorded_research_product_refresh(
             "The recorded research parent is not a successful US refresh",
         )
     details = _details(persisted)
+    if persisted.job_name.startswith(f"{SCHEDULED_RESEARCH_V2_JOB}:"):
+        product_version = V2_PRODUCT_VERSION
+    elif persisted.job_name.startswith(f"{SCHEDULED_RESEARCH_JOB}:"):
+        product_version = PRODUCT_VERSION
+    else:
+        raise RefreshVerificationError(
+            "recorded_product_parent_identity_invalid",
+            "The recorded research parent has an unsupported captured product version",
+        )
+    v2 = product_version == V2_PRODUCT_VERSION
     identity = details.get("invocation_identity")
     if (
         not isinstance(identity, dict)
-        or set(identity) != {"owner_id", "issuance_key", "product"}
+        or set(identity)
+        != (
+            {"owner_id", "issuance_key", "product", "config_hash", "source_contract"}
+            if v2
+            else {"owner_id", "issuance_key", "product"}
+        )
         or identity.get("issuance_key") != ISSUANCE_KEY
-        or identity.get("product") != PRODUCT_VERSION
-        or persisted.job_name != product_job_name(SCHEDULED_RESEARCH_JOB, identity)
-        or details.get("profile") != PROFILE
+        or identity.get("product") != product_version
+        or persisted.job_name
+        != product_job_name(SCHEDULED_RESEARCH_V2_JOB if v2 else SCHEDULED_RESEARCH_JOB, identity)
+        or details.get("profile") != (PROFILE_V2 if v2 else PROFILE)
         or details.get("target_date") != persisted.target_date.isoformat()
     ):
         raise RefreshVerificationError(
@@ -740,6 +811,11 @@ def replay_recorded_research_product_refresh(
         raise RefreshVerificationError(
             "recorded_product_owner_invalid",
             "The recorded research owner is unavailable or inactive",
+        )
+    if identity != scheduled_identity(owner, product_version=product_version):
+        raise RefreshVerificationError(
+            "recorded_product_parent_details_invalid",
+            "The recorded research identity does not bind its captured product policy",
         )
     current_owner = resolve_scheduled_owner()
     if current_owner.pk != owner.pk:
@@ -761,6 +837,7 @@ def replay_recorded_research_product_refresh(
             code_revision=revision,
             stages=stages,
             store=store,
+            product_version=product_version,
         )
     except RefreshVerificationError:
         raise
@@ -774,6 +851,20 @@ def replay_recorded_research_product_refresh(
             "recorded_product_verification_mismatch",
             "The recorded research verification differs from its canonical replay",
         )
+    if v2:
+        try:
+            _verify_recorded_frequency_stage(
+                parent=persisted,
+                target_date=persisted.target_date,
+                owner_id=identity["owner_id"],
+                store=store or open_asset_store(),
+                product_version=product_version,
+            )
+        except (OSError, ValueError):
+            raise RefreshVerificationError(
+                "recorded_product_frequency_invalid",
+                "The recorded research frequency stage could not be replayed",
+            ) from None
     snapshot = UniverseSnapshot.objects.filter(pk=UUID(verification["snapshot_id"])).first()
     run = AnalysisRun.objects.filter(pk=UUID(verification["analysis_run_id"])).first()
     if snapshot is None or run is None:
@@ -800,18 +891,20 @@ def _completed_scheduled_run(
     target_date: date,
     owner_id: str,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> AnalysisRun | None:
     intake = load_product_intake(
         target_date=target_date,
         owner_id=owner_id,
         issuance_key=ISSUANCE_KEY,
         store=store,
+        product_version=product_version,
     )
     if intake is None:
         return None
     snapshots = list(
         UniverseSnapshot.objects.filter(
-            universe__slug=f"{PRODUCT_VERSION}-{intake.asset.sha256[:16]}"
+            universe__slug=f"{product_version}-{intake.asset.sha256[:16]}"
         )
     )
     if len(snapshots) > 1:
@@ -824,15 +917,24 @@ def _completed_scheduled_run(
     runs = list(
         AnalysisRun.objects.filter(
             universe_snapshot=snapshots[0],
-            config_version=PRODUCT_VERSION,
-            config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
+            config_version=product_version,
+            config_hash=(
+                V2_CONFIG_HASH
+                if product_version == V2_PRODUCT_VERSION
+                else PRODUCT_EFFECTIVE_CONFIG_HASH
+            ),
         )
     )
     if len(runs) > 1:
         raise ValueError("Scheduled research intake has conflicting completed outputs")
     if not runs:
         return None
-    verify_price_product_output(run=runs[0], store=store, replay=False)
+    if product_version == V2_PRODUCT_VERSION:
+        from stanstock.research.product_eligibility_pipeline import verify_decision_support_output
+
+        verify_decision_support_output(run=runs[0], store=store)
+    else:
+        verify_price_product_output(run=runs[0], store=store, replay=False)
     return runs[0]
 
 
@@ -841,10 +943,11 @@ def _exact_product_output(
     *,
     target_date: date,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> tuple[UniverseSnapshot, AnalysisRun]:
     snapshots = list(
         UniverseSnapshot.objects.filter(
-            universe__slug=f"{PRODUCT_VERSION}-{intake_asset.sha256[:16]}",
+            universe__slug=f"{product_version}-{intake_asset.sha256[:16]}",
             as_of_date=target_date,
         )
     )
@@ -863,8 +966,12 @@ def _exact_product_output(
     runs = list(
         AnalysisRun.objects.filter(
             universe_snapshot=snapshot,
-            config_version=PRODUCT_VERSION,
-            config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
+            config_version=product_version,
+            config_hash=(
+                V2_CONFIG_HASH
+                if product_version == V2_PRODUCT_VERSION
+                else PRODUCT_EFFECTIVE_CONFIG_HASH
+            ),
         )
     )
     if len(runs) != 1:
@@ -883,7 +990,13 @@ def _product_asset_closure(
     membership: dict[str, object],
     source_time: datetime,
     analyses: list[StockAnalysis],
+    store: AssetStore | None = None,
 ) -> tuple[tuple[DataAsset, ...], set[UUID]]:
+    if run.config_version == V2_PRODUCT_VERSION:
+        from stanstock.research.product_eligibility_pipeline import decision_support_run_assets
+
+        assets = decision_support_run_assets(run=run, store=store or open_asset_store())
+        return _catalog_assets(membership, cutoff=source_time), {asset.pk for asset in assets}
     asset_ids = {intake_asset.pk}
     membership_assets = list(
         DataAsset.objects.filter(
@@ -1065,7 +1178,16 @@ def _resolve_product_stage(
     return referenced
 
 
-def _frequency_job_name(owner_id: str) -> str:
+def _frequency_job_name(owner_id: str, *, product_version: str = PRODUCT_VERSION) -> str:
+    if product_version == V2_PRODUCT_VERSION:
+        from stanstock.data.liquidity_evidence import liquidity_job_identity
+
+        return product_job_name(
+            FREQUENCY_RESEARCH_V2_JOB,
+            liquidity_job_identity({"owner_id": owner_id, "issuance_key": ISSUANCE_KEY}),
+        )
+    if product_version != PRODUCT_VERSION:
+        raise ValueError("Unsupported scheduled frequency product version")
     return product_job_name(
         FREQUENCY_JOB,
         {"owner_id": owner_id, "issuance_key": ISSUANCE_KEY, "product": PRODUCT_VERSION},
@@ -1073,8 +1195,14 @@ def _frequency_job_name(owner_id: str) -> str:
 
 
 def _legacy_frequency_child(
-    *, target_date: date, owner_id: str, store: AssetStore
+    *,
+    target_date: date,
+    owner_id: str,
+    store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> JobRun | None:
+    if product_version == V2_PRODUCT_VERSION:
+        return None
     legacy = JobRun.objects.filter(
         job_name=FREQUENCY_JOB,
         region=REGION,
@@ -1099,16 +1227,18 @@ def _run_frequency_stage(
     target_date: date,
     owner_id: str,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> JobRun:
     """Execute a recoverable derived-only child without altering the frozen stage map."""
 
-    job_name = _frequency_job_name(owner_id)
+    job_name = _frequency_job_name(owner_id, product_version=product_version)
 
     def task(_child: JobRun) -> JobExecutionResult:
         completed = _completed_scheduled_run(
             target_date=target_date,
             owner_id=owner_id,
             store=store,
+            product_version=product_version,
         )
         if completed is None:
             raise ValueError("Frequency stage has no complete scheduled source run")
@@ -1126,7 +1256,12 @@ def _run_frequency_stage(
         )
 
     try:
-        legacy = _legacy_frequency_child(target_date=target_date, owner_id=owner_id, store=store)
+        legacy = _legacy_frequency_child(
+            target_date=target_date,
+            owner_id=owner_id,
+            store=store,
+            product_version=product_version,
+        )
         child = legacy or execute_target_job(
             job_name=job_name, region=REGION, target_date=target_date, task=task
         )
@@ -1164,11 +1299,14 @@ def _run_frequency_stage(
         "frequency_asset_id": success.details.get("frequency_asset_id"),
         "frequency_asset_sha256": success.details.get("frequency_asset_sha256"),
     }
+    if product_version == V2_PRODUCT_VERSION:
+        details[FREQUENCY_STAGE]["attempt"] = child.attempt
     details["frequency_verification"] = _verify_frequency_stage(
         child=success,
         target_date=target_date,
         owner_id=owner_id,
         store=store,
+        product_version=product_version,
     )
     _persist_parent_details(parent, details)
     return child
@@ -1180,6 +1318,7 @@ def _verify_recorded_frequency_stage(
     target_date: date,
     owner_id: str,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> None:
     """Recheck a new parent's optional sibling evidence before skip recovery.
 
@@ -1191,13 +1330,20 @@ def _verify_recorded_frequency_stage(
 
     recorded = parent.details.get("frequency_verification")
     if recorded is None:
+        if product_version == V2_PRODUCT_VERSION:
+            raise ValueError("Scheduled v2 frequency verification binding is missing")
         has_child = JobRun.objects.filter(
-            job_name=_frequency_job_name(owner_id),
+            job_name=_frequency_job_name(owner_id, product_version=product_version),
             region=REGION,
             target_date=target_date,
             status=JobRun.Status.SUCCESS,
         ).exists()
-        legacy = _legacy_frequency_child(target_date=target_date, owner_id=owner_id, store=store)
+        legacy = _legacy_frequency_child(
+            target_date=target_date,
+            owner_id=owner_id,
+            store=store,
+            product_version=product_version,
+        )
         if has_child or legacy is not None or FREQUENCY_STAGE in parent.details:
             raise ValueError("Scheduled frequency verification binding is missing")
         return
@@ -1215,9 +1361,33 @@ def _verify_recorded_frequency_stage(
         target_date=target_date,
         owner_id=owner_id,
         store=store,
+        product_version=product_version,
     )
     if actual != recorded:
         raise ValueError("Scheduled frequency verification block does not match its child")
+    if product_version == V2_PRODUCT_VERSION:
+        info = parent.details.get(FREQUENCY_STAGE)
+        if not isinstance(info, dict) or set(info) != {
+            "status",
+            "job_run_id",
+            "attempt",
+            "analysis_run_id",
+            "frequency_asset_id",
+            "frequency_asset_sha256",
+        }:
+            raise ValueError("Scheduled v2 frequency stage binding is invalid")
+        resolved = _resolve_product_stage(
+            {FREQUENCY_STAGE: info},
+            FREQUENCY_STAGE,
+            job_name=_frequency_job_name(owner_id, product_version=product_version),
+            region=REGION,
+            target_date=target_date,
+        )
+        if resolved != child or any(
+            info[key] != actual[key]
+            for key in ("analysis_run_id", "frequency_asset_id", "frequency_asset_sha256")
+        ):
+            raise ValueError("Scheduled v2 frequency stage does not bind its verified child")
 
 
 def _verify_frequency_stage(
@@ -1226,11 +1396,15 @@ def _verify_frequency_stage(
     target_date: date,
     owner_id: str,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> dict[str, object]:
     """Verify the sibling evidence without extending frozen parent stages."""
 
+    allowed_names = {_frequency_job_name(owner_id, product_version=product_version)}
+    if product_version == PRODUCT_VERSION:
+        allowed_names.add(FREQUENCY_JOB)
     if (
-        child.job_name not in {_frequency_job_name(owner_id), FREQUENCY_JOB}
+        child.job_name not in allowed_names
         or child.region != REGION
         or child.target_date != target_date
         or child.status != JobRun.Status.SUCCESS
@@ -1242,7 +1416,12 @@ def _verify_frequency_stage(
         asset_id = UUID(str(child.details["frequency_asset_id"]))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Scheduled frequency child details are invalid") from exc
-    source = _completed_scheduled_run(target_date=target_date, owner_id=owner_id, store=store)
+    source = _completed_scheduled_run(
+        target_date=target_date,
+        owner_id=owner_id,
+        store=store,
+        product_version=product_version,
+    )
     run = AnalysisRun.objects.filter(pk=run_id).first()
     asset = DataAsset.objects.filter(pk=asset_id).first()
     if (

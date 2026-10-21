@@ -9,6 +9,15 @@ from django.db import models
 from django.db.models.base import ModelBase
 
 from stanstock.data.models import Listing, UniverseSnapshot
+from stanstock.research.decision_support_eligibility import (
+    MOMENTUM_METHOD_VERSION as MOMENTUM_V2,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as PRODUCT_V2_HASH,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as PRODUCT_V2,
+)
 from stanstock.research.forecasting import scenario_from_document
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
@@ -57,6 +66,23 @@ class AnalysisRun(models.Model):
 
     def clean(self) -> None:
         super().clean()
+        if self.config_version == PRODUCT_V2 and self.config_hash != PRODUCT_V2_HASH:
+            raise ValidationError("Research-product-v2 requires its exact accepted config hash.")
+        if self.config_version == PRODUCT_V2:
+            snapshot = (
+                UniverseSnapshot.objects.filter(pk=self.universe_snapshot_id)
+                .select_related("universe")
+                .first()
+            )
+            if (
+                snapshot is None
+                or snapshot.universe.config_version != PRODUCT_V2
+                or snapshot.as_of_date != self.target_date
+                or (self.issued_on_time and snapshot.grade != UniverseSnapshot.Grade.OBSERVED)
+            ):
+                raise ValidationError(
+                    "V2 parent must bind its exact captured target/version/grade."
+                )
         if not self.pk:
             return
         original = (
@@ -65,13 +91,19 @@ class AnalysisRun(models.Model):
             .values(
                 "config_version",
                 "config_hash",
+                "generated_at",
+                "data_cutoff",
+                "target_date",
+                "issued_on_time",
+                "universe_snapshot_id",
+                "code_revision",
             )
             .first()
         )
         if not original or not self.stocks.exists():
             return
-        original_touches_product = original["config_version"] == PRODUCT_VERSION
-        current_touches_product = self.config_version == PRODUCT_VERSION
+        original_touches_product = original["config_version"] in (PRODUCT_VERSION, PRODUCT_V2)
+        current_touches_product = self.config_version in (PRODUCT_VERSION, PRODUCT_V2)
         if original_touches_product or current_touches_product:
             if (
                 original["config_version"] != self.config_version
@@ -81,6 +113,18 @@ class AnalysisRun(models.Model):
                     "Research-product analysis runs with stock analyses cannot "
                     "change config_version or config_hash."
                 )
+        if PRODUCT_V2 in (original["config_version"], self.config_version) and any(
+            original[field] != getattr(self, field)
+            for field in (
+                "generated_at",
+                "data_cutoff",
+                "target_date",
+                "issued_on_time",
+                "universe_snapshot_id",
+                "code_revision",
+            )
+        ):
+            raise ValidationError("Research-product-v2 issuance identity is immutable.")
 
 
 class StockAnalysis(models.Model):
@@ -171,8 +215,12 @@ class StockAnalysis(models.Model):
                     )
                     .first()
                 )
-                if (original_parent and original_parent["config_version"] == PRODUCT_VERSION) or (
-                    current_parent and current_parent["config_version"] == PRODUCT_VERSION
+                if (
+                    original_parent
+                    and original_parent["config_version"] in (PRODUCT_VERSION, PRODUCT_V2)
+                ) or (
+                    current_parent
+                    and current_parent["config_version"] in (PRODUCT_VERSION, PRODUCT_V2)
                 ):
                     raise ValidationError(
                         {
@@ -194,9 +242,11 @@ class StockAnalysis(models.Model):
         )
         if run is None:
             return
-        prospective = run["config_version"] == PRODUCT_VERSION
+        prospective = run["config_version"] in (PRODUCT_VERSION, PRODUCT_V2)
         if prospective:
             errors: dict[str, str] = {}
+            if run["config_version"] == PRODUCT_V2 and run["config_hash"] != PRODUCT_V2_HASH:
+                errors["run"] = "research-product-v2 requires its exact reviewed config hash."
             if self.overall_score is not None:
                 errors["overall_score"] = "Prospective price research does not estimate a score."
             if self.risk_score is not None:
@@ -422,7 +472,7 @@ class Prediction(models.Model):
                     | models.Q(
                         evidence_role="decision",
                         horizon="6m",
-                        method_version=MOMENTUM_METHOD_VERSION,
+                        method_version__in=(MOMENTUM_METHOD_VERSION, MOMENTUM_V2),
                     )
                     | models.Q(
                         evidence_role="advisory",
@@ -434,7 +484,7 @@ class Prediction(models.Model):
             models.CheckConstraint(
                 condition=(
                     models.Q(
-                        method_version=MOMENTUM_METHOD_VERSION,
+                        method_version__in=(MOMENTUM_METHOD_VERSION, MOMENTUM_V2),
                         evidence_role="decision",
                         horizon="6m",
                         overall_score__isnull=True,
@@ -469,6 +519,7 @@ class Prediction(models.Model):
                         ~models.Q(
                             method_version__in=(
                                 MOMENTUM_METHOD_VERSION,
+                                MOMENTUM_V2,
                                 FHS_METHOD_VERSION,
                             )
                         )
@@ -520,9 +571,10 @@ class Prediction(models.Model):
         run_version = run["run__config_version"]
         prospective_method = self.method_version in {
             MOMENTUM_METHOD_VERSION,
+            MOMENTUM_V2,
             FHS_METHOD_VERSION,
         }
-        if run_version != PRODUCT_VERSION:
+        if run_version not in (PRODUCT_VERSION, PRODUCT_V2):
             if prospective_method:
                 raise ValidationError(
                     {"method_version": "Prospective methods require research-product-v1."}
@@ -539,6 +591,35 @@ class Prediction(models.Model):
             raise ValidationError(
                 {"method_version": "research-product-v1 permits only its reviewed methods."}
             )
+        expected_momentum = MOMENTUM_V2 if run_version == PRODUCT_V2 else MOMENTUM_METHOD_VERSION
+        if self.method_version not in (expected_momentum, FHS_METHOD_VERSION):
+            raise ValidationError(
+                {"method_version": "Momentum method must match its parent version."}
+            )
+        if run_version == PRODUCT_V2:
+            parent = self.analysis.run
+            if parent.config_hash != PRODUCT_V2_HASH:
+                raise ValidationError(
+                    {"config_hash": "V2 requires its exact reviewed config hash."}
+                )
+            if (
+                any(
+                    getattr(self, field) != getattr(parent, field)
+                    for field in (
+                        "generated_at",
+                        "target_date",
+                        "data_cutoff",
+                        "issued_on_time",
+                        "code_revision",
+                    )
+                )
+                or self.listing_id != self.analysis.listing_id
+                or self.evidence_grade != parent.universe_snapshot.grade
+                or self.source_mode != self.SourceMode.PROVIDER
+                or self.price_provider != "twelve_data"
+                or self.price_subject != self.analysis.listing.provider_symbol
+            ):
+                raise ValidationError("V2 prediction issuance must match its owning run/listing.")
         if self.config_hash != run["run__config_hash"]:
             raise ValidationError(
                 {
@@ -558,7 +639,7 @@ class Prediction(models.Model):
                 {"recommendation": "Advisory FHS projections have no recommendation."}
             )
         if (
-            self.method_version == MOMENTUM_METHOD_VERSION
+            self.method_version in (MOMENTUM_METHOD_VERSION, MOMENTUM_V2)
             and self.recommendation is None
             and not self.insufficiency_reason
         ):
@@ -645,10 +726,10 @@ class PredictionOutcome(models.Model):
         if self.status != self.Status.MATURED or not self.prediction_id:
             return
         if self.prediction.evidence_role == Prediction.EvidenceRole.DECISION:
-            prospective_non_directional = (
-                self.prediction.method_version == MOMENTUM_METHOD_VERSION
-                and self.prediction.recommendation in (Recommendation.HOLD, None)
-            )
+            prospective_non_directional = self.prediction.method_version in (
+                MOMENTUM_METHOD_VERSION,
+                MOMENTUM_V2,
+            ) and self.prediction.recommendation in (Recommendation.HOLD, None)
             if prospective_non_directional and self.success is not None:
                 raise ValidationError(
                     {"success": "Prospective HOLD/unavailable outcomes must not claim success."}
@@ -656,7 +737,7 @@ class PredictionOutcome(models.Model):
             if not prospective_non_directional and self.success is None:
                 message = (
                     "Matured directional decision outcomes require success."
-                    if self.prediction.method_version == MOMENTUM_METHOD_VERSION
+                    if self.prediction.method_version in (MOMENTUM_METHOD_VERSION, MOMENTUM_V2)
                     else "Matured decision outcomes require a success value."
                 )
                 raise ValidationError({"success": message})

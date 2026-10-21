@@ -1,0 +1,59 @@
+{
+  "base_effective_config_hash": "55334183af29fc01b853e83f9bf75216f24564956925fb95912cb80a69420867",
+  "base_product_version": "research-product-v1",
+  "decision_method_version": "us-relative-momentum-v2",
+  "liquidity": {
+    "admission": "same_batch_exact_decimal_close_and_integer_volume_every_session",
+    "arithmetic": "native_float_products_fsum_mean_finite_representable_only",
+    "availability": "actual_retrieved_and_available_le_logical_cutoff",
+    "calendar": "XNYS",
+    "currency": "USD",
+    "fallback": "withhold_liquidity_keep_independent_price_research",
+    "parity_tolerance": "0",
+    "purpose": "decision_liquidity_only",
+    "request_modes": [
+      "none",
+      "splits"
+    ],
+    "sessions": 20,
+    "source_contract": "decision-support-liquidity@1",
+    "turnover": "mean_closing_price_times_provider_reported_volume",
+    "volume_maximum": 9223372036854775807,
+    "volume_minimum": 0,
+    "zero_volume": "reported_zero_only_never_missing_substitute"
+  },
+  "mode_witness": {
+    "authority_url": "https://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-first-quarter-fiscal-2025",
+    "cadence": "each_fresh_acquisition_batch_no_additional_control_requests",
+    "contract": "twelve-data-none-witness@1",
+    "control_volume": "strictly_positive_on_all_control_sessions",
+    "currency": "USD",
+    "exchange": "NASDAQ",
+    "failure_scope": "all_liquidity_in_that_batch",
+    "issuer_event_date": "2024-06-10",
+    "issuer_split_new_shares_per_old_share": 10,
+    "maximum_none_requests_per_batch": 1,
+    "maximum_outputsize": 5000,
+    "post_rule": "exact_decimal_close_and_integer_volume_parity_all",
+    "post_sessions": [
+      "2024-06-10",
+      "2024-06-11",
+      "2024-06-12",
+      "2024-06-13",
+      "2024-06-14"
+    ],
+    "pre_rule": "none_close_gt_splits_close_and_10_times_none_volume_eq_splits_volume_all",
+    "pre_sessions": [
+      "2024-06-03",
+      "2024-06-04",
+      "2024-06-05",
+      "2024-06-06",
+      "2024-06-07"
+    ],
+    "request_start": "2024-06-03",
+    "symbol": "NVDA"
+  },
+  "payload_schema": "research-product@2",
+  "product_version": "research-product-v2",
+  "schema_version": 2
+}

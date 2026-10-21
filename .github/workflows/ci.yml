@@ -165,6 +165,12 @@ jobs:
             tests/test_research_product_jobs.py::test_postgresql_frequency_registration_has_one_winner_and_retry_reads_its_bytes \
             tests/test_research_product_reader_web.py::test_native_four_layer_live_job_reader_and_authenticated_pages \
             tests/test_research_product_reader_web.py::test_status_history_performance_and_my_list_keep_boundaries \
+            tests/test_decision_support_database.py \
+            tests/test_decision_support_eligibility_scheduled.py::test_completed_scheduled_recovery_precedes_disabled_provider_and_dirty_checkout \
+            tests/test_decision_support_eligibility_scheduled.py::test_closed_scheduled_batch_recovers_membership_before_credentials_or_quota \
+            tests/test_decision_support_reader_web.py::test_real_v2_buy_producer_immutable_reader_and_existing_authenticated_render \
+            tests/test_decision_support_reader_web.py::test_real_zero_is_matched_measured_activity_not_missing_or_buy \
+            tests/test_decision_support_eligibility_pipeline.py::test_genuine_near_zero_forecast_survives_decimal_db_roundtrip \
             tests/test_research_product_study_evidence.py::test_registered_study_reader_fails_closed_on_forged_metadata_row \
             tests/test_research_outcomes.py::test_outcome_validation_separates_decision_and_advisory_success \
             tests/test_research_outcomes.py::test_prediction_horizon_and_evidence_role_must_match \

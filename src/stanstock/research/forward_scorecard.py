@@ -32,6 +32,21 @@ from stanstock.data.assets import (
     resolve_asset_ref,
 )
 from stanstock.data.models import DataAsset
+from stanstock.research.decision_support_eligibility import (
+    FORECAST_CONFIG_HASH,
+    SOURCE_CONTRACT,
+    canonical_json,
+    strict_json,
+)
+from stanstock.research.decision_support_eligibility import (
+    MOMENTUM_METHOD_VERSION as V2_MOMENTUM,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as V2_PRODUCT_VERSION,
+)
 from stanstock.research.models import Prediction
 from stanstock.research.outcome_refresh_validation import verify_prediction_outcome
 from stanstock.research.outcomes import HORIZON_SESSION_COUNTS
@@ -92,6 +107,39 @@ FORWARD_PROTOCOL = {
 }
 # Literal pin is checked before publication and reading.
 FORWARD_PROTOCOL_SHA256 = "6fc2608de73d2de46c02cb2ee1308741e8882a0f5cb01f56cf9e230afa323524"
+FORWARD_PROTOCOL_V2_VERSION = "forward-forecast-scorecard-v2"
+FORWARD_PROTOCOL_V2 = {
+    **json.loads(json.dumps(FORWARD_PROTOCOL)),
+    "version": FORWARD_PROTOCOL_V2_VERSION,
+    "product_version": V2_PRODUCT_VERSION,
+    "effective_config_hash": V2_CONFIG_HASH,
+    "forecast_seed_config_hash": FORECAST_CONFIG_HASH,
+    "eligibility_source_contract": SOURCE_CONTRACT,
+    "decision_method": V2_MOMENTUM,
+    "prospective_start": "first_XNYS_target_close_strictly_after_actual_declaration",
+}
+FORWARD_PROTOCOL_V2_SHA256 = "d49e0b52cf2af6d68c7eccf1c8d73234b9488421c0373c2867436995a05048df"
+
+
+def _protocol(product_version: str) -> tuple[str, dict[str, Any], str]:
+    if product_version == PRODUCT_VERSION:
+        return FORWARD_PROTOCOL_VERSION, FORWARD_PROTOCOL, FORWARD_PROTOCOL_SHA256
+    if product_version == V2_PRODUCT_VERSION:
+        return FORWARD_PROTOCOL_V2_VERSION, FORWARD_PROTOCOL_V2, FORWARD_PROTOCOL_V2_SHA256
+    raise ValueError("Unsupported forward protocol product version")
+
+
+def prospective_start_target(declared_at: datetime) -> date:
+    if declared_at.tzinfo is None:
+        raise ValueError("Forward declaration time must be timezone-aware")
+    first_day = declared_at.date()
+    calendar = get_calendar(
+        "XNYS", start=first_day - timedelta(days=7), end=first_day + timedelta(days=21)
+    )
+    for session in calendar.sessions_in_range(first_day, first_day + timedelta(days=14)):
+        if calendar.session_close(session).to_pydatetime() > declared_at:
+            return cast(date, session.date())
+    raise ValueError("Forward declaration has no prospective target in the bounded calendar")
 
 
 def _bytes(value: Any) -> bytes:
@@ -105,32 +153,53 @@ class ForwardDeclaration:
     document: dict[str, Any]
 
 
-def _authority(user: ProductUser, store: AssetStore) -> tuple[str, str, str]:
+def _authority(
+    user: ProductUser,
+    store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
+    *,
+    allow_disabled: bool = False,
+) -> tuple[str, str, str]:
     if (
-        not settings.RESEARCH_PRODUCT_ENABLED
+        (not settings.RESEARCH_PRODUCT_ENABLED and not allow_disabled)
         or not user.is_authenticated
         or not get_user_model().objects.filter(pk=str(user.pk), is_active=True).exists()
     ):
         raise ValueError("An active research owner is required")
-    source_owner, provider, _intakes = _authorized_intakes(user=user)
+    if product_version == V2_PRODUCT_VERSION and settings.DEMO_MODE:
+        raise ValueError("research-product-v2 has no synthetic demo protocol")
+    source_owner, provider, _intakes = _authorized_intakes(
+        user=user, product_version=product_version
+    )
     _require_current_display_authorization(
         {"owner_id": source_owner, "source_provider": provider}, user=user
     )
-    if hashlib.sha256(_bytes(FORWARD_PROTOCOL)).hexdigest() != FORWARD_PROTOCOL_SHA256:
+    _version, protocol, pin = _protocol(product_version)
+    if hashlib.sha256(_bytes(protocol)).hexdigest() != pin:
         raise ValueError("Forward protocol code declaration differs from its pin")
     return str(user.pk), source_owner, provider
 
 
-def _protocol_subject(owner_id: str) -> str:
-    return f"{FORWARD_PROTOCOL_VERSION}:{owner_id}"
+def _protocol_subject(owner_id: str, product_version: str = PRODUCT_VERSION) -> str:
+    version, _document, _pin = _protocol(product_version)
+    return f"{version}:{owner_id}"
 
 
 def _read_declaration(
-    asset: DataAsset, *, user: ProductUser, store: AssetStore
+    asset: DataAsset,
+    *,
+    user: ProductUser,
+    store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
+    allow_disabled: bool = False,
 ) -> ForwardDeclaration:
-    owner_id, source_owner, provider = _authority(user, store)
-    document = json.loads(read_checksummed_bytes(store, asset))
-    if not isinstance(document, dict) or set(document) != {
+    owner_id, source_owner, provider = _authority(
+        user, store, product_version, allow_disabled=allow_disabled
+    )
+    version, protocol, pin = _protocol(product_version)
+    raw = read_checksummed_bytes(store, asset)
+    document = strict_json(raw) if product_version == V2_PRODUCT_VERSION else json.loads(raw)
+    keys = {
         "protocol",
         "protocol_sha256",
         "owner_id",
@@ -139,24 +208,31 @@ def _read_declaration(
         "source_intakes",
         "declared_at",
         "execution_revision",
-    }:
+    }
+    if product_version == V2_PRODUCT_VERSION:
+        keys.add("prospective_start_target")
+    if not isinstance(document, dict) or set(document) != keys:
         raise ValueError("Forward declaration has an invalid shape")
     declared_at = datetime.fromisoformat(document["declared_at"])
     expected_metadata = {
         "owner_id": owner_id,
-        "protocol_version": FORWARD_PROTOCOL_VERSION,
-        "protocol_sha256": FORWARD_PROTOCOL_SHA256,
+        "protocol_version": version,
+        "protocol_sha256": pin,
         "declared_at": document["declared_at"],
     }
     if (
         asset.provider != "stanstock"
         or asset.kind != FORWARD_PROTOCOL_KIND
-        or asset.subject != _protocol_subject(owner_id)
+        or asset.subject != _protocol_subject(owner_id, product_version)
         or document["owner_id"] != owner_id
         or document["source_owner_id"] != source_owner
         or document["source_provider"] != provider
-        or document["protocol"] != FORWARD_PROTOCOL
-        or document["protocol_sha256"] != FORWARD_PROTOCOL_SHA256
+        or (
+            canonical_json(document["protocol"]) != canonical_json(protocol)
+            if product_version == V2_PRODUCT_VERSION
+            else document["protocol"] != protocol
+        )
+        or document["protocol_sha256"] != pin
         or asset.metadata != expected_metadata
         or declared_at.tzinfo is None
         or declared_at > timezone.now()
@@ -167,6 +243,14 @@ def _read_declaration(
         or not isinstance(document["source_intakes"], list)
     ):
         raise ValueError("Forward declaration identity is invalid")
+    if (
+        product_version == V2_PRODUCT_VERSION
+        and document["prospective_start_target"]
+        != prospective_start_target(declared_at).isoformat()
+    ):
+        raise ValueError(
+            "V2 forward declaration prospective start differs from the independent calendar"
+        )
     for raw in document["source_intakes"]:
         intake = resolve_asset_ref(AssetRef.from_json(raw), cutoff=declared_at)
         payload = json.loads(read_checksummed_bytes(store, intake))
@@ -175,36 +259,45 @@ def _read_declaration(
             or intake.kind != "research_product_intake"
             or payload.get("owner_id") != source_owner
             or payload.get("source_provider") != provider
-            or payload.get("product_version") != PRODUCT_VERSION
+            or payload.get("product_version") != product_version
         ):
             raise ValueError("Forward declaration intake authority is invalid")
     return ForwardDeclaration(asset, declared_at, document)
 
 
 def read_forward_declaration(
-    *, user: ProductUser, store: AssetStore | None = None
+    *,
+    user: ProductUser,
+    store: AssetStore | None = None,
+    product_version: str = PRODUCT_VERSION,
 ) -> ForwardDeclaration:
     store = store or AssetStore()
-    owner_id, _source_owner, _provider = _authority(user, store)
+    owner_id, _source_owner, _provider = _authority(user, store, product_version)
     assets = list(
         DataAsset.objects.filter(
-            provider="stanstock", kind=FORWARD_PROTOCOL_KIND, subject=_protocol_subject(owner_id)
+            provider="stanstock",
+            kind=FORWARD_PROTOCOL_KIND,
+            subject=_protocol_subject(owner_id, product_version),
         )
     )
     if len(assets) != 1:
         raise ValueError("One durable forward protocol declaration is required")
-    return _read_declaration(assets[0], user=user, store=store)
+    return _read_declaration(assets[0], user=user, store=store, product_version=product_version)
 
 
 def declare_forward_protocol(
-    *, user: ProductUser, store: AssetStore | None = None
+    *,
+    user: ProductUser,
+    store: AssetStore | None = None,
+    product_version: str = PRODUCT_VERSION,
 ) -> ForwardDeclaration:
     """Explicit publication only. The owner/version lock spans durable commit."""
     store = store or AssetStore()
-    owner_id, source_owner, provider = _authority(user, store)
+    owner_id, source_owner, provider = _authority(user, store, product_version)
+    version, protocol, pin = _protocol(product_version)
     with (
         target_job_lock(
-            job_name=f"{FORWARD_PROTOCOL_VERSION}:{owner_id}",
+            job_name=f"{version}:{owner_id}",
             region="us",
             target_date=PROTOCOL_EPOCH,
         ),
@@ -214,22 +307,24 @@ def declare_forward_protocol(
             DataAsset.objects.filter(
                 provider="stanstock",
                 kind=FORWARD_PROTOCOL_KIND,
-                subject=_protocol_subject(owner_id),
+                subject=_protocol_subject(owner_id, product_version),
             )
         )
         if existing:
             if len(existing) != 1:
                 raise ValueError("Forward declaration registry is ambiguous")
-            return _read_declaration(existing[0], user=user, store=store)
-        _owner, _provider, intakes = _authorized_intakes(user=user)
+            return _read_declaration(
+                existing[0], user=user, store=store, product_version=product_version
+            )
+        _owner, _provider, intakes = _authorized_intakes(user=user, product_version=product_version)
         # No predictions/outcomes/losses are read by declaration.
         declared_at = timezone.now()
         revision = _git(settings.BASE_DIR, "rev-parse", "HEAD").stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
             raise ValueError("Forward declaration execution revision is unavailable")
         document = {
-            "protocol": FORWARD_PROTOCOL,
-            "protocol_sha256": FORWARD_PROTOCOL_SHA256,
+            "protocol": protocol,
+            "protocol_sha256": pin,
             "owner_id": owner_id,
             "source_owner_id": source_owner,
             "source_provider": provider,
@@ -241,6 +336,8 @@ def declare_forward_protocol(
             "declared_at": declared_at.isoformat(),
             "execution_revision": revision,
         }
+        if product_version == V2_PRODUCT_VERSION:
+            document["prospective_start_target"] = prospective_start_target(declared_at).isoformat()
         payload = _bytes(document)
         stored = store.write_bytes(
             f"research/forward/{owner_id}/{hashlib.sha256(payload).hexdigest()}.json", payload
@@ -248,24 +345,77 @@ def declare_forward_protocol(
         asset = register_asset(
             provider="stanstock",
             kind=FORWARD_PROTOCOL_KIND,
-            subject=_protocol_subject(owner_id),
+            subject=_protocol_subject(owner_id, product_version),
             stored=stored,
             retrieved_at=declared_at,
             available_at=declared_at,
             metadata={
                 "owner_id": owner_id,
-                "protocol_version": FORWARD_PROTOCOL_VERSION,
-                "protocol_sha256": FORWARD_PROTOCOL_SHA256,
+                "protocol_version": version,
+                "protocol_sha256": pin,
                 "declared_at": declared_at.isoformat(),
             },
         )
-        return _read_declaration(asset, user=user, store=store)
+        return _read_declaration(asset, user=user, store=store, product_version=product_version)
 
 
-def read_forward_scorecard(*, user: ProductUser, store: AssetStore | None = None) -> dict[str, Any]:
+def require_v2_forward_declaration(
+    *,
+    owner_id: str,
+    target_date: date,
+    before: datetime | str,
+    store: AssetStore,
+    acquisition_job_id: str | None = None,
+    expected_asset: DataAsset | None = None,
+) -> ForwardDeclaration:
+    """Read only: never implicitly declare, reset, or backdate a protocol."""
+    user = get_user_model().objects.filter(pk=owner_id, is_active=True).first()
+    if user is None:
+        raise ValueError("V2 forward declaration owner is inactive")
+    assets = list(
+        DataAsset.objects.filter(
+            provider="stanstock",
+            kind=FORWARD_PROTOCOL_KIND,
+            subject=_protocol_subject(owner_id, V2_PRODUCT_VERSION),
+        )
+    )
+    if len(assets) != 1:
+        raise ValueError("V2 requires its single durable prospective declaration")
+    declaration = _read_declaration(
+        assets[0],
+        user=user,
+        store=store,
+        product_version=V2_PRODUCT_VERSION,
+        allow_disabled=True,
+    )
+    boundary = datetime.fromisoformat(before) if isinstance(before, str) else before
+    if acquisition_job_id is not None:
+        from stanstock.core.models import JobRun
+
+        job = JobRun.objects.get(pk=acquisition_job_id)
+        boundary = min(boundary, job.started_at)
+    if (
+        boundary.tzinfo is None
+        or declaration.declared_at >= boundary
+        or target_date < prospective_start_target(declaration.declared_at)
+        or (expected_asset is not None and expected_asset.pk != declaration.asset.pk)
+    ):
+        raise ValueError(
+            "V2 acquisition/issuance must follow its independently declared prospective start"
+        )
+    return declaration
+
+
+def read_forward_scorecard(
+    *,
+    user: ProductUser,
+    store: AssetStore | None = None,
+    product_version: str = PRODUCT_VERSION,
+) -> dict[str, Any]:
     """Fail closed: declaration, full physical product proof, then outcome replay."""
     store = store or AssetStore()
-    declaration = read_forward_declaration(user=user, store=store)
+    declaration = read_forward_declaration(user=user, store=store, product_version=product_version)
+    version, _protocol_document, pin = _protocol(product_version)
     scope = read_research_product_performance(user=user, store=store)
     if not scope.available:
         raise ValueError("Forward scorecard source scope could not be verified")
@@ -282,7 +432,8 @@ def read_forward_scorecard(*, user: ProductUser, store: AssetStore | None = None
         "calculation__forecast__projections",
     )
     for row in iter_product_prediction_projection(
-        tuple(item.run.id for item in scope.runs), extra_fields=fields
+        tuple(item.run.id for item in scope.runs if item.run.config_version == product_version),
+        extra_fields=fields,
     ):
         key = tuple(
             row[name]
@@ -302,8 +453,8 @@ def read_forward_scorecard(*, user: ProductUser, store: AssetStore | None = None
     matured = sum(group["denominators"]["matured"] for group in results)
     return {
         "status": "available",
-        "protocol_version": FORWARD_PROTOCOL_VERSION,
-        "protocol_sha256": FORWARD_PROTOCOL_SHA256,
+        "protocol_version": version,
+        "protocol_sha256": pin,
         "declaration": asset_ref_for(declaration.asset).to_json(),
         "declared_at": declaration.declared_at.isoformat(),
         "conclusion": "unmatured; skill not established"
@@ -311,7 +462,12 @@ def read_forward_scorecard(*, user: ProductUser, store: AssetStore | None = None
         else ("descriptive forward evidence; skill not established"),
         "groups": results,
         "admission_denominators": dict(
-            Counter(admission.status for item in scope.runs for admission in item.admissions)
+            Counter(
+                admission.status
+                for item in scope.runs
+                if item.run.config_version == product_version
+                for admission in item.admissions
+            )
         ),
     }
 

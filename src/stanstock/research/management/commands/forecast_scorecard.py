@@ -25,6 +25,12 @@ class Command(BaseCommand):
             action="store_true",
             help="Publish once before reading losses",
         )
+        parser.add_argument(
+            "--product-version",
+            choices=("research-product-v1", "research-product-v2"),
+            default="research-product-v1",
+            help="Independent frozen protocol; declaring v2 never changes the v1 declaration.",
+        )
 
     def handle(self, *args: object, **options: object) -> str:
         try:
@@ -36,9 +42,13 @@ class Command(BaseCommand):
             if owner is None:
                 raise CommandError("An active authorized owner is required")
             if options["declare"]:
-                declaration = declare_forward_protocol(user=owner)
+                declaration = declare_forward_protocol(
+                    user=owner, product_version=str(options["product_version"])
+                )
                 self.stdout.write(f"Forward protocol declared: {declaration.asset.id}")
-            report = read_forward_scorecard(user=owner)
+            report = read_forward_scorecard(
+                user=owner, product_version=str(options["product_version"])
+            )
         except (
             ValueError,
             TypeError,

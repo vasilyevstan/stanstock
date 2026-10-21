@@ -177,6 +177,11 @@ DATA_DIR = Path(os.getenv("STANSTOCK_DATA_DIR", BASE_DIR / "var" / "data")).reso
 BACKUP_DIR = Path(os.getenv("STANSTOCK_BACKUP_DIR", BASE_DIR / "var" / "backups")).resolve()
 DEMO_MODE = env_bool("STANSTOCK_DEMO_MODE", DEBUG)
 RESEARCH_PRODUCT_ENABLED = env_bool("STANSTOCK_RESEARCH_PRODUCT_ENABLED", True)
+RESEARCH_PRODUCT_VERSION = os.getenv("STANSTOCK_RESEARCH_PRODUCT_VERSION", "research-product-v1")
+if RESEARCH_PRODUCT_VERSION not in {"research-product-v1", "research-product-v2"}:
+    raise ImproperlyConfigured(
+        "STANSTOCK_RESEARCH_PRODUCT_VERSION must be research-product-v1 or research-product-v2"
+    )
 SHADOW_STUDY_ENABLED = env_bool("STANSTOCK_SHADOW_STUDY_ENABLED", False)
 OWNER_USERNAME = os.getenv("STANSTOCK_OWNER_USERNAME", "admin")
 LOGIN_RATE_LIMIT_ATTEMPTS = int(os.getenv("STANSTOCK_LOGIN_RATE_LIMIT_ATTEMPTS", "5"))
