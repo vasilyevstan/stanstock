@@ -333,6 +333,7 @@ def _measured_request(monkeypatch):
     instrument(product_pipeline, "_required_sessions", "calendar_windows")
     instrument(price_product, "_input_series_payload", "hash_series")
     instrument(twelve_data, "_parse_bars", "raw_validation")
+    instrument(twelve_data, "_required_decimal", "row_admissions")
     instrument(product_frequency_evidence, "_validate_registered_asset", "child_proofs")
     instrument(product_reader, "_build_cards", "current_cards")
     instrument(product_reader, "read_registered_product_frequencies", "current_frequency")
@@ -408,6 +409,7 @@ def test_native_performance_workload(
         assert calls["raw_rows"] == (analyzed + 1) * sum(
             retained_closes + offset for offset in range(1, cohorts + 1)
         )
+        assert calls["row_admissions"] == (analyzed + 1) * (retained_closes + cohorts)
         assert calls["scalar_projections"] == 1
         assert calls["aggregation_queries"] == 1
         assert calls["current_cards"] == calls["current_frequency"] == calls["child_proofs"] == 1

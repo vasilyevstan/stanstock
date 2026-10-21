@@ -176,3 +176,29 @@ def test_raw_identity_failure_precedes_close_conversion(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="identity diverges"):
         research_product._verify_product_price_content(**source)
     conversion.assert_not_called()
+
+
+def test_row_reuse_is_local_and_never_replaces_physical_or_normalized_proof(tmp_path, monkeypatch):
+    source = _verification_source(tmp_path)
+    admission = Mock(wraps=twelve_data._required_decimal)
+    reads = Mock(wraps=source["store"].read_bytes)
+    monkeypatch.setattr(twelve_data, "_required_decimal", admission)
+    monkeypatch.setattr(source["store"], "read_bytes", reads)
+    for _ in range(2):
+        admission.reset_mock()
+        reads.reset_mock()
+        with twelve_data._reuse_admitted_price_rows():
+            research_product._verify_product_price_content(**source)
+            research_product._verify_product_price_content(**source)
+            assert admission.call_count == 1758
+            assert reads.call_count == 4
+            changed = _verification_source(tmp_path / "changed", fault="late_volume")
+            with pytest.raises(ProviderDataError, match="negative volume"):
+                research_product._verify_product_price_content(**changed)
+            normalized = _verification_source(tmp_path / "normalized", fault="normalized")
+            with pytest.raises(ValueError, match="Normalized prices diverge"):
+                research_product._verify_product_price_content(**normalized)
+            identity = _verification_source(tmp_path / "identity", fault="identity")
+            with pytest.raises(ValueError, match="identity diverges"):
+                research_product._verify_product_price_content(**identity)
+        assert twelve_data._ROW_ADMISSIONS.get() is None
