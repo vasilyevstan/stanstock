@@ -547,12 +547,36 @@ or unavailable evidence is not acquired or filled in by these commands. See
 [the paper policy](methodology.md#current-method-paper-policy) for allocation,
 cost and cash conventions.
 
-Activation does not schedule measurements. The existing price-refresh job does
-not invoke the paper command: each session must be captured explicitly after
-its close and before the next session opens. A missed capture stays missing
-and withholds the complete paper measurement; a later command cannot repair
-it by backfilling. Preview and scorecard declaration do not start this one-shot
-paper experiment.
+Activation does not schedule measurements. For frozen paper v1, each session
+must still be captured explicitly after its close and before the next session
+opens. A missed capture stays missing and withholds the complete v1 paper
+measurement; a later command cannot repair it by backfilling. Preview and
+scorecard declaration do not start this one-shot experiment.
+
+Select paper v2 explicitly with
+`--policy-version current-method-paper-6m-v2` on the existing `paper_portfolio`
+command. Omitting that option preserves v1 behavior and output. V2 separates
+terminal evidence from path risk; inspect both states, captured/missing
+sessions and the through-session rather than treating an interim mark as a
+matured result. Its selection remains source-v1-bound even if current research
+later selects a different product version.
+
+The native-only `scheduled_refresh --capture-paper` option attaches v2 capture
+to the existing refresh. It is **off by default** and does not activate paper,
+change the installed schedule or establish unattended coverage. Disabled
+invocations perform no paper imports/lookups; an opted-in but unactivated
+invocation performs at most one exact activation lookup and creates no paper
+jobs, locks or files.
+
+The attachment recovers exact committed evidence before parent credential or
+quota access, then attempts a fresh retained-source capture after the market
+attempt. It acquires no extra quotes and preserves the mandatory parent
+stages. Fresh publication must occur after close and strictly before next
+open, checked after proof and lock waiting. Recovery may reuse already
+committed evidence after that deadline; it never backdates a new capture.
+Check the separate paper-child status and exact registered assets, not only
+parent success or process exit. This implementation does not authorize
+activation or enable the installed capture schedule.
 
 The performance page uses a narrower verified projection than prediction
 history: it still validates every included historical run but builds full

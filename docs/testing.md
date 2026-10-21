@@ -262,6 +262,21 @@ retry reuse, concurrent single-winner publication and owner isolation.
 Research evidence must not create personal ledger or generic simulation rows.
 All these fixtures remain synthetic and offline.
 
+Paper v2 coverage in `tests/test_current_method_paper_v2.py`,
+`tests/test_paper_capture_jobs.py` and the scheduled-refresh suite must prove
+real persistence -> requery -> strict reader -> command output, including a
+terminal result surviving an intermediate gap and a complete 127-close path.
+Exercise reference-window/basis conflicts, present corruption, independent
+terminal/path numeric failures, exact reconciliation, owner/job identity and
+publication deadlines after lock waiting. Committed recovery preserves
+originating identity/time/revision before any credential or quota access.
+Disabled paths import/look up nothing; opted-in unactivated paths perform at
+most one exact activation lookup, with no paper jobs, locks or files.
+Use migrated concurrency fixtures
+and full f800-to-candidate v1 payload/error/default-command differentials,
+including baseline-produced retained assets and transitive source changes.
+No real paper activation, provider call or personal-ledger write belongs here.
+
 ## Model-outcome summary coverage
 
 The immutable FHS prediction contract stays unchanged. A separate report must

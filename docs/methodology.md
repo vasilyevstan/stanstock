@@ -321,3 +321,34 @@ and incompatible share-basis evidence remain explicit; later retrieval must
 not manufacture an earlier observed paper curve. The fixed experiment can
 produce cash, unavailable valuations or adverse results without implying an
 application failure or a profitable strategy.
+
+#### Paper v2: terminal evidence and path risk
+
+`current-method-paper-6m-v2` retains those notional, allocation, cost, calendar
+and fixed-quantity assumptions. Its policy hash is
+`e1839e1bdd25236de47dcaa421def82fdfb98e0ac46b7d0f7261cf74fee22a61`.
+It uses separate immutable assets; v1 artifacts and their complete-measurement
+semantics are unchanged. Both policies remain bound to the v1 research
+product and momentum decision, not a subsequently selected product version.
+
+A v2 terminal return requires timely entry and terminal captures plus verified
+share-basis continuity. Freeze 757 authoritative closes ending at entry;
+each valuation source must cover that reference and the complete held
+calendar, with consistent recorded overlaps. Two endpoints alone are not
+enough. Missing intermediate captures do not erase independently supported
+terminal results, but retained historical rows never become backfilled
+prospective captures.
+
+Drawdown, volatility and Sharpe require a complete prospectively captured
+common path. Report coverage and the through-session separately; missing
+captures withhold path risk. Terminal financial values remain null before
+the terminal session and its valid capture. Corruption is an integrity
+failure, not an absent capture. Native path-number insufficiency can withhold
+risk independently of representable decimal terminal accounting.
+
+Attribute the stock sleeve against same-dollar SPY separately from the whole
+account. The full-notional native SPY reference is scaled by exactly 7/10
+and 3/10; P&L reconciles fixed-quantity price movement, entry costs and
+independently frozen native entry roundoff. An empty sleeve measures a
+cash-allocation effect, not stock-selection skill. This does not establish
+alpha, optimal weights or investment eligibility.

@@ -90,6 +90,7 @@ from stanstock.research.refresh_evidence import ANALYSIS_OUTPUT_MANIFEST_KIND, l
 if TYPE_CHECKING:
     from stanstock.core.refresh_verification import ReplayedScheduledRefresh
     from stanstock.research.shadow_study import ShadowJobResult
+    from stanstock.simulation.paper_jobs import PaperCaptureResult
 
 PROFILE = "research_product_v1"
 ISSUANCE_KEY = "scheduled"
@@ -115,6 +116,15 @@ class ScheduledResearchExecution:
     prediction_count: int
     shadow_capture: ShadowJobResult | None = None
     shadow_evaluation: ShadowJobResult | None = None
+    paper_capture: PaperCaptureResult | None = None
+
+
+class ScheduledPaperRefreshError(ValueError):
+    """Opted-in runtime attachment on a failed parent, never parent history."""
+
+    def __init__(self, paper_capture: PaperCaptureResult) -> None:
+        super().__init__("Scheduled research refresh failed")
+        self.paper_capture = paper_capture
 
 
 def scheduled_identity(owner: object) -> dict[str, str]:
@@ -165,6 +175,7 @@ def execute_scheduled_research_refresh(
     core_config_path: Path | None = None,
     store: AssetStore | None = None,
     enforce_rate_limit: bool = True,
+    capture_paper: bool = False,
 ) -> ScheduledResearchExecution:
     """Run or independently replay one native prospective scheduled target."""
 
@@ -175,10 +186,35 @@ def execute_scheduled_research_refresh(
     parent_job_name = product_job_name(SCHEDULED_RESEARCH_JOB, identity)
     asset_store = store or open_asset_store()
     config_path = core_config_path or default_us_universe_config_path()
+    paper_invocation = None
+    if capture_paper:
+        from stanstock.simulation.paper_jobs import (
+            PaperCaptureInvocation,
+            PaperCaptureResult,
+            prepare_paper_capture,
+        )
+
+        try:
+            paper_invocation = prepare_paper_capture(
+                owner=owner, session=target_date, store=asset_store
+            )
+            # Mandatory recovery-only pre-market pass, before the parent lock,
+            # credentials, quota, or fresh work. Never activate from refresh.
+            paper_invocation.recover()
+        except (OSError, ValueError):
+            paper_invocation = PaperCaptureInvocation(
+                owner,
+                target_date,
+                asset_store,
+                None,
+                PaperCaptureResult(None, "failed", "paper_v2_integrity_invalid"),
+            )
 
     replayed_prior: list[Any] = []
     shadow_capture: list[ShadowJobResult | None] = []
     shadow_evaluation: list[ShadowJobResult | None] = []
+    market_attempted = False
+    paper_result: PaperCaptureResult | None = None
 
     def before_attempt() -> None:
         prior = JobRun.objects.filter(
@@ -200,6 +236,7 @@ def execute_scheduled_research_refresh(
         return None
 
     def parent_task(parent: JobRun) -> JobExecutionResult:
+        nonlocal market_attempted
         details: dict[str, Any] = {
             "profile": PROFILE,
             "target_date": target_date.isoformat(),
@@ -237,6 +274,7 @@ def execute_scheduled_research_refresh(
         details["code_revision"] = revision
         _persist_parent_details(parent, details)
 
+        market_attempted = True
         try:
             market = _run_stage(
                 parent=parent,
@@ -348,23 +386,38 @@ def execute_scheduled_research_refresh(
         details["verification"] = verification
         return JobExecutionResult(details=details)
 
-    parent = execute_target_job(
-        job_name=parent_job_name,
-        region=REGION,
-        target_date=target_date,
-        task=parent_task,
-        before_attempt=before_attempt,
+    try:
+        parent = execute_target_job(
+            job_name=parent_job_name,
+            region=REGION,
+            target_date=target_date,
+            task=parent_task,
+            before_attempt=before_attempt,
+        )
+        if parent.status == JobRun.Status.SKIPPED:
+            if len(replayed_prior) != 1:
+                raise ValueError("Scheduled research skip has no independently replayed parent")
+            verification = replayed_prior[0].verification
+            try:
+                shadow_capture.append(_attach_shadow_capture(owner, target_date, asset_store))
+            finally:
+                shadow_evaluation.append(_attach_shadow_evaluation(owner, target_date, asset_store))
+        else:
+            verification = parent.details.get("verification", {})
+    except EXPECTED_STAGE_ERRORS:
+        if paper_invocation is not None:
+            paper_result = paper_invocation.after_market(
+                attempted=market_attempted or bool(replayed_prior)
+            )
+            raise ScheduledPaperRefreshError(paper_result) from None
+        raise
+    # Outside the parent task AND target lock. Optional failure cannot prevent
+    # the parent's mandatory evaluation/portfolio attempts or alter its proof.
+    paper_result = (
+        paper_invocation.after_market(attempted=market_attempted or bool(replayed_prior))
+        if paper_invocation is not None
+        else None
     )
-    if parent.status == JobRun.Status.SKIPPED:
-        if len(replayed_prior) != 1:
-            raise ValueError("Scheduled research skip has no independently replayed parent")
-        verification = replayed_prior[0].verification
-        try:
-            shadow_capture.append(_attach_shadow_capture(owner, target_date, asset_store))
-        finally:
-            shadow_evaluation.append(_attach_shadow_evaluation(owner, target_date, asset_store))
-    else:
-        verification = parent.details.get("verification", {})
     return ScheduledResearchExecution(
         parent=parent,
         target_date=target_date,
@@ -372,6 +425,7 @@ def execute_scheduled_research_refresh(
         prediction_count=_summary_count(verification, "prediction_count"),
         shadow_capture=shadow_capture[0],
         shadow_evaluation=shadow_evaluation[0],
+        paper_capture=paper_result,
     )
 
 
