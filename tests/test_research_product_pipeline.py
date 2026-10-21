@@ -117,6 +117,51 @@ def test_source_series_materializes_each_column_once(tmp_path, monkeypatch, with
     assert calls == {"date": 1, "close": 1, **({"volume": 1} if with_volume else {})}
 
 
+@pytest.mark.parametrize(
+    "fault", ["gap", "future", "duplicate", "nonfinite", "reference", "date", "no_close"]
+)
+def test_shared_calendar_keeps_each_stock_validation_and_failure_order(tmp_path, fault) -> None:
+    target = date(2026, 9, 11)
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    config = load_price_product_config()
+    sessions = product_pipeline._required_sessions(target, config.required_closes)
+    frame = pl.DataFrame(
+        {"date": sessions, "close": [64.0] * len(sessions), "volume": [1] * len(sessions)}
+    )
+    if fault == "gap":
+        frame = frame.slice(1)
+    elif fault == "future":
+        frame = frame.with_columns(pl.col("date") + pl.duration(days=1))
+    elif fault == "duplicate":
+        frame = pl.concat([frame, frame.tail(1)])
+    elif fault == "nonfinite":
+        frame = frame.with_columns(pl.lit(float("nan")).alias("close"))
+    elif fault == "reference":
+        frame = frame.with_columns(pl.lit(1e-100).alias("close"))
+    elif fault == "no_close":
+        frame = frame.drop("close")
+    asset = DataAsset(
+        provider="twelve_data",
+        subject="SYN",
+        sha256="a" * 64,
+        retrieved_at=now,
+        available_at=now,
+        metadata={"currency": "USD"},
+    )
+    arguments = {
+        "asof": AsOfData(now, AssetStore(tmp_path)),
+        "asset": asset,
+        "target_date": target,
+        "config": config,
+        "validated_read": PriceFrameRead(asset, frame, int(fault == "date")),
+    }
+    with pytest.raises(product_pipeline.PriceProductInputError) as expected:
+        product_pipeline._series_for_asset(**arguments)
+    with pytest.raises(type(expected.value)) as actual:
+        product_pipeline._series_for_asset(**arguments, required_sessions=sessions)
+    assert actual.value.args == expected.value.args and vars(actual.value) == vars(expected.value)
+
+
 # Full payloads captured on unchanged 5aa301d sources in both math runtimes.
 # Unrounded NumPy/libm results differ between Darwin and Linux. Neither output
 # fields nor precision are changed; identity and clock are fixed BEFORE issuance.
@@ -595,8 +640,9 @@ def test_verified_source_window_round_trips_without_asset_reselection(
         benchmark_asset=benchmark_asset if bound_assets else None,
     )
 
-    assert calendar.call_count == (2 if bound_assets else 4)
+    assert calendar.call_count == (1 if bound_assets else 3)
     assert source.product_input.calendar_sessions is source.product_input.stock.dates
+    assert source.product_input.calendar_sessions is source.product_input.benchmark.dates
     expected_input = replace(source.product_input, calendar_sessions=expected_sessions)
     assert source.product_input.calendar_sessions == expected_sessions
     assert product_pipeline.complete_input_hash(source.product_input) == (

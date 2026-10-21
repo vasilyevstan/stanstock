@@ -257,50 +257,78 @@ def prediction_model_version(*, method_version: str, issuance_id: UUID) -> str:
 
 def complete_input_hash(product_input: PriceProductInput) -> str:
     """Hash complete identities, values, volumes, and the supplied calendar."""
+    return _CompleteInputHasher()(product_input)
 
-    def identity_payload(identity: PriceInputIdentity) -> dict[str, str]:
-        return {
+
+class _CompleteInputHasher:
+    """Invocation-local canonical representations, never a source-verification proof.
+
+    The verifier may reuse the exact immutable benchmark/calendar objects it
+    already owns for ONE run. Identity rather than value equality controls
+    reuse; stock values are always canonicalized. Every call still serializes
+    and hashes the entire original document, including the complete benchmark.
+    Public one-shot hashing always constructs a fresh instance.
+    """
+
+    def __init__(self) -> None:
+        self._calendar: tuple[date, ...] | None = None
+        self._calendar_payload: list[str] = []
+        self._benchmark: PriceSeries | None = None
+        self._benchmark_payload: dict[str, object] = {}
+
+    def __call__(self, product_input: PriceProductInput) -> str:
+        document = {
+            "domain": _INPUT_HASH_DOMAIN,
+            "listing_id": str(product_input.listing_id),
+            "target_date": product_input.target_date.isoformat(),
+            "decision_time": product_input.decision_time.isoformat(),
+            "source_execution": {
+                "mode": product_input.source_execution.mode,
+                "evidence_grade": product_input.source_execution.evidence_grade,
+            },
+            "calendar_sessions": self._calendar_values(product_input.calendar_sessions),
+            "source_eligible": product_input.source_eligible,
+            "source_ineligibility_reasons": list(product_input.source_ineligibility_reasons),
+            "stock": _input_series_payload(product_input.stock),
+            "benchmark": self._benchmark_values(product_input.benchmark),
+        }
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _calendar_values(self, sessions: tuple[date, ...]) -> list[str]:
+        if sessions is not self._calendar:
+            self._calendar_payload = [value.isoformat() for value in sessions]
+            self._calendar = sessions
+        return self._calendar_payload
+
+    def _benchmark_values(self, series: PriceSeries) -> dict[str, object]:
+        if series is not self._benchmark:
+            self._benchmark_payload = _input_series_payload(series)
+            self._benchmark = series
+        return self._benchmark_payload
+
+
+def _input_series_payload(series: PriceSeries) -> dict[str, object]:
+    identity = series.identity
+    return {
+        "identity": {
             "asset_id": str(identity.asset_id),
             "provider": identity.provider,
             "subject": identity.subject,
             "sha256": identity.sha256,
             "retrieved_at": identity.retrieved_at.isoformat(),
             "available_at": identity.available_at.isoformat(),
-        }
-
-    def series_payload(series: PriceSeries) -> dict[str, object]:
-        return {
-            "identity": identity_payload(series.identity),
-            "currency": series.currency,
-            "dates": [value.isoformat() for value in series.dates],
-            "closes": [_canonical_float(value) for value in series.closes],
-            "volumes": (
-                None
-                if series.volumes is None
-                else [
-                    None if value is None else _canonical_float(value) for value in series.volumes
-                ]
-            ),
-            "volume_adjustment_compatible": series.volume_adjustment_compatible,
-        }
-
-    document = {
-        "domain": _INPUT_HASH_DOMAIN,
-        "listing_id": str(product_input.listing_id),
-        "target_date": product_input.target_date.isoformat(),
-        "decision_time": product_input.decision_time.isoformat(),
-        "source_execution": {
-            "mode": product_input.source_execution.mode,
-            "evidence_grade": product_input.source_execution.evidence_grade,
         },
-        "calendar_sessions": [value.isoformat() for value in product_input.calendar_sessions],
-        "source_eligible": product_input.source_eligible,
-        "source_ineligibility_reasons": list(product_input.source_ineligibility_reasons),
-        "stock": series_payload(product_input.stock),
-        "benchmark": series_payload(product_input.benchmark),
+        "currency": series.currency,
+        "dates": [value.isoformat() for value in series.dates],
+        "closes": [_canonical_float(value) for value in series.closes],
+        "volumes": (
+            None
+            if series.volumes is None
+            else [None if value is None else _canonical_float(value) for value in series.volumes]
+        ),
+        "volume_adjustment_compatible": series.volume_adjustment_compatible,
     }
-    payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def calculate_momentum(

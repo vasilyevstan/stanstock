@@ -30,7 +30,12 @@ from stanstock.data.research_product import (
     materialize_product_membership,
 )
 from stanstock.portfolio.models import TrackedSymbol
-from stanstock.research import product_frequency_evidence, product_pipeline, product_reader
+from stanstock.research import (
+    price_product,
+    product_frequency_evidence,
+    product_pipeline,
+    product_reader,
+)
 from stanstock.research.models import Prediction
 from stanstock.research.price_product import (
     SourceExecutionBinding,
@@ -58,6 +63,8 @@ def build_native_workload(
     cohorts=2,
     analyzed=2,
     observed=False,
+    retained_closes=757,
+    with_frequencies=False,
 ):
     """109 requests, explicit exclusions, full registered native product rows.
 
@@ -146,7 +153,9 @@ def build_native_workload(
     ][-cohorts:]
     sessions = [
         item.date()
-        for item in calendar.sessions_window(calendar.date_to_session(TARGET), -(757 + cohorts))
+        for item in calendar.sessions_window(
+            calendar.date_to_session(TARGET), -(retained_closes + cohorts)
+        )
     ]
 
     def persist_prices(target):
@@ -198,7 +207,11 @@ def build_native_workload(
 
     def setup_calculation(product_input, *, config, **_kwargs):
         nonlocal template
-        if len(set(product_input.stock.closes)) == 1:
+        if len(set(product_input.stock.closes)) == 1 or (
+            with_frequencies and product_input.target_date == targets[-1]
+        ):
+            # An AVAILABLE child must replay genuine, per-seed projections.
+            # Only older source-only cohorts use the setup template.
             return calculate_price_product(product_input, config=config)
         if template is None:
             template = calculate_price_product(product_input, config=config)
@@ -274,11 +287,21 @@ def build_native_workload(
                 issued_on_time=observed,
             )
             runs.append(issued[0].run)
+    if with_frequencies:
+        monkeypatch.setattr(timezone, "now", lambda: NOW + timedelta(minutes=5))
+        product_frequency_evidence.register_product_frequencies(run=runs[-1], store=store)
     return owner, store, tuple(runs), blocked
 
 
 @contextmanager
 def measured_request(monkeypatch):
+    with monkeypatch.context() as scoped:
+        with _measured_request(scoped) as measurements:
+            yield measurements
+
+
+@contextmanager
+def _measured_request(monkeypatch):
     timings = Counter()
     calls = Counter()
     phases = []
@@ -289,6 +312,10 @@ def measured_request(monkeypatch):
         def measured(*args, **kwargs):
             started = time.perf_counter()
             calls[label] += 1
+            if label == "verification":
+                calls[f"{module.__name__.rsplit('.', 1)[-1]}_verification"] += 1
+            if label == "raw_validation":
+                calls["raw_rows"] += len(args[0])
             phases.append(label)
             try:
                 return original(*args, **kwargs)
@@ -303,6 +330,10 @@ def measured_request(monkeypatch):
     instrument(product_frequency_evidence, "verify_price_product_output", "verification")
     instrument(product_pipeline, "product_catalog_references", "catalog_proofs")
     instrument(product_pipeline, "_validate_price_asset_with_frame", "price_proofs")
+    instrument(product_pipeline, "_required_sessions", "calendar_windows")
+    instrument(price_product, "_input_series_payload", "hash_series")
+    instrument(twelve_data, "_parse_bars", "raw_validation")
+    instrument(product_frequency_evidence, "_validate_registered_asset", "child_proofs")
     instrument(product_reader, "_build_cards", "current_cards")
     instrument(product_reader, "read_registered_product_frequencies", "current_frequency")
     instrument(product_views, "_observed_performance_groups", "aggregation")
@@ -336,43 +367,66 @@ def measured_request(monkeypatch):
     timings["total"] = time.perf_counter() - started
 
 
-@pytest.mark.parametrize(("cohorts", "analyzed"), [(2, 2), (3, 4), (26, 105)])
+@pytest.mark.parametrize(
+    ("cohorts", "analyzed", "retained_closes"),
+    [(2, 2, 757), (3, 4, 757), (26, 105, 757), (26, 105, 1758)],
+)
 def test_native_performance_workload(
-    tmp_path, monkeypatch, django_user_model, settings, client, cohorts, analyzed
+    tmp_path, monkeypatch, django_user_model, settings, client, cohorts, analyzed, retained_closes
 ):
     owner, store, runs, blocked = build_native_workload(
-        tmp_path, monkeypatch, django_user_model, settings, cohorts=cohorts, analyzed=analyzed
+        tmp_path,
+        monkeypatch,
+        django_user_model,
+        settings,
+        cohorts=cohorts,
+        analyzed=analyzed,
+        retained_closes=retained_closes,
+        with_frequencies=True,
     )
     assert Prediction.objects.filter(analysis__run_id__in=[run.id for run in runs]).count() == (
         cohorts * analyzed * 5
     )
     client.force_login(owner)
-    with measured_request(monkeypatch) as (timings, calls):
-        response = client.get(reverse("performance"))
-    assert response.status_code == 200
-    assert response.context["history"].available
-    assert len(response.context["history"].runs) == cohorts
-    assert response.context["observed_scope"]["advisory"]["non_evaluable"] == cohorts * 4
-    assert response.context["observed_scope"]["decision"]["not_eligible_for_observed"] == (
-        cohorts * analyzed
-    )
-    assert calls["verification"] == cohorts
-    assert calls["registry_enumerations"] == cohorts
-    assert calls["catalog_proofs"] == cohorts
-    assert calls["price_proofs"] == cohorts * (analyzed + 1)
-    assert calls["scalar_projections"] == 1
-    assert calls["aggregation_queries"] == 1
-    assert calls["current_cards"] == calls["current_frequency"] == 1
-    assert all(
-        projection.frequency_status == "absent"
-        for card in response.context["product"].cards
-        for projection in card.projections
-    )
-    assert len(response.context["product"].admissions) == 109
-    assert response.context["product"].admitted_count == analyzed
-    assert response.context["product"].rejected_count == 109 - analyzed
+    for attempt in ("first", "repeat"):
+        with measured_request(monkeypatch) as (timings, calls):
+            response = client.get(reverse("performance"))
+        assert response.status_code == 200
+        assert response.context["history"].available
+        assert len(response.context["history"].runs) == cohorts
+        assert response.context["observed_scope"]["advisory"]["non_evaluable"] == cohorts * 4
+        assert response.context["observed_scope"]["decision"]["not_eligible_for_observed"] == (
+            cohorts * analyzed
+        )
+        assert calls["verification"] == calls["product_reader_verification"] == cohorts
+        assert calls["product_frequency_evidence_verification"] == 0
+        assert calls["registry_enumerations"] == cohorts
+        assert calls["catalog_proofs"] == cohorts
+        assert calls["price_proofs"] == calls["raw_validation"] == cohorts * (analyzed + 1)
+        assert calls["calendar_windows"] == cohorts
+        assert calls["hash_series"] == cohorts * (analyzed + 1)
+        assert calls["raw_rows"] == (analyzed + 1) * sum(
+            retained_closes + offset for offset in range(1, cohorts + 1)
+        )
+        assert calls["scalar_projections"] == 1
+        assert calls["aggregation_queries"] == 1
+        assert calls["current_cards"] == calls["current_frequency"] == calls["child_proofs"] == 1
+        assert all(
+            projection.frequency_status == "available"
+            for card in response.context["product"].cards
+            for projection in card.projections
+        )
+        assert (
+            b"Registered terminal-path shares are available for this issuance." in response.content
+        )
+        assert len(response.context["product"].admissions) == 109
+        assert response.context["product"].admitted_count == analyzed
+        assert response.context["product"].rejected_count == 109 - analyzed
+        print(
+            f"\nPERFORMANCE {attempt=} {cohorts=} {analyzed=} {retained_closes=} "
+            f"{dict(timings)} {dict(calls)}"
+        )
     blocked.assert_not_called()
-    print(f"\nPERFORMANCE cohorts={cohorts} analyzed={analyzed} {dict(timings)} {dict(calls)}")
 
 
 @pytest.mark.parametrize("fault", ["frequency_child", "source_price"])
@@ -380,27 +434,35 @@ def test_available_frequency_child_shares_only_exact_source_proof(
     tmp_path, monkeypatch, django_user_model, settings, client, fault
 ):
     owner, store, runs, blocked = build_native_workload(
-        tmp_path, monkeypatch, django_user_model, settings, cohorts=1, analyzed=2
+        tmp_path,
+        monkeypatch,
+        django_user_model,
+        settings,
+        cohorts=2,
+        analyzed=2,
+        retained_closes=1758,
+        with_frequencies=True,
     )
-    monkeypatch.setattr(timezone, "now", lambda: NOW + timedelta(minutes=5))
-    child = product_frequency_evidence.register_product_frequencies(run=runs[0], store=store)
+    child = DataAsset.objects.get(kind=product_frequency_evidence.FREQUENCY_EVIDENCE_KIND)
     child_read = Mock(wraps=product_frequency_evidence._validate_registered_asset)
     monkeypatch.setattr(product_frequency_evidence, "_validate_registered_asset", child_read)
     client.force_login(owner)
     with measured_request(monkeypatch) as (_timings, calls):
         first = client.get(reverse("performance"))
     assert first.status_code == 200 and first.context["history"].available
-    assert len(first.context["history"].runs) == 1
+    assert len(first.context["history"].runs) == len(runs) == 2
     assert first.context["product"].cards[0].projections[0].frequency_status == "available"
     assert b"Registered terminal-path shares are available for this issuance." in first.content
-    assert calls["verification"] == calls["registry_enumerations"] == 1
+    assert calls["verification"] == calls["registry_enumerations"] == 2
     assert child_read.call_count == 1
 
     if fault == "frequency_child":
         store.resolve(child.relative_path).write_bytes(b"corrupt registered child")
     else:
         price = DataAsset.objects.filter(
-            kind="price_history", subject=first.context["product"].cards[0].listing.provider_symbol
+            kind="price_history",
+            subject=first.context["product"].cards[0].listing.provider_symbol,
+            period_end=TARGET,
         ).get()
         store.resolve(price.relative_path).write_bytes(b"corrupt current source")
     with measured_request(monkeypatch) as (_timings, second_calls):
@@ -421,16 +483,16 @@ def test_available_frequency_child_shares_only_exact_source_proof(
         assert second.context["history"].verification_code == "asset_corrupt"
         assert second.context["history"].runs == ()
         assert second.context["decision_groups"] == []
-    assert second_calls["verification"] == 1
+    assert second_calls["verification"] == (2 if fault == "frequency_child" else 1)
     blocked.assert_not_called()
 
 
-@pytest.mark.parametrize("fault", ["calculation", "price", "missing_price"])
+@pytest.mark.parametrize("fault", ["calculation", "price", "raw", "missing_price"])
 def test_performance_scope_rechecks_older_bytes_between_requests(
     tmp_path, monkeypatch, django_user_model, settings, client, fault
 ):
     owner, store, runs, _blocked = build_native_workload(
-        tmp_path, monkeypatch, django_user_model, settings
+        tmp_path, monkeypatch, django_user_model, settings, retained_closes=1758
     )
     client.force_login(owner)
     first = client.get(reverse("performance"))
@@ -441,7 +503,9 @@ def test_performance_scope_rechecks_older_bytes_between_requests(
         ).first()
     else:
         old = (
-            DataAsset.objects.filter(kind="price_history")
+            DataAsset.objects.filter(
+                kind="raw_price_history" if fault == "raw" else "price_history"
+            )
             .order_by(
                 "period_end",
                 "subject",
@@ -461,6 +525,7 @@ def test_performance_scope_rechecks_older_bytes_between_requests(
         == {
             "calculation": "product_calculation_malformed",
             "price": "asset_corrupt",
+            "raw": "asset_corrupt",
             "missing_price": "asset_unreadable",
         }[fault]
     )
@@ -508,6 +573,8 @@ def test_native_observed_reissue_and_genuine_withholding_share_verified_render(
     assert calls["verification"] == calls["registry_enumerations"] == 2
     assert calls["catalog_proofs"] == 2
     assert calls["price_proofs"] == 6  # same bytes/cutoff, different exact run identity
+    assert calls["calendar_windows"] == 2
+    assert calls["hash_series"] == 6
     assert calls["current_cards"] == calls["current_frequency"] == 1
     assert calls["aggregation_queries"] == 1
     blocked.assert_not_called()
@@ -611,6 +678,12 @@ def test_verification_session_separates_cutoff_target_and_request(
     with pytest.raises(RefreshVerificationError):
         product_reader.ProductVerificationSession().verify(run=changed, store=store)
     assert verifier.call_count == 3
+    changed = copy(runs[0])
+    changed.config_hash = "0" * 64
+    with pytest.raises(RefreshVerificationError) as invalid_config:
+        product_reader.ProductVerificationSession().verify(run=changed, store=store)
+    assert invalid_config.value.reason_code == "product_config_invalid"
+    assert verifier.call_count == 4
 
 
 def test_shared_registered_study_source_does_not_skip_the_child_proof(
