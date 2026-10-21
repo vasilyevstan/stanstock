@@ -50,6 +50,24 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Captured versions govern every consumer, not only product readers.**
+  A legacy holdings classifier recognized only v1 and rendered a scoreless
+  v2 decision as `BUY None/100`. Recognize every supported current-method
+  version and retain the no-score/no-repeated-action notice even when the
+  current selector names another version. Test the genuine persisted BUY
+  through the scoped holdings cell, not a page-wide text assertion.
+- **Disabled fresh work and committed recovery are different paths.**
+  A selected-v2 dispatch bypassed the disabled product profile. Recover exact
+  completed output and valid closed batches first, then reject disabled
+  fresh work before new intake evidence, credentials or quota. Cover both
+  a missing intake and an already captured intake; an early disabled return
+  that breaks recovery is not a safe guard.
+- **Runtime flags can invalidate intentionally mocked tests.**
+  A global `STANSTOCK_DISABLE_KEYCHAIN=1` blocked the synthetic fallback test's
+  mocked lookup. Run the full quality gate without inherited provider secrets
+  or operator-profile overrides; individual tests set their own flags. Keep
+  the original failure and exact corrected-environment result rather than
+  changing source or weakening the test.
 - **Absent dependencies do not prove shared verification.** Performance work
   bounds must include a real AVAILABLE frequency child and count both imported
   source-verifier paths. Reuse only the existing exact-run proof; checksum and
@@ -202,10 +220,11 @@ reviews and should not be re-litigated without an explicit new decision.
   recorded failure, disclose available and unavailable comparisons separately,
   and never tune the frozen operator against that observation.
 - **Provider exception imports still cross the provider boundary.** Domain
-  readers obtain `ProviderConfigurationError` through `data.provider_policy`,
-  not `data.providers.exceptions`. Run the fast architecture tests when
-  adding domain modules; extensive behavioral coverage does not enforce an
-  import-layer rule.
+  readers obtain `ProviderError` and `ProviderConfigurationError` through
+  `data.provider_policy`, not `data.providers.exceptions`. Re-export the
+  original classes so catch hierarchy and sanitization stay unchanged.
+  Run the fast architecture tests when adding domain modules; extensive
+  behavioral coverage does not enforce an import-layer rule.
 - **Historical losses and descriptive interval metrics are different.**
   Compare losses on identical horizon/partition support with equal
   target-cohort weights. Narrower intervals and higher inclusion are not

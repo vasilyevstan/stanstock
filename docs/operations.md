@@ -563,6 +563,11 @@ Its first eligible target close is strictly after the actual declaration.
 Selecting v2 does not replace, reset or backdate the v1 declaration. These
 commands do not activate either paper policy or the separate study.
 
+Fresh v2 work also requires `STANSTOCK_RESEARCH_PRODUCT_ENABLED=true`.
+When disabled, the selected-v2 route permits only recovery of exact completed
+output or a valid closed batch. Recovery stays ahead of the disabled check;
+fresh work fails before new intake evidence, credentials or quota use.
+
 Declaration is an explicit append-only operation and precedes reading matured
 losses. Reporting does not replace an existing declaration or reset its clock.
 An unmatured report has null metrics and no skill claim.
