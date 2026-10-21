@@ -16,7 +16,7 @@ jobs:
   checks:
     name: checks (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.suite == 'core' && 120 || 40 }}
+    timeout-minutes: ${{ matrix.suite == 'core' && 240 || 40 }}
     strategy:
       fail-fast: false
       matrix:

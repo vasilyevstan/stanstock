@@ -24,8 +24,11 @@ exact command result must bind to the final revision.
 CI partitions the complete pytest collection into price-product modules
 (`test_research_product_*.py` and `test_research_price_product*.py`), the
 expensive `test_research_product_study_evidence.py` subset, and the non-product
-complement. Each test belongs to exactly one partition. All retain the
-40-minute execution limit; none drops tests or changes assertions. The
+complement. Each test belongs to exactly one partition. Core has a bounded
+240-minute execution limit; price-product and price-study retain 40 minutes.
+Two attempts selecting the full core suite exceeded the previous 120-minute limit
+without an assertion failure, despite an earlier successful 98-minute run.
+The larger bound does not omit tests or change assertions. The
 required `quality` check fails unless all partitions, including their checks,
 succeed. Coverage shown by each partition is partial; `make check` remains
 the complete local run. A failed partition
