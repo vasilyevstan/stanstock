@@ -124,6 +124,12 @@ available while dollar turnover is withheld and BUY remains blocked.
 The synthetic demo explicitly marks its generated volume as compatible, but
 that is code-path validation, not provider evidence.
 
+Bounded paired-mode controls also found that changing the provider's
+adjustment mode changes historical volume, not just prices. Post-event
+agreement in one control does not establish a universal share-volume
+contract. These private controls are not production assets and do not
+retroactively make the frozen v1 inputs liquidity-compatible.
+
 ## Under-$10 policy
 
 When history qualifies, Under-$10 names receive the same research and
@@ -191,7 +197,7 @@ establishes calibrated probabilities or investment skill.
 
 ## Retrospective comparison
 
-The registered study is current-universe/current-vintage research. It compares
+The retrospective comparison is current-universe/current-vintage research. It compares
 FHS with zero-log-drift and historical-log-drift Gaussian baselines on the
 same paired listing/anchor/maturity support. Means are first calculated inside
 target cohorts, then equally across target cohorts.
@@ -203,6 +209,14 @@ must not be treated as standalone rankings.
 The study preserves empty partitions, unavailable comparisons, and
 worse-than-baseline results. Real losses use recorded realized returns, never
 simulated paths as market observations.
+
+The [October 2026 retained-data checkpoint](price-research.md#october-2026-retained-data-checkpoint)
+found worse FHS median MAE and interval scores than the zero-log-drift
+Gaussian on the inspected six- and twelve-month final paired scope.
+Support was only three and one target cohorts respectively, with no eligible
+three- or five-year empirical anchors. This reconstruction does not establish
+observed skill, justify tuning against inspected outcomes, or activate a
+prospective study.
 
 ## Research grounding and nonclaims
 

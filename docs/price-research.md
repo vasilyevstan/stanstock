@@ -390,6 +390,38 @@ The report records separately:
 - report generation time; and
 - actual registration availability.
 
+### October 2026 retained-data checkpoint
+
+An unchanged-protocol, read-only replay covered all 105 admitted stock/SPY
+pairs in the retained source. It acquired no replacement history, created no
+observed predictions, and did not register or activate a study. The complete
+report remains private; the following are aggregate research results, not
+redistributed source observations.
+
+| Final-holdout horizon | Paired observations / target cohorts | Median MAE: FHS / zero-drift Gaussian | Interval score: FHS / zero-drift Gaussian |
+|---|---|---|---|
+| 6m | 315 / 3 | 0.229232 / 0.221503 | 0.835121 / 0.810425 |
+| 12m | 105 / 1 | 0.449404 / 0.395600 | 1.703121 / 1.513907 |
+
+Scores use cumulative price returns and are rounded to six decimal places.
+Both metrics are lower-is-better: FHS was worse than the zero-log-drift
+Gaussian on this paired scope. Against the historical-log-drift Gaussian,
+FHS had slightly lower median MAE but a worse interval score at both horizons.
+There were no eligible three- or five-year empirical anchors.
+
+Only one development six-month cohort had paired support. Positive, negative
+and mixed momentum directions each occurred in all three final six-month
+cohorts; those groups do not create additional independent market trials.
+Relative-direction correctness and AVOID success are different: the latter
+also requires the stock itself to decline. HOLD has no action-success label.
+
+This is current-universe/current-vintage reconstruction, not observed skill
+or a pristine untouched holdout. Listing counts, simulated paths and model
+review agreement do not resolve its small, dependent temporal support.
+No parameters, thresholds, drift assumption or allocation weights were tuned;
+the results do not promote a replacement method. Any alternative selected
+after inspecting them needs genuinely future evaluation.
+
 ## Observed forward evaluation
 
 The six-month decision uses exact stock and SPY endpoints:
