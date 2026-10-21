@@ -13,7 +13,7 @@ from django.utils.html import strip_tags
 from stanstock.core.models import JobRun
 from stanstock.data.models import DataAsset, LatestMarketData
 from stanstock.data.research_product_jobs import execute_daily_research_job
-from stanstock.portfolio.models import Portfolio, TrackedSymbol
+from stanstock.portfolio.models import Portfolio, PortfolioHolding, TrackedSymbol
 from stanstock.research.models import AnalysisRun, Prediction, PredictionOutcome, StockAnalysis
 from stanstock.research.outcomes import evaluate_prediction
 from stanstock.research.price_product_config import (
@@ -176,6 +176,53 @@ def test_real_v2_buy_producer_immutable_reader_and_existing_authenticated_render
     assert methodology.status_code == 200
     assert f"Selected {env.version}" in _text(methodology)
     assert _counts() == counts and set(DataAsset.objects.values_list("pk", "sha256")) == assets
+    env.fetch.assert_not_called()
+    env.credentials.assert_not_called()
+    no_simulation.assert_not_called()
+
+
+@pytest.mark.parametrize("selected_version", [V1, "research-product-v2"])
+def test_v2_portfolio_research_cell_never_repeats_scoreless_buy(
+    c2_persisted, client, settings, monkeypatch, selected_version
+):
+    env = c2_persisted
+    source = env.run.stocks.get(listing__provider_symbol="AAPL")
+    assert source.run.config_version == env.version == "research-product-v2"
+    assert source.recommendation == "buy" and source.overall_score is None
+    assert not env.run.issued_on_time
+    settings.RESEARCH_PRODUCT_VERSION = selected_version
+    portfolio = Portfolio.objects.create(
+        owner=env.owner,
+        name="C2 scoreless momentum holding",
+        base_currency="USD",
+        cash_balance=0,
+    )
+    PortfolioHolding.objects.create(
+        portfolio=portfolio,
+        listing=source.listing,
+        quantity=1,
+        average_cost=source.current_price,
+    )
+    client.force_login(env.owner)
+    no_simulation = _deny_get_work(env, monkeypatch)
+    counts = _counts()
+
+    response = client.get(reverse("portfolio-detail", args=[portfolio.pk]), {"section": "holdings"})
+
+    assert response.status_code == 200
+    assert response.context["position_cards"][0]["analysis"] == source
+    research_html = (
+        response.content.decode()
+        .split('<td data-label="Research" class="holding-research">', 1)[1]
+        .split("</td>", 1)[0]
+    )
+    research_cell = " ".join(strip_tags(research_html).split())
+    assert "None/100" not in research_cell, research_cell
+    assert "BUY" not in research_cell, research_cell
+    assert "No overall score — this is the 6-month momentum method." in research_cell
+    assert "Action is not repeated here." in research_cell
+    assert "Check verified current research" in research_cell
+    assert _counts() == counts
     env.fetch.assert_not_called()
     env.credentials.assert_not_called()
     no_simulation.assert_not_called()
