@@ -214,11 +214,16 @@ pre-trade capital. Simulation service/web cases bind version/configuration,
 coverage and execution revision to immutable result evidence and reject
 invalid v2 provenance instead of falling back to legacy.
 
-The full-payload pins separately capture Darwin and Linux numerical
-runtimes from the same frozen base. Exact source prices do not make unrounded
-`pow`, NumPy/BLAS or libm outputs byte-identical across operating systems. Prove complete
-base/head equality within each runtime; never round or omit fields to force
-a cross-runtime hash match.
+The full-payload pins capture each observed numerical runtime from the same
+frozen base, including more than one Linux result. An operating-system name
+and matching package versions do not identify a bitwise math runtime. Exact
+source prices do not make unrounded `pow`, NumPy/BLAS or libm outputs
+byte-identical across or within operating systems. Admit another literal
+complete-payload hash only after proving unchanged-base/candidate byte equality
+in the actual failing runtime; never round or omit fields to force a match.
+A one-ULP raw result can change derived artifact and manifest hashes without
+changing the rounded prediction. A failing candidate's digest alone is not
+baseline evidence.
 
 The real writer/requery/detail chain must reject changed definition/snapshot
 parents and missing or corrupt result/input bytes between two requests.

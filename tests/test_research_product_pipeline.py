@@ -162,17 +162,20 @@ def test_shared_calendar_keeps_each_stock_validation_and_failure_order(tmp_path,
     assert actual.value.args == expected.value.args and vars(actual.value) == vars(expected.value)
 
 
-# Full payloads captured on unchanged 5aa301d sources in both math runtimes.
-# Unrounded NumPy/libm results differ between Darwin and Linux. Neither output
-# fields nor precision are changed; identity and clock are fixed BEFORE issuance.
-FROZEN_CHECKPOINT_PRODUCT: dict[str, dict[bool, str]] = {
+# Every complete, unrounded hash is backed by an unchanged frozen-base capture.
+# Darwin and Linux can differ; Linux alone does not identify every math runtime.
+# Output fields and precision are unchanged; identity and clock are fixed BEFORE issuance.
+FROZEN_CHECKPOINT_PRODUCT: dict[str, dict[bool, tuple[str, ...]]] = {
     "darwin": {
-        False: "9eb44ebb027cde8f30b185f19da2c82849b1d11bc80b3c04ffdf8d4892d6b736",
-        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+        False: ("9eb44ebb027cde8f30b185f19da2c82849b1d11bc80b3c04ffdf8d4892d6b736",),
+        True: ("47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",),
     },
     "linux": {
-        False: "671cc0cc446541cc2e2f889dd2c6f771efca94b654bd797a6245f5a9faa54f9a",
-        True: "47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",
+        False: (
+            "671cc0cc446541cc2e2f889dd2c6f771efca94b654bd797a6245f5a9faa54f9a",
+            "bd6fdc1ca6ecabb30bc91dcf989d59b5eea0e398437a3ae548ee5e14e3839e21",
+        ),
+        True: ("47866189da9694e9f7da8240f4f142da9dc68581de028582861bc5e3ed24ae41",),
     },
 }
 
@@ -287,7 +290,7 @@ def test_checkpoint_frozen_native_issuance_replay(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
     digest = hashlib.sha256(complete_bytes).hexdigest()
-    assert digest == FROZEN_CHECKPOINT_PRODUCT[sys.platform][withheld], (
+    assert digest in FROZEN_CHECKPOINT_PRODUCT[sys.platform][withheld], (
         sys.platform,
         withheld,
         digest,

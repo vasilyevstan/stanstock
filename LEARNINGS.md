@@ -258,8 +258,11 @@ reviews and should not be re-litigated without an explicit new decision.
   inputs for a literal content-hash golden and separately prove sensitivity
   to a one-ULP input change; do not weaken production precision or hashing.
   Complete unrounded NumPy/libm outputs can still differ between Darwin and
-  Linux: capture strict per-runtime goldens from the same frozen base, not
-  rounded or stripped output.
+  Linux, or between Linux runtimes with matching package versions. Capture
+  strict complete-payload goldens only after unchanged-base/candidate byte
+  equality in the actual failing runtime; never round or strip output.
+  One primitive ULP can change derived artifact/manifest hashes. A shared
+  runner-image label does not prove identical numerical results.
 - **Dependency diagnostics are command output too.** A count-only summary
   does not protect private symbols when HTTP-client logs contain request URLs.
   Protect native acquisition services, not only command wrappers. Overlapping
