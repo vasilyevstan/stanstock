@@ -353,7 +353,8 @@ def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
     )
 
 
-def test_exact_run_hasher_preserves_complete_base_bytes_for_every_input_field(monkeypatch) -> None:
+@pytest.fixture
+def f800_input_encoder():
     import json
 
     # The f8008c5 document encoding, independent of the reusable encoder.
@@ -389,6 +390,12 @@ def test_exact_run_hasher_preserves_complete_base_bytes_for_every_input_field(mo
         }
         return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
 
+    return base_bytes
+
+
+def test_exact_run_hasher_preserves_complete_base_bytes_for_every_input_field(
+    monkeypatch, f800_input_encoder
+) -> None:
     product_input = _product_input()
     product_input = replace(
         product_input,
@@ -441,9 +448,21 @@ def test_exact_run_hasher_preserves_complete_base_bytes_for_every_input_field(mo
     monkeypatch.setattr(price_product_module.hashlib, "sha256", digest)
     hasher = price_product_module._CompleteInputHasher()
     for variant in variants:
-        expected = base_bytes(variant)
+        expected = f800_input_encoder(variant)
         assert hasher(variant) == sha256(expected).hexdigest()
         assert digest.call_args.args[0] == expected  # Complete bytes, not component digests.
+
+
+@pytest.mark.parametrize("field", ["calendar_sessions", "benchmark"])
+@pytest.mark.parametrize("public", [False, True], ids=["fresh-hasher", "public-hash"])
+def test_none_input_rejection_matches_f800_encoder(f800_input_encoder, field, public) -> None:
+    product_input = replace(_product_input(), **{field: None})
+    encoder = complete_input_hash if public else price_product_module._CompleteInputHasher()
+    with pytest.raises((TypeError, AttributeError)) as expected:
+        f800_input_encoder(product_input)
+    with pytest.raises(type(expected.value)) as actual:
+        encoder(product_input)
+    assert actual.value.args == expected.value.args and vars(actual.value) == vars(expected.value)
 
 
 def test_exact_run_hasher_reuses_only_its_exact_benchmark_object(monkeypatch) -> None:

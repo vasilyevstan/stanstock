@@ -38,6 +38,7 @@ EvidenceGrade = Literal["research", "observed"]
 
 _SEED_DOMAIN = "stanstock-research-product-seed-v1"
 _INPUT_HASH_DOMAIN = "stanstock-research-product-input-v1"
+_UNSET_INPUT_IDENTITY = object()
 _MAX_LEDGER_RETURN = Decimal("999999.9999")
 _MAX_LEDGER_PRICE = Decimal("99999999999999.999999")
 _SIMULATION_CHUNK_PATHS = 256
@@ -271,9 +272,9 @@ class _CompleteInputHasher:
     """
 
     def __init__(self) -> None:
-        self._calendar: tuple[date, ...] | None = None
+        self._calendar: object = _UNSET_INPUT_IDENTITY
         self._calendar_payload: list[str] = []
-        self._benchmark: PriceSeries | None = None
+        self._benchmark: object = _UNSET_INPUT_IDENTITY
         self._benchmark_payload: dict[str, object] = {}
 
     def __call__(self, product_input: PriceProductInput) -> str:
