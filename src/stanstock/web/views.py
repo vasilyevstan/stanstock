@@ -95,6 +95,9 @@ from stanstock.research.affordability import (
     classify_price_band,
     latest_price_band,
 )
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as ELIGIBILITY_V2_PRODUCT_VERSION,
+)
 from stanstock.research.indicators import (
     DOLLAR_VOLUME_DROPPED_ROWS,
     DOLLAR_VOLUME_DUPLICATE_SESSIONS,
@@ -3201,7 +3204,8 @@ def _portfolio_detail_context(
                 "is_etf": is_etf,
                 "is_active_momentum_method": (
                     latest_analysis is not None
-                    and latest_analysis.run.config_version == PRODUCT_VERSION
+                    and latest_analysis.run.config_version
+                    in (PRODUCT_VERSION, ELIGIBILITY_V2_PRODUCT_VERSION)
                 ),
                 "opportunity": (
                     assess_opportunity(

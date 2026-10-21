@@ -13,6 +13,19 @@ STANSTOCK_RESEARCH_PRODUCT_ENABLED=true
 
 This selects the replacement product paths; it does not enable a provider.
 
+`STANSTOCK_RESEARCH_PRODUCT_VERSION` selects `research-product-v1` by default
+and accepts only that value or the explicit `research-product-v2`. V2 has no
+demo generator; do not expect demo mode to substitute v1 silently.
+Changing the selector does not enable a provider, declare a protocol,
+activate paper or retarget historical runs.
+
+Fresh v2 acquisition and issuance require the owner's separately declared
+v2 forward protocol, in addition to the unchanged source/rights/revision
+guards. Its prospective start follows actual declaration; never reset or
+backdate the v1 declaration. Exact completed-output and closed-batch recovery
+precedes credential resolution and additional quota spending. An incomplete
+attempt is not reusable as fragments of a later batch.
+
 | Profile | Provider/source | Issuance claim |
 |---|---|---|
 | Demo `refresh_demo` | `synthetic_demo` | Always research-grade |
@@ -244,7 +257,7 @@ A fresh scheduled issuance requires:
 
 - an observed target window;
 - current owner/display authorization;
-- `research-product-v1` and its pinned config;
+- the captured product version and its exact reviewed, pinned config;
 - `provider="twelve_data"` and benchmark `SPY`;
 - a clean committed checkout;
 - `STANSTOCK_CODE_REVISION` equal to that exact 40-hex commit; and
@@ -265,6 +278,10 @@ analyze_snapshot(
     config_path=default_price_product_config_path(),
 )
 ```
+
+The example above is the frozen v1 route. A v2 request must explicitly bind
+its reviewed v2 config, source contract and declaration; neither the current
+selector nor a provider/config flag makes a manual command observed.
 
 The parent/orchestrator must first bind the exact clean revision and
 independently reprove the deadline. No reissue inherits another version's
@@ -533,6 +550,24 @@ uv run --no-sync python manage.py paper_portfolio --owner USER --session YYYY-MM
 uv run --no-sync python manage.py paper_portfolio --owner USER
 ```
 
+The forward-scorecard command defaults to v1. Before any v2 provider
+acquisition or issuance, declare and inspect the separate v2 protocol
+explicitly:
+
+```bash
+uv run --no-sync python manage.py forecast_scorecard --owner USER --product-version research-product-v2 --declare
+uv run --no-sync python manage.py forecast_scorecard --owner USER --product-version research-product-v2
+```
+
+Its first eligible target close is strictly after the actual declaration.
+Selecting v2 does not replace, reset or backdate the v1 declaration. These
+commands do not activate either paper policy or the separate study.
+
+Fresh v2 work also requires `STANSTOCK_RESEARCH_PRODUCT_ENABLED=true`.
+When disabled, the selected-v2 route permits only recovery of exact completed
+output or a valid closed batch. Recovery stays ahead of the disabled check;
+fresh work fails before new intake evidence, credentials or quota use.
+
 Declaration is an explicit append-only operation and precedes reading matured
 losses. Reporting does not replace an existing declaration or reset its clock.
 An unmatured report has null metrics and no skill claim.
@@ -547,12 +582,36 @@ or unavailable evidence is not acquired or filled in by these commands. See
 [the paper policy](methodology.md#current-method-paper-policy) for allocation,
 cost and cash conventions.
 
-Activation does not schedule measurements. The existing price-refresh job does
-not invoke the paper command: each session must be captured explicitly after
-its close and before the next session opens. A missed capture stays missing
-and withholds the complete paper measurement; a later command cannot repair
-it by backfilling. Preview and scorecard declaration do not start this one-shot
-paper experiment.
+Activation does not schedule measurements. For frozen paper v1, each session
+must still be captured explicitly after its close and before the next session
+opens. A missed capture stays missing and withholds the complete v1 paper
+measurement; a later command cannot repair it by backfilling. Preview and
+scorecard declaration do not start this one-shot experiment.
+
+Select paper v2 explicitly with
+`--policy-version current-method-paper-6m-v2` on the existing `paper_portfolio`
+command. Omitting that option preserves v1 behavior and output. V2 separates
+terminal evidence from path risk; inspect both states, captured/missing
+sessions and the through-session rather than treating an interim mark as a
+matured result. Its selection remains source-v1-bound even if current research
+later selects a different product version.
+
+The native-only `scheduled_refresh --capture-paper` option attaches v2 capture
+to the existing refresh. It is **off by default** and does not activate paper,
+change the installed schedule or establish unattended coverage. Disabled
+invocations perform no paper imports/lookups; an opted-in but unactivated
+invocation performs at most one exact activation lookup and creates no paper
+jobs, locks or files.
+
+The attachment recovers exact committed evidence before parent credential or
+quota access, then attempts a fresh retained-source capture after the market
+attempt. It acquires no extra quotes and preserves the mandatory parent
+stages. Fresh publication must occur after close and strictly before next
+open, checked after proof and lock waiting. Recovery may reuse already
+committed evidence after that deadline; it never backdates a new capture.
+Check the separate paper-child status and exact registered assets, not only
+parent success or process exit. This implementation does not authorize
+activation or enable the installed capture schedule.
 
 The performance page uses a narrower verified projection than prediction
 history: it still validates every included historical run but builds full

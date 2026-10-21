@@ -3,6 +3,10 @@ from __future__ import annotations
 from django.conf import settings
 from django.http import HttpRequest
 
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as ELIGIBILITY_V2_PRODUCT_VERSION,
+)
+from stanstock.research.product_reader import current_product_version
 from stanstock.research.provenance import (
     DATA_MODE_SYNTHETIC,
     analysis_run_data_mode,
@@ -11,6 +15,10 @@ from stanstock.research.provenance import (
 
 
 def stanstock_runtime(request: HttpRequest) -> dict[str, object]:
+    version_context = {
+        "stanstock_research_product_version": current_product_version(),
+        "stanstock_eligibility_v2_version": ELIGIBILITY_V2_PRODUCT_VERSION,
+    }
     product_read = getattr(request, "_stanstock_product_read", None)
     if settings.RESEARCH_PRODUCT_ENABLED and product_read is not None:
         synthetic_data = (
@@ -23,6 +31,7 @@ def stanstock_runtime(request: HttpRequest) -> dict[str, object]:
             "stanstock_synthetic_data": synthetic_data,
             "stanstock_show_synthetic_banner": settings.DEMO_MODE or synthetic_data,
             "stanstock_research_product_enabled": True,
+            **version_context,
         }
     mode = "unknown"
     if request.user.is_authenticated:
@@ -34,4 +43,5 @@ def stanstock_runtime(request: HttpRequest) -> dict[str, object]:
         "stanstock_synthetic_data": synthetic_data,
         "stanstock_show_synthetic_banner": demo_fallback or synthetic_data,
         "stanstock_research_product_enabled": settings.RESEARCH_PRODUCT_ENABLED,
+        **version_context,
     }

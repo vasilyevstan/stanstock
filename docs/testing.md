@@ -214,11 +214,16 @@ pre-trade capital. Simulation service/web cases bind version/configuration,
 coverage and execution revision to immutable result evidence and reject
 invalid v2 provenance instead of falling back to legacy.
 
-The full-payload pins separately capture Darwin and Linux numerical
-runtimes from the same frozen base. Exact source prices do not make unrounded
-`pow`, NumPy/BLAS or libm outputs byte-identical across operating systems. Prove complete
-base/head equality within each runtime; never round or omit fields to force
-a cross-runtime hash match.
+The full-payload pins capture each observed numerical runtime from the same
+frozen base, including more than one Linux result. An operating-system name
+and matching package versions do not identify a bitwise math runtime. Exact
+source prices do not make unrounded `pow`, NumPy/BLAS or libm outputs
+byte-identical across or within operating systems. Admit another literal
+complete-payload hash only after proving unchanged-base/candidate byte equality
+in the actual failing runtime; never round or omit fields to force a match.
+A one-ULP raw result can change derived artifact and manifest hashes without
+changing the rounded prediction. A failing candidate's digest alone is not
+baseline evidence.
 
 The real writer/requery/detail chain must reject changed definition/snapshot
 parents and missing or corrupt result/input bytes between two requests.
@@ -261,6 +266,35 @@ versus withheld selection, fixed quantities, future/missing prices, exact-byte
 retry reuse, concurrent single-winner publication and owner isolation.
 Research evidence must not create personal ledger or generic simulation rows.
 All these fixtures remain synthetic and offline.
+
+Paper v2 coverage in `tests/test_current_method_paper_v2.py`,
+`tests/test_paper_capture_jobs.py` and the scheduled-refresh suite must prove
+real persistence -> requery -> strict reader -> command output, including a
+terminal result surviving an intermediate gap and a complete 127-close path.
+Exercise reference-window/basis conflicts, present corruption, independent
+terminal/path numeric failures, exact reconciliation, owner/job identity and
+publication deadlines after lock waiting. Committed recovery preserves
+originating identity/time/revision before any credential or quota access.
+Disabled paths import/look up nothing; opted-in unactivated paths perform at
+most one exact activation lookup, with no paper jobs, locks or files.
+Use migrated concurrency fixtures
+and full f800-to-candidate v1 payload/error/default-command differentials,
+including baseline-produced retained assets and transitive source changes.
+No real paper activation, provider call or personal-ledger write belongs here.
+
+Eligibility-v2 tests must cover exact Decimal/integer pairing, valid zero
+versus missing, a distinguishing and ignored-mode canary, whole-batch failure
+scope, purpose isolation, actual cutoffs and every captured candidate.
+Exercise producer -> immutable assets -> authorized reader -> existing
+rendering, including a gate-valid positive case and a withheld-liquidity case
+that preserves independent forecasts. Prove full-input hashes, unchanged v1
+forecast seeds/payloads, default-v1/demo refusal, separate declaration and
+canonical outcome cohorts. Recovery must reuse exact committed IDs with zero
+fetches, credential resolutions and additional credits. Migration checks must
+retain SQLite/PostgreSQL immutability and parent/reparent protections.
+Reuse compatible frozen probes but supplement uncovered retained-parent,
+declaration and rejection paths; file-count or changed-file allowlists are not
+behavioral evidence.
 
 ## Model-outcome summary coverage
 

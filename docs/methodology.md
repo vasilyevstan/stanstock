@@ -116,13 +116,35 @@ for the exact event, rounding, provenance, and nonclaim contract.
 
 ## Volume provenance
 
-The current Twelve Data price contract documents split adjustment for prices,
+The frozen v1 Twelve Data price contract documents split adjustment for prices,
 not a compatible adjustment basis for volume. StanStock does not infer
 split-compatible volume. Consequently, projections and raw direction can be
 available while dollar turnover is withheld and BUY remains blocked.
 
 The synthetic demo explicitly marks its generated volume as compatible, but
 that is code-path validation, not provider evidence.
+
+Bounded paired-mode controls also found that changing the provider's
+adjustment mode changes historical volume, not just prices. Post-event
+agreement in one control does not establish a universal share-volume
+contract. These private controls are not production assets and do not
+retroactively make the frozen v1 inputs liquidity-compatible.
+
+`research-product-v2` introduces a separate, purpose-qualified liquidity
+evidence lane. It requires exact raw Decimal-close and integer-volume parity
+between `none` and `splits` over the same 20 XNYS sessions, plus a fresh
+same-batch split-mode control. Its closing-price-times-volume mean is an
+activity proxy, not exact transaction-dollar turnover or universal proof of
+provider volume semantics. Missing evidence blocks BUY, not independently
+valid direction or projections; a corrupt registered proof is an integrity
+failure, not an ordinary missing-input fallback.
+
+Only this eligibility boundary is versioned. Momentum, other BUY gates and
+FHS numerical inputs, seed configuration and forecasts remain unchanged for
+identical split-adjusted inputs. V1 histories are not relabelled. See
+[Version 2 liquidity evidence](price-research.md#version-2-purpose-qualified-liquidity)
+for source isolation, the bounded control and the separate prospective
+declaration.
 
 ## Under-$10 policy
 
@@ -191,7 +213,7 @@ establishes calibrated probabilities or investment skill.
 
 ## Retrospective comparison
 
-The registered study is current-universe/current-vintage research. It compares
+The retrospective comparison is current-universe/current-vintage research. It compares
 FHS with zero-log-drift and historical-log-drift Gaussian baselines on the
 same paired listing/anchor/maturity support. Means are first calculated inside
 target cohorts, then equally across target cohorts.
@@ -203,6 +225,14 @@ must not be treated as standalone rankings.
 The study preserves empty partitions, unavailable comparisons, and
 worse-than-baseline results. Real losses use recorded realized returns, never
 simulated paths as market observations.
+
+The [October 2026 retained-data checkpoint](price-research.md#october-2026-retained-data-checkpoint)
+found worse FHS median MAE and interval scores than the zero-log-drift
+Gaussian on the inspected six- and twelve-month final paired scope.
+Support was only three and one target cohorts respectively, with no eligible
+three- or five-year empirical anchors. This reconstruction does not establish
+observed skill, justify tuning against inspected outcomes, or activate a
+prospective study.
 
 ## Research grounding and nonclaims
 
@@ -307,3 +337,34 @@ and incompatible share-basis evidence remain explicit; later retrieval must
 not manufacture an earlier observed paper curve. The fixed experiment can
 produce cash, unavailable valuations or adverse results without implying an
 application failure or a profitable strategy.
+
+#### Paper v2: terminal evidence and path risk
+
+`current-method-paper-6m-v2` retains those notional, allocation, cost, calendar
+and fixed-quantity assumptions. Its policy hash is
+`e1839e1bdd25236de47dcaa421def82fdfb98e0ac46b7d0f7261cf74fee22a61`.
+It uses separate immutable assets; v1 artifacts and their complete-measurement
+semantics are unchanged. Both policies remain bound to the v1 research
+product and momentum decision, not a subsequently selected product version.
+
+A v2 terminal return requires timely entry and terminal captures plus verified
+share-basis continuity. Freeze 757 authoritative closes ending at entry;
+each valuation source must cover that reference and the complete held
+calendar, with consistent recorded overlaps. Two endpoints alone are not
+enough. Missing intermediate captures do not erase independently supported
+terminal results, but retained historical rows never become backfilled
+prospective captures.
+
+Drawdown, volatility and Sharpe require a complete prospectively captured
+common path. Report coverage and the through-session separately; missing
+captures withhold path risk. Terminal financial values remain null before
+the terminal session and its valid capture. Corruption is an integrity
+failure, not an absent capture. Native path-number insufficiency can withhold
+risk independently of representable decimal terminal accounting.
+
+Attribute the stock sleeve against same-dollar SPY separately from the whole
+account. The full-notional native SPY reference is scaled by exactly 7/10
+and 3/10; P&L reconciles fixed-quantity price movement, entry costs and
+independently frozen native entry roundoff. An empty sleeve measures a
+cash-allocation effect, not stock-selection skill. This does not establish
+alpha, optimal weights or investment eligibility.

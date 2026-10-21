@@ -516,12 +516,16 @@ def _latest_verified_refresh_bundle() -> ReplayedScheduledRefresh:
     is treated as corruption and fails closed instead of silently falling
     back to an older parent.
     """
-    from stanstock.data.research_product_jobs import SCHEDULED_RESEARCH_JOB
+    from stanstock.data.research_product_jobs import (
+        SCHEDULED_RESEARCH_JOB,
+        SCHEDULED_RESEARCH_V2_JOB,
+    )
 
     parents = (
         JobRun.objects.filter(
             Q(job_name=SCHEDULED_REFRESH_JOB)
-            | Q(job_name__startswith=f"{SCHEDULED_RESEARCH_JOB}:"),
+            | Q(job_name__startswith=f"{SCHEDULED_RESEARCH_JOB}:")
+            | Q(job_name__startswith=f"{SCHEDULED_RESEARCH_V2_JOB}:"),
             region="us",
             status=JobRun.Status.SUCCESS,
         ).order_by("-target_date", "-finished_at", "-started_at", "-pk")

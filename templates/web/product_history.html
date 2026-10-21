@@ -49,7 +49,7 @@
                   <a href="{% url 'stock-detail' entry.card.analysis.listing_id %}?horizon={{ selected_horizon }}"><h3>{{ entry.card.listing.ticker }}</h3></a>
                   <p>{{ entry.card.listing.security.company.name }}</p>
                 </div>
-                <span class="badge">{{ entry.card.decision_prediction.evidence_grade|display_label }} · {{ entry.card.decision_prediction.price_provider|display_label }}</span>
+                <span class="badge">{{ entry.card.decision_prediction.evidence_grade|display_label }} · {{ entry.card.decision_prediction.price_provider|display_label }}{% if entry.card.product_version == stanstock_eligibility_v2_version %} · {{ entry.card.product_version }}{% endif %}</span>
               </header>
               <dl class="issuance-summary">
                 <div><dt>Target</dt><dd>{{ entry.card.decision_prediction.target_date }}</dd></div>

@@ -15,6 +15,12 @@ from stanstock.core.verification_types import RefreshVerificationError
 from stanstock.data.asof import AsOfData, PriceFrameSchemaError, raw_price_asset_for
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import DataAsset
+from stanstock.data.research_product import verify_product_price_content
+from stanstock.research.decision_support_eligibility import MOMENTUM_METHOD_VERSION as V2_MOMENTUM
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as V2_PRODUCT_VERSION
 from stanstock.research.long_forecast_config import (
     LONG_V4_EFFECTIVE_CONFIG_HASH,
     LONG_V4_METHOD,
@@ -37,6 +43,7 @@ from stanstock.research.price_product_config import (
 )
 
 _LONG_V4_RETURN_QUANTUM = Decimal("0.0001")
+_MOMENTUM_METHODS = frozenset((MOMENTUM_METHOD_VERSION, V2_MOMENTUM))
 _LONG_V4_BASELINE_ROLE = "calculation.target_price.valuation_value"
 _LONG_V4_BASELINE_COMPARISON = "Decimal(str(target_close)) == valuation_value"
 _LONG_V4_BASELINE_ISSUE_ORDER = (
@@ -106,6 +113,10 @@ class PriceSessionDataError(ValueError):
     """Raised when price observations cannot represent unique market sessions."""
 
 
+class _V2MaturityIntegrityError(RuntimeError):
+    """Persisted malformed maturity proof must not replay as ordinary unresolved."""
+
+
 @dataclass(frozen=True, slots=True)
 class _LongV4Baseline:
     valuation_value: Decimal
@@ -163,7 +174,7 @@ def resolve_outcome(
         )
 
     if (
-        prediction.method_version == MOMENTUM_METHOD_VERSION
+        prediction.method_version in _MOMENTUM_METHODS
         and benchmark_subject != PRODUCT_BENCHMARK_SUBJECT
     ):
         return _unresolved_outcome(
@@ -281,7 +292,7 @@ def resolve_outcome(
                 metadata={"provider": provider, "subject": subject},
             )
 
-        momentum = prediction.method_version == MOMENTUM_METHOD_VERSION
+        momentum = prediction.method_version in _MOMENTUM_METHODS
         evaluation_baseline = (
             _close_on_date(price_frame, prediction.target_date)
             if momentum
@@ -315,7 +326,7 @@ def resolve_outcome(
         actual_return = session.close / price_at_prediction - 1.0
     benchmark_return = None
     benchmark_resolution = ""
-    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+    if prediction.method_version in _MOMENTUM_METHODS:
         benchmark_return, benchmark_resolution = _momentum_benchmark_return(
             price_loader=price_loader,
             subject=PRODUCT_BENCHMARK_SUBJECT,
@@ -353,7 +364,7 @@ def resolve_outcome(
         else None
     )
     non_directional_momentum = (
-        prediction.method_version == MOMENTUM_METHOD_VERSION
+        prediction.method_version in _MOMENTUM_METHODS
         and prediction.recommendation in (Recommendation.HOLD, None)
     )
     if (
@@ -363,7 +374,7 @@ def resolve_outcome(
     ):
         resolution = (
             "Prospective momentum decision requires a benchmark return"
-            if prediction.method_version == MOMENTUM_METHOD_VERSION
+            if prediction.method_version in _MOMENTUM_METHODS
             else "HOLD success requires non-null stored bear and bull returns"
         )
         return _unresolved_outcome(
@@ -1008,6 +1019,36 @@ def evaluate_prediction(
         nonlocal asof
         if asof is None:
             asof = AsOfData(evaluated_at, store)
+        if prediction.config_hash == V2_CONFIG_HASH:
+            if prediction.analysis.run.config_version != V2_PRODUCT_VERSION:
+                raise _V2MaturityIntegrityError("V2 maturity has the wrong parent identity")
+            asset = asof.latest_asset(
+                provider=selected_provider, kind="price_history", subject=subject
+            )
+            try:
+                if (
+                    asset.metadata.get("adjustment") != "splits"
+                    or asset.metadata.get("currency") != "USD"
+                ):
+                    raise ValueError
+                raw = raw_price_asset_for(asset, cutoff=evaluated_at)
+                if raw is None:
+                    raise ValueError
+                verify_product_price_content(
+                    asset=asset,
+                    raw=raw,
+                    cutoff=evaluated_at,
+                    target_date=through_date,
+                    store=asof.store,
+                    product_version=V2_PRODUCT_VERSION,
+                )
+                return asof.price_frame_for_asset_with_diagnostics(
+                    asset=asset, through_date=through_date
+                ).frame
+            except (ValueError, OSError, pl.exceptions.PolarsError):
+                raise _V2MaturityIntegrityError(
+                    "V2 maturity requires valid split-only raw/normalized USD evidence"
+                ) from None
         return _cached_price_frame(
             asof=asof,
             provider=selected_provider,
@@ -1251,7 +1292,7 @@ def _success(
     benchmark_return: float | None = None,
 ) -> bool | None:
     method_version = getattr(prediction, "method_version", "")
-    if method_version == MOMENTUM_METHOD_VERSION:
+    if method_version in _MOMENTUM_METHODS:
         if prediction.recommendation in (Recommendation.HOLD, None):
             return None
         if benchmark_return is None:
@@ -1275,7 +1316,7 @@ def _success(
 def _success_semantics(prediction: Prediction) -> str:
     if prediction.evidence_role == Prediction.EvidenceRole.ADVISORY:
         return "Advisory forecasts do not receive recommendation success labels"
-    if prediction.method_version == MOMENTUM_METHOD_VERSION:
+    if prediction.method_version in _MOMENTUM_METHODS:
         if prediction.recommendation == Recommendation.BUY:
             return "BUY succeeds when stock return is positive and exceeds SPY"
         if prediction.recommendation == Recommendation.AVOID:

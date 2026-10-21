@@ -46,6 +46,11 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument(
+            "--capture-paper",
+            action="store_true",
+            help="Opt in to no-fetch capture of an already activated native v2 paper policy.",
+        )
+        parser.add_argument(
             "--config",
             type=Path,
             default=default_us_universe_config_path(),
@@ -56,9 +61,16 @@ class Command(BaseCommand):
         config_path = options["config"]
         if not isinstance(config_path, Path):
             raise CommandError("--config must be a filesystem path")
-        if settings.RESEARCH_PRODUCT_ENABLED:
-            self._handle_research_product(config_path)
+        from stanstock.research.decision_support_eligibility import (
+            PRODUCT_VERSION as V2_PRODUCT_VERSION,
+        )
+        from stanstock.research.product_reader import current_product_version
+
+        if settings.RESEARCH_PRODUCT_ENABLED or current_product_version() == V2_PRODUCT_VERSION:
+            self._handle_research_product(config_path, capture_paper=bool(options["capture_paper"]))
             return
+        if options["capture_paper"]:
+            raise CommandError("--capture-paper requires the native research profile")
         decision_time = timezone.now()
         try:
             _validate_runtime_timezone()
@@ -204,19 +216,34 @@ class Command(BaseCommand):
             )
         )
 
-    def _handle_research_product(self, config_path: Path) -> None:
+    def _handle_research_product(self, config_path: Path, *, capture_paper: bool = False) -> None:
         from stanstock.core.research_product_refresh import (
             execute_scheduled_research_refresh,
         )
+        from stanstock.research.decision_support_eligibility import (
+            PRODUCT_VERSION as V2_PRODUCT_VERSION,
+        )
+        from stanstock.research.product_reader import current_product_version
 
         try:
             _validate_runtime_timezone()
-            result = execute_scheduled_research_refresh(core_config_path=config_path)
+            result = (
+                execute_scheduled_research_refresh(core_config_path=config_path, capture_paper=True)
+                if capture_paper
+                else execute_scheduled_research_refresh(core_config_path=config_path)
+            )
+            profile = (
+                "research_product_v2"
+                if current_product_version() == V2_PRODUCT_VERSION
+                else "research_product_v1"
+            )
         except EXPECTED_STAGE_ERRORS as exc:
+            if capture_paper:
+                self._paper_status(getattr(exc, "paper_capture", None))
             raise CommandError(f"Scheduled research refresh failed ({type(exc).__name__})") from exc
         self.stdout.write(
             self.style.SUCCESS(
-                f"scheduled_refresh profile=research_product_v1 "
+                f"scheduled_refresh profile={profile} "
                 f"status={result.parent.status} "
                 f"target_date={result.target_date.isoformat()} "
                 f"analyses={result.analysis_count} predictions={result.prediction_count}"
@@ -231,6 +258,16 @@ class Command(BaseCommand):
                 f"{'disabled' if study_result is None else study_result.state} "
                 f"reason={'' if study_result is None else study_result.reason_code or ''}"
             )
+        if capture_paper:
+            self._paper_status(result.paper_capture)
+
+    def _paper_status(self, result: Any) -> None:
+        self.stdout.write(
+            f"paper_capture status={'unavailable' if result is None else result.state} "
+            f"captures={0 if result is None else result.capture_count} "
+            f"child_status={'' if result is None or result.child is None else result.child.status} "
+            f"reason={'' if result is None else result.reason_code or ''}"
+        )
 
 
 def _run_stage(

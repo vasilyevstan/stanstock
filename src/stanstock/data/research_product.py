@@ -41,13 +41,23 @@ from stanstock.data.models import (
 from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER, validate_provider_usage
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import StockReference
+from stanstock.data.providers.exceptions import ProviderError
 from stanstock.portfolio.models import TrackedSymbol
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as V2_PRODUCT_VERSION,
+)
+from stanstock.research.decision_support_eligibility import strict_json
 from stanstock.research.price_product_config import PRODUCT_EFFECTIVE_CONFIG_HASH, PRODUCT_VERSION
 
 PRODUCT_INTAKE_KIND = "research_product_intake"
 PRODUCT_INTAKE_CONTRACT = "research-product-intake@1"
 PRODUCT_MEMBERSHIP_KIND = "research_product_membership"
 PRODUCT_MEMBERSHIP_CONTRACT = "research-product-membership@1"
+PRODUCT_INTAKE_V2_CONTRACT = "research-product-intake@2"
+PRODUCT_MEMBERSHIP_V2_CONTRACT = "research-product-membership@2"
 MAX_SAVED_NAMES = 20
 type _ProductCatalogReference = StockReference
 
@@ -84,6 +94,16 @@ class CapturedProductIntake:
     saved_symbols: tuple[str, ...]
 
     @property
+    def product_version(self) -> str:
+        # Keep the original v1 dataclass/constructor shape. The immutable
+        # captured subject, not a mutable selector, owns version dispatch.
+        return (
+            V2_PRODUCT_VERSION
+            if self.asset.subject.startswith(f"{V2_PRODUCT_VERSION}:")
+            else PRODUCT_VERSION
+        )
+
+    @property
     def requested_symbols(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys((*self.core_symbols, *self.saved_symbols)))
 
@@ -94,8 +114,9 @@ def load_product_intake(
     owner_id: str,
     issuance_key: str,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> CapturedProductIntake | None:
-    subject = _intake_subject(target_date, owner_id, issuance_key)
+    subject = _intake_subject(target_date, owner_id, issuance_key, product_version)
     assets = list(
         DataAsset.objects.filter(provider="stanstock", kind=PRODUCT_INTAKE_KIND, subject=subject)
     )
@@ -114,6 +135,7 @@ def capture_authorized_product_intake(
     policy_identity: str,
     captured_at: datetime,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> CapturedProductIntake:
     """Capture the real owner/catalog/provider-authorized product request.
 
@@ -132,6 +154,7 @@ def capture_authorized_product_intake(
         owner_id=str(owner.pk),
         issuance_key=issuance_key,
         store=store,
+        product_version=product_version,
     )
     if existing is not None:
         return existing
@@ -183,6 +206,7 @@ def capture_authorized_product_intake(
         core_config=config.raw,
         universe_policy=universe_policy,
         entitlement=entitlement,
+        product_version=product_version,
     )
 
 
@@ -204,13 +228,18 @@ def capture_product_intake(
     core_config: dict[str, object] | None = None,
     universe_policy: dict[str, object] | None = None,
     entitlement: dict[str, object] | None = None,
+    product_version: str = PRODUCT_VERSION,
 ) -> CapturedProductIntake:
     """Capture a deduplicated 100-core-plus-20-saved request before provider work."""
     if not owner_id or not entitlement_identity or not policy_identity:
         raise ValueError("Product intake requires owner, entitlement, and policy identities")
-    subject = _intake_subject(target_date, owner_id, issuance_key)
+    subject = _intake_subject(target_date, owner_id, issuance_key, product_version)
     existing = load_product_intake(
-        target_date=target_date, owner_id=owner_id, issuance_key=issuance_key, store=store
+        target_date=target_date,
+        owner_id=owner_id,
+        issuance_key=issuance_key,
+        store=store,
+        product_version=product_version,
     )
     if existing is not None:
         return existing
@@ -221,6 +250,12 @@ def capture_product_intake(
         raise ValueError("Product intake source or evidence grade is invalid")
     if source_provider == "synthetic_demo" and evidence_grade != "research":
         raise ValueError("Synthetic intake cannot claim observed evidence")
+    if product_version == V2_PRODUCT_VERSION and (
+        source_provider != TWELVE_DATA_PROVIDER or policy_identity != V2_CONFIG_HASH
+    ):
+        raise ValueError(
+            "V2 requires its exact policy and provider-backed intake; demo is unsupported"
+        )
     core_rows, saved_rows = tuple(core_listings), tuple(saved_listings)
     core = _unique_ids(core_rows)
     saved = _unique_ids(saved_rows)
@@ -246,6 +281,9 @@ def capture_product_intake(
         saved=saved,
         candidates=candidates,
     )
+    if product_version == V2_PRODUCT_VERSION:
+        payload["contract"] = PRODUCT_INTAKE_V2_CONTRACT
+        payload["product_version"] = product_version
     payload.update(
         {
             "core_symbols": list(dict.fromkeys(requested_core)),
@@ -269,7 +307,7 @@ def capture_product_intake(
                 stored=stored,
                 retrieved_at=captured_at,
                 available_at=captured_at,
-                metadata={"contract": PRODUCT_INTAKE_CONTRACT},
+                metadata={"contract": payload["contract"]},
             )
     except Exception:
         if not DataAsset.objects.filter(relative_path=path).exists():
@@ -296,6 +334,8 @@ def materialize_product_membership(
     admissions: dict[str, dict[str, Any]] | None = None,
     catalog_assets: tuple[DataAsset, ...] = (),
     benchmark_asset: DataAsset | None = None,
+    liquidity_batch: DataAsset | None = None,
+    forward_declaration: DataAsset | None = None,
 ) -> UniverseSnapshot:
     """Materialize a new immutable qualified cohort from a captured intake.
 
@@ -335,18 +375,34 @@ def materialize_product_membership(
         ),
         "decision_time": captured_at.isoformat(),
     }
+    if intake.product_version == V2_PRODUCT_VERSION:
+        if liquidity_batch is None or forward_declaration is None:
+            raise ValueError("V2 membership requires its closed batch and prospective declaration")
+        from stanstock.data.liquidity_evidence import verify_liquidity_batch
+
+        verify_liquidity_batch(
+            asset=liquidity_batch,
+            intake=intake,
+            cutoff=captured_at,
+            store=store,
+        )
+        payload.update(
+            contract=PRODUCT_MEMBERSHIP_V2_CONTRACT,
+            liquidity_batch=asset_ref_for(liquidity_batch).to_json(),
+            forward_declaration=asset_ref_for(forward_declaration).to_json(),
+        )
     config_hash = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     universe, _created = Universe.objects.get_or_create(
-        slug=f"{PRODUCT_VERSION}-{intake.asset.sha256[:16]}",
+        slug=f"{intake.product_version}-{intake.asset.sha256[:16]}",
         defaults={
             "name": "Captured research product cohort",
             "description": "Immutable research-product admission cohort.",
-            "config_version": PRODUCT_VERSION,
+            "config_version": intake.product_version,
         },
     )
-    if universe.config_version != PRODUCT_VERSION:
+    if universe.config_version != intake.product_version:
         raise ValueError("Product cohort universe identity conflicts with existing evidence")
     snapshot, created = UniverseSnapshot.objects.get_or_create(
         universe=universe,
@@ -385,7 +441,7 @@ def materialize_product_membership(
         stored=stored,
         retrieved_at=captured_at,
         available_at=captured_at,
-        metadata={"contract": PRODUCT_MEMBERSHIP_CONTRACT},
+        metadata={"contract": payload["contract"]},
     )
     return snapshot
 
@@ -401,13 +457,23 @@ def product_membership_payload(
     )
     if len(assets) != 1:
         raise ValueError("Product membership evidence is missing or ambiguous")
+    expected_contract = (
+        PRODUCT_MEMBERSHIP_V2_CONTRACT
+        if snapshot.universe.config_version == V2_PRODUCT_VERSION
+        else PRODUCT_MEMBERSHIP_CONTRACT
+    )
     try:
-        payload = json.loads(read_checksummed_bytes(store, assets[0]))
+        raw = read_checksummed_bytes(store, assets[0])
+        payload = (
+            strict_json(raw)
+            if expected_contract == PRODUCT_MEMBERSHIP_V2_CONTRACT
+            else json.loads(raw)
+        )
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("Product membership evidence is malformed") from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("contract") != PRODUCT_MEMBERSHIP_CONTRACT
+        or payload.get("contract") != expected_contract
         or payload.get("snapshot_id") != str(snapshot.id)
     ):
         raise ValueError("Product membership evidence has an invalid identity")
@@ -443,8 +509,12 @@ def _intake_payload(
 
 def _captured_intake_from_asset(asset: DataAsset, *, store: AssetStore) -> CapturedProductIntake:
     try:
-        payload = json.loads(read_checksummed_bytes(store, asset))
-        if not isinstance(payload, dict) or payload.get("contract") != PRODUCT_INTAKE_CONTRACT:
+        raw = read_checksummed_bytes(store, asset)
+        v2 = asset.subject.startswith(f"{V2_PRODUCT_VERSION}:")
+        payload = strict_json(raw) if v2 else json.loads(raw)
+        version = V2_PRODUCT_VERSION if v2 else PRODUCT_VERSION
+        contract = PRODUCT_INTAKE_V2_CONTRACT if v2 else PRODUCT_INTAKE_CONTRACT
+        if not isinstance(payload, dict) or payload.get("contract") != contract:
             raise ValueError
         core = tuple(UUID(str(item)) for item in payload["core_listing_ids"])
         saved = tuple(UUID(str(item)) for item in payload["saved_listing_ids"])
@@ -464,14 +534,23 @@ def _captured_intake_from_asset(asset: DataAsset, *, store: AssetStore) -> Captu
         )
         or len(set(core_symbols)) != len(core_symbols)
         or len(set(saved_symbols)) != len(saved_symbols)
-        or payload.get("product_version") != PRODUCT_VERSION
+        or payload.get("product_version") != version
         or payload.get("source_provider") not in {TWELVE_DATA_PROVIDER, "synthetic_demo"}
         or asset.subject
         != _intake_subject(
-            date.fromisoformat(payload["target_date"]), payload["owner_id"], payload["issuance_key"]
+            date.fromisoformat(payload["target_date"]),
+            payload["owner_id"],
+            payload["issuance_key"],
+            version,
         )
     ):
         raise ValueError("Captured product intake asset violates bounded membership")
+    if v2 and (
+        asset.metadata != {"contract": PRODUCT_INTAKE_V2_CONTRACT}
+        or payload.get("source_provider") != TWELVE_DATA_PROVIDER
+        or payload.get("policy_identity") != V2_CONFIG_HASH
+    ):
+        raise ValueError("Captured v2 intake has an invalid policy, purpose, or provider")
     if payload["source_provider"] == TWELVE_DATA_PROVIDER:
         entitlement = payload.get("entitlement")
         core_config = load_us_universe_config(default_us_universe_config_path())
@@ -523,7 +602,11 @@ def _unique_ids(listings: Iterable[Listing]) -> tuple[UUID, ...]:
     return tuple(values)
 
 
-def _intake_subject(target_date: date, owner_id: str, issuance_key: str) -> str:
+def _intake_subject(
+    target_date: date, owner_id: str, issuance_key: str, product_version: str = PRODUCT_VERSION
+) -> str:
+    if product_version not in (PRODUCT_VERSION, V2_PRODUCT_VERSION):
+        raise ValueError("Unsupported captured product version")
     if (
         not issuance_key
         or len(issuance_key) > 36
@@ -535,7 +618,7 @@ def _intake_subject(target_date: date, owner_id: str, issuance_key: str) -> str:
         raise ValueError("Product intake requires a safe explicit issuance key")
     if not owner_id or len(owner_id) > 36 or ":" in owner_id:
         raise ValueError("Product intake owner identity is invalid")
-    return f"{PRODUCT_VERSION}:{target_date.isoformat()}:{owner_id}:{issuance_key}"
+    return f"{product_version}:{target_date.isoformat()}:{owner_id}:{issuance_key}"
 
 
 def product_intake_payload(
@@ -555,10 +638,26 @@ def verify_product_price_content(
     cutoff: datetime,
     target_date: date,
     store: AssetStore,
+    product_version: str = PRODUCT_VERSION,
 ) -> None:
-    _verify_product_price_content(
-        asset=asset, raw=raw, cutoff=cutoff, target_date=target_date, store=store
-    )
+    if product_version == V2_PRODUCT_VERSION:
+        try:
+            _verify_product_price_content(
+                asset=asset, raw=raw, cutoff=cutoff, target_date=target_date, store=store
+            )
+        except ProviderError:
+            # Persisted malformed evidence is not a fresh provider failure that
+            # a caller may downgrade to missing data. Keep that distinction in
+            # the data boundary without leaking provider exceptions to research.
+            raise ValueError(
+                "V2 persisted raw price content failed full parser admission"
+            ) from None
+    elif product_version == PRODUCT_VERSION:
+        _verify_product_price_content(
+            asset=asset, raw=raw, cutoff=cutoff, target_date=target_date, store=store
+        )
+    else:
+        raise ValueError("Unsupported product price-content version")
 
 
 def _verify_product_price_content(
@@ -769,15 +868,16 @@ def verify_product_intake_membership(
         raise ValueError("Product membership does not bind a registered intake")
     intake = _captured_intake_from_asset(asset, store=store)
     captured = product_intake_payload(intake, store=store)
+    version = intake.product_version
+    effective_hash = (
+        V2_CONFIG_HASH if version == V2_PRODUCT_VERSION else PRODUCT_EFFECTIVE_CONFIG_HASH
+    )
     if (
-        snapshot.universe.slug != f"{PRODUCT_VERSION}-{asset.sha256[:16]}"
+        snapshot.universe.slug != f"{version}-{asset.sha256[:16]}"
         or snapshot.as_of_date.isoformat() != captured["target_date"]
         or snapshot.grade != captured["evidence_grade"]
         or captured["source_provider"] != provider
-        or (
-            provider == TWELVE_DATA_PROVIDER
-            and captured["policy_identity"] != PRODUCT_EFFECTIVE_CONFIG_HASH
-        )
+        or (provider == TWELVE_DATA_PROVIDER and captured["policy_identity"] != effective_hash)
     ):
         raise ValueError("Product snapshot identity diverges from captured intake")
     states = payload["candidate_states"]

@@ -33,6 +33,9 @@ from stanstock.research.affordability import (
     PriceBandDefinition,
     classify_price_band,
 )
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as ELIGIBILITY_V2_PRODUCT_VERSION,
+)
 from stanstock.research.models import (
     AnalysisRun,
     Prediction,
@@ -40,6 +43,7 @@ from stanstock.research.models import (
     Recommendation,
     StockAnalysis,
 )
+from stanstock.research.price_product_config import PRODUCT_VERSION
 from stanstock.research.product_reader import (
     ProductAdmission,
     ProductCard,
@@ -69,6 +73,7 @@ from stanstock.web.templatetags.stanstock import percentage
 
 _OPPORTUNITIES_PAGE_SIZE = 20
 _SHORTLIST_LIMIT = 3
+_PRODUCT_CONFIG_VERSIONS = (PRODUCT_VERSION, ELIGIBILITY_V2_PRODUCT_VERSION)
 
 
 def _read(request: HttpRequest) -> ProductRead:
@@ -555,6 +560,8 @@ def status_page(request: HttpRequest) -> HttpResponse:
         Q(job_name__startswith="daily_research_v1")
         | Q(job_name__startswith="scheduled_refresh_research_v1")
         | Q(job_name="refresh_demo_research_v1")
+        | Q(job_name__startswith="daily_research_v2")
+        | Q(job_name__startswith="scheduled_refresh_research_v2")
     ).order_by("-started_at")[:10]
     return render(
         request,
@@ -702,6 +709,9 @@ def performance_page(request: HttpRequest) -> HttpResponse:
             "decision_groups": decision_groups,
             "advisory_groups": advisory_groups,
             "observed_scope": observed_scope,
+            "has_eligibility_v2_history": any(
+                item.run.config_version == ELIGIBILITY_V2_PRODUCT_VERSION for item in history.runs
+            ),
             "has_matured": any(
                 group["status"] == PredictionOutcome.Status.MATURED
                 for group in (*decision_groups, *advisory_groups)
@@ -889,13 +899,13 @@ def _selected_product_horizon(request: HttpRequest) -> tuple[str, str]:
 
 
 def _has_product_output() -> bool:
-    return AnalysisRun.objects.filter(config_version="research-product-v1").exists()
+    return AnalysisRun.objects.filter(config_version__in=_PRODUCT_CONFIG_VERSIONS).exists()
 
 
 @login_required
 def archive_opportunities_page(request: HttpRequest) -> HttpResponse:
     run = (
-        AnalysisRun.objects.exclude(config_version="research-product-v1")
+        AnalysisRun.objects.exclude(config_version__in=_PRODUCT_CONFIG_VERSIONS)
         .filter(status="complete")
         .select_related("universe_snapshot")
         .order_by("-target_date", "-generated_at", "-id")
@@ -923,7 +933,7 @@ def archive_stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpRes
     )
     analysis = (
         StockAnalysis.objects.select_related("run")
-        .exclude(run__config_version="research-product-v1")
+        .exclude(run__config_version__in=_PRODUCT_CONFIG_VERSIONS)
         .filter(listing=listing, run__status="complete")
         .order_by("-run__target_date", "-run__generated_at", "-id")
         .first()
@@ -931,7 +941,7 @@ def archive_stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpRes
     if analysis is None:
         raise Http404("No archived analysis exists for this listing")
     predictions = (
-        Prediction.objects.exclude(analysis__run__config_version="research-product-v1")
+        Prediction.objects.exclude(analysis__run__config_version__in=_PRODUCT_CONFIG_VERSIONS)
         .filter(listing=listing)
         .order_by("-generated_at", "horizon", "id")[:100]
     )
@@ -946,7 +956,7 @@ def archive_stock_detail_page(request: HttpRequest, listing_id: UUID) -> HttpRes
 def archive_prediction_history_page(request: HttpRequest) -> HttpResponse:
     predictions = (
         Prediction.objects.select_related("listing__security__company", "analysis__run", "outcome")
-        .exclude(analysis__run__config_version="research-product-v1")
+        .exclude(analysis__run__config_version__in=_PRODUCT_CONFIG_VERSIONS)
         .order_by("-generated_at", "listing__ticker", "id")[:200]
     )
     return render(
@@ -960,7 +970,7 @@ def archive_prediction_history_page(request: HttpRequest) -> HttpResponse:
 def archive_performance_page(request: HttpRequest) -> HttpResponse:
     groups = list(
         PredictionOutcome.objects.exclude(
-            prediction__analysis__run__config_version="research-product-v1"
+            prediction__analysis__run__config_version__in=_PRODUCT_CONFIG_VERSIONS
         )
         .values(
             "prediction__analysis__run__config_version",

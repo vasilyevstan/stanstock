@@ -1219,10 +1219,18 @@ def _persist_price_series(
     listing: Listing | None,
     resolved_mic_code: str | None = None,
     catalog_assets: list[DataAsset] | None = None,
+    acquisition_context: dict[str, Any] | None = None,
 ) -> DataAsset:
     frame = _price_frame(series)
     digest = hashlib.sha256(series.raw_bytes).hexdigest()
     stamp = _timestamp(series.retrieved_at)
+    if acquisition_context is not None:
+        # Separate fresh C2 attempts even when source bytes and retrieval-clock
+        # precision coincide. Never alter the actual clock or a prior vintage.
+        context_bytes = json.dumps(
+            acquisition_context, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        stamp += "-" + hashlib.sha256(context_bytes).hexdigest()
     safe_symbol = series.symbol.replace(".", "_")
     raw_path = f"raw/twelve_data/time_series/{safe_symbol}/{stamp}-{digest[:12]}.json"
     normalized_path = f"price_history/twelve_data/{safe_symbol}/{stamp}-{digest[:12]}.parquet"
@@ -1247,6 +1255,11 @@ def _persist_price_series(
                     "interval": "1day",
                     "adjustment": series.adjustment,
                     "usage_scope": PRIVATE_USAGE_SCOPE,
+                    **(
+                        {"acquisition_context": dict(acquisition_context)}
+                        if acquisition_context is not None
+                        else {}
+                    ),
                 },
             )
             price_metadata: dict[str, Any] = {
@@ -1263,6 +1276,8 @@ def _persist_price_series(
                 "raw_sha256": raw_asset.sha256,
                 "usage_scope": PRIVATE_USAGE_SCOPE,
             }
+            if acquisition_context is not None:
+                price_metadata["acquisition_context"] = dict(acquisition_context)
             if resolved_mic_code is not None:
                 price_metadata["resolved_mic_code"] = resolved_mic_code
                 price_metadata["mic_code_source"] = (

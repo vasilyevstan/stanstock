@@ -28,6 +28,7 @@ from stanstock.research.affordability import (
     classify_price_band,
 )
 from stanstock.research.config import code_revision
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as PRODUCT_V2
 from stanstock.research.eligibility import STOCK_RESEARCH_SECURITY_TYPES
 from stanstock.research.models import AnalysisRun, StockAnalysis
 from stanstock.research.opportunities import OpportunityAssessment, assess_opportunity
@@ -251,7 +252,7 @@ def build_sample_portfolio(
             "A sample portfolio requires a provider-backed analysis run; "
             "synthetic research cannot seed tracked accuracy."
         )
-    if run.config_version == PRODUCT_VERSION:
+    if run.config_version in (PRODUCT_VERSION, PRODUCT_V2):
         raise PortfolioValuationError(
             "The legacy scored sample builder is not supported by the active momentum method."
         )

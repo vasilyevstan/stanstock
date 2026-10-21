@@ -9,6 +9,8 @@ import pytest
 from django.conf import settings as django_settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from stanstock.core import research_product_refresh
@@ -574,3 +576,36 @@ def test_real_market_failure_blocks_both_downstream_children(
     assert not JobRun.objects.filter(job_name="scheduled_portfolio_snapshots").exists()
     resolve.assert_called_once()
     fetch.assert_called_once()
+
+
+@pytest.mark.parametrize("capture_paper", (False, True))
+def test_optional_paper_unactivated_invocation_is_one_lookup_or_zero(
+    scheduled_environment, capture_paper
+):
+    owner, store, _path, resolve, fetch = scheduled_environment
+    output = StringIO()
+    with CaptureQueriesContext(connection) as queries:
+        call_command("scheduled_refresh", capture_paper=capture_paper, stdout=output)
+    lookups = [query["sql"] for query in queries if "paper_portfolio_v2_activation" in query["sql"]]
+    assert len(lookups) == int(capture_paper)
+    if capture_paper:
+        assert f"current-method-paper-6m-v2:{owner.pk}" in lookups[0]
+        assert "paper_capture status=unactivated captures=0" in output.getvalue()
+    else:
+        assert "paper_capture" not in output.getvalue()
+    assert not JobRun.objects.filter(job_name__startswith="paper_v2:").exists()
+    assert not DataAsset.objects.filter(kind__startswith="paper_portfolio_v2").exists()
+    assert not (store.root / "simulations" / "paper-v2").exists()
+    parent = _parent(owner)
+    assert "paper_capture" not in parent.details
+    assert set(parent.details["stages"]) == {"market", "evaluation", "portfolio_snapshots"}
+    resolve.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_legacy_profile_paper_flag_rejects_without_dispatch_or_writes(settings):
+    settings.RESEARCH_PRODUCT_ENABLED = False
+    with pytest.raises(CommandError, match="requires the native research profile"):
+        call_command("scheduled_refresh", capture_paper=True, stdout=StringIO())
+    assert not JobRun.objects.exists()
+    assert not DataAsset.objects.exists()

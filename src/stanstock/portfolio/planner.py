@@ -35,6 +35,7 @@ from stanstock.portfolio.service import (
     record_portfolio_snapshot,
 )
 from stanstock.research.affordability import latest_price_band
+from stanstock.research.decision_support_eligibility import PRODUCT_VERSION as PRODUCT_V2
 from stanstock.research.eligibility import STOCK_RESEARCH_SECURITY_TYPES
 from stanstock.research.models import AnalysisRun, StockAnalysis
 from stanstock.research.opportunities import OpportunityAssessment, assess_opportunity
@@ -796,7 +797,7 @@ def _qualified_satellite(
     run = latest_provider_backed_analysis_run()
     if run is None:
         return None, "No provider-backed stock analysis is available for a satellite."
-    if run.config_version == PRODUCT_VERSION:
+    if run.config_version in (PRODUCT_VERSION, PRODUCT_V2):
         return (
             None,
             "The active momentum method has no short-horizon satellite lane; cash is carried.",

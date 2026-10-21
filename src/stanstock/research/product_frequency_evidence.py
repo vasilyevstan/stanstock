@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import OperationalError, connection, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
@@ -32,6 +33,15 @@ from stanstock.data.provider_policy import (
     validate_provider_usage,
 )
 from stanstock.research.config import code_revision
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as V2_PRODUCT_VERSION,
+)
+from stanstock.research.decision_support_eligibility import (
+    strict_json,
+)
 from stanstock.research.models import AnalysisRun, Prediction
 from stanstock.research.price_product import (
     PriceProductInputError,
@@ -61,10 +71,13 @@ from stanstock.research.price_product_study import load_price_product_sources
 from stanstock.research.product_pipeline import _jsonable, verify_price_product_output
 
 if TYPE_CHECKING:
+    from stanstock.research.price_product_study import _LoadedStudySource
+    from stanstock.research.product_eligibility_pipeline import VerifiedForecastSource
     from stanstock.research.product_reader import ProductVerificationSession
 
 FREQUENCY_EVIDENCE_KIND = "research_product_frequency_evidence"
 FREQUENCY_EVIDENCE_CONTRACT = "research-product-frequency-evidence@1"
+FREQUENCY_EVIDENCE_V2_CONTRACT = "research-product-frequency-evidence@2"
 FrequencyReadStatus = Literal["available", "absent", "disabled", "integrity_failed", "unauthorized"]
 _HORIZONS = ("6m", "12m", "3y", "5y")
 _DEMO_OWNER_ID = "synthetic-demo"
@@ -99,6 +112,24 @@ _PROJECTION_KEYS = {
     "zero_drift_ledger_prices",
     "insufficiency_reason",
 }
+
+
+def _binding(run: AnalysisRun) -> tuple[str, str]:
+    if run.config_version == PRODUCT_VERSION and run.config_hash == PRODUCT_EFFECTIVE_CONFIG_HASH:
+        return FREQUENCY_EVIDENCE_CONTRACT, PRODUCT_EFFECTIVE_CONFIG_HASH
+    if run.config_version == V2_PRODUCT_VERSION and run.config_hash == V2_CONFIG_HASH:
+        return FREQUENCY_EVIDENCE_V2_CONTRACT, V2_CONFIG_HASH
+    raise ValueError("Frequency source run has an unsupported exact version/config binding")
+
+
+def _verify_source(run: AnalysisRun, *, store: AssetStore) -> None:
+    _binding(run)
+    if run.config_version == V2_PRODUCT_VERSION:
+        from stanstock.research.product_eligibility_pipeline import verify_decision_support_output
+
+        verify_decision_support_output(run=run, store=store, replay=False)
+    else:
+        verify_price_product_output(run=run, store=store, replay=False)
 
 
 class FrequencyViewer(Protocol):
@@ -190,7 +221,9 @@ def _register_product_frequencies(
             )
             payload = _canonical_bytes(document)
             payload_sha256 = hashlib.sha256(payload).hexdigest()
-            relative_path = f"research/frequencies/{PRODUCT_VERSION}/{run.id}/{payload_sha256}.json"
+            relative_path = (
+                f"research/frequencies/{run.config_version}/{run.id}/{payload_sha256}.json"
+            )
             metadata = _metadata(
                 document=document,
                 run=locked_run,
@@ -272,7 +305,11 @@ def read_registered_product_frequencies(
             verification_code="frequency_decision_time_invalid",
         )
     try:
-        expected_owner, expected_provider = _current_authorization(user)
+        expected_owner, expected_provider = (
+            _current_authorization(user, product_version=V2_PRODUCT_VERSION)
+            if run.config_version == V2_PRODUCT_VERSION
+            else _current_authorization(user)
+        )
     except ProviderConfigurationError:
         return ProductFrequencyRead(
             "unauthorized",
@@ -350,6 +387,14 @@ def verify_registered_product_frequencies(*, run: AnalysisRun, store: AssetStore
         raise ValueError("frequency_verify_logical_content_mismatch")
 
 
+def verified_registered_frequency_asset(*, run: AnalysisRun, store: AssetStore) -> DataAsset | None:
+    """Exact physical/row binding for run closure, without Monte Carlo or a serving flag."""
+    asset = _single_asset_for_run(run)
+    if asset is not None:
+        _validate_registered_asset(asset, store=store, expected_run=run, verify_source=True)
+    return asset
+
+
 def _derive_document(
     *,
     run: AnalysisRun,
@@ -359,17 +404,20 @@ def _derive_document(
 ) -> dict[str, Any]:
     """Recreate every count from independently verified immutable inputs."""
 
-    verify_price_product_output(run=run, store=store, replay=False)
+    _verify_source(run, store=store)
     config = load_price_product_config()
-    if (
-        run.config_version != PRODUCT_VERSION
-        or run.config_hash != PRODUCT_EFFECTIVE_CONFIG_HASH
-        or config.product_version != PRODUCT_VERSION
-    ):
-        raise ValueError("Frequency source run does not match the frozen product identity")
-    loaded = load_price_product_sources(
-        run=run, store=store, config=config, requested_listing_ids=()
-    )
+    contract, config_hash = _binding(run)
+    loaded: tuple[_LoadedStudySource | VerifiedForecastSource, ...]
+    if run.config_version == V2_PRODUCT_VERSION:
+        from stanstock.research.product_eligibility_pipeline import (
+            load_verified_v2_forecast_sources,
+        )
+
+        loaded = load_verified_v2_forecast_sources(run=run, store=store)
+    else:
+        loaded = load_price_product_sources(
+            run=run, store=store, config=config, requested_listing_ids=()
+        )
     rows = [
         _derive_listing(source=source, run=run, config=config, store=store) for source in loaded
     ]
@@ -379,13 +427,13 @@ def _derive_document(
     source_execution = loaded[0].source_execution
     if any(source.source_execution != source_execution for source in loaded):
         raise ValueError("Frequency source run mixes execution identities")
-    return {
+    document = {
         "schema": FREQUENCY_SCHEMA,
-        "contract": FREQUENCY_EVIDENCE_CONTRACT,
+        "contract": contract,
         "method_version": FREQUENCY_METHOD_VERSION,
         "method_identity_sha256": method_identity_sha256(),
-        "product_version": PRODUCT_VERSION,
-        "config_hash": PRODUCT_EFFECTIVE_CONFIG_HASH,
+        "product_version": run.config_version,
+        "config_hash": config_hash,
         "path_count": config.simulation.production_paths,
         "owner_id": _owner_id(run=run, store=store),
         "source_provider": (
@@ -405,6 +453,9 @@ def _derive_document(
         "own_deadline_met": False,
         "rows": rows,
     }
+    if run.config_version == V2_PRODUCT_VERSION:
+        document["forecast_config_hash"] = PRODUCT_EFFECTIVE_CONFIG_HASH
+    return document
 
 
 def _published_document(
@@ -446,13 +497,14 @@ def _metadata(
     derived_at: datetime,
     logical_sha256: str,
 ) -> dict[str, object]:
+    contract, config_hash = _binding(run)
     return {
-        "contract": FREQUENCY_EVIDENCE_CONTRACT,
+        "contract": contract,
         "frequency_schema": FREQUENCY_SCHEMA,
         "method_version": FREQUENCY_METHOD_VERSION,
         "method_identity_sha256": method_identity_sha256(),
-        "product_version": PRODUCT_VERSION,
-        "config_hash": PRODUCT_EFFECTIVE_CONFIG_HASH,
+        "product_version": run.config_version,
+        "config_hash": config_hash,
         "source_run_id": str(run.id),
         "source_target_date": run.target_date.isoformat(),
         "source_snapshot_grade": run.universe_snapshot.grade,
@@ -575,7 +627,7 @@ def _frequency_row(
     projected: Any,
     projection_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
+    row = {
         "horizon": frequency.horizon,
         "sessions": frequency.sessions,
         "path_count": frequency.path_count,
@@ -590,6 +642,9 @@ def _frequency_row(
         "method_identity_sha256": method_identity_sha256(),
         "source_assets": source.selection.source_assets,
     }
+    if source.analysis.run.config_version == V2_PRODUCT_VERSION:
+        row["eligibility_input_hash"] = source.prediction_rows[0].calculation["input_hash"]
+    return row
 
 
 def _forecast_from_source(source: Any, *, store: AssetStore) -> Mapping[str, Any]:
@@ -603,7 +658,12 @@ def _forecast_from_source(source: Any, *, store: AssetStore) -> Mapping[str, Any
 
 def _artifact_input_hash(source: Any, *, store: AssetStore) -> str:
     raw = json.loads(read_checksummed_bytes(store, source.calculation_artifact))
-    value = raw.get("input_hash") if isinstance(raw, dict) else None
+    key = (
+        "forecast_input_hash"
+        if source.analysis.run.config_version == V2_PRODUCT_VERSION
+        else "input_hash"
+    )
+    value = raw.get(key) if isinstance(raw, dict) else None
     if not isinstance(value, str):
         raise ValueError("Frequency source artifact input hash is malformed")
     return value
@@ -701,7 +761,8 @@ def _single_asset_for_run(run: AnalysisRun) -> DataAsset | None:
 
 
 def _subject(run: AnalysisRun) -> str:
-    return f"{PRODUCT_VERSION}:frequencies:{run.id}"
+    _binding(run)
+    return f"{run.config_version}:frequencies:{run.id}"
 
 
 def _validate_registered_asset(
@@ -717,7 +778,11 @@ def _validate_registered_asset(
 ) -> dict[str, Any]:
     payload = read_checksummed_bytes(store, asset)
     try:
-        document = json.loads(payload)
+        document = (
+            strict_json(payload)
+            if expected_run.config_version == V2_PRODUCT_VERSION
+            else json.loads(payload)
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Frequency evidence bytes are malformed") from exc
     if not isinstance(document, dict):
@@ -727,6 +792,7 @@ def _validate_registered_asset(
     _require_publication_time(run=expected_run, derived_at=derived_at)
     if decision_time is not None and asset.available_at > decision_time:
         raise ValueError("Frequency evidence was not available at the decision time")
+    contract, config_hash = _binding(expected_run)
     if (
         asset.provider != "stanstock"
         or asset.kind != FREQUENCY_EVIDENCE_KIND
@@ -746,11 +812,11 @@ def _validate_registered_asset(
         raise ValueError("Frequency evidence metadata does not bind its document")
     if (
         document.get("schema") != FREQUENCY_SCHEMA
-        or document.get("contract") != FREQUENCY_EVIDENCE_CONTRACT
+        or document.get("contract") != contract
         or document.get("method_version") != FREQUENCY_METHOD_VERSION
         or document.get("method_identity_sha256") != method_identity_sha256()
-        or document.get("product_version") != PRODUCT_VERSION
-        or document.get("config_hash") != PRODUCT_EFFECTIVE_CONFIG_HASH
+        or document.get("product_version") != expected_run.config_version
+        or document.get("config_hash") != config_hash
         or document["source_run"]["id"] != str(expected_run.id)
     ):
         raise ValueError("Frequency evidence identity is invalid")
@@ -774,7 +840,7 @@ def _validate_registered_asset(
     _verify_reader_row_bindings(parsed=parsed, run=expected_run, document=document)
     if verify_source:
         if verification is None:
-            verify_price_product_output(run=expected_run, store=store, replay=False)
+            _verify_source(expected_run, store=store)
         else:
             verification.verify(run=expected_run, store=store)
     return document
@@ -811,7 +877,14 @@ def _verify_reader_row_bindings(
         calculation = prediction.calculation
         if (
             not isinstance(calculation, Mapping)
-            or raw.get("input_hash") != calculation.get("input_hash")
+            or raw.get("input_hash")
+            != calculation.get(
+                "forecast_input_hash" if run.config_version == V2_PRODUCT_VERSION else "input_hash"
+            )
+            or (
+                run.config_version == V2_PRODUCT_VERSION
+                and raw.get("eligibility_input_hash") != calculation.get("input_hash")
+            )
             or raw.get("source_assets") != prediction.source_assets
             or raw.get("effective_config_hash") != PRODUCT_EFFECTIVE_CONFIG_HASH
             or raw.get("method_identity_sha256") != method_identity_sha256()
@@ -856,7 +929,12 @@ def _read_document(document: Mapping[str, Any]) -> ProductFrequencyRead:
             if horizon not in _HORIZONS or (str(listing_id), horizon) in expected:
                 raise ValueError("Frequency horizon identity is ambiguous")
             if (
-                set(raw) != _FREQUENCY_ROW_KEYS
+                set(raw)
+                != (
+                    _FREQUENCY_ROW_KEYS | {"eligibility_input_hash"}
+                    if document.get("product_version") == V2_PRODUCT_VERSION
+                    else _FREQUENCY_ROW_KEYS
+                )
                 or not isinstance(raw.get("projection"), Mapping)
                 or set(raw["projection"]) != _PROJECTION_KEYS
                 or not isinstance(raw.get("input_hash"), str)
@@ -944,7 +1022,14 @@ def _read_ledger(raw: object) -> tuple[Decimal, Decimal, Decimal] | None:
     return result[0], result[1], result[2]
 
 
-def _current_authorization(user: FrequencyViewer) -> tuple[str, str]:
+def _current_authorization(
+    user: FrequencyViewer, *, product_version: str = PRODUCT_VERSION
+) -> tuple[str, str]:
+    if (
+        product_version == V2_PRODUCT_VERSION
+        and not get_user_model().objects.filter(pk=str(user.pk), is_active=True).exists()
+    ):
+        raise ProviderConfigurationError("V2 frequency owner is inactive")
     if settings.DEMO_MODE:
         return _DEMO_OWNER_ID, "synthetic_demo"
     owner = str(user.pk)
@@ -1049,6 +1134,10 @@ def _validate_document_shape(document: Mapping[str, Any]) -> None:
     }
     source_run = document.get("source_run")
     execution = document.get("execution")
+    if document.get("product_version") == V2_PRODUCT_VERSION:
+        expected.add("forecast_config_hash")
+        if document.get("forecast_config_hash") != PRODUCT_EFFECTIVE_CONFIG_HASH:
+            raise ValueError("V2 frequencies must retain the frozen forecast config/seed")
     if (
         set(document) != expected
         or not isinstance(source_run, Mapping)

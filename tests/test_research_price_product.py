@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
+from unittest.mock import Mock
 from uuid import UUID
 
 import numpy as np
@@ -350,6 +351,154 @@ def test_seed_and_complete_input_hash_have_separate_pinned_encodings() -> None:
         )
         == seed
     )
+
+
+@pytest.fixture
+def f800_input_encoder():
+    import json
+
+    # The f8008c5 document encoding, independent of the reusable encoder.
+    def base_bytes(product_input):
+        def series_payload(series):
+            return {
+                "identity": {
+                    key: value.isoformat() if isinstance(value, datetime) else str(value)
+                    for key, value in asdict(series.identity).items()
+                },
+                "currency": series.currency,
+                "dates": [value.isoformat() for value in series.dates],
+                "closes": [float(value).hex() for value in series.closes],
+                "volumes": (
+                    None
+                    if series.volumes is None
+                    else [None if value is None else float(value).hex() for value in series.volumes]
+                ),
+                "volume_adjustment_compatible": series.volume_adjustment_compatible,
+            }
+
+        document = {
+            "domain": "stanstock-research-product-input-v1",
+            "listing_id": str(product_input.listing_id),
+            "target_date": product_input.target_date.isoformat(),
+            "decision_time": product_input.decision_time.isoformat(),
+            "source_execution": asdict(product_input.source_execution),
+            "calendar_sessions": [value.isoformat() for value in product_input.calendar_sessions],
+            "source_eligible": product_input.source_eligible,
+            "source_ineligibility_reasons": list(product_input.source_ineligibility_reasons),
+            "stock": series_payload(product_input.stock),
+            "benchmark": series_payload(product_input.benchmark),
+        }
+        return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+    return base_bytes
+
+
+def test_exact_run_hasher_preserves_complete_base_bytes_for_every_input_field(
+    monkeypatch, f800_input_encoder
+) -> None:
+    product_input = _product_input()
+    product_input = replace(
+        product_input,
+        benchmark=replace(
+            product_input.benchmark,
+            volumes=tuple(None if index % 7 == 0 else float(index) for index in range(757)),
+        ),
+    )
+    variants = [product_input, product_input]
+    for field, value in {
+        "listing_id": UUID(int=5),
+        "target_date": product_input.target_date - timedelta(days=1),
+        "decision_time": product_input.decision_time + timedelta(seconds=1),
+        "calendar_sessions": product_input.calendar_sessions[:-1],
+        "source_execution": SourceExecutionBinding("synthetic_demo", "research"),
+        "source_eligible": False,
+        "source_ineligibility_reasons": ("missing",),
+    }.items():
+        variants.append(replace(product_input, **{field: value}))
+    variants.append(
+        replace(product_input, source_execution=SourceExecutionBinding("provider", "observed"))
+    )
+    for role in ("stock", "benchmark"):
+        series = getattr(product_input, role)
+        for field, value in {
+            "currency": "EUR",
+            "dates": series.dates[:-1],
+            "closes": (math.nextafter(series.closes[0], math.inf), *series.closes[1:]),
+            "volumes": None if series.volumes is not None else (None,) * 757,
+            "volume_adjustment_compatible": not series.volume_adjustment_compatible,
+        }.items():
+            variants.append(replace(product_input, **{role: replace(series, **{field: value})}))
+        for field, value in {
+            "asset_id": UUID(int=6),
+            "provider": "synthetic_demo",
+            "subject": "OTHER",
+            "sha256": "c" * 64,
+            "retrieved_at": series.identity.retrieved_at + timedelta(seconds=1),
+            "available_at": series.identity.available_at + timedelta(seconds=1),
+        }.items():
+            variants.append(
+                replace(
+                    product_input,
+                    **{role: replace(series, identity=replace(series.identity, **{field: value}))},
+                )
+            )
+    variants.append(product_input)  # Return to the original objects after changed identities.
+    sha256 = price_product_module.hashlib.sha256
+    digest = Mock(wraps=sha256)
+    monkeypatch.setattr(price_product_module.hashlib, "sha256", digest)
+    hasher = price_product_module._CompleteInputHasher()
+    for variant in variants:
+        expected = f800_input_encoder(variant)
+        assert hasher(variant) == sha256(expected).hexdigest()
+        assert digest.call_args.args[0] == expected  # Complete bytes, not component digests.
+
+
+@pytest.mark.parametrize("field", ["calendar_sessions", "benchmark"])
+@pytest.mark.parametrize("public", [False, True], ids=["fresh-hasher", "public-hash"])
+def test_none_input_rejection_matches_f800_encoder(f800_input_encoder, field, public) -> None:
+    product_input = replace(_product_input(), **{field: None})
+    encoder = complete_input_hash if public else price_product_module._CompleteInputHasher()
+    with pytest.raises((TypeError, AttributeError)) as expected:
+        f800_input_encoder(product_input)
+    with pytest.raises(type(expected.value)) as actual:
+        encoder(product_input)
+    assert actual.value.args == expected.value.args and vars(actual.value) == vars(expected.value)
+
+
+def test_exact_run_hasher_reuses_only_its_exact_benchmark_object(monkeypatch) -> None:
+    product_input = _product_input()
+    payload = Mock(wraps=price_product_module._input_series_payload)
+    monkeypatch.setattr(price_product_module, "_input_series_payload", payload)
+    hasher = price_product_module._CompleteInputHasher()
+    original = hasher(product_input)
+    assert hasher(product_input) == original
+    assert payload.call_count == 3  # Both stocks, one benchmark.
+    equivalent = replace(product_input, benchmark=replace(product_input.benchmark))
+    assert equivalent == product_input and equivalent.benchmark is not product_input.benchmark
+    assert hasher(equivalent) == original
+    assert payload.call_count == 5  # Equal copied identity is not reused.
+    assert price_product_module._CompleteInputHasher()(product_input) == original
+    assert payload.call_count == 7  # Another invocation owns no previous representation.
+    assert complete_input_hash(product_input) == complete_input_hash(product_input) == original
+    assert payload.call_count == 11  # Public hashing remains one-shot.
+
+
+@pytest.mark.parametrize("role", ["stock", "benchmark"])
+@pytest.mark.parametrize(
+    "value", [True, None, math.nan, math.inf, -math.inf, pytest.param(10**1000, id="overflow")]
+)
+def test_warm_exact_run_hasher_preserves_numeric_failures(role, value) -> None:
+    product_input = _product_input()
+    hasher = price_product_module._CompleteInputHasher()
+    original = hasher(product_input)
+    series = getattr(product_input, role)
+    changed = replace(product_input, **{role: replace(series, closes=(value, *series.closes[1:]))})
+    with pytest.raises((PriceProductInputError, OverflowError)) as expected:
+        complete_input_hash(changed)
+    with pytest.raises(type(expected.value)) as actual:
+        hasher(changed)
+    assert actual.value.args == expected.value.args and vars(actual.value) == vars(expected.value)
+    assert hasher(product_input) == original
 
 
 @pytest.mark.parametrize(

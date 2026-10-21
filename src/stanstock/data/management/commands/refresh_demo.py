@@ -106,6 +106,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args: object, **options: object) -> None:
+        from stanstock.research.product_reader import current_product_version
+
+        if current_product_version() != "research-product-v1":
+            raise CommandError(
+                "research-product-v2 refuses synthetic_demo; no demo data was seeded"
+            )
         if settings.RESEARCH_PRODUCT_ENABLED:
             from stanstock.data.research_product_demo import END_DATE, execute_demo_product_refresh
 

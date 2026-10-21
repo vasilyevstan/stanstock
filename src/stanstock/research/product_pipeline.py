@@ -57,10 +57,11 @@ from stanstock.research.price_product import (
     PriceProductResult,
     PriceSeries,
     SourceExecutionBinding,
+    _CompleteInputHasher,
     calculate_price_product,
-    complete_input_hash,
     prediction_model_version,
 )
+from stanstock.research.price_product import complete_input_hash as complete_input_hash
 from stanstock.research.price_product_config import (
     FHS_METHOD_VERSION,
     MOMENTUM_METHOD_VERSION,
@@ -432,7 +433,12 @@ def _select_product_source(
                 ),
             )
     stock_series = _series_for_asset(
-        asof=asof, asset=stock, target_date=target_date, config=config, validated_read=stock_read
+        asof=asof,
+        asset=stock,
+        target_date=target_date,
+        config=config,
+        validated_read=stock_read,
+        required_sessions=benchmark_proof[2].dates if benchmark_proof is not None else None,
     )
     benchmark_series = (
         benchmark_proof[2]
@@ -443,6 +449,7 @@ def _select_product_source(
             target_date=target_date,
             config=config,
             validated_read=benchmark_read,
+            required_sessions=stock_series.dates,
         )
     )
     return ProductSourceSelection(
@@ -779,6 +786,7 @@ def verify_price_product_output(
     # Invocation-local validated facts, keyed by BOTH complete source refs and
     # cutoff/target/mode. Never stored on a session or reused across runs/requests.
     benchmark_proofs: dict[tuple[object, ...], tuple[DataAsset, DataAsset, PriceSeries]] = {}
+    input_hasher = _CompleteInputHasher()
     for analysis in by_listing.values():
         _verify_product_rows(
             analysis=analysis,
@@ -793,6 +801,7 @@ def verify_price_product_output(
             config=config,
             catalog_references=catalog_references,
             sources_by_id=sources_by_id,
+            input_hasher=input_hasher,
         )
 
 
@@ -864,6 +873,7 @@ def _verify_product_rows(
     config: PriceProductConfig,
     catalog_references: tuple[_ProductCatalogReference, ...] | None,
     sources_by_id: dict[UUID, DataAsset],
+    input_hasher: _CompleteInputHasher,
 ) -> None:
     keys = {(row.method_version, row.evidence_role, row.horizon) for row in rows}
     expected = {
@@ -969,7 +979,7 @@ def _verify_product_rows(
         ) from exc
     if (
         window_input != selection.product_input
-        or document.get("input_hash") != complete_input_hash(selection.product_input)
+        or document.get("input_hash") != input_hasher(selection.product_input)
         or document.get("source_assets") != selection.source_assets
     ):
         raise RefreshVerificationError(
@@ -1576,6 +1586,7 @@ def _series_for_asset(
     target_date: date,
     config: PriceProductConfig,
     validated_read: PriceFrameRead | None = None,
+    required_sessions: tuple[date, ...] | None = None,
 ) -> PriceSeries:
     read = validated_read or asof.price_frame_for_asset_with_diagnostics(
         asset=asset, through_date=target_date
@@ -1587,7 +1598,13 @@ def _series_for_asset(
     frame = read.frame
     if "close" not in frame.columns:
         raise PriceProductInputError("price_close_missing", "Price evidence has no close column")
-    sessions = _required_sessions(target_date, config.required_closes)
+    # Only the exact-run source selector supplies an already authoritative
+    # calendar, at the same validation point as ordinary calendar construction.
+    sessions = (
+        _required_sessions(target_date, config.required_closes)
+        if required_sessions is None
+        else required_sessions
+    )
     dates = tuple(frame.get_column("date").to_list())
     if len(dates) != len(set(dates)):
         raise PriceProductInputError(

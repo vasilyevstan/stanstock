@@ -58,6 +58,7 @@ class Command(BaseCommand):
             from stanstock.core.research_product_refresh import resolve_scheduled_owner
             from stanstock.data.live_us import resolve_us_target_date
             from stanstock.data.research_product_jobs import execute_daily_research_job
+            from stanstock.research.product_reader import current_product_version
 
             if options["issuance_key"] == "scheduled":
                 raise CommandError("The scheduled issuance identity is reserved for automation")
@@ -71,6 +72,7 @@ class Command(BaseCommand):
                     issuance_key=str(options["issuance_key"]),
                     issued_on_time=False,
                     core_config_path=config_path,
+                    product_version=current_product_version(),
                 )
             except (OSError, ProviderError, ValueError) as exc:
                 raise CommandError(
@@ -78,7 +80,7 @@ class Command(BaseCommand):
                 ) from exc
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"daily research-product-v1 job_run={job.pk} status={job.status} "
+                    f"daily {current_product_version()} job_run={job.pk} status={job.status} "
                     f"region=us target_date={target.isoformat()}"
                 )
             )

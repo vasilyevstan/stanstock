@@ -13,6 +13,7 @@
       <p class="run-stamp opportunity-run-stamp">
         Market date <strong>{{ product.run.target_date }}</strong> ·
         {{ product.evidence_grade|display_label }} · {{ product.provider|display_label }}
+        {% if product.run.config_version == stanstock_eligibility_v2_version %} · {{ product.run.config_version }}{% endif %}
       </p>
     {% endif %}
   </section>
@@ -83,6 +84,9 @@
       <p class="muted opportunity-scenario-note">
         <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
         Advisory only. Action uses the separate 6-month momentum decision.
+        {% if product.run.config_version == stanstock_eligibility_v2_version %}
+          Eligibility v2 requires separate matched-mode activity evidence; advisory projection math and its seed policy remain v1.
+        {% endif %}
       </p>
       {# Each row retains its own semantic labels; these are visual alignment guides. #}
       {% if overview_cards %}

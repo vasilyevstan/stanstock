@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
@@ -69,8 +70,18 @@ from stanstock.data.research_product import (
     verify_product_listing_catalog,
 )
 from stanstock.research.config import code_revision
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,
+)
+from stanstock.research.decision_support_eligibility import (
+    PRODUCT_VERSION as V2_PRODUCT_VERSION,
+)
+from stanstock.research.decision_support_eligibility import (
+    default_decision_support_config_path,
+    load_decision_support_config,
+)
 from stanstock.research.models import AnalysisRun
-from stanstock.research.price_product import PriceProductInputError
+from stanstock.research.price_product import PriceProductInputError, SourceExecutionBinding
 from stanstock.research.price_product_config import (
     PRODUCT_EFFECTIVE_CONFIG_HASH,
     PRODUCT_VERSION,
@@ -81,6 +92,7 @@ from stanstock.research.product_frequency_evidence import register_product_frequ
 from stanstock.research.product_pipeline import (
     _require_observed_commit_deadline,
     select_product_price_asset,
+    select_product_source,
     verify_price_product_output,
 )
 from stanstock.research.service import analyze_snapshot
@@ -89,6 +101,10 @@ RESEARCH_INTAKE_JOB = "research_intake_v1"
 DAILY_RESEARCH_JOB = "daily_research_v1"
 SCHEDULED_RESEARCH_JOB = "scheduled_refresh_research_v1"
 FREQUENCY_RESEARCH_JOB = "research_product_frequency_v1"
+RESEARCH_INTAKE_V2_JOB = "research_intake_v2"
+DAILY_RESEARCH_V2_JOB = "daily_research_v2"
+SCHEDULED_RESEARCH_V2_JOB = "scheduled_refresh_research_v2"
+FREQUENCY_RESEARCH_V2_JOB = "research_product_frequency_v2"
 SHADOW_ACTIVATE_JOB = "shadow_study_activate_v1"
 SHADOW_CLOSE_JOB = "shadow_study_close_v1"
 SHADOW_CAPTURE_JOB = "shadow_study_capture_v1"
@@ -105,15 +121,29 @@ def execute_daily_research_job(
     core_config_path: Path | None = None,
     enforce_rate_limit: bool = True,
     derive_frequencies: bool = True,
+    product_version: str = PRODUCT_VERSION,
 ) -> JobRun:
     """Capture, acquire, admit and issue one recoverable bounded research cohort."""
     if not isinstance(issued_on_time, bool):
         raise ValueError("issued_on_time must be an explicit boolean")
+    if product_version not in (PRODUCT_VERSION, V2_PRODUCT_VERSION):
+        raise ValueError("Unknown explicit research product version")
+    v2 = product_version == V2_PRODUCT_VERSION
+    if v2:
+        from stanstock.data.liquidity_evidence import liquidity_job_identity
+
+        load_decision_support_config()
     user_model = get_user_model()
     if not isinstance(owner, user_model) or not owner.is_active:
         raise ValueError("Research refresh requires an active authenticated owner")
     asset_store = store or open_asset_store()
     identity = {"owner_id": str(owner.pk), "issuance_key": issuance_key, "product": PRODUCT_VERSION}
+    if v2:
+        identity = liquidity_job_identity({"owner_id": str(owner.pk), "issuance_key": issuance_key})
+
+    def require_v2_acquisition_enabled() -> None:
+        if not settings.RESEARCH_PRODUCT_ENABLED:
+            raise ValueError("Research product v2 is disabled; fresh acquisition is not permitted")
 
     def daily_task(run: JobRun) -> JobExecutionResult:
         intake = load_product_intake(
@@ -121,6 +151,7 @@ def execute_daily_research_job(
             owner_id=str(owner.pk),
             issuance_key=issuance_key,
             store=asset_store,
+            product_version=product_version,
         )
         if intake is not None:
             completed = _completed_product_run(intake, store=asset_store)
@@ -129,11 +160,31 @@ def execute_daily_research_job(
                 if derive_frequencies:
                     register_product_frequencies(run=completed, store=asset_store)
                 return JobExecutionResult(details=_daily_details(intake, completed, recovered=True))
+        if v2 and intake is None:
+            # Without an intake, neither completed output nor a closed batch can be recovered.
+            require_v2_acquisition_enabled()
         resolve_us_target_date(decision_time=timezone.now(), explicit_target=target_date)
         if issued_on_time:
-            _require_observed_commit_deadline(
-                target_date=target_date, code_revision=code_revision()
-            )
+            if v2:
+                from stanstock.research.product_eligibility_pipeline import (
+                    _require_observed_deadline,
+                )
+
+                _require_observed_deadline(target_date=target_date, revision=code_revision())
+            else:
+                _require_observed_commit_deadline(
+                    target_date=target_date, code_revision=code_revision()
+                )
+        declaration = None
+        if v2:
+            from stanstock.research.forward_scorecard import require_v2_forward_declaration
+
+            declaration = require_v2_forward_declaration(
+                owner_id=str(owner.pk),
+                target_date=target_date,
+                before=timezone.now(),
+                store=asset_store,
+            ).asset
         path = core_config_path or default_us_universe_config_path()
         if intake is None:
             intake = capture_authorized_product_intake(
@@ -142,9 +193,10 @@ def execute_daily_research_job(
                 issuance_key=issuance_key,
                 owner=owner,
                 core_config_path=path,
-                policy_identity=PRODUCT_EFFECTIVE_CONFIG_HASH,
+                policy_identity=V2_CONFIG_HASH if v2 else PRODUCT_EFFECTIVE_CONFIG_HASH,
                 captured_at=timezone.now(),
                 store=asset_store,
+                product_version=product_version,
             )
         captured = product_intake_payload(intake, store=asset_store)
         if captured["evidence_grade"] != ("observed" if issued_on_time else "research"):
@@ -164,16 +216,38 @@ def execute_daily_research_job(
                 return JobExecutionResult(
                     details={"snapshot_id": str(snapshot.id), "recovered": True}
                 )
+            if v2:
+                from stanstock.data.liquidity_evidence import recover_liquidity_batch
+
+                closed = recover_liquidity_batch(
+                    intake=intake, cutoff=timezone.now(), store=asset_store
+                )
+                if closed is not None:
+                    return _materialize_closed_liquidity(
+                        intake=intake, closed=closed, store=asset_store
+                    )
+                require_v2_acquisition_enabled()
+                if declaration is None:
+                    raise ValueError("V2 acquisition lost its separately verified declaration")
+                _child.details = {
+                    "intake_asset": asset_ref_for(intake.asset).to_json(),
+                    "forward_declaration": asset_ref_for(declaration).to_json(),
+                }
+                _child.save(update_fields=["details"])
             return _acquire_product_membership(
                 intake=intake,
                 target_date=target_date,
                 core_config_path=path,
                 store=asset_store,
                 enforce_rate_limit=enforce_rate_limit,
+                liquidity_job=_child if v2 else None,
+                forward_declaration=declaration,
             )
 
         child = execute_target_job(
-            job_name=product_job_name(RESEARCH_INTAKE_JOB, identity),
+            job_name=product_job_name(
+                RESEARCH_INTAKE_V2_JOB if v2 else RESEARCH_INTAKE_JOB, identity
+            ),
             region="us",
             target_date=target_date,
             task=intake_task,
@@ -197,7 +271,9 @@ def execute_daily_research_job(
             provider=TWELVE_DATA_PROVIDER,
             benchmark_subject="SPY",
             store=asset_store,
-            config_path=default_price_product_config_path(),
+            config_path=default_decision_support_config_path()
+            if v2
+            else default_price_product_config_path(),
         )
         completed = _completed_product_run(intake, store=asset_store)
         if completed is None:
@@ -217,7 +293,9 @@ def execute_daily_research_job(
         with suppress_http_client_request_logs():
             validate_provider_usage(_provider_record(require_enabled=False))
             job = execute_target_job(
-                job_name=product_job_name(DAILY_RESEARCH_JOB, identity),
+                job_name=product_job_name(
+                    DAILY_RESEARCH_V2_JOB if v2 else DAILY_RESEARCH_JOB, identity
+                ),
                 region="us",
                 target_date=target_date,
                 task=daily_task,
@@ -229,6 +307,7 @@ def execute_daily_research_job(
                     owner_id=str(owner.pk),
                     issuance_key=issuance_key,
                     store=asset_store,
+                    product_version=product_version,
                 )
                 if intake is None:
                     raise ValueError("Completed research job has no registered intake")
@@ -247,6 +326,8 @@ def _acquire_product_membership(
     core_config_path: Path,
     store: AssetStore,
     enforce_rate_limit: bool,
+    liquidity_job: JobRun | None = None,
+    forward_declaration: DataAsset | None = None,
 ) -> JobExecutionResult:
     config = load_us_universe_config(core_config_path)
     captured = product_intake_payload(intake, store=store)
@@ -369,9 +450,36 @@ def _acquire_product_membership(
                 "evidence_invalid", "price_evidence_invalid", listings[symbol]
             )
 
+    liquidity_entries = None
+    freshly_paired: set[str] = set()
+    if intake.product_version == V2_PRODUCT_VERSION:
+        from stanstock.data.liquidity_evidence import acquire_liquidity_pairs
+
+        if liquidity_job is None or forward_declaration is None:
+            raise ValueError("V2 acquisition requires its original job and prior declaration")
+        liquidity_entries = acquire_liquidity_pairs(
+            intake=intake,
+            job=liquidity_job,
+            listings=listings,
+            references={symbol: references[symbol][0] for symbol in listings},
+            split_assets=selected,
+            request_key=request_key,
+            preflight=lambda count: budget.preflight(
+                count + int(config.benchmark_symbol in missing)
+            ),
+            history_start=target_date - timedelta(days=366 * config.history_years),
+            target_date=target_date,
+            store=store,
+        )
+        freshly_paired = {
+            entry["symbol"] for entry in liquidity_entries if entry["split_asset"] is not None
+        }
+
     # Every cache candidate has been inspected before a key or price credit
     # is requested. Each unresolved symbol appears only once in this list.
     for symbol in missing:
+        if symbol in freshly_paired:
+            continue
         candidate_listing = listings.get(symbol)
         fetched_asset: DataAsset | None = None
         try:
@@ -434,15 +542,61 @@ def _acquire_product_membership(
     decision_time = timezone.now()
     for symbol in tuple(selected):
         try:
-            selected[symbol] = select_product_price_asset(
-                asof=AsOfData(decision_time, store),
-                subject=symbol,
-                target_date=target_date,
-                config=product_config,
-                store=store,
-                provider=TWELVE_DATA_PROVIDER,
+            if symbol in freshly_paired:
+                # Keep this attempt's exact native split reference, even if
+                # a prior attempt has equal timestamp precision. Qualification
+                # still uses the unchanged public stock/SPY price interface.
+                select_product_source(
+                    listing=listings[symbol],
+                    target_date=target_date,
+                    decision_time=decision_time,
+                    provider=TWELVE_DATA_PROVIDER,
+                    benchmark_subject=config.benchmark_symbol,
+                    store=store,
+                    config=product_config,
+                    stock_asset=selected[symbol],
+                    benchmark_asset=selected[config.benchmark_symbol],
+                    catalog_assets=tuple(catalogs),
+                    source_execution=SourceExecutionBinding(
+                        mode="provider",
+                        evidence_grade="observed"
+                        if captured["evidence_grade"] == "observed"
+                        else "research",
+                    ),
+                )
+            else:
+                selected[symbol] = select_product_price_asset(
+                    asof=AsOfData(decision_time, store),
+                    subject=symbol,
+                    target_date=target_date,
+                    config=product_config,
+                    store=store,
+                    provider=TWELVE_DATA_PROVIDER,
+                )
+        except PriceProductInputError as exc:
+            if symbol not in freshly_paired:
+                if symbol == config.benchmark_symbol:
+                    raise ValueError("Benchmark evidence changed during research intake") from None
+                selected.pop(symbol)
+                admissions[symbol] = _admission(
+                    "evidence_invalid", "price_evidence_changed_during_intake", listings[symbol]
+                )
+                continue
+            fetched = selected.pop(symbol)
+            admissions[symbol] = _admission(
+                "insufficient_history"
+                if exc.reason_code == "price_history_insufficient"
+                else "evidence_invalid",
+                exc.reason_code,
+                listings[symbol],
+                fetched,
+                bootstrap_attempted=True,
             )
-        except (PriceProductInputError, RefreshVerificationError, ValueError, ProviderError):
+            if exc.reason_code == "price_history_insufficient":
+                admissions[symbol]["history_qualification"] = _history_shortfall(
+                    asset=fetched, target_date=target_date, store=store
+                )
+        except (RefreshVerificationError, ValueError, ProviderError):
             if symbol == config.benchmark_symbol:
                 raise ValueError("Benchmark evidence changed during research intake") from None
             selected.pop(symbol)
@@ -476,10 +630,31 @@ def _acquire_product_membership(
                 )
                 qualified.append(listing.id)
         states[listing.id] = admissions[symbol]["status"]
+    liquidity_batch = None
+    if liquidity_entries is not None:
+        from stanstock.data.liquidity_evidence import close_liquidity_batch
+
+        if liquidity_job is None:
+            raise ValueError("V2 closure lost its original acquisition job")
+        liquidity_job.details["liquidity_admissions"] = admissions
+        liquidity_job.save(update_fields=["details"])
+        liquidity_batch = close_liquidity_batch(
+            intake=intake,
+            job=liquidity_job,
+            entries=liquidity_entries,
+            catalog_assets=tuple(catalogs),
+            benchmark_asset=selected[config.benchmark_symbol],
+            cutoff=decision_time,
+            store=store,
+        )
     if not qualified:
         return JobExecutionResult(
             status=JobRun.Status.NO_DATA,
-            details={"admissions": admissions, "credits_used": credits},
+            details={
+                **(liquidity_job.details if liquidity_job is not None else {}),
+                "admissions": admissions,
+                "credits_used": credits,
+            },
         )
     snapshot = materialize_product_membership(
         intake=intake,
@@ -488,17 +663,63 @@ def _acquire_product_membership(
         admissions=admissions,
         catalog_assets=tuple(catalogs),
         benchmark_asset=selected[config.benchmark_symbol],
-        captured_at=decision_time,
+        captured_at=liquidity_batch.available_at if liquidity_batch is not None else decision_time,
         store=store,
+        liquidity_batch=liquidity_batch,
+        forward_declaration=forward_declaration,
     )
     return JobExecutionResult(
         details={
+            **(liquidity_job.details if liquidity_job is not None else {}),
             "snapshot_id": str(snapshot.id),
             "intake_asset": asset_ref_for(intake.asset).to_json(),
             "credits_used": credits,
             "admitted": len(qualified),
             "pending_or_rejected": len(admissions) - len(qualified),
         }
+    )
+
+
+def _materialize_closed_liquidity(
+    *, intake: CapturedProductIntake, closed: Any, store: AssetStore
+) -> JobExecutionResult:
+    """Resume one verified whole original attempt; never combine partial attempts."""
+    document = closed.document
+    admissions = document["forecast_admissions"]
+    qualified = [
+        UUID(entry["listing_id"]) for entry in admissions.values() if entry["status"] == "admitted"
+    ]
+    if not qualified:
+        return JobExecutionResult(
+            status=JobRun.Status.NO_DATA,
+            details={"admissions": admissions, "credits_used": 0, "recovered": True},
+        )
+    cutoff = closed.asset.available_at
+    snapshot = materialize_product_membership(
+        intake=intake,
+        qualified_listing_ids=qualified,
+        candidate_states={
+            UUID(entry["listing_id"]): entry["status"]
+            for entry in admissions.values()
+            if entry["listing_id"] is not None
+        },
+        admissions=admissions,
+        catalog_assets=tuple(
+            resolve_asset_ref(AssetRef.from_json(ref), cutoff=cutoff)
+            for ref in document["catalog_assets"]
+        ),
+        benchmark_asset=resolve_asset_ref(
+            AssetRef.from_json(document["benchmark_asset"]), cutoff=cutoff
+        ),
+        captured_at=cutoff,
+        store=store,
+        liquidity_batch=closed.asset,
+        forward_declaration=resolve_asset_ref(
+            AssetRef.from_json(document["forward_declaration"]), cutoff=cutoff
+        ),
+    )
+    return JobExecutionResult(
+        details={"snapshot_id": str(snapshot.id), "credits_used": 0, "recovered": True}
     )
 
 
@@ -546,7 +767,7 @@ def _snapshot_for_intake(
 ) -> UniverseSnapshot | None:
     snapshots = list(
         UniverseSnapshot.objects.filter(
-            universe__slug=f"{PRODUCT_VERSION}-{intake.asset.sha256[:16]}"
+            universe__slug=f"{intake.product_version}-{intake.asset.sha256[:16]}"
         ).select_related("universe")
     )
     if len(snapshots) > 1:
@@ -568,15 +789,22 @@ def _completed_product_run(
     runs = list(
         AnalysisRun.objects.filter(
             universe_snapshot=snapshot,
-            config_version=PRODUCT_VERSION,
-            config_hash=PRODUCT_EFFECTIVE_CONFIG_HASH,
+            config_version=intake.product_version,
+            config_hash=V2_CONFIG_HASH
+            if intake.product_version == V2_PRODUCT_VERSION
+            else PRODUCT_EFFECTIVE_CONFIG_HASH,
         )
     )
     if len(runs) > 1:
         raise ValueError("Captured research intake has conflicting completed analyses")
     if not runs:
         return None
-    verify_price_product_output(run=runs[0], store=store)
+    if intake.product_version == V2_PRODUCT_VERSION:
+        from stanstock.research.product_eligibility_pipeline import verify_decision_support_output
+
+        verify_decision_support_output(run=runs[0], store=store)
+    else:
+        verify_price_product_output(run=runs[0], store=store)
     return runs[0]
 
 
@@ -619,6 +847,10 @@ def product_job_name(kind: str, identity: dict[str, str]) -> str:
         SHADOW_CLOSE_JOB,
         SHADOW_CAPTURE_JOB,
         SHADOW_EVALUATE_JOB,
+        RESEARCH_INTAKE_V2_JOB,
+        DAILY_RESEARCH_V2_JOB,
+        SCHEDULED_RESEARCH_V2_JOB,
+        FREQUENCY_RESEARCH_V2_JOB,
     }:
         raise ValueError("Unknown research product job kind")
     digest = hashlib.sha256(

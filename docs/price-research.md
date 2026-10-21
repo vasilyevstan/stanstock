@@ -6,6 +6,10 @@ This is the normative public explanation of `research-product-v1`. The product
 uses two deterministic operators. It is not an LLM, fitted model, paper
 replication, fair-value engine, or trading system.
 
+The separately versioned `research-product-v2` changes only liquidity-input
+evidence and its eligibility binding, as described below. It does not replace
+the frozen v1 specification or introduce another forecast operator.
+
 ## Output contract
 
 For each qualified listing:
@@ -97,9 +101,55 @@ Nominal price never increases conviction. Under $10 adds
 `speculative_watch_0_percent_new_allocation` and blocks BUY promotion without
 changing raw direction.
 
-The current Twelve Data source documents split-adjusted prices but does not
+The frozen v1 Twelve Data source documents split-adjusted prices but does not
 prove compatible volume adjustment. That missing provenance can keep turnover
 unavailable and BUY blocked even when direction and projections calculate.
+
+## Version 2: purpose-qualified liquidity
+
+V2 uses `config/scoring/research-product-v2.yml`, a
+`us-relative-momentum-v2` decision and the same four `us-price-fhs-v1`
+advisories. It calculates the frozen numerical operator once, retains its
+forecast input hash and v1 seed configuration, and composes only the new
+liquidity result. Its separate complete input hash binds that eligibility
+evidence; it does not reseed FHS or create an auxiliary v1 issuance.
+The `.yml` file contains reviewed JSON: duplicate keys, nonfinite values,
+YAML features and substitutions of the pinned field types are rejected.
+
+For the exact 20 XNYS sessions ending at the target, independently verified
+`none` and `splits` raw responses must agree on Decimal closes and integer
+share volumes. Float64 equality is insufficient. The eligible activity proxy
+is the arithmetic mean of those 20 closing-price-times-volume products:
+it is not the sum of actual transaction dollars. Numeric zero remains zero;
+missing values, wrong identities/bases, gaps, future evidence and
+nonrepresentable arithmetic remain explicit rather than becoming zeros.
+The existing $5 million threshold and every other BUY gate are unchanged.
+
+A fresh same-batch NVDA control uses the known June 2024 ten-for-one split:
+in five pre-split sessions, `none` closes must exceed `splits` closes and
+`splits` volume must equal ten times `none` volume. Five post-split sessions
+must match exactly. Its long `none`
+request replaces the ordinary short NVDA request. It does not add another
+provider or an extra canary request. A failed, missing or non-distinguishing
+control withholds liquidity for the entire batch and stops further
+liquidity-only requests; independently valid split-price research continues.
+This bounded canary is not a universal guarantee of provider mode behavior.
+
+`none` raw and normalized assets have disjoint liquidity-only kinds. They
+never become forecast, momentum, price-gate, `LatestMarketData`, valuation,
+portfolio or paper-mark sources. A separately registered closed batch binds
+every captured candidate, status and reason to its actual sources and clocks.
+The original core/saved denominator stays visible; there is no joint
+availability floor, forced BUY count or profitability gate. Malformed
+persisted evidence fails integrity verification instead of becoming HOLD.
+
+V1 remains readable and reproducible with its original config, reasons and
+successful/withheld payloads. Current selection defaults to v1; v2 has no demo
+generator and requires its own prospective forward declaration before fresh
+provider-backed acquisition or issuance. Historical reads dispatch by the
+captured version. Old study, shadow, drift, candidate and paper protocols
+remain v1-bound; this correction neither promotes a method from inspected
+retrospective results nor establishes stock-selection skill.
 
 ## Opportunities shortlists
 
@@ -389,6 +439,38 @@ The report records separately:
 - source generation/cutoff/retrieval identity;
 - report generation time; and
 - actual registration availability.
+
+### October 2026 retained-data checkpoint
+
+An unchanged-protocol, read-only replay covered all 105 admitted stock/SPY
+pairs in the retained source. It acquired no replacement history, created no
+observed predictions, and did not register or activate a study. The complete
+report remains private; the following are aggregate research results, not
+redistributed source observations.
+
+| Final-holdout horizon | Paired observations / target cohorts | Median MAE: FHS / zero-drift Gaussian | Interval score: FHS / zero-drift Gaussian |
+|---|---|---|---|
+| 6m | 315 / 3 | 0.229232 / 0.221503 | 0.835121 / 0.810425 |
+| 12m | 105 / 1 | 0.449404 / 0.395600 | 1.703121 / 1.513907 |
+
+Scores use cumulative price returns and are rounded to six decimal places.
+Both metrics are lower-is-better: FHS was worse than the zero-log-drift
+Gaussian on this paired scope. Against the historical-log-drift Gaussian,
+FHS had slightly lower median MAE but a worse interval score at both horizons.
+There were no eligible three- or five-year empirical anchors.
+
+Only one development six-month cohort had paired support. Positive, negative
+and mixed momentum directions each occurred in all three final six-month
+cohorts; those groups do not create additional independent market trials.
+Relative-direction correctness and AVOID success are different: the latter
+also requires the stock itself to decline. HOLD has no action-success label.
+
+This is current-universe/current-vintage reconstruction, not observed skill
+or a pristine untouched holdout. Listing counts, simulated paths and model
+review agreement do not resolve its small, dependent temporal support.
+No parameters, thresholds, drift assumption or allocation weights were tuned;
+the results do not promote a replacement method. Any alternative selected
+after inspecting them needs genuinely future evaluation.
 
 ## Observed forward evaluation
 

@@ -145,7 +145,9 @@ def replay_recorded_scheduled_refresh(parent: JobRun) -> ReplayedScheduledRefres
     consulted.
     """
     persisted = JobRun.objects.filter(pk=parent.pk).first()
-    if persisted is not None and persisted.job_name.startswith("scheduled_refresh_research_v1:"):
+    if persisted is not None and persisted.job_name.startswith(
+        ("scheduled_refresh_research_v1:", "scheduled_refresh_research_v2:")
+    ):
         from stanstock.core.research_product_refresh import (
             replay_recorded_research_product_refresh,
         )

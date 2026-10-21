@@ -157,6 +157,7 @@ from stanstock.research.under10 import (
 )
 
 if TYPE_CHECKING:
+    from stanstock.research.product_eligibility_pipeline import ProductEligibilityPersistedAnalysis
     from stanstock.research.product_pipeline import ProductPersistedAnalysis
 
 #: `data_quality` key carrying the unactivated Under-$10 shadow assessment.
@@ -2227,7 +2228,7 @@ def analyze_snapshot(
     sample_support: dict[str, int] | None = None,
     output_paths: AnalysisOutputPaths | None = None,
     long_forecast_requested: bool | None = None,
-) -> Sequence[PersistedAnalysis | ProductPersistedAnalysis]:
+) -> Sequence[PersistedAnalysis | ProductPersistedAnalysis | ProductEligibilityPersistedAnalysis]:
     """Analyze every eligible member of `universe_snapshot`.
 
     An OBSERVED-grade `universe_snapshot` produces exactly one
@@ -2265,6 +2266,27 @@ def analyze_snapshot(
         raise ValueError("long_forecast_requested must be a boolean")
     if issued_on_time is not None and not isinstance(issued_on_time, bool):
         raise ValueError("issued_on_time must be a boolean when supplied")
+    from stanstock.research.decision_support_eligibility import default_decision_support_config_path
+
+    if (
+        config_path is not None
+        and config_path.resolve() == default_decision_support_config_path().resolve()
+    ):
+        from stanstock.research.product_eligibility_pipeline import issue_decision_support_snapshot
+
+        if benchmark_subject is None:
+            raise ValueError("research-product-v2 requires an explicit benchmark_subject")
+        return issue_decision_support_snapshot(
+            universe_snapshot=universe_snapshot,
+            decision_time=generated_at,
+            target_date=target_date or generated_at.date(),
+            provider=provider,
+            benchmark_subject=benchmark_subject,
+            store=store or open_asset_store(),
+            code_revision=code_revision(),
+            issued_on_time=issued_on_time is True,
+            output_paths=output_paths,
+        )
     if (
         config_path is not None
         and config_path.resolve() == default_price_product_config_path().resolve()
