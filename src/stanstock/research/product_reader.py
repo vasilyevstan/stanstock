@@ -466,7 +466,7 @@ def read_research_product_performance(
     Shares selection, rights, exact-run verification and error mapping with
     full history. No historical frequency/card/promotion hydration is implied.
     """
-    from stanstock.data.providers.twelve_data import _reuse_admitted_price_rows
+    from stanstock.data.research_product import _reuse_admitted_price_rows
 
     with _reuse_admitted_price_rows():
         result = _read_product_history(

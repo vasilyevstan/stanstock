@@ -179,6 +179,7 @@ def test_raw_identity_failure_precedes_close_conversion(tmp_path, monkeypatch):
 
 
 def test_row_reuse_is_local_and_never_replaces_physical_or_normalized_proof(tmp_path, monkeypatch):
+    assert research_product._reuse_admitted_price_rows is twelve_data._reuse_admitted_price_rows
     source = _verification_source(tmp_path)
     admission = Mock(wraps=twelve_data._required_decimal)
     reads = Mock(wraps=source["store"].read_bytes)
@@ -187,7 +188,7 @@ def test_row_reuse_is_local_and_never_replaces_physical_or_normalized_proof(tmp_
     for _ in range(2):
         admission.reset_mock()
         reads.reset_mock()
-        with twelve_data._reuse_admitted_price_rows():
+        with research_product._reuse_admitted_price_rows():
             research_product._verify_product_price_content(**source)
             research_product._verify_product_price_content(**source)
             assert admission.call_count == 1758
