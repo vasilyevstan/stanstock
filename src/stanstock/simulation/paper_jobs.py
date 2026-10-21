@@ -15,7 +15,7 @@ from stanstock.core.models import JobRun
 from stanstock.data.asof import PriceFrameChecksumMismatchError
 from stanstock.data.assets import AssetStore
 from stanstock.data.models import DataAsset
-from stanstock.data.providers.exceptions import ProviderError
+from stanstock.data.provider_policy import ProviderError
 from stanstock.research.forward_scorecard import PROTOCOL_EPOCH
 from stanstock.research.product_reader import ProductUser
 from stanstock.simulation.paper import _calendar

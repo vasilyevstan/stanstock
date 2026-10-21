@@ -135,6 +135,29 @@ def _assert_no_generic_rows():
         assert model.objects.count() == 0, model.__name__
 
 
+def test_provider_error_facade_preserves_identity_hierarchy_and_sanitization():
+    from stanstock.data import provider_policy
+    from stanstock.data.providers import exceptions
+
+    assert provider_policy.ProviderError is exceptions.ProviderError
+    assert paper_v2.ProviderError is provider_policy.ProviderError
+    assert paper_jobs.ProviderError is provider_policy.ProviderError
+    for error_type in (
+        exceptions.ProviderError,
+        exceptions.ProviderConfigurationError,
+        exceptions.ProviderNetworkError,
+        exceptions.ProviderBlockedError,
+        exceptions.ProviderQuotaError,
+        exceptions.ProviderResponseError,
+        exceptions.ProviderDataError,
+    ):
+        error = error_type("private synthetic provider error")
+        assert isinstance(error, provider_policy.ProviderError)
+        sanitized = paper_jobs._safe_error(error)
+        assert sanitized.reason_code == "paper_v2_integrity_invalid"
+        assert str(sanitized) == "Paper v2 evidence withheld (paper_v2_integrity_invalid)"
+
+
 def test_v2_persistence_reader_command_terminal_survives_gap(environment, monkeypatch):
     """One real source -> persistence -> strict requery -> actual CLI flow."""
     owner, store, _run = environment
@@ -495,6 +518,11 @@ def test_full_basis_not_endpoints_and_no_corruption_fallback(environment, monkey
     assert DataAsset.objects.filter(kind=paper_v2.EXECUTION_KIND).count() == 1
     assert winner.period_end == session
     assert "private synthetic parser text" not in result.child.error
+    if case == "malformed_raw_with_valid_checksum":
+        assert result.reason_code == "paper_v2_source_unverified"
+        assert result.child.error == (
+            "PaperV2Error: Paper v2 evidence withheld (paper_v2_source_unverified)"
+        )
 
 
 @pytest.mark.parametrize("false_bounds", (False, True))

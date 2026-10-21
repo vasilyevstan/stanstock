@@ -7,6 +7,7 @@ from stanstock.data.providers import sec, twelve_data
 from stanstock.data.providers.exceptions import (
     ProviderConfigurationError as ProviderConfigurationError,
 )
+from stanstock.data.providers.exceptions import ProviderError as ProviderError
 
 #: Canonical SEC provider identifier, re-exported at the provider-policy
 #: boundary so research code can qualify SEC evidence without importing the
