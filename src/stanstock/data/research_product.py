@@ -42,6 +42,9 @@ from stanstock.data.provider_policy import TWELVE_DATA_PROVIDER, validate_provid
 from stanstock.data.providers import twelve_data
 from stanstock.data.providers.contracts import StockReference
 from stanstock.data.providers.exceptions import ProviderError
+from stanstock.data.providers.twelve_data import (
+    _reuse_admitted_price_rows as _reuse_admitted_price_rows,
+)
 from stanstock.portfolio.models import TrackedSymbol
 from stanstock.research.decision_support_eligibility import (
     PRODUCT_EFFECTIVE_CONFIG_HASH as V2_CONFIG_HASH,

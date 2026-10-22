@@ -50,6 +50,20 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Growing histories can hide rolling-window reuse failures.** A leading-row
+  miss disabled reuse even when later rows matched; favorable growing-history
+  controls missed the retained histories' shifted starts. Cover fixed-length,
+  oldest-first windows with values tied to absolute dates, changed leading
+  rows, and true zero-overlap controls. Check actual native work counters and
+  bounded memory before attributing latency savings or spending another long
+  CI cycle; a faster unchanged run does not establish a runtime cause.
+- **Source-only timing does not accept an installed rollout.** A passing
+  isolated screen was followed by an installed repeat-request failure.
+  Preserve both results and require each complete installed fresh/repeat
+  request to meet its budget. Restore a verified listener promptly after
+  stopping the old one; on failed acceptance, restore the prior committed
+  source against the same current data, preserving compatible guards,
+  identities, scheduler, and exact session/fence cleanup.
 - **Captured versions govern every consumer, not only product readers.**
   A legacy holdings classifier recognized only v1 and rendered a scoreless
   v2 decision as `BUY None/100`. Recognize every supported current-method

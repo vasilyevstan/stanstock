@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -53,6 +55,21 @@ DEFAULT_USER_AGENT = (
 )
 MAX_OUTPUT_SIZE = 5_000
 SUPPORTED_ADJUSTMENTS = frozenset({"all", "splits", "dividends", "none"})
+
+type _AdmittedRows = dict[date, tuple[tuple[object, ...], Decimal, int | None]]
+_ROW_ADMISSIONS: ContextVar[dict[str, _AdmittedRows | None] | None] = ContextVar(
+    "twelve_data_row_admissions", default=None
+)
+
+
+@contextmanager
+def _reuse_admitted_price_rows() -> Iterator[None]:
+    """Reuse pure successful row admission only within one complete reader call."""
+    token = _ROW_ADMISSIONS.set({})
+    try:
+        yield
+    finally:
+        _ROW_ADMISSIONS.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +223,7 @@ def _parse_daily_price_projection(
         end_date=end_date,
         adjustment=adjustment,
         projection=True,
+        decoded_rows=True,
     )
 
 
@@ -262,6 +280,7 @@ def _parse_price_payload(
     end_date: date | None,
     adjustment: str,
     projection: bool,
+    decoded_rows: bool = False,
 ) -> _ParsedDailyPrices:
     normalized_symbol = symbol
     try:
@@ -289,6 +308,7 @@ def _parse_price_payload(
             start_date=start_date,
             end_date=end_date,
             projection=projection,
+            decoded_rows=decoded_rows,
         )
     except ProviderResponseError as exc:
         raise ProviderDataError(str(exc)) from exc
@@ -548,6 +568,24 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
+def _same_admitted_row(row: dict[str, Any], fields: tuple[object, ...]) -> bool:
+    """Compare only immutable decoded scalars, without coercion or hashing."""
+    return (
+        type(value := row.get("volume")) is type(fields[5])
+        and value == fields[5]
+        and type(value := row.get("close")) is type(fields[4])
+        and value == fields[4]
+        and type(value := row.get("datetime")) is type(fields[0])
+        and value == fields[0]
+        and type(value := row.get("open")) is type(fields[1])
+        and value == fields[1]
+        and type(value := row.get("high")) is type(fields[2])
+        and value == fields[2]
+        and type(value := row.get("low")) is type(fields[3])
+        and value == fields[3]
+    )
+
+
 def _parse_bars(
     rows: list[object],
     *,
@@ -555,10 +593,17 @@ def _parse_bars(
     start_date: date | None,
     end_date: date | None,
     projection: bool,
+    decoded_rows: bool = False,
 ) -> tuple[tuple[PriceBar, ...], tuple[tuple[date, Decimal, int | None], ...]]:
     bars: list[PriceBar] = []
     values: list[tuple[date, Decimal, int | None]] = []
     seen_dates: set[date] = set()
+    # Only the bytes->JSON projection producer enables reuse. Direct payload
+    # callers may supply mutable/custom coercible objects; never cache them.
+    admission_scope = _ROW_ADMISSIONS.get() if projection and decoded_rows else None
+    previous = admission_scope.get(symbol, {}) if admission_scope is not None else None
+    admitted: _AdmittedRows = {}
+    reused = False
     for index, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
             raise ProviderResponseError(f"Twelve Data row {index} for {symbol!r} was not an object")
@@ -582,11 +627,28 @@ def _parse_bars(
             raise ProviderResponseError(
                 f"Twelve Data returned {trade_date} after requested end {end_date} for {symbol!r}"
             )
-        open_price = _optional_decimal(raw_row.get("open"), field="open", symbol=symbol)
-        high = _optional_decimal(raw_row.get("high"), field="high", symbol=symbol)
-        low = _optional_decimal(raw_row.get("low"), field="low", symbol=symbol)
-        close = _required_decimal(raw_row.get("close"), field="close", symbol=symbol)
-        volume = _optional_volume(raw_row.get("volume"), symbol=symbol)
+        cached = None
+        if previous is not None:
+            # The validated date only locates a candidate; every consumed
+            # value and exact type must still match its successful admission.
+            cached = previous.get(trade_date)
+            if cached is not None and _same_admitted_row(raw_row, cached[0]):
+                _, close, volume = cached
+                values.append((trade_date, close, volume))
+                seen_dates.add(trade_date)
+                admitted[trade_date] = cached
+                reused = True
+                continue
+        open_value = raw_row.get("open")
+        open_price = _optional_decimal(open_value, field="open", symbol=symbol)
+        high_value = raw_row.get("high")
+        high = _optional_decimal(high_value, field="high", symbol=symbol)
+        low_value = raw_row.get("low")
+        low = _optional_decimal(low_value, field="low", symbol=symbol)
+        close_value = raw_row.get("close")
+        close = _required_decimal(close_value, field="close", symbol=symbol)
+        volume_value = raw_row.get("volume")
+        volume = _optional_volume(volume_value, symbol=symbol)
         if (
             (open_price is not None and open_price <= 0)
             or (high is not None and high <= 0)
@@ -618,10 +680,29 @@ def _parse_bars(
                 )
             )
         seen_dates.add(trade_date)
+        if previous is not None:
+            # A successful JSON row's consumed fields are immutable scalars.
+            fields = (
+                raw_row.get("datetime"),
+                open_value,
+                high_value,
+                low_value,
+                close_value,
+                volume_value,
+            )
+            admitted[trade_date] = (fields, close, volume)
     if not seen_dates:
         raise ProviderResponseError(f"Twelve Data returned no rows for {symbol!r}")
     bars.sort(key=lambda bar: bar.trade_date)
     values.sort(key=lambda row: row[0])
+    if admission_scope is not None:
+        # Replace, rather than accumulate, immutable vintages for each symbol.
+        # A failing row never publishes this document's partial row set.
+        # A leading date may be a new prefix of an overlapping older window.
+        # Only a fully admitted document with no exact reuse opts out.
+        admission_scope[symbol] = (
+            admitted if previous is not None and (not previous or reused) else None
+        )
     return tuple(bars), tuple(values)
 
 

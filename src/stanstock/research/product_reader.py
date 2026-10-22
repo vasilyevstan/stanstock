@@ -466,9 +466,12 @@ def read_research_product_performance(
     Shares selection, rights, exact-run verification and error mapping with
     full history. No historical frequency/card/promotion hydration is implied.
     """
-    result = _read_product_history(
-        user=user, store=store, verification=verification, full_history=False
-    )
+    from stanstock.data.research_product import _reuse_admitted_price_rows
+
+    with _reuse_admitted_price_rows():
+        result = _read_product_history(
+            user=user, store=store, verification=verification, full_history=False
+        )
     if isinstance(result, ProductPerformanceRead):
         return result
     return ProductPerformanceRead(

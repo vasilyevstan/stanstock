@@ -238,21 +238,33 @@ make a mismatched fixture appear readable. Retain the converted-FX case.
 
 `tests/test_research_performance_read.py` covers real registered history,
 physical verification, scalar canonical aggregation and authenticated
-rendering. Small fixtures establish deterministic work bounds; one generated
+rendering. Small fixtures establish deterministic work bounds; a generated
 26-cohort, 105-analyzed, five-prediction workload retains its 109 requested
 members and explicit exclusions. Fixture setup may reuse numerical work;
 the measured request must not mock authorization, physical integrity,
 canonical selection or rendering. Record phase/query/asset-read receipts
 without production profiling infrastructure or a tight CI clock assertion.
 Candidate-bound native cold and repeated HTTP checks remain separate evidence.
-The scale fixture explicitly has ABSENT frequency reports; a separate real
-producer-to-AVAILABLE-child-to-authenticated-page case counts both imported
-source-verifier paths. It proves exact-run proof sharing without memoizing
-child checks, then detects child/source corruption on the next request.
+The scale fixture includes a genuine AVAILABLE frequency child and counts
+both imported source-verifier paths. The separate real
+producer-to-AVAILABLE-child-to-authenticated-page case also proves exact-run
+proof sharing without memoizing child checks, then detects child/source
+corruption on the next request.
 Standalone and initially unverified-session reads must still verify their
 source. Column/config work bounds retain full raw validation and load frozen
 horizon authority once per document, only after earlier row checks pass;
 retained raw histories can be longer than the synthetic forecast window.
+The full-performance invocation may reuse successful numeric/OHLC admission
+across overlapping serialized-JSON rows only after exact symbol, validated
+date, consumed-value and type matches. Every raw row is still traversed;
+date/window, metadata, normalized binding and physical checks remain.
+Direct/custom payloads retain original coercion/getter order. Only a fully
+successful document with zero exact row reuses may opt that symbol out;
+failed documents publish neither rows nor opt-out state. The scope resets
+on success or error. Cover growing and shifted-start oldest-first histories,
+changed values, disjoint dates, Decimal state, bounded retained row sets and
+cross-invocation corruption. Measure non-overlap controls and actual retained
+source shapes rather than assuming favorable synthetic overlap is representative.
 `tests/test_raw_price_verification_projection.py` proves the private raw
 projection validates all four OHLC fields across 1,758 rows without creating
 discarded public records. It rejects early/late raw faults and normalized
