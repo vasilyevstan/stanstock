@@ -17,7 +17,7 @@
         <dd>{{ card.direction|display_label }}</dd>
       </div>
       <div>
-        <dt>Action</dt>
+        <dt>{% if product.status == "stale" %}Historical decision{% else %}Action{% endif %}</dt>
         <dd>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</dd>
       </div>
       <div>

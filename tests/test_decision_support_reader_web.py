@@ -183,6 +183,71 @@ def test_real_v2_buy_producer_immutable_reader_and_existing_authenticated_render
     no_simulation.assert_not_called()
 
 
+def test_stale_v2_buy_cohort_is_historical_only_and_never_a_shortlist(
+    c2_web_product, client, monkeypatch
+):
+    from stanstock.research.product_eligibility_pipeline import (
+        verify_decision_support_output,
+    )
+
+    env = c2_web_product
+    env.clock["now"] = env.now + timedelta(days=5)
+    client.force_login(env.owner)
+    verifier = Mock(wraps=verify_decision_support_output)
+    monkeypatch.setattr(
+        "stanstock.research.product_eligibility_pipeline.verify_decision_support_output",
+        verifier,
+    )
+    no_simulation = _deny_get_work(env, monkeypatch)
+    counts = _counts()
+
+    strict = read_research_product(user=env.owner, store=env.store)
+    assert strict.status == "stale" and strict.cards == ()
+    displayed = read_research_product(
+        user=env.owner,
+        store=env.store,
+        include_past_stale=True,
+    )
+    assert displayed.status == "stale" and displayed.displayable and not displayed.available
+    assert displayed.run == env.run
+    assert len(displayed.cards) == 2
+    assert all(card.suggestion == "buy" for card in displayed.cards)
+    assert all(not card.current_promotion_eligible for card in displayed.cards)
+    assert verifier.call_count == 1
+
+    response = client.get(reverse("opportunities"), {"horizon": "12m"})
+    assert response.status_code == 200
+    assert response.context["product"].status == "stale"
+    assert response.context["selected_horizon"] == "12m"
+    assert response.context["show_shortlists"] is False
+    assert response.context["shortlist_sections"] == ()
+    assert b"Historical forecast cohort" in response.content
+    assert b"Historical decision" in response.content
+    assert reverse("archive-opportunities").encode() not in response.content
+    assert b'class="shortlist-opportunity"' not in response.content
+    assert verifier.call_count == 2
+
+    card = response.context["overview_cards"][0]["card"]
+    detail = client.get(
+        reverse("stock-detail", args=[card.analysis.listing_id]),
+        {"horizon": "12m"},
+    )
+    assert detail.status_code == 200
+    assert detail.context["product"].status == "stale"
+    assert detail.context["selected_horizon"] == "12m"
+    assert b"Historical 126-session research suggestion" in detail.content
+    assert b"not a current signal" in detail.content
+    assert reverse("archive-stock-detail", args=[card.analysis.listing_id]).encode() not in (
+        detail.content
+    )
+    assert verifier.call_count == 3
+
+    assert counts == _counts()
+    env.fetch.assert_not_called()
+    env.credentials.assert_not_called()
+    no_simulation.assert_not_called()
+
+
 @pytest.mark.parametrize("selected_version", [V1, "research-product-v2"])
 def test_v2_portfolio_research_cell_never_repeats_scoreless_buy(
     c2_persisted, client, settings, monkeypatch, selected_version
@@ -370,12 +435,38 @@ def test_current_selector_and_retained_v1_history_remain_exactly_versioned(
     performance = client.get(reverse("performance"))
     assert performance.status_code == 200
     assert performance.context["has_eligibility_v2_history"]
-    assert "not independent market trials or one pooled strategy-performance claim" in (
-        _text(performance)
-    )
     assert "does not validate the v2 activity evidence or eligibility correction" in _text(
         performance
     )
+    assert "not independent market trials or one pooled strategy-performance claim" in (
+        _text(performance)
+    )
+
+
+def test_corrupt_selected_v2_never_falls_back_to_valid_retained_v1(
+    c2_web_product, settings, monkeypatch
+):
+    env = c2_web_product
+    old_job = _issue(env, product_version=V1, issuance="c2-stale-fallback-v1")
+    old_run = AnalysisRun.objects.get(pk=old_job.details["analysis_run_id"])
+    settings.RESEARCH_PRODUCT_VERSION = V1
+    old = read_research_product(user=env.owner, store=env.store)
+    assert old.available and old.run == old_run
+
+    settings.RESEARCH_PRODUCT_VERSION = env.version
+    selected_source = DataAsset.objects.filter(kind="liquidity_price_raw").first()
+    assert selected_source is not None
+    env.store.resolve(selected_source.relative_path).write_bytes(b"corrupt selected v2 output")
+    _deny_get_work(env, monkeypatch)
+
+    selected = read_research_product(user=env.owner, store=env.store)
+
+    assert selected.status == "integrity_failed"
+    assert selected.run == env.run
+    assert selected.cards == ()
+    assert old_run.config_version == V1 and env.run.config_version == env.version
+    env.fetch.assert_not_called()
+    env.credentials.assert_not_called()
 
 
 def test_v2_only_history_does_not_claim_v1_issuances(c2_web_product, client):

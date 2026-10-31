@@ -19,13 +19,30 @@
   </section>
 
   {% if not product.available %}
-    <div class="error-box" role="alert">
-      <strong>Active research unavailable.</strong>
-      <p>{{ product.message }}</p>
-      {% if product.verification_code %}<small>Verification state: {{ product.verification_code|display_label }}</small>{% endif %}
-      <p><a href="{% url 'archive-opportunities' %}">Open clearly labelled archived evidence</a>.</p>
-    </div>
-  {% else %}
+    {% if not product.displayable %}
+      <div class="error-box" role="alert">
+        <strong>Active research unavailable.</strong>
+        <p>{{ product.message }}</p>
+        {% if product.verification_code %}<small>Verification state: {{ product.verification_code|display_label }}</small>{% endif %}
+        {% if product.status == "stale" %}
+          <p>Current-method evidence: <a href="{% url 'predictions' %}">Prediction history</a> · <a href="{% url 'status' %}">Product status</a>.</p>
+        {% else %}
+          <p><a href="{% url 'archive-opportunities' %}">Open clearly labelled archived evidence</a>.</p>
+        {% endif %}
+      </div>
+    {% endif %}
+  {% endif %}
+  {% if product.displayable %}
+    {% if product.status == "stale" %}
+      <div class="notice stale-product-notice" role="status">
+        <strong>Historical forecast cohort · not current signals.</strong>
+        This latest verified cohort is dated {{ product.run.target_date }}.
+        Its decisions and projections describe that historical date only;
+        current promotion and BUY shortlists are disabled.
+        <a href="{% url 'predictions' %}">Prediction history</a> ·
+        <a href="{% url 'status' %}">Product status</a>.
+      </div>
+    {% endif %}
     <section class="opportunity-controls" aria-label="Opportunity filters">
       <div class="price-band-links" aria-label="Reference price band">
         {% for link in band_links %}
@@ -82,7 +99,7 @@
         <span class="badge">{{ opportunity_page.paginator.count }} listing{{ opportunity_page.paginator.count|pluralize }} · page {{ opportunity_page.number }}</span>
       </div>
       <p class="muted opportunity-scenario-note">
-        <strong>Model-estimated probabilities:</strong> Shares of model simulations; not validated real-world odds.
+        <strong>{% if product.status == "stale" %}Historical model-estimated probabilities:{% else %}Model-estimated probabilities:{% endif %}</strong> Shares of model simulations; not validated real-world odds.
         Advisory only. Action uses the separate 6-month momentum decision.
         {% if product.run.config_version == stanstock_eligibility_v2_version %}
           Eligibility v2 requires separate matched-mode activity evidence; advisory projection math and its seed policy remain v1.
@@ -94,7 +111,7 @@
           <span>Stock / company</span>
           <span>Dated close</span>
           <span>Relative momentum</span>
-          <span>Action</span>
+          <span>{% if product.status == "stale" %}Historical decision{% else %}Action{% endif %}</span>
           <span>{{ selected_horizon_label }} median cumulative price return</span>
           <span>Loss</span>
           <span>Flat to +20%</span>
@@ -210,5 +227,9 @@
   {% endif %}
 
   {% include "web/_research_navigation.html" %}
-  <p class="archive-link"><a href="{% url 'archive-opportunities' %}">Archived score-based research</a> retains its original methods and labels.</p>
+  {% if product.status == "stale" %}
+    <p class="archive-link">Current-method evidence: <a href="{% url 'predictions' %}">Prediction history</a> · <a href="{% url 'status' %}">Product status</a>.</p>
+  {% else %}
+    <p class="archive-link"><a href="{% url 'archive-opportunities' %}">Archived score-based research</a> retains its original methods and labels.</p>
+  {% endif %}
 {% endblock %}

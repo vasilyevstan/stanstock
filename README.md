@@ -263,6 +263,15 @@ evidence by waiting; a withheld all-null forecast is not evaluable. The
 scoreless momentum method also does not supply a legacy overall score or
 qualify a legacy scored sample basket.
 
+If the selected current-method forecast targets a past market session,
+Opportunities and stock detail can show that exact cohort only after full
+verification, with a prominent historical date and no current promotion or
+BUY shortlist. This is not a current signal; status, saved stocks, and
+portfolio/planning remain strict. Future or unverifiable output stays
+withheld, and there is no fallback to another run or product version. Use
+Prediction history for the current method's historical issuances; the legacy
+archive represents a different method.
+
 ## Integrity guarantees
 
 - Permanent company, security, listing, asset, analysis, and prediction

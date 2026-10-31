@@ -853,11 +853,22 @@ def test_corrupt_physical_source_suppresses_all_active_output(live_product, clie
     assert b"Active research unavailable." in response.content
 
 
-def test_stale_target_is_not_substituted_or_promoted(live_product, client, monkeypatch):
+def test_stale_target_is_default_withheld_but_verified_for_historical_display(
+    live_product, client, monkeypatch
+):
     owner, store, _run = live_product
     monkeypatch.setattr(
         "stanstock.research.product_reader.timezone.now",
         lambda: NOW + timedelta(days=5),
+    )
+    verifier = Mock(wraps=real_product_verifier)
+    monkeypatch.setattr("stanstock.research.product_reader.verify_price_product_output", verifier)
+    counts = (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+        StockAnalysis.objects.count(),
+        JobRun.objects.count(),
     )
 
     result = read_research_product(user=owner, store=store)
@@ -865,15 +876,103 @@ def test_stale_target_is_not_substituted_or_promoted(live_product, client, monke
     assert result.status == "stale"
     assert result.cards == ()
     assert result.verification_code == "product_target_stale"
+    verifier.assert_not_called()
 
     client.force_login(owner)
-    response = client.get(reverse("opportunities"))
+    response = client.get(reverse("opportunities"), {"q": "CHEAP", "horizon": "5y"})
 
     assert response.status_code == 200
     assert response.context["product"].status == "stale"
+    assert response.context["product"].displayable
+    assert response.context["product"].available is False
+    assert response.context["product"].verification_code == "product_target_stale_verified"
+    assert response.context["product"].run.target_date == _run.target_date
+    assert response.context["opportunity_page"].paginator.count == 1
+    assert response.context["selected_horizon"] == "5y"
+    assert response.context["overview_cards"][0]["projection"].horizon == "5y"
+    assert all(not card.current_promotion_eligible for card in response.context["product"].cards)
     assert response.context["show_shortlists"] is False
     assert response.context["shortlist_sections"] == ()
-    assert b'class="opportunity-explanation"' not in response.content
+    assert b'class="shortlist-opportunity"' not in response.content
+    assert b"Historical forecast cohort" in response.content
+    assert str(_run.target_date).encode() in response.content
+    assert b"not current signals" in response.content
+    assert reverse("predictions").encode() in response.content
+    assert reverse("archive-opportunities").encode() not in response.content
+    card = response.context["overview_cards"][0]["card"]
+    assert (
+        f"{reverse('stock-detail', args=[card.analysis.listing_id])}?horizon=5y".encode()
+        in response.content
+    )
+    verifier.assert_called_once()
+    assert verifier.call_args.kwargs["run"] == _run
+    assert verifier.call_args.kwargs["store"].root == store.root
+    assert verifier.call_args.kwargs["replay"] is False
+
+    detail = client.get(
+        reverse("stock-detail", args=[card.analysis.listing_id]),
+        {"horizon": "5y"},
+    )
+    assert detail.status_code == 200
+    assert detail.context["product"].status == "stale"
+    assert detail.context["selected_horizon"] == "5y"
+    assert b"Historical 126-session research suggestion" in detail.content
+    assert b"not a current signal" in detail.content
+    assert reverse("archive-stock-detail", args=[card.analysis.listing_id]).encode() not in (
+        detail.content
+    )
+    assert str(_run.target_date.year).encode() in detail.content
+    assert verifier.call_count == 2
+    assert counts == (
+        AnalysisRun.objects.count(),
+        Prediction.objects.count(),
+        DataAsset.objects.count(),
+        StockAnalysis.objects.count(),
+        JobRun.objects.count(),
+    )
+
+
+def test_past_stale_opt_in_does_not_admit_a_future_selected_run(live_product, monkeypatch):
+    owner, store, run = live_product
+    monkeypatch.setattr(
+        "stanstock.research.product_reader._expected_current_target",
+        lambda: run.target_date - timedelta(days=1),
+    )
+    verifier = Mock(wraps=real_product_verifier)
+    monkeypatch.setattr("stanstock.research.product_reader.verify_price_product_output", verifier)
+
+    result = read_research_product(user=owner, store=store, include_past_stale=True)
+
+    assert result.status == "stale"
+    assert result.run == run
+    assert result.cards == ()
+    verifier.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_opted_in_stale_selected_source_corruption_stays_fail_closed(
+    live_product, monkeypatch, missing
+):
+    owner, store, _run = live_product
+    source = DataAsset.objects.get(
+        provider="twelve_data",
+        kind="price_history",
+        subject="AAPL",
+    )
+    path = store.resolve(source.relative_path)
+    if missing:
+        path.unlink()
+    else:
+        path.write_bytes(b"corrupt selected stale source")
+    monkeypatch.setattr(
+        "stanstock.research.product_reader.timezone.now",
+        lambda: NOW + timedelta(days=5),
+    )
+
+    result = read_research_product(user=owner, store=store, include_past_stale=True)
+
+    assert result.status == "integrity_failed"
+    assert result.cards == ()
 
 
 def test_stale_active_target_remains_visible_only_as_dated_history(
