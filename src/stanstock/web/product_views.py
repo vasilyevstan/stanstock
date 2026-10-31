@@ -77,7 +77,14 @@ _PRODUCT_CONFIG_VERSIONS = (PRODUCT_VERSION, ELIGIBILITY_V2_PRODUCT_VERSION)
 
 
 def _read(request: HttpRequest) -> ProductRead:
-    result = read_research_product(user=cast(User, request.user))
+    include_past_stale = getattr(request.resolver_match, "url_name", None) in {
+        "opportunities",
+        "stock-detail",
+    }
+    result = read_research_product(
+        user=cast(User, request.user),
+        include_past_stale=include_past_stale,
+    )
     # The runtime context processor consumes this request-scoped result rather
     # than selecting or verifying the run a second time.
     request._stanstock_product_read = result  # type: ignore[attr-defined]

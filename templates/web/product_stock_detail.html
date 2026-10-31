@@ -11,6 +11,15 @@
       {% if product.verification_code %}<small>{{ product.verification_code|display_label }}</small>{% endif %}
     </div>
   {% else %}
+    {% if product.status == "stale" %}
+      <div class="notice stale-product-notice" role="status">
+        <strong>Historical forecast cohort · not a current signal.</strong>
+        This verified decision is dated {{ product.run.target_date }}. Its
+        recorded suggestion and projections are historical only; promotion is
+        disabled. <a href="{% url 'predictions' %}">Prediction history</a> ·
+        <a href="{% url 'status' %}">Product status</a>.
+      </div>
+    {% endif %}
     <section class="page-heading">
       <div>
         <p class="eyebrow">{{ card.captured_role }} member · verified price research{% if card.product_version == stanstock_eligibility_v2_version %} · {{ card.product_version }}{% endif %}</p>
@@ -18,7 +27,7 @@
         <p class="lede">{{ card.listing.security.company.name }}</p>
       </div>
       <div class="decision-card">
-        <small>126-session research suggestion</small>
+        <small>{% if product.status == "stale" %}Historical 126-session research suggestion{% else %}126-session research suggestion{% endif %}</small>
         <strong>{% if card.suggestion %}{{ card.suggestion|upper }}{% else %}Unavailable{% endif %}</strong>
         <span>{{ card.direction|display_label }} raw momentum</span>
       </div>
@@ -184,6 +193,10 @@
       </details>
     </div>
     <p><a href="{% url 'methodology' %}">Full methodology and published foundations</a></p>
-    <p><a href="{% url 'archive-stock-detail' card.analysis.listing_id %}">Archived evidence for this listing</a> keeps its historical interpretation.</p>
+    {% if product.status == "stale" %}
+      <p>Current-method evidence: <a href="{% url 'predictions' %}">Prediction history</a> · <a href="{% url 'status' %}">Product status</a>.</p>
+    {% else %}
+      <p><a href="{% url 'archive-stock-detail' card.analysis.listing_id %}">Archived evidence for this listing</a> keeps its historical interpretation.</p>
+    {% endif %}
   {% endif %}
 {% endblock %}

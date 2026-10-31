@@ -477,6 +477,18 @@ user can find or understand the view.
 `/status` is not a duplicate forecast table. HTTP GET never performs source
 acquisition, analysis, Monte Carlo replay, or study registration.
 
+When the selected current-method run targets a past market session,
+Opportunities and stock detail may show that exact owner-authorized cohort
+after full integrity verification. The page labels its target date and every
+decision historical, disables current promotion, and omits BUY shortlists.
+Status, saved stocks, portfolio/planning, jobs, and all other current-product
+consumers remain strict; they do not opt into stale display. A future target
+or an invalid selected run remains withheld rather than falling back to an
+older run. Use Prediction history or Product status for current-method
+historical evidence and freshness context; the legacy archive is a different
+methodology, not a stale-run substitute. The display performs no provider
+request, replay, persistence, or forecast calculation.
+
 ## Retrospective replay
 
 The CLI is read-only:

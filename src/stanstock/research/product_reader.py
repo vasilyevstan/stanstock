@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
@@ -218,6 +218,15 @@ class ProductRead:
         return self.status == "available"
 
     @property
+    def displayable(self) -> bool:
+        """Whether the selected, verified cohort may be rendered in context."""
+        return self.available or (
+            self.status == "stale"
+            and self.verification_code == "product_target_stale_verified"
+            and bool(self.cards)
+        )
+
+    @property
     def admitted_count(self) -> int:
         return sum(item.status == "admitted" for item in self.admissions)
 
@@ -344,6 +353,7 @@ def read_research_product(
     *,
     user: ProductUser,
     store: AssetStore | None = None,
+    include_past_stale: bool = False,
 ) -> ProductRead:
     """Return the newest expected authorized cohort, or an explicit failure.
 
@@ -351,6 +361,8 @@ def read_research_product(
     the complete run verification.  Once a current cohort is selected, an
     integrity failure suppresses it; the reader does not search backward for
     a more convenient product run and never substitutes a legacy run.
+    ``include_past_stale`` is a display-only opt-in for past-target cohorts;
+    it never admits future targets and does not change the default.
     """
     if not settings.RESEARCH_PRODUCT_ENABLED:
         return ProductRead(
@@ -394,7 +406,8 @@ def read_research_product(
             message="No verified active research-product cohort is available for this account.",
         )
     expected_target = _expected_current_target()
-    if candidate.run.target_date != expected_target:
+    is_past_stale = candidate.run.target_date < expected_target
+    if candidate.run.target_date != expected_target and not (include_past_stale and is_past_stale):
         return ProductRead(
             status="stale",
             message=(
@@ -438,6 +451,21 @@ def read_research_product(
             ),
             run=candidate.run,
             verification_code="product_reader_shape_invalid",
+        )
+    if is_past_stale:
+        return ProductRead(
+            status="stale",
+            message=(
+                "The latest verified forecast cohort is historical. Its dated "
+                "decisions are not current signals and are not eligible for promotion."
+            ),
+            run=cohort.run,
+            cards=tuple(replace(card, current_promotion_eligible=False) for card in cohort.cards),
+            admissions=cohort.admissions,
+            provider=cohort.provider,
+            evidence_grade=cohort.evidence_grade,
+            owner_id=cohort.owner_id,
+            verification_code="product_target_stale_verified",
         )
     return _product_read_from_cohort(cohort)
 
