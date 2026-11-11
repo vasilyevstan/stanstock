@@ -50,6 +50,18 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Count outcome-disjoint windows, not pooled forecast rows.** The November
+  2026 walk-forward (`docs/price-research.md`) had 42 six-month anchors and
+  4,391 listing observations, but seven outcome-disjoint windows per offset;
+  independence is not established. Offsets are phases of one market path,
+  not replications. Half versus historical drift's apparent advantage was
+  concentrated in the inspected holdout; half versus zero's was larger
+  outside it. Shared shocks establish pairing, not a mechanical preference
+  for half drift. Report overlap-aware inference and inspected-period
+  sensitivity separately; survivor-selected subsets are not gate evidence.
+  Freeze the protocol before losses, and do not size power from the
+  observed effect.
+
 - **Growing histories can hide rolling-window reuse failures.** A leading-row
   miss disabled reuse even when later rows matched; favorable growing-history
   controls missed the retained histories' shifted starts. Cover fixed-length,
