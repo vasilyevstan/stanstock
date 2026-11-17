@@ -472,6 +472,111 @@ No parameters, thresholds, drift assumption or allocation weights were tuned;
 the results do not promote a replacement method. Any alternative selected
 after inspecting them needs genuinely future evaluation.
 
+### November 2026 whole-history walk-forward checkpoint
+
+This separate read-only `research_reconstruction` used an exploratory
+protocol frozen before walk-forward losses. It examined 105 listings plus
+SPY in a survivorship-biased 2026-selected universe, using current-vintage
+split-adjusted closes retrieved 2026-11-02. Outcomes are cumulative price
+returns excluding dividends. The calendar epoch is 2019-09-03, not a common
+source-history start. P-values and confidence intervals are
+assumption-conditional.
+
+The study replayed the protocol's eligible anchors through 2026-11-02:
+- 6,930 listing-anchor rows;
+- an exact six-decimal reproduction of the frozen grid;
+- zero integrity mismatches.
+
+It changed no methodology, configuration, prediction or outcome. Two
+independent review rounds checked the protocol and the reading of the
+results. The complete report remains private.
+
+**Inference method**
+- Each anchor's mean loss difference is one time observation.
+- Inference uses fixed-b equal-weighted cosine (EWC) standard errors with
+  Holm correction across the two primary contrasts.
+- Six-month outcome windows overlap. The 42 six-month anchors and 4,391
+  listing observations provide seven outcome-disjoint windows per offset,
+  whose independence is not established.
+- E0∪E1 covers the 23 anchors whose outcome windows do not overlap the final
+  holdout already inspected in the October checkpoint. E2 covers the 19
+  anchors that do.
+
+**Six-month interval score** (lower is better)
+
+| Contrast | Mean difference | Holm p | Outside the inspected holdout (E0∪E1) |
+|---|---|---|---|
+| half − historical FHS | −0.0132 | 0.218 | −0.0020 |
+| half − zero FHS | −0.0153 | 0.218 | −0.0194 |
+| zero − historical FHS | +0.0021 | — (secondary) | +0.0174 |
+
+The last cell is derived from the two paired contrasts above on the same
+support. Zero − historical FHS is −0.0165 in E2.
+
+No drift choice is distinguished:
+
+- For 6m interval score, half − historical's apparent advantage was
+  concentrated in E2; half − zero's mean advantage was larger outside E2.
+- Shared simulated shocks make the comparisons paired; they do not by
+  themselves establish a mechanical preference for half drift.
+- All three SPY-down anchors fall inside E2, so market regime and the
+  inspected holdout cannot be separated.
+
+**Other findings**
+- **Coverage:** observed pooled 6m inclusion was 57.7–58.9%, versus 60%
+  model mass. Per-anchor inclusion ranged from 37% to 85%; this does not
+  establish calibration or statistical equivalence.
+- **Long horizons:** 3y has a single outcome-disjoint window and 5y has none,
+  so neither can be validated on retained data.
+- **Momentum:** the cross-sectional IC was +0.028, with a 95% interval of
+  −0.099 to +0.154. That is inconclusive, not evidence of zero information.
+- **Decision layer:** in this replay v1 issued no BUY, because every
+  positive row lacked compatible dollar turnover.
+- **Relative-volatility gate:** it blocked 2.6–86.8% of positives per anchor,
+  lowest after market stress and highest in calm periods.
+- **Counterfactual decision subsets:** these were current-vintage and
+  survivor-selected. They are associations, not gate evidence, and do not
+  justify relaxing or tightening any gate.
+
+**Power**
+- For half − historical 6m interval score, conditional 80%-power calculations
+  at a 0.042 difference give 10.6 windows under the primary variance
+  assumption: rounded up to 11, approximately 5.5 years. The alternative
+  variance assumption gives 7.3 windows, rounded up to 8.
+- At a 0.021 difference, the two variance assumptions give 29.3–42.3
+  windows: rounded up to 30–43, approximately 15–21.5 years.
+- These are planning estimates, not guaranteed prospective power or a
+  reason to adopt an arm. The eight-window reporting floor is not proof
+  of adequate power.
+
+**Candidate next steps**
+
+All of these are pending explicit authorization:
+
+1. A versioned outcome-evaluation rule before the first observed six-month
+   maturity on 2027-03-15. It should use:
+   - single-vintage endpoints;
+   - source-based revision classification;
+   - an explicit delisting rule; and
+   - append-only corrections.
+2. A pre-registered forward estimation and confirmation procedure.
+3. Activation of the
+   [prospective three-arm study](#prospective-three-arm-evidence-collection).
+4. Unvalidated labels for 3y and 5y forecasts.
+
+No gate, drift, shrinkage, calibration or hysteresis change follows from
+this checkpoint.
+
+References for this checkpoint:
+- Fixed-b EWC inference: Lazarus, Lewis, Stock and Watson (2018),
+  <https://doi.org/10.1080/07350015.2018.1506926>.
+- Survivorship: Brown, Goetzmann, Ibbotson and Ross (1992),
+  <https://doi.org/10.1093/rfs/5.4.553>.
+- Delisting: Shumway (1997),
+  <https://doi.org/10.1111/j.1540-6261.1997.tb03818.x>.
+- Pre-registration: Nosek et al. (2018),
+  <https://doi.org/10.1073/pnas.1708274114>.
+
 ## Observed forward evaluation
 
 The six-month decision uses exact stock and SPY endpoints:
