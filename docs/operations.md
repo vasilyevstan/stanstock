@@ -517,6 +517,24 @@ listing details and must not be copied into public logs or issues.
 The command contacts no provider, resolves no credentials, creates no jobs,
 analyses, predictions, or assets, and cannot create observed evidence.
 
+### Quantile calibration ledger
+
+To see how the frozen quantile forecasts hit realized returns, run the
+read-only ledger over a private JSON report written by the replay above:
+
+```bash
+uv run python manage.py summarize_price_product_calibration \
+  --study-file PRIVATE_EXISTING_REPORT_FILE \
+  --format text
+```
+
+The command reads one regular, non-symlink file, accesses no database, asset
+store, provider or credential, and writes only to stdout. It rejects a report
+whose schema or frozen configuration hash differs, and any inconsistent
+observation, instead of producing a partial ledger. The output is descriptive
+only; see
+[Quantile calibration ledger](price-research.md#quantile-calibration-ledger).
+
 ## Registering retrospective evidence
 
 Registration is deliberately not a public management command or GET action.

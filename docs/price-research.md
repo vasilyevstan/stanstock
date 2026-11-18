@@ -440,6 +440,48 @@ The report records separately:
 - report generation time; and
 - actual registration availability.
 
+### Quantile calibration ledger
+
+`research-product-quantile-calibration-ledger@1` is a read-only, descriptive
+diagnostic over an already-produced retrospective study document. It adds the
+per-quantile hit rates the study does not report, as descriptive context before
+any correction is ever considered. For each partition, horizon and model it reports, with nominal levels tied to
+the frozen p20/p50/p80 configuration:
+
+- share of realized returns below p20 (nominal 0.2), below p50 (0.5) and above
+  p80 (0.2);
+- share inside the inclusive central-60% interval (0.6), which equals the
+  study's `interval_inclusion`;
+- the mean signed median error (realized minus median); and
+- target-cohort, listing, scored-cohort and scored non-overlapping counts.
+
+Every partition/horizon/model cell of the study's aggregate grid is emitted,
+so horizons with no eligible anchors (currently 3y and 5y) appear as explicit
+`no_eligible_observations` rows. Each cell is cross-checked against the study's
+own aggregate, and the ledger carries the source execution mode, snapshot
+grade, scope and study disclosures; a synthetic-demo study gets a distinct
+not-empirical label.
+
+Equality with a quantile is not a tail hit, so the three interval shares sum to
+one before rounding; each is rounded separately to six places. Averages are
+cohort-first with equal cohort weight, exactly like the study aggregates;
+unavailable observations are counted by reason and never scored as zero.
+Ties are compared at the replay's rounded return precision.
+
+Reading the rates: the below-p50 share is the location check. The mean signed
+median error is expected to be nonzero for right-skewed returns even when the
+forecast is calibrated, so it is not a calibration test. No
+sampling-uncertainty threshold is applied, and few or correlated cohorts make
+deviations from nominal uninterpretable.
+
+The ledger is not a calibration, skill or adoption claim. Observations in one
+cohort share a market regime and overlapping anchors are not independent
+trials, so rates carry no confidence interval. The final-holdout partition is
+already inspected and cannot be a fresh confirmation of a correction chosen
+after seeing it; only genuinely future prospective evidence can. The ledger
+changes no prediction, score, configuration or frozen study output, and its
+`input_sha256` identifies the exact input document without authenticating it.
+
 ### October 2026 retained-data checkpoint
 
 An unchanged-protocol, read-only replay covered all 105 admitted stock/SPY

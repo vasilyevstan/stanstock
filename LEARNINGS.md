@@ -559,3 +559,14 @@ reviews and should not be re-litigated without an explicit new decision.
   Desktop storage is exhausted, validate Compose configuration locally and
   rely on the clean GitHub Actions image build; never prune unrelated shared
   images or volumes.
+- **Self-learning starts as measurement, then small calibration, never a
+  returns model.** With about 120 names and few independent, overlapping,
+  market-correlated matured outcomes, a neural net would overfit and has no
+  evidence base. The accepted order is: descriptive per-quantile hit-rate
+  ledger (`price_product_calibration`), then pre-registered shadow-only
+  corrections with one or two scalars per horizon (weighted split conformal,
+  adaptive conformal inference or a vol/drift scalar), each a new immutable
+  version evaluated prospectively under a new protocol. The 2025+ holdout is
+  already inspected, so only future outcomes confirm a correction; 3y/5y stay
+  unavailable. Reuse the replay's cohort-first aggregation and fail closed to
+  the frozen native output when support is insufficient.

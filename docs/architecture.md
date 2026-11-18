@@ -178,7 +178,10 @@ The retrospective study is deliberately separate from prospective issuance:
   Python service that calculates the complete selected cohort itself and
   registers a canonical immutable report;
 - the performance GET path reads only registered evidence and re-verifies its
-  source run; it never accepts caller-authored metrics or runs a replay.
+  source run; it never accepts caller-authored metrics or runs a replay;
+- `summarize_price_product_calibration` reads one replay JSON file and prints a
+  descriptive quantile-hit-rate ledger from it; it uses no database, asset
+  store or provider and feeds no prediction, score or registered evidence.
 
 Execution revision, source-run revision, report generation time, and actual
 registration availability are distinct provenance fields.
