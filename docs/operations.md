@@ -535,6 +535,23 @@ observation, instead of producing a partial ledger. The output is descriptive
 only; see
 [Quantile calibration ledger](price-research.md#quantile-calibration-ledger).
 
+### Fitting the interval calibration learner
+
+Run the research-only learner over a private retrospective replay JSON:
+
+```bash
+uv run python manage.py fit_price_product_interval_calibration \
+  --study-file PRIVATE_EXISTING_REPORT_FILE \
+  --format json
+```
+
+Use `--format text` for a summary. The command uses the same hardened local
+file reader as the quantile ledger, writes only to stdout, and makes no
+database, credential, or provider calls. Its output is not registered
+evidence. Invalid inputs are rejected; insufficient support produces an
+explicit withheld result, not a zero offset. Neither form changes native
+predictions. See the [learner and evidence limits](price-research.md#interval-calibration-learner-research-only).
+
 ## Registering retrospective evidence
 
 Registration is deliberately not a public management command or GET action.
@@ -651,6 +668,26 @@ cache. A corrupt older source suppresses complete historical reporting.
 HTTP GET does not declare protocols, calculate new forecasts or publish paper
 measurements. Verify actual page responsiveness as well as health and complete
 authorized source closure; a responsive health endpoint alone is insufficient.
+
+### Prospective interval calibration report
+
+Read the research-only report for an explicit owner:
+
+```bash
+uv run python manage.py price_product_interval_shadow --owner USERNAME
+```
+
+Keep the report private. The read does not fetch provider data or write
+evidence. `not_declared` means no verified parameters have been published
+for that owner; `integrity_failed` withholds metrics when verification
+fails. `params_recompute_mismatch` means that the parameters no longer
+match a fresh fit from the exact registered study. Neither state fabricates
+calibrated pairs or changes native forecasts.
+
+`--declare` is a separate operator action, not authorized by delivery of
+this command. It fails closed without a verified registered study and a
+usable 6m fit. Do not supply a caller-computed fit or backdate a declaration.
+No job schedule or change to the existing three-arm protocol is needed.
 
 ## Job states
 

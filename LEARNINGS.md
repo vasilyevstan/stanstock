@@ -50,6 +50,13 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **Keep preparation and fitting separate when frozen validation imports
+  the ORM.** The interval calibration document adapter reuses the frozen
+  validators and passes explicit inputs to a Django-free core. Verify the
+  first fit in a cold process with I/O blocked. Keep the order-sensitive
+  ledger digest as source provenance; fit and diagnostic identities hash
+  their own canonical inputs and remain stable under equivalent reorderings.
+
 - **An unread result is a stalled handoff, not an active wait.** A completed
   architect result was left unread while delivery was reported as waiting.
   The single delivery owner must consume completed output, resolve or surface

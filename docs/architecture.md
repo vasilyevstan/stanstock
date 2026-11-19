@@ -181,10 +181,18 @@ The retrospective study is deliberately separate from prospective issuance:
   source run; it never accepts caller-authored metrics or runs a replay;
 - `summarize_price_product_calibration` reads one replay JSON file and prints a
   descriptive quantile-hit-rate ledger from it; it uses no database, asset
-  store or provider and feeds no prediction, score or registered evidence.
+  store or provider and feeds no prediction, score or registered evidence;
+- `fit_price_product_interval_calibration` uses the same local file boundary
+  for deterministic, research-only parameters and separate validation
+  diagnostics. It neither registers evidence nor changes native output.
 
 Execution revision, source-run revision, report generation time, and actual
 registration availability are distinct provenance fields.
+
+The [interval calibration shadow](price-research.md#prospective-interval-calibration-shadow)
+binds a registered study and its recomputed parameters in one owner-bound
+declaration, with successful job evidence witnessing publication. Reading
+the report never rewrites the declaration or augments native predictions.
 
 ## Jobs and recovery
 
