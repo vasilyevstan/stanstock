@@ -50,6 +50,14 @@ reviews and should not be re-litigated without an explicit new decision.
 
 ## Verified lessons
 
+- **An unread result is a stalled handoff, not an active wait.** A completed
+  architect result was left unread while delivery was reported as waiting.
+  The single delivery owner must consume completed output, resolve or surface
+  its blocker, and retain an actual resume trigger before yielding. Finishing
+  an approved first slice does not cancel later slices; preserve their
+  authorization and explicit evidence dependencies. The owner profile in
+  `.github/agents/stanstock-owner.agent.md` is not itself a running scheduler.
+
 - **Count outcome-disjoint windows, not pooled forecast rows.** The November
   2026 walk-forward (`docs/price-research.md`) had 42 six-month anchors and
   4,391 listing observations, but seven outcome-disjoint windows per offset;
