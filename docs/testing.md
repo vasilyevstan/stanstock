@@ -21,11 +21,14 @@ Production settings and PostgreSQL migration/concurrency checks run separately
 with non-secret test values. A copied test count is not release evidence; the
 exact command result must bind to the final revision.
 
-CI partitions the complete pytest collection into price-product modules
-(`test_research_product_*.py` and `test_research_price_product*.py`), the
-expensive `test_research_product_study_evidence.py` subset, and the non-product
-complement. Each test belongs to exactly one partition. Core has a bounded
-240-minute execution limit; price-product and price-study retain 40 minutes.
+CI partitions the complete pytest collection into four suites: price-product
+modules (`test_research_product_*.py` and `test_research_price_product*.py`),
+the expensive `test_research_product_study_evidence.py` subset, the two
+`test_research_price_product_interval_calibration.py` and
+`test_research_price_product_interval_shadow.py` modules, and the non-product
+complement. The study-evidence and interval-calibration modules are excluded
+from price-product. Each test belongs to exactly one partition. Core has a bounded
+240-minute execution limit; the other three suites retain 40 minutes.
 Two attempts selecting the full core suite exceeded the previous 120-minute limit
 without an assertion failure, despite an earlier successful 98-minute run.
 The larger bound does not omit tests or change assertions. The
@@ -33,7 +36,9 @@ required `quality` check fails unless all partitions, including their checks,
 succeed. Coverage shown by each partition is partial; `make check` remains
 the complete local run. A failed partition
 stops at its first failure so its traceback is available without waiting for
-the job timeout. PostgreSQL integrity and container checks remain separate.
+the job timeout. The interval-calibration suite was separated after its added
+runtime caused the combined price-product job to reach that 40-minute limit
+without an assertion failure. PostgreSQL integrity and container checks remain separate.
 
 Responsive browser cases require the Chromium binary matching the locked
 Playwright package. CI installs it with
