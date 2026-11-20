@@ -482,6 +482,50 @@ after seeing it; only genuinely future prospective evidence can. The ledger
 changes no prediction, score, configuration or frozen study output, and its
 `input_sha256` identifies the exact input document without authenticating it.
 
+### Interval calibration learner (research-only)
+
+`interval-offset-cqr-v1` fits one symmetric offset per horizon to the
+log-return endpoints of the frozen filtered historical simulation (FHS)
+interval. It preserves the native median. For each development observation,
+the score is the larger of two signed log-scale differences: the lower
+endpoint minus the outcome, and the outcome minus the upper endpoint. The
+score can be negative for an outcome inside the interval. The fit uses a
+weighted score quantile, giving each outcome cohort equal total weight
+regardless of its listing count. It is an adaptation of
+[conformalized quantile regression](https://arxiv.org/abs/1905.03222), not a
+finite-sample, conditional, or regime-robust coverage guarantee. Outcome
+cohorts can remain dependent even when return windows do not overlap.
+
+The fit uses only pre-2024 development outcomes. The 2024 walk-forward
+diagnostic admits a training outcome only after a gap of at least one full
+horizon (126 XNYS sessions at 6m; 252 at 12m) between its end and the
+validation anchor. The inspected 2025+ holdout is not used for fitting or
+diagnostic scoring. The fit and diagnostics have separate input fingerprints;
+their hashes identify evidence and configuration, not the authenticity of
+the caller's replay file.
+
+The document adapter validates the replay and supplies the frozen
+configuration and calendar to a fitting core that does no I/O. Fit and
+diagnostic fingerprints are stable under equivalent row reorderings. The
+separately reported S1 ledger hash preserves the source document's array
+order and is not part of parameter identity.
+
+The 6m engineering floor is seven non-overlapping cohorts, at least 30
+scored listings in each cohort, and a span of at least 1,095 days. These
+are support rules, not statistical guarantees. The frozen development grid
+can meet this floor only if all seven 6m cohorts qualify. The corresponding
+12m floor is unreachable on this grid; 3y and 5y are unavailable. A withheld
+offset is `null`, distinct from a fitted zero. Withholding leaves the native
+interval unchanged and contributes no calibrated observations. The lone 6m
+validation cohort provides descriptive coverage, not confirmation of skill.
+
+With only p20, p50, and p80, the four bins defined by those cut points can
+already be derived from the ledger's hit rates under its tie convention;
+they are not a full PIT histogram for a continuous predictive distribution.
+The ledger gives cohort inclusion bounds, not a per-anchor reliability
+table. The learner's validation diagnostics report coverage by validation
+cohort when evaluable.
+
 ### October 2026 retained-data checkpoint
 
 An unchanged-protocol, read-only replay covered all 105 admitted stock/SPY
@@ -799,6 +843,35 @@ establish calibrated StanStock returns or justify a calibration retrofit:
 
 See [prospective study operations](operations.md#prospective-shadow-study)
 for activation, failure isolation and recovery.
+
+## Prospective interval calibration shadow
+
+The interval-calibration protocol is separate from the three-arm study.
+It binds one owner's verified retrospective study and canonical fitted
+parameters in an immutable declaration. A prediction must be generated
+strictly after publication is witnessed, with a target on or after the
+first XNYS close after that witness. The report rechecks the declaration,
+recomputes the parameters from the same registered study, and authenticates
+outcomes before scoring. A withheld fit leaves native intervals unchanged
+and supplies no paired candidate evidence.
+
+The primary comparison is the calibrated minus native central-60% interval
+score at 6m. The first eight strictly non-overlapping cohorts are selected
+without looking at outcomes. Each must have at least 30 paired listings
+for a final comparison, and the cohort span must be at least 1,095 days.
+The primary criterion requires improvement in at least seven cohorts (ties
+do not count) and a negative cohort-weighted mean difference. The exact
+sign calculation assumes independence; non-overlapping windows alone do
+not establish it. The companion compares each arm's cohort-weighted coverage
+with 60% on those same cohorts.
+
+Pending, insufficient, and adverse results are retained. The 12m arm is
+diagnostic and this frozen fit cannot support it; 3y and 5y are unavailable.
+Synthetic evidence, an improvement in the descriptive mean alone, and
+retrospective diagnostics cannot unlock probability calibration (S4).
+That slice remains conditional on independently verified real prospective
+evidence meeting both preregistered criteria. The protocol does not authorize
+activation, monitoring jobs, or promotion into native predictions.
 
 ## Synthetic candidate-policy research
 

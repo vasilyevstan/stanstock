@@ -1,8 +1,9 @@
 # StanStock reusable agent team
 
-Six reusable agents provide an independent-review workflow for StanStock
-changes. They complement `CONTRIBUTING.md`; they do not replace human release
-or merge authority.
+Six reusable specialist agents provide an independent-review workflow for
+StanStock changes. `stanstock-owner` is the designated delivery orchestrator
+around that chain, not an additional review gate. They complement
+`CONTRIBUTING.md`; they do not grant authority beyond the accepted task.
 
 These are development and review roles, not application runtime services.
 They do not generate production forecasts, fetch provider data at runtime,
@@ -12,6 +13,15 @@ explains their responsibilities and handoffs; this file and the individual
 agent definitions remain normative.
 
 ## Agents
+
+Assign exactly one delivery owner for an accepted task. Use
+[`stanstock-owner`](stanstock-owner.agent.md) when a named owner agent is
+wanted, or keep the explicitly designated human/current orchestrator. Do not
+add a second coordinator above an existing owner. Ownership includes consuming
+results and taking the next eligible action, not merely launching specialists.
+The agent profile alone does not run in the background or install a scheduler.
+
+The six specialist gates remain:
 
 | Agent | Role |
 |---|---|
@@ -139,7 +149,11 @@ owner is genuinely unavailable.
 
 The orchestrator remains accountable for the requested result across every
 handoff, wait, CI run, release gate, merge, and local verification. Waiting is
-not a terminal status.
+not a terminal status. `stanstock-owner` supplies the reusable
+[ownership and recovery loop](stanstock-owner.agent.md#recover-waits-without-duplicate-work).
+Preserve the accepted scope across resumes: delivering a first slice does
+not cancel later approved slices, and unmet evidence dependencies remain
+explicitly blocked, not silently removed.
 
 Treat each of these as an actionable stall signal:
 
@@ -168,6 +182,15 @@ Keep one owner and one active observer for each wait. Use bounded checkpoints
 to inspect required jobs and eligible gates, and report a concrete blocker
 when progress stops. A CI or provider wait is not permission to expand scope,
 add optional reviews, or create unrelated work.
+
+Consume unread completed results before yielding. Record the next action and
+actual resume trigger in the existing task record; a completion notification
+or an explicitly approved same-session wake is a trigger, but "waiting" alone
+is not. Inspect healthy busy work without restarting it, and report after
+15 minutes of investigation without decisive progress. A missing wake
+mechanism or unavailable app/host must be reported, not described as an
+always-on guarantee. Transfer ownership explicitly with accessible evidence
+and stop the former owner from advancing the same task.
 
 For performance repairs, check the actual retained workload shape and useful
 work counters before attributing a gain or starting another long CI cycle.

@@ -67,6 +67,11 @@ Every task begins by reading, in order:
   result, return the finding to its owner, fall back to direct work or a
   replacement only when the owner is unavailable, and keep going until the
   requested result is released and locally verified.
+- Assign one delivery owner per accepted task. The reusable
+  [`stanstock-owner`](agents/stanstock-owner.agent.md) is that orchestrator,
+  not an extra specialist gate. Reuse the current owner and evidence, consume
+  completed results before waiting, and retain an actual resume trigger.
+  Finishing the first slice does not cancel the remaining approved scope.
 - Maintain local-first behavior: the app must remain runnable with `docker
   compose up --build` and must not require a live external provider or cloud
   service to function in its default (demo) mode.
@@ -162,4 +167,6 @@ contract revisions, CI results, and review statuses before merge.
 
 Only the orchestrator (human, or an explicitly designated orchestrator role)
 performs git actions (stage, commit, push, open/merge a PR, dispatch a
-workflow); reusable agents defined under `agents/` never do.
+workflow). `stanstock-owner` may do so only when explicitly assigned that
+role and within the accepted task's authority; the six specialist agents
+defined under `agents/` never do.

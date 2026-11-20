@@ -211,6 +211,13 @@ null and the conclusion is **unmatured; skill not established**, not zero
 accuracy. This protocol neither activates the separate drift study nor
 establishes calibrated probabilities or investment skill.
 
+## Interval calibration shadow
+
+The [prospective interval calibration shadow](price-research.md#prospective-interval-calibration-shadow)
+compares a median-preserving research interval with its native counterpart
+on the same eligible cohorts. The adjusted intervals are not product scores
+and do not change native forecasts, probabilities, or their presentation.
+
 ## Retrospective comparison
 
 The retrospective comparison is current-universe/current-vintage research. It compares
